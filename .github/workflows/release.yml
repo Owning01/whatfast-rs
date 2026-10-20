@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "La etiqueta del release (v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: backend/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      - name: el sidecar en Go
+        run: |
+          cd backend
+          go build -trimpath -ldflags "-s -w" -o bin\whatfast-backend.exe .\cmd\whatfast-backend
+          cd ..
+      - name: la interfaz en release
+        run: cargo build --release -p whatfast-ui
+      - name: armar el paquete
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\icons | Out-Null
+          Copy-Item target\release\whatfast-ui.exe dist\whatfast.exe
+          Copy-Item backend\bin\whatfast-backend.exe dist\whatfast-backend.exe
+          Copy-Item assets\icons\32x32.png,assets\icons\128x128.png,assets\icons\128x128@2x.png,assets\icons\icon.ico,assets\icons\icon.icns dist\icons\
+          Compress-Archive -Path dist\* -DestinationPath whatfast-windows.zip
+          Get-ChildItem dist\whatfast.exe,dist\whatfast-backend.exe | ForEach-Object { "{0} {1:N0} bytes" -f $_.Name, $_.Length }
+      - name: publicar
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: whatfast-windows.zip
+          body: |
+            Whatfast, cliente de escritorio de WhatsApp.
+
+            El paquete trae los dos ejecutables: `whatfast.exe` (la interfaz
+            nativa) y `whatfast-backend.exe` (el sidecar que habla con
+            WhatsApp). Los dos tienen que estar en la misma carpeta.
+
+  linux:
+    name: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: backend/go.sum
+      - name: el sidecar en Go
+        run: |
+          cd backend
+          go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
+          cd ..
+      - name: la interfaz en release
+        run: cargo build --release -p whatfast-ui
+      - name: armar el paquete
+        run: |
+          mkdir -p dist/icons
+          cp target/release/whatfast-ui dist/whatfast
+          cp backend/bin/whatfast-backend dist/
+          cp assets/icons/32x32.png assets/icons/128x128.png assets/icons/128x128@2x.png assets/icons/icon.png dist/icons/
+          tar -czf whatfast-linux.tar.gz -C dist .
+      - name: publicar
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: whatfast-linux.tar.gz

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The crates that do not paint: the domain, the wire contract and the data
+  # model. They build anywhere, in a couple of minutes.
+  logic:
+    name: dominio, contrato y modelo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy -p whatfast-core -p whatfast-protocol -p whatfast-model --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test -p whatfast-core -p whatfast-protocol -p whatfast-model --locked
+      - name: el juez de paridad
+        run: python scripts/parity.py
+
+  # The interface: GPUI, the stack of Zed. It only builds where the stack
+  # builds, and it takes a while, so it is a separate job.
+  interface:
+    name: interfaz nativa
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
