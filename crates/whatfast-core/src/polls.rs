@@ -3,11 +3,13 @@
 //! The original is the optimistic reducer of the poll votes.
 //!
 //! port: the message model the original imports from `tauri/src/lib/types.ts`
-//! lives in `crate::message_format`, which ports the same file.
+//! lives in `crate::types`, the single home of the shared DTOs of the app.
+//! The reducer reads the poll of a message, so it works with the projection
+//! [`MessageSummary`], the same one the pure formatters use.
 
 use std::collections::HashSet;
 
-use crate::message_format::{Message, MessageContent, PollContent, PollOption, PollVoter};
+use crate::types::{MessageContent, MessageSummary, PollContent, PollOption, PollVoter};
 
 /// Snapshot a poll without structuredClone. Solid store values are proxies,
 /// which the browser structured-clone algorithm rejects with DataCloneError.
@@ -89,10 +91,10 @@ pub fn optimistic_poll_vote(poll: &PollContent, selected_options: &[String]) -> 
 /// Ignore an unsolicited/stale poll snapshot while a newer local full-state
 /// vote is pending. Non-poll metadata still converges immediately.
 pub fn preserve_pending_poll_intent(
-    current: &Message,
-    incoming: &Message,
+    current: &MessageSummary,
+    incoming: &MessageSummary,
     pending: bool,
-) -> Message {
+) -> MessageSummary {
     // port: `!current.content` in JS is "the content is null" and
     // `"poll" in current.content` is "the content is the poll variant".
     if !pending

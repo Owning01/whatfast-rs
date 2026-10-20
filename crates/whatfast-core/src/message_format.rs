@@ -22,191 +22,22 @@
 //!
 //! The characterisation values of every function below come from the oracle
 //! module itself, see `tests/message_format.rs`.
+//!
+//! port: the model the original imports from `tauri/src/lib/types.ts` lives in
+//! [`crate::types`]. The formatters read a handful of fields of the chat and
+//! of the message, so they work with the projections
+//! [`crate::types::ChatSummary`] and [`crate::types::MessageSummary`]; the
+//! module exports them under the names `Chat` and `Message` to keep the public
+//! path of the module stable.
 
-// ---------------------------------------------------------------- the model
-
-/// The kind of conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ChatKind {
-    Unspecified = 0,
-    Direct = 1,
-    Group = 2,
-    Other = 3,
-}
-
-/// A conversation of the sidebar.
-///
-/// port: the original takes the whole `Chat` DTO; the port keeps the fields
-/// the pure formatters read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chat {
-    pub id: String,
-    pub kind: ChatKind,
-    pub title: String,
-    pub avatar_path: String,
-    pub last_message_preview: String,
-    pub last_message_timestamp_ms: i64,
-    pub unread_count: u32,
-    pub muted: bool,
-    pub pinned: bool,
-    pub archived: bool,
-    pub phone_number: String,
-    pub contact_name: String,
-    pub push_name: String,
-    pub business_name: String,
-    pub last_message_from_me: bool,
-    pub transport_jid: String,
-}
-
-/// A reaction to a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reaction {
-    pub chat_id: String,
-    pub message_id: String,
-    pub sender_id: String,
-    pub emoji: String,
-    pub timestamp_ms: i64,
-    pub from_me: bool,
-    pub sender_name: String,
-    pub sender_phone_number: String,
-    pub sender_avatar_path: String,
-}
-
-/// A message of the conversation.
-///
-/// port: the original takes the whole `Message` DTO; the port keeps the
-/// fields the pure formatters and the poll reducer read.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Message {
-    pub id: String,
-    pub chat_id: String,
-    pub sender_id: String,
-    pub sender_name: String,
-    pub from_me: bool,
-    pub timestamp_ms: i64,
-    /// The raw wire value of `MessageStatus`; no ported function reads it.
-    pub status: i32,
-    pub edited: bool,
-    pub revoked: bool,
-    pub expires_at_ms: i64,
-    pub sender_phone_number: String,
-    pub sender_avatar_path: String,
-    pub reactions: Vec<Reaction>,
-    pub reply_to_message_id: String,
-    pub reply_to_chat_id: String,
-    pub content: Option<MessageContent>,
-}
-
-/// The content of a message: the externally tagged oneof of the bridge.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MessageContent {
-    Text(TextContent),
-    Unsupported(UnsupportedContent),
-    Image(ImageContent),
-    Attachment(AttachmentContent),
-    Contacts(ContactsContent),
-    Location(LocationContent),
-    Poll(PollContent),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextContent {
-    pub text: String,
-    pub link_preview: Option<LinkPreview>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LinkPreview {
-    pub url: String,
-    pub title: String,
-    pub description: String,
-    pub jpeg_thumbnail: Vec<u8>,
-    pub thumbnail_width: u32,
-    pub thumbnail_height: u32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ImageContent {
-    pub caption: String,
-    pub mime_type: String,
-    pub local_path: String,
-    pub width: u32,
-    pub height: u32,
-    pub file_size: u64,
-    pub downloadable: bool,
-    pub sticker: bool,
-    pub animated: bool,
-    pub thumbnail_path: String,
-    pub jpeg_thumbnail: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AttachmentContent {
-    pub kind: String,
-    pub caption: String,
-    pub mime_type: String,
-    pub file_name: String,
-    pub local_path: String,
-    pub file_size: u64,
-    pub width: u32,
-    pub height: u32,
-    pub duration_seconds: f64,
-    pub animated: bool,
-    pub voice_note: bool,
-    pub downloadable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContactContent {
-    pub display_name: String,
-    pub vcard: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContactsContent {
-    pub contacts: Vec<ContactContent>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LocationContent {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub name: String,
-    pub address: String,
-    pub url: String,
-    pub live: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnsupportedContent {
-    pub type_name: String,
-    pub fallback_text: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PollVoter {
-    pub user_id: String,
-    pub display_name: String,
-    pub avatar_path: String,
-    pub from_me: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PollOption {
-    pub name: String,
-    pub vote_count: u32,
-    pub selected_by_me: bool,
-    pub voters: Vec<PollVoter>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PollContent {
-    pub question: String,
-    pub options: Vec<PollOption>,
-    pub selectable_options_count: u32,
-    pub total_voters: u32,
-}
+pub use crate::types::{
+    AttachmentContent, ChatKind, ContactContent, ContactsContent, ImageContent, LinkPreview,
+    LocationContent, MessageContent, PollContent, PollOption, PollVoter, Reaction, TextContent,
+    UnsupportedContent,
+};
+// port: the projections the formatters read. The canonical DTOs of the app are
+// `crate::types::Chat` and `crate::types::Message`.
+pub use crate::types::{ChatSummary as Chat, MessageSummary as Message};
 
 // -------------------------------------------------------------- the clock
 

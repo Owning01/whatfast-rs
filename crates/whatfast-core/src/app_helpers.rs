@@ -1,10 +1,10 @@
 //! Port of `tauri/src/state/app-helpers.ts` (SolidJS frontend, frozen oracle).
 //!
-//! This module owns the chat/message domain types that the frontend shares
+//! This module works with the chat and message DTOs the frontend shares
 //! between `state/app-helpers.ts` and `lib/notification-policy.ts`: the
-//! original imports them from `lib/types.ts`, but `whatfast-core` has no
-//! `types` module and `lib.rs` is owned by the orchestrator, so the shared
-//! DTOs live here and `notification_policy` re-exports them.
+//! original imports them from `lib/types.ts`, and here they live in
+//! [`crate::types`], the single home of the domain model of the app. This
+//! module imports them and re-exports the ones its public API mentions.
 //!
 //! Fidelity notes (the odd bits are deliberate, they are the oracle's):
 //! - `sortChats` / `compareMessages` break ties with `String.prototype.localeCompare`,
@@ -37,198 +37,15 @@ pub const RECENT_CHATS_STORAGE_KEY: &str = "whatfast-recent";
 
 // --- domain types -----------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ChatKind {
-    #[default]
-    Unspecified,
-    Direct,
-    Group,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MessageStatus {
-    #[default]
-    Unspecified,
-    Pending,
-    Sent,
-    Delivered,
-    Read,
-    Failed,
-}
-
-/// A conversation of the sidebar.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Chat {
-    /// Opaque local conversation ID, not a WhatsApp JID.
-    pub id: String,
-    pub kind: ChatKind,
-    pub title: String,
-    pub avatar_path: String,
-    pub last_message_preview: String,
-    pub last_message_timestamp_ms: i64,
-    pub unread_count: u32,
-    pub muted: bool,
-    pub pinned: bool,
-    pub archived: bool,
-    /// Local-only favorite flag (linked-device scope has no favorites RPC).
-    pub favorite: Option<bool>,
-    /// Local-only block flag mirrored from the browser mock / optimistic state.
-    pub blocked: Option<bool>,
-    /// Local-only mute expiry; `None` means muted indefinitely or not muted.
-    pub mute_until_ms: Option<i64>,
-    pub phone_number: String,
-    pub contact_name: String,
-    pub push_name: String,
-    pub business_name: String,
-    pub last_message_from_me: bool,
-    pub transport_jid: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LinkPreview {
-    pub url: String,
-    pub title: String,
-    pub description: String,
-    pub jpeg_thumbnail: Vec<u8>,
-    pub thumbnail_width: u32,
-    pub thumbnail_height: u32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TextContent {
-    pub text: String,
-    pub link_preview: Option<LinkPreview>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ImageContent {
-    pub caption: String,
-    pub mime_type: String,
-    pub local_path: String,
-    pub width: u32,
-    pub height: u32,
-    pub file_size: u64,
-    pub downloadable: bool,
-    pub sticker: bool,
-    pub animated: bool,
-    pub thumbnail_path: String,
-    pub jpeg_thumbnail: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AttachmentContent {
-    pub kind: String,
-    pub caption: String,
-    pub mime_type: String,
-    pub file_name: String,
-    pub local_path: String,
-    pub file_size: u64,
-    pub width: u32,
-    pub height: u32,
-    pub duration_seconds: f64,
-    pub animated: bool,
-    pub voice_note: bool,
-    pub downloadable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ContactContent {
-    pub display_name: String,
-    pub vcard: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ContactsContent {
-    pub contacts: Vec<ContactContent>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LocationContent {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub name: String,
-    pub address: String,
-    pub url: String,
-    pub live: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct UnsupportedContent {
-    pub type_name: String,
-    pub fallback_text: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PollVoter {
-    pub user_id: String,
-    pub display_name: String,
-    pub avatar_path: String,
-    pub from_me: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PollOption {
-    pub name: String,
-    pub vote_count: u32,
-    pub selected_by_me: bool,
-    pub voters: Vec<PollVoter>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PollContent {
-    pub question: String,
-    pub options: Vec<PollOption>,
-    pub selectable_options_count: u32,
-    pub total_voters: u32,
-}
-
-/// The oneof of the message payload: exactly one variant is present.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MessageContent {
-    Text(TextContent),
-    Unsupported(UnsupportedContent),
-    Image(ImageContent),
-    Attachment(AttachmentContent),
-    Contacts(ContactsContent),
-    Location(LocationContent),
-    Poll(PollContent),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reaction {
-    pub chat_id: String,
-    pub message_id: String,
-    pub sender_id: String,
-    pub emoji: String,
-    pub timestamp_ms: i64,
-    pub from_me: bool,
-    pub sender_name: String,
-    pub sender_phone_number: String,
-    pub sender_avatar_path: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Message {
-    pub id: String,
-    pub chat_id: String,
-    pub sender_id: String,
-    pub sender_name: String,
-    pub from_me: bool,
-    pub timestamp_ms: i64,
-    pub status: MessageStatus,
-    pub edited: bool,
-    pub revoked: bool,
-    pub expires_at_ms: i64,
-    pub sender_phone_number: String,
-    pub sender_avatar_path: String,
-    pub reactions: Vec<Reaction>,
-    pub reply_to_message_id: String,
-    pub reply_to_chat_id: String,
-    pub forwarding_score: u32,
-    pub mention_texts: Vec<String>,
-    pub content: Option<MessageContent>,
-}
+// port: the model the original imports from `tauri/src/lib/types.ts` lives in
+// [`crate::types`], the single home of the shared DTOs of the app. This module
+// re-exports the ones its public API mentions, so the paths the callers and
+// the frozen suites use stay the same.
+pub use crate::types::{
+    AttachmentContent, Chat, ChatKind, ContactContent, ContactsContent, ImageContent, LinkPreview,
+    LocationContent, Message, MessageContent, MessageStatus, PollContent, PollOption, PollVoter,
+    Reaction, TextContent, UnsupportedContent,
+};
 
 /// A mention of the composer (`state/app.ts`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

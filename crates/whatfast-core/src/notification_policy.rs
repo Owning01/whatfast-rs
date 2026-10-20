@@ -1,8 +1,8 @@
 //! Port of `tauri/src/lib/notification-policy.ts` (SolidJS frontend, frozen oracle).
 //!
-//! The domain types come from [`crate::app_helpers`]: the original imports
-//! them from `lib/types.ts`, but `whatfast-core` has no `types` module, so the
-//! shared DTOs live in `app_helpers` and are re-exported here.
+//! The domain types come from [`crate::types`], the single home of the shared
+//! DTOs of the app: the original imports them from `lib/types.ts`. They are
+//! re-exported here to keep the public API of this module stable.
 //!
 //! Fidelity notes (the odd bits are deliberate, they are the oracle's):
 //! - `notificationTitle` chains `||`, which is *falsy* based: an empty title
@@ -13,7 +13,7 @@
 //!   UTF-16 code units here; the slice never cuts a surrogate pair in half
 //!   (Rust strings cannot hold a lone surrogate).
 
-pub use crate::app_helpers::{Chat, Message, MessageContent};
+pub use crate::types::{Chat, Message, MessageContent};
 use crate::workspace::Pane;
 
 /// The facts the notification policy decides on.
