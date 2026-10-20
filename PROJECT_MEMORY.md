@@ -211,3 +211,63 @@ puede estar mirando cualquier cosa.
 
 - B-A4 (consolidacion de DTOs en `types.rs`) en curso.
 - Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
+
+## 2026-10-20 ? B-A5, B-A6, B-P1 mergeados, y GPUI?? compila con una sola copia
+
+**Que se cambio**
+
+- B-A5 (5 modulos) y B-A6 (4 modulos) mergeados: paridad de 103/153 a
+  **150/153 (98,0 %)**. 219 tests en verde en todo el workspace.
+- B-P1: el transporte protobuf en `crates/whatfast-protocol/src/transport.rs`.
+  Framing (4 bytes BE + payload, tope de 8 MiB), `classify_exit` con las seis
+  agujas del oraculo, `BackendClient` con los bucles de lectura y escritura,
+  `RequestTracker` con ids monotonicos desde 1 y tope de 512 en vuelo,
+  `RequestClass` con sus plazos (Control 15 s, Read 30 s, Write 60 s,
+  Attachment 22 min) y `EventSequence` para el orden del stream. 18 casos del
+  oraculo.
+- El crate `whatfast-ui` (GPUI) entra al workspace y **compila**: ventana con
+  `gpui_component::init`, tema oscuro y layout centrado.
+
+**Por que**
+
+El transporte era el "puente" del F4: sin el, el crate de UI no puede hablar
+con el sidecar Go. Y GPUI era el desconocido grande: si no compilaba, todo el
+plan de la interfaz caia.
+
+**Evidencia**
+
+- `cargo test --workspace`: 219 en verde. `cargo clippy --workspace
+  --all-targets --locked -- -D warnings`: limpio.
+- B-A5: 23/23 casos (send-idempotency 3, emoji-autocomplete 10, performance 5,
+  sync 4, authoritative-resync 1). B-A6: 24/24 (notification-routing 7,
+  participant-avatar-queue 9, spotlight 4, theme 4).
+- `voice_note` (el ultimo modulo, 3 casos) quedo en el lote B-A7.
+- El shell de GPUI compila incremental en 4,4 s.
+
+**Trampas (las dos mas caras de la sesion)**
+
+1. **Dos copias de gpui en el grafo.** Pinear `gpui` con `rev = ...` hace que
+   cargo resuelva una copia con `?rev=` y otra sin, porque los crates internos
+   del repo de Zed se declaran entre si por URL plana. Dos copias significa
+   dos `AssetSource` distintos y el error "the trait bound `Assets:
+   AssetSource` is not satisfied". **Solucion**: declarar `gpui` y
+   `gpui_platform` SIN `rev` (como hace el crate `desktop/` del origen) y
+   dejar que el `Cargo.lock` versionado fije el commit
+   (`zed#1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba`).
+2. **`gpui-component` pineado no compila contra el HEAD de Zed**: la firma de
+   `wrap_line` cambio y el componente llama con los argumentos viejos. De ahi
+   el rev de `gpui` que se uso: el del `Cargo.lock` del crate viejo.
+3. Editar el `Cargo.lock` a mano con un reemplazo de texto deja el lock con
+   paquetes duplicados y cargo deja de poder parsearlo. La forma correcta de
+   resolver un lock pegado es copiar uno que ya funciona y dejar que cargo lo
+   adjusting.
+4. `is_multiple_of` pide MSRV 1.87 y el crate declara 1.85: clippy lo rechaza
+   con `incompatible_msrv`. Se usa `%`.
+
+**Pendiente**
+
+- B-A7 (voice_note) en curso: con el, la paridad llega a 153/153.
+- Faltan los lotes de UI (B-U1 tokens, B-U2 shell, B-U3 sidebar como corte
+  vertical, y B-U4..B-U8).
+- Deuda anotada: el parser de URLs de `whatsapp_formatting.rs` son ~1.100
+  lineas de WHATWG dentro de un solo archivo; deberia pasar a su modulo.
