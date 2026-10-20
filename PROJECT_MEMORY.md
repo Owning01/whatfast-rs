@@ -634,3 +634,62 @@ agentes deja de costar 3 GB por worktree.
   `#![allow(dead_code)]` del modulo de tokens.
 - Los 28 RPC que faltan y los 11 componentes que el cliente GPUI del
   oraculo no tiene (los que estan en `gpui_component`).
+
+## 2026-10-20 - Tanda 1 completa: la app nativa anda de punta a punta
+
+**Que se cambio**
+
+- **`crates/whatfast-ui/`**: los 6 modulos de la interfaz.
+  `app.rs` (3.039 l., el estado y las acciones), `rpc.rs` (434, el ciclo de
+  vida de los pedidos), `text.rs` (234, los helpers de texto),
+  `render.rs` (3.034, el dibujo), `helpers.rs` (236) y `tokens.rs` (1.133, el
+  tema). `main.rs` (49 l.) es el entrypoint.
+- **La app corre**: abre la ventana, se conecta al backend, lista 10.000
+  chats del backend de demostracion, abre conversaciones, dibuja las
+  burbujas con reacciones, respuestas y previews de links, y pinta las fotos
+  que genera el backend.
+- **README nuevo** con la tabla comparativa y los numeros medidos.
+- **Cuatro capturas** propias en `docs/screenshots/`.
+
+**Evidencia**
+
+- `scripts\test.cmd`: **288 tests en verde**. `scripts\lint.cmd`: limpio.
+- `scripts/parity.py`: **153/153 (100 %)** del oraculo.
+- **RAM: 91,9 MB** (mediana de 3 corridas del release con el sidecar real):
+  60,5 MB la interfaz + 31,4 MB el sidecar. La meta era < 120 MB.
+  El cliente anterior con webview usaba **432 MB**: el 85 % era el WebView2.
+- **Ventana visible: 0,70 s** (mediana de 3). La meta era < 0,5 s: **no se
+  llega**. El costo es la inicializacion de la plataforma de GPUI (la base
+  de datos de fuentes del sistema), no el codigo: con y sin sidecar la
+  diferencia es de 0,03 s, y con y sin aplicar el tema, de 0,1 s.
+- **UI lista (lista de chats)**: ~1,1 s (el cliente anterior: 1,16 s).
+- El paquete de descarga: **33,2 MB** (10,6 la app + 22,6 el sidecar).
+
+**Tres defectos del cliente GPUI del origen que se corrigieron**
+
+1. **La fila de la lista de chats no tenia ancho.** En GPUI el
+   `uniform_list` mide cada item, asi que la fila no heredaba el ancho de la
+   lista: el preview se desbordaba hacia el panel de conversacion y
+   **empujaba los contadores de no leidos fuera del panel**. Con `.w_full()`
+   en la fila, el preview se recorta con puntos suspensivos y los
+   contadores vuelven a verse.
+2. **El titulo de la cabecera se partia en dos lineas** cuando los botones
+   no entraban. Con `.flex_1().min_w_0().truncate()` y los tres botones
+   como iconos (sol, carpeta, engranaje) el header entra en los 340 px del
+   panel lateral.
+3. La escala de la interfaz estaba **definida tres veces** (las constantes
+   en `app.rs`, `normalized_ui_scale` en `text.rs` y el modulo `tokens.rs`).
+  Ahora `tokens.rs` es el unico due?o y los otros dos re-exportan, para no
+  romper los imports que ya estaban escritos.
+
+**Pendiente (la tanda 2)**
+
+- **28 de los 50 RPC** sin interfaz: sincronizacion e historia, medios que
+  no son imagen, reenvio, edicion y borrado, encuestas, newsletters,
+  estados y las acciones del chat (fijar, archivar, silenciar, bloquear).
+- **11 componentes** que tiene el cliente web: barra de titulo, strip de
+  tabs, panel de miembros, lista de participantes, panel de newsletters,
+  tira de estados, bandeja de stickers y el editor de imagen.
+  De estos, la barra de titulo, las tabs, el sidebar, el avatar, el dialogo,
+  el menu y los ajustes **ya existen en `gpui_component`**: la tanda 2 es
+  mas cableado que dibujo.
