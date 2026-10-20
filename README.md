@@ -42,6 +42,15 @@ scripts/lint.cmd        # cargo clippy --all-targets --locked -- -D warnings
 Los wrappers existen porque el volumen `G:` de esta máquina no tiene
 `sccache` instalado y el toolchain está pineado.
 
+Si querés que las compilaciones no caigan en el disco del repo, exportá
+`WHATFAST_TARGET_DIR` a una carpeta de caches. Los dos wrappers la respetan, y
+así varios worktrees comparten **un** target en vez de llenar el disco con
+una copia de la compilación cada uno:
+
+```sh
+export WHATFAST_TARGET_DIR=/ruta/a/caches/whatfast-target
+```
+
 ## Licencia
 
 MIT o Apache-2.0, a elección del usuario.

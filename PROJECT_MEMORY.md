@@ -391,3 +391,58 @@ que es portable sin dependencias nuevas.
   tokens, B-U4 a B-U8).
 - Deuda anotada: el parser de URLs de `whatsapp_formatting.rs` son ~1.100
   lineas de WHATWG dentro de un solo archivo; deberia pasar a su modulo.
+
+## 2026-10-20 ? El disco C: limpio y las compilaciones en un solo lugar en G:
+
+**Que se cambio**
+
+- **`G:\_build` es la unica casa de las compilaciones y las caches.**
+  Todo lo regenerable esta ahi, y `G:\_build\borrar-cache.cmd` lo borra
+  entero de un comando.
+- C: paso de **8,6 GB libres a 40,8 GB libres** (168 GB usados -> 136 GB).
+- Movidos a `G:\_build`: el target de cargo (10,85 GB), Gradle (14,78 GB),
+  el AVD de Android (8,63 GB), la distro WSL `archlinux` (8,11 GB), el cache
+  de Pub (1,44 GB) y los navegadores de Playwright (1,92 GB).
+- Borrados de C: el cache de shaders de NVIDIA (12,58 GB), una extraccion de
+  PyInstaller (1,66 GB), los caches de Go/uv/pnpm (3,84 GB) y ~2.100
+  archivos de scratch de sesiones anteriores (3,34 GB).
+- **Los worktrees de los agentes que ya terminaron, eliminados** (a1-a7, p1,
+  u0, u1). Se conservaron solo los que estan mergeados: verificado con
+  `git cherry main <rama>`, que compara por patch-id y no por hash.
+- `scripts/test.cmd` y `scripts/lint.cmd` ahora leen `WHATFAST_TARGET_DIR`
+  del entorno en vez de tener una ruta fija de esta maquina.
+
+**Por que**
+
+C: se llenaba con cada compilacion: los worktrees de los agentes viven en C:
+y cada uno compilaba su propio `target/`, y con el stack de GPUI son 3 GB por
+worktree. Dos veces se mato una compilacion por falta de espacio. La
+solucion no es solo limpiar: es que **las compilaciones no vivan en C:**.
+
+**Evidencia**
+
+- `G:\_build` queda asi: `whatfast-target` 10,85 GB, `gradle` 14,78 GB,
+  `android-avd` 8,63 GB, `wsl` 8,11 GB, `playwright` 1,92 GB, `pub` 1,44 GB.
+- El emulador de Android encuentra el AVD en G::
+  `emulator -list-avds` -> `leonsys` (con `ANDROID_AVD_HOME`).
+- El crate `whatfast-ui` **compila y enlaza** con el target nuevo: se toco
+  `main.rs` a proposito para forzar el relink, y produjo el `.exe` de 45 MB.
+- 267 tests en verde en el workspace.
+
+**Trampas (dos, y una me costo trabajo)**
+
+1. **El scratch de `Temp\opencode` contenia `msvc.ps1`**, el script que
+   deja el linker de MSVC en el PATH. Al limpiar la carpeta, borre el script.
+   **Recreado** en el mismo lugar, ahora con una version que llama a
+   `vcvars64.bat` y importa el entorno, en vez de tener las rutas fijas.
+2. **Mover `.gradle` y el AVD no es un rename**: son volumenes distintos, y
+   hay que reescribir las rutas absolutas. El `.ini` del AVD
+   (`leonsys.ini`) tiene un `path=C:\Users\perca\.android\avd\leonsys.avd`
+   que hay que cambiar a mano.
+
+**Pendiente**
+
+- La distro de WSL y el AVD de Android **no son caches**: se pueden borrar
+  (libran 16 GB), pero se pierden el sistema y el emulador.
+- El `opencode.db` (5,79 GB en `C:\Users\perca\.local\share\opencode`) es
+  el historial de sesiones: no se toco.
