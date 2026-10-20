@@ -42,12 +42,14 @@ public class Ventana {
 }
 "@
 
-function Capturar([IntPtr]$handle, [string]$nombre) {
+function Rect([IntPtr]$handle) {
     $rect = New-Object Ventana+RECT
-    if(-not [Ventana]::GetWindowRect($handle, [ref]$rect)) {
-        Write-Warning "no se pudo leer el rectangulo de $nombre"
-        return
-    }
+    [Ventana]::GetWindowRect($handle, [ref]$rect) | Out-Null
+    return $rect
+}
+
+function Capturar([IntPtr]$handle, [string]$nombre) {
+    $rect = Rect $handle
     $ancho = $rect.Right - $rect.Left
     $alto = $rect.Bottom - $rect.Top
     if($ancho -le 0 -or $alto -le 0) {
@@ -65,12 +67,21 @@ function Capturar([IntPtr]$handle, [string]$nombre) {
 }
 
 function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
-    $rect = New-Object Ventana+RECT
-    [Ventana]::GetWindowRect($handle, [ref]$rect) | Out-Null
+    $rect = Rect $handle
     [Ventana]::SetCursorPos($rect.Left + $dx, $rect.Top + $dy) | Out-Null
     Start-Sleep -Milliseconds 250
     [Ventana]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
     [Ventana]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 700
+}
+
+function Rueda([IntPtr]$handle, [int]$dx, [int]$dy, [int]$pasos) {
+    $rect = Rect $handle
+    [Ventana]::SetCursorPos($rect.Left + $dx, $rect.Top + $dy) | Out-Null
+    for($i = 0; $i -lt $pasos; $i++) {
+        [Ventana]::mouse_event(0x0800, 0, 0, 120, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+    }
     Start-Sleep -Milliseconds 700
 }
 
@@ -90,8 +101,8 @@ if($handle -eq [IntPtr]::Zero) {
     exit 1
 }
 
-# The window goes to the top left corner: the shadow that Windows draws
-# around it would otherwise be part of the capture.
+# La ventana va a la esquina: la sombra que Windows dibuja alrededor entraria
+# en la captura si no.
 [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0004) | Out-Null
 [Ventana]::SetForegroundWindow($handle) | Out-Null
 Start-Sleep -Seconds 4
@@ -100,23 +111,13 @@ Write-Output "=== capturas ==="
 Capturar $handle "01-lista-de-chats.png"
 
 # una conversacion
-Clic $handle 150 220
+Clic $handle 150 258
 Start-Sleep -Seconds 2
 Capturar $handle "02-conversacion.png"
 
-# el buscador: se hace clic en el campo y se escribe
-Clic $handle 220 150
-Start-Sleep -Milliseconds 500
-[System.Windows.Forms.SendKeys]::SendWait("fast")
-Start-Sleep -Seconds 2
-Capturar $handle "03-busqueda.png"
-[System.Windows.Forms.SendKeys]::SendWait("{ESC}")
-Start-Sleep -Seconds 1
-
-# los ajustes (el boton de la rueda, en la cabecera del panel lateral)
-Clic $handle 302 64
-Start-Sleep -Seconds 2
-Capturar $handle "04-ajustes.png"
+# un mensaje con foto: la conversacion baja hasta la imagen
+Rueda $handle 700 400 10
+Capturar $handle "03-mensaje-con-foto.png"
 
 Stop-Process -Id $proceso.Id -Force -ErrorAction SilentlyContinue
 Write-Output "listo."
