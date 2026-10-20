@@ -111,6 +111,12 @@ Los tres lotes son disjuntos por archivo. El orquestador mantiene
 | **B-P1** | P1 | `crates/whatfast-protocol/src/transport.rs` + `tests/transport.rs` | `tauri/src-tauri/src/bridge.rs` (framing, ciclo de vida de requests) |
 | **B-P2** | P2 | `docs/api-mapping.md` (documento) | `tauri/src/lib/bridge.ts` (64 comandos) → acciones del crate UI |
 
+### Grupo 1 bis · reparación (nace de un gap entre agentes)
+
+| Lote | Agente | Archivos | Por qué |
+|---|---|---|---|
+| **B-A4** | A4 | `src/types.rs` (nuevo) + `src/message_format.rs` + `src/app_helpers.rs` + `src/notification_policy.rs` | A2 y A3 definieron **dos** familias paralelas de `Chat`, `Message`, `TextContent`, `LinkPreview` y compañía. El rulebook no decía dónde viven los DTOs compartidos: es un gap del rulebook, no un error de un agente. La UI (F4) necesita un solo tipo `Chat` |
+
 ### Grupo 3 · UI nativa (GPUI) — arranca cuando el grupo 2 está verde
 
 | Lote | Agente | Alcance |

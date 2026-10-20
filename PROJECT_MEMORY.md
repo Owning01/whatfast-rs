@@ -97,3 +97,61 @@ puede migrar sin romper lo más duro del producto: la sesión ya emparejada.
 - D5 (spike de 2 días con `whatsapp-rust` para medir RSS y probar si el
   `SessionRecord` de libsignal-go se decodifica) queda para atrás, salvo que
   el humano quiera ese dato.
+
+## 2026-10-20 ? Lotes B-A2 y B-A3 mergeados, y un gap del rulebook que se hizo lote
+
+**Qu? se cambi?**
+
+- B-A2 (8 modulos puros) y B-A3 (6 modulos de estado) mergeados en `main`.
+  134 tests en verde, clippy limpio, cero `unwrap`/`panic`/`todo!` fuera de
+  los tests.
+- Paridad: de 0/153 a **89/153 (58,2 %)** mas 45 tests de caracterizacion.
+- El juez de paridad (`scripts/parity.py`) tuvo dos bugs que lohacian mentir:
+  buscaba `media-crop.rs` con guion (los archivos usan `media_crop.rs`) y
+  solo miraba el archivo homonimo de cada suite. Arreglados: ahora busca en
+  todos los archivos de test del destino y distingue los tests de
+  caracterizacion (modulos sin suite en el oraculo) de los inventados.
+- `lib.rs` ordenado en alfanumerico: `cargo fmt --all` reordena los
+  `pub mod` (regla `reorder_modules` de rustfmt) y los agentes lo estaban
+  revirtiendo en sus worktrees. Ahora `cargo fmt --all` es inocuo.
+- Lote **B-A4** creado: consolidar los DTOs duplicados en `src/types.rs`.
+- Rulebook: D8 (donde viven los DTOs compartidos) y D9 (donde viven los
+  efectos) resueltos y escritos.
+
+**Por qu?**
+
+A2 y A3 definieron **dos familias paralelas e incompatibles** de `Chat`,
+`Message`, `TextContent`, `LinkPreview` y companhia: el rulebook no decia
+donde viven los tipos compartidos, asi que cada agente invento los suyos.
+No es un error de un agente: es un gap del rulebook. La UI de la fase F4
+necesita **un** `Chat` y **un** `Message`, no dos.
+
+**Evidencia**
+
+- B-A2: 36/36 casos del oraculo (20 de media-crop, 4 de polls, 3 de pairing,
+  3 de unread, 2 de unsupported, 1 de chat-merge, 3 de file-drop) + 14 de
+  caracterizacion para `message_format`.
+- B-A3: 53/53 casos del oraculo (31 de workspace, 8 de backend-lifecycle,
+  6 de scroll-restoration, 5 de tab-keyboard, 3 de notification-policy) + 31
+  de caracterizacion para `app_helpers`.
+- Las caracterizaciones seSacaron con un script Node temporal **fuera** del
+  repo de origen, congelando `new Date()` y forzando `TZ=UTC`: el oraculo
+  quedo intacto.
+
+**Trampas**
+
+- `localeCompare` de JS no es orden de bytes: el oraculo ordena
+  `["a","A","b","B"]` donde Rust ordenaria `["A","B","a","b"]`. El puerto
+  reproduce dos niveles de colacion (primario sin distinguir mayusculas,
+  terciario minuscula antes que mayuscula).
+- La verdad de JavaScript: cadena vacia es falsy. Aparece en seis ramas
+  distintas de los modulos de estado y hay que decidirla en cada una.
+- `runBoundedRetry` era `async` con `window.setTimeout`: en el crate puro
+  pasa a ser sincrono con un callback `wait` que recibe el delay, y el plan
+  de delays aparte (`[0,100,200]`). Los tests del oraculo se adaptan sin
+  cambiar sus valores.
+
+**Pendiente**
+
+- B-A1 (parser de formato) y B-A4 (consolidacion de DTOs) en curso.
+- Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
