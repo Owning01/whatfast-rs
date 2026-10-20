@@ -21,7 +21,7 @@
 //! - `tokens`: the theme tokens and the scale of the interface
 
 use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component::Root;
 use gpui_component_assets::Assets;
 
 mod app;
@@ -40,7 +40,13 @@ fn main() {
             KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
             KeyBinding::new("ctrl-shift-tab", app::CycleRecentChatReverse, None),
         ]);
-        Theme::change(ThemeMode::Dark, None, cx);
+        // The theme of Whatfast goes over the one of `gpui_component`: the
+        // mode comes first, because `Theme::change` rewrites every color from
+        // the configuration of the mode.
+        let scale = whatfast_model::settings::load_ui_scale()
+            .map(tokens::normalized_ui_scale)
+            .unwrap_or(tokens::DEFAULT_UI_SCALE);
+        tokens::apply_theme(&whatfast_core::theme::default_theme(), scale, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
             window_min_size: Some(size(px(480.), px(560.))),
