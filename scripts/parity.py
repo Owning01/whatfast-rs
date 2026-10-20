@@ -40,11 +40,15 @@ def snake(name: str) -> str:
 
 
 def normalize(name: str) -> str:
-    """Normaliza para comparar: minusculas, sin separadores, sin palabras
-    vacias. El nombre del caso puede estar en ingles en el oraculo y en
-    snake_case en el puerto."""
-    tokens = [t for t in re.split(r"[^a-z0-9]+", snake(name)) if t]
-    return " ".join(t for t in tokens if t not in STOP)
+    """Normaliza para comparar: solo letras y digitos, en minusculas.
+
+    No se parte en tokens: el nombre del caso puede venir del TypeScript en
+    camelCase ("parses WhatsApp inline emphasis") y del puerto en snake_case
+    ("parses_whatsapp_inline_emphasis"), y el separador de camelCase rompe
+    las palabras compuestas como "WhatsApp" en dos pedazos distintos.
+    Comparar la forma sin separadores evita ese falso negativo.
+    """
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 def main() -> int:

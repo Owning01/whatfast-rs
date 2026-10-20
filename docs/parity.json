@@ -232,32 +232,20 @@
     {
       "modulo": "whatsapp-formatting-spoiler",
       "oracle": 7,
-      "ok": 0,
-      "faltan": [
-        "parses a spoiler delimited by double pipes",
-        "keeps the text around a spoiler unstyled",
-        "parses several spoilers in the same message",
-        "a spoiler inherits and composes with the other inline styles",
-        "a spoiler keeps links and mentions atomic",
-        "keeps malformed spoilers as literal text",
-        "a spoiler does not leak into the next line"
-      ],
-      "en": []
+      "ok": 7,
+      "faltan": [],
+      "en": [
+        "whatsapp_formatting.rs"
+      ]
     },
     {
       "modulo": "whatsapp-formatting",
       "oracle": 7,
-      "ok": 0,
-      "faltan": [
-        "parses WhatsApp inline emphasis and nested formatting",
-        "parses quotes, bullet items, and one or two digit numbered items",
-        "parses a multiline triple-backtick region as a code block",
-        "keeps malformed and in-word delimiters as literal text",
-        "preserves URL syntax and trims sentence punctuation from the link",
-        "mentions are atomic, can inherit formatting, and do not match inside code or email",
-        "HTML-looking input is returned only as inert text tokens"
-      ],
-      "en": []
+      "ok": 7,
+      "faltan": [],
+      "en": [
+        "whatsapp_formatting.rs"
+      ]
     },
     {
       "modulo": "workspace",
@@ -270,8 +258,8 @@
     }
   ],
   "total_oracle": 153,
-  "total_ok": 89,
-  "paridad_pct": 58.17,
+  "total_ok": 103,
+  "paridad_pct": 67.32,
   "sobran": [],
   "caracterizacion": [
     "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",
