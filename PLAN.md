@@ -126,9 +126,9 @@ Los tres lotes son disjuntos por archivo. El orquestador mantiene
 
 ### Grupo 4 · protocolo en Rust (spike con gate)
 
-| Lote | Agente | Pregunta | Gate |
-|---|---|---|---|
-| **B-R1** | R1 | ¿`wa-rs` o `whatsapp-rust` cubren los 50 RPC que necesita el cliente? | Si no cubren: el sidecar Go se queda y el trabajo termina en "UI en Rust" |
+| Lote | Agente | Pregunta | Gate | Resultado |
+|---|---|---|---|---|
+| **B-R1** | R1 | ¿`wa-rs` o `whatsapp-rust` cubren los 50 RPC que necesita el cliente? | Si no cubren: el sidecar Go se queda y el trabajo termina en "UI en Rust" | **CERRADO**: no se puede reusar la sesión ya emparejada (esquema SQLite incompatible, cero importadores). Decisión D1 del charter: el sidecar Go se queda |
 
 **B-R1 no bloquea los grupos 1 a 3**: es un spike en paralelo, con su propio
 presupuesto.

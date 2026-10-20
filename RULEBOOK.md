@@ -198,3 +198,5 @@ a propósito: es el loop rápido).
 | D3 | ¿Los offsets de caret del emoji-autocomplete se exponen en bytes UTF-8 o en "unidades de carácter"? | humano | por defecto: **bytes UTF-8**, documentado |
 | D4 | ¿El snapshot del workspace sigue siendo JSON en `localStorage`? | humano | abierta — en GPUI el equivalente es un archivo JSON en el perfil; a definir en F4 |
 | D5 | ¿Los nombres de los chats mock (`Fast friend N`) se conservan? | humano | **sí**: son parte del oráculo de los tests |
+| D6 | ¿El sidecar del protocolo se reescribe en Rust? | humano | **no** (decisión D1 del charter, con el spike B-R1 como evidencia): `whatsapp-rust` no puede reusar una sesión emparejada y `wa-rs` está parado. El sidecar Go se queda |
+| D7 | ¿El transporte entre el binario Rust y el sidecar Go sigue siendo protobuf sobre stdio? | humano | **sí** (decisión D4): ya existe, ya está versionado y falla cerrado |
