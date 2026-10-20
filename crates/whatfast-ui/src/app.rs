@@ -75,16 +75,12 @@ pub(crate) const MAX_TEXT_BYTES: usize = 65_536;
 pub(crate) const MAX_CAPTION_BYTES: usize = 4_096;
 /// The biggest image the client sends.
 pub(crate) const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
-/// The smallest scale of the interface.
-pub(crate) const MIN_UI_SCALE: f32 = 1.0;
-/// The biggest scale of the interface.
-pub(crate) const MAX_UI_SCALE: f32 = 1.5;
-/// How much one step of the scale changes.
-pub(crate) const UI_SCALE_STEP: f32 = 0.1;
-/// The size of the interface font at the scale of one.
-pub(crate) const BASE_UI_FONT_SIZE: f32 = 16.0;
-/// The size of the interface monospace font at the scale of one.
-pub(crate) const BASE_MONO_FONT_SIZE: f32 = 13.0;
+// The scale of the interface belongs to the tokens of the theme: they are
+// re-exported here so that the rest of the crate keeps reading them from
+// the state module, and there is only one definition.
+pub(crate) use crate::tokens::{
+    BASE_MONO_FONT_SIZE, BASE_UI_FONT_SIZE, MAX_UI_SCALE, MIN_UI_SCALE, UI_SCALE_STEP,
+};
 /// How many conversations the recency history keeps.
 pub(crate) const MAX_RECENT_CHATS: usize = 10;
 /// How long two wheel events may be apart to be part of the same gesture.
@@ -3031,9 +3027,5 @@ fn save_ui_scale(scale: f32) -> std::io::Result<()> {
 
 /// Applies the scale of the interface to the theme of the window.
 fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut App) {
-    let theme = Theme::global_mut(cx);
-    theme.font_size = px(BASE_UI_FONT_SIZE * scale);
-    theme.mono_font_size = px(BASE_MONO_FONT_SIZE * scale);
-    window.set_rem_size(theme.font_size);
-    window.refresh();
+    crate::tokens::apply_theme_scale(scale, window, cx);
 }

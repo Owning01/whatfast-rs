@@ -33,19 +33,12 @@ mod tokens;
 
 use app::Whatfast;
 
-/// The actions that switch between the recent chats.
-///
-/// They are declared at the root of the crate so that the drawing module can
-/// listen to them: `gpui::actions!` puts the structs in the scope where it
-/// is called.
-gpui::actions!(whatfast, [CycleRecentChat, CycleRecentChatReverse]);
-
 fn main() {
     gpui_platform::application().with_assets(Assets).run(|cx| {
         gpui_component::init(cx);
         cx.bind_keys([
-            KeyBinding::new("ctrl-tab", CycleRecentChat, None),
-            KeyBinding::new("ctrl-shift-tab", CycleRecentChatReverse, None),
+            KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
+            KeyBinding::new("ctrl-shift-tab", app::CycleRecentChatReverse, None),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         let options = WindowOptions {
@@ -63,11 +56,11 @@ fn main() {
                 // they stop propagation, which keeps these from firing twice.
                 let window_handle = window.window_handle();
                 let weak = app.downgrade();
-                cx.on_action(move |_: &CycleRecentChat, cx| {
+                cx.on_action(move |_: &app::CycleRecentChat, cx| {
                     Whatfast::cycle_recent_chat_from_global(&weak, window_handle, false, cx);
                 });
                 let weak = app.downgrade();
-                cx.on_action(move |_: &CycleRecentChatReverse, cx| {
+                cx.on_action(move |_: &app::CycleRecentChatReverse, cx| {
                     Whatfast::cycle_recent_chat_from_global(&weak, window_handle, true, cx);
                 });
                 cx.new(|cx| Root::new(app, window, cx))

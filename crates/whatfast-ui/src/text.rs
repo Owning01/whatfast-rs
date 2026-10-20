@@ -180,13 +180,10 @@ pub(crate) fn validate_image_message(path: &Path, caption: &str) -> Result<(), S
     Ok(())
 }
 
-/// The scale the interface actually uses: clamped and rounded to a tenth.
-///
-/// port: the origin rounded with `f64::round`, which rounds halves away from
-/// zero; the value is always positive here, so the two agree.
-pub(crate) fn normalized_ui_scale(scale: f32) -> f32 {
-    ((scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE) * 10.0).round()) / 10.0
-}
+// The normalization of the scale belongs to the tokens of the theme: it is
+// re-exported here so that the rest of the crate keeps reading it from this
+// module, and there is only one definition.
+pub(crate) use crate::tokens::normalized_ui_scale;
 
 /// The "typing…" line of a chat, or `None` when nobody is typing there.
 ///
