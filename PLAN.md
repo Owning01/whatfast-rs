@@ -163,6 +163,29 @@ los componentes SolidJS:
 | **B-U7** | U7 | Buscador global, switcher de chats, bandeja de stickers, visor de imagen | `SpotlightSearch.tsx`, `ChatSwitcher.tsx`, `StickerTray.tsx`, `ImageViewer` |
 | **B-U8** | U8 | Editor de imagen (recorte libre + rotacion) en GPUI | `MediaEditor.tsx` + `whatfast-core/media_crop.rs` (ya portado) |
 
+##### Tanda 2 en ejecucion (20/10/2026): los lotes reales
+
+La tabla de arriba es el reparto teorico; en la ejecucion los lotes se
+partieron por **archivos disjuntos** (regla del charter: un archivo, un
+dueno) y el estado es este:
+
+| Lote | Worktree | Rama | Archivos que posee | Que hace |
+|---|---|---|---|---|
+| **r1** | `wf/r1` | `mig/r1` | `crates/whatfast-model/src/model.rs`, `crates/whatfast-ui/src/{rpc.rs,app.rs}` | Los **28 RPC** que faltaban: la peticion, el estado del store y la accion que la dispara |
+| **r2** | `wf/r2` | `mig/r2` | `crates/whatfast-ui/src/{icons.rs,media_editor.rs}` | El juego de iconos del cliente web y el editor de imagen (recorte + rotacion) |
+| **r3** | `wf/r3` | `mig/r3` | `crates/whatfast-ui/src/{navrail.rs,tabs.rs}` | La columna de iconos y el strip de pestañas |
+| **r4** | `wf/r4` | `mig/r4` | `crates/whatfast-ui/src/{newsletters.rs,statuses.rs,members.rs,stickers.rs}` | Los cuatro paneles que dependen del estado nuevo del store (arranca cuando r1 aterrice) |
+
+**El orquestador** integra: `crates/whatfast-ui/src/main.rs` (los `mod` y la
+entrada), los campos nuevos del `struct Whatfast`, el layout de `render.rs`
+(la columna de iconos a la izquierda, el strip de pestañas arriba de la
+conversacion, los paneles al lado) y las medidas.
+
+**La puerta de calidad** es `scripts/funcionalidad.py`: cuenta los RPC que la
+interfaz pide (sobre 50) y los componentes del cliente web que tienen
+equivalente en Rust (sobre 21). Sale con codigo 1 mientras falte algo.
+`scripts/parity.py` sigue siendo el juez de los 153 casos del dominio.
+
 #### Tanda 3 - el cierre
 
 - El empaquetado: el binario de Rust con el sidecar en Go al lado, los
