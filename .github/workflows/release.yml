@@ -43,17 +43,29 @@ jobs:
           Copy-Item assets\icons\32x32.png,assets\icons\128x128.png,assets\icons\128x128@2x.png,assets\icons\icon.ico,assets\icons\icon.icns dist\icons\
           Compress-Archive -Path dist\* -DestinationPath whatfast-windows.zip
           Get-ChildItem dist\whatfast.exe,dist\whatfast-backend.exe | ForEach-Object { "{0} {1:N0} bytes" -f $_.Name, $_.Length }
+      - name: el instalador
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+          if(-not (Test-Path whatfast-setup.exe)) { throw "el instalador no salio" }
+          Get-Item whatfast-setup.exe | ForEach-Object { "whatfast-setup.exe {0:N0} bytes" -f $_.Length }
       - name: publicar
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: whatfast-windows.zip
+          files: |
+            whatfast-windows.zip
+            whatfast-setup.exe
           body: |
             Whatfast, cliente de escritorio de WhatsApp.
 
             El paquete trae los dos ejecutables: `whatfast.exe` (la interfaz
             nativa) y `whatfast-backend.exe` (el sidecar que habla con
             WhatsApp). Los dos tienen que estar en la misma carpeta.
+
+            `whatfast-setup.exe` es el instalador: deja todo en Archivos de
+            programa y arma los accesos directos.
 
   linux:
     name: linux
