@@ -87,11 +87,23 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | B-B1 | backend fake (los 50 RPC de demostración) | cerrado | 14/14 |
 | B-R1 | spike del protocolo Rust | cerrado (D1: el sidecar Go se queda) | — |
 | B-U0 | crate `whatfast-model` (el modelo de datos, sin GPUI) | cerrado | 31/31 |
-| B-G1 | el sidecar en Go, en el repo nuevo | en curso | — |
-| B-U2a | el estado y las acciones (`app.rs`, `rpc.rs`, `text.rs`) | en curso | — |
-| B-U2b | el dibujo (`render.rs`, `helpers.rs`) | en curso | — |
-| B-U3 | los tokens del tema (`tokens.rs`) | en curso | — |
+| B-G1 | el sidecar en Go, en el repo nuevo | cerrado | 220/220 tests de Go |
+| B-U2a | el estado y las acciones (`app.rs`, `rpc.rs`, `text.rs`) | cerrado | 3.707 l. |
+| B-U2b | el dibujo (`render.rs`, `helpers.rs`) | cerrado | 3.270 l. |
+| B-U3 | los tokens del tema (`tokens.rs`) | cerrado | 21/21 |
 | B-U4..U8 | los 11 componentes que faltan y los 28 RPC pendientes | pendiente (F4+) | — |
 
 **Paridad del oráculo: 153/153 (100 %) + 45 tests de caracterización.
-267 tests en verde en el workspace; clippy limpio.**
+288 tests en verde en el workspace; clippy limpio.**
+
+## Medido (release, 20/10/2026)
+
+| Métrica | Antes (webview) | Ahora (nativo) | Meta |
+|---|---|---|---|
+| RAM de la interfaz + el sidecar | 57,4 MB | **91,9 MB** | < 120 MB |
+| RAM del motor de render | 366,8 MB (WebView2) | **0** | 0 |
+| RAM total | 432 MB | **91,9 MB** | < 120 MB |
+| Ventana visible | 0,25 s | 0,70 s | < 0,5 s (**no se llega**) |
+| UI lista (lista de chats) | 1,16 s | ~1,1 s | — |
+| JS que baja el cliente | 411 KB | **0** | 0 |
+| Descarga para instalar | 33,1 MB | 33,2 MB | — |
