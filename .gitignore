@@ -6,3 +6,5 @@
 *.log
 /perf-results/
 /.bench/
+/.cache/
+
