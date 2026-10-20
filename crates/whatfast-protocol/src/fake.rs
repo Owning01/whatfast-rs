@@ -380,6 +380,7 @@ pub fn fake_loop(
                     .map(fake_chat)
                     .map(|mut chat| {
                         if let Some(settings) = chat_settings.get(&chat.id) {
+                            chat.pinned = settings.pinned;
                             chat.archived = settings.archived;
                             chat.muted = settings.muted;
                             chat.blocked = settings.blocked;
@@ -765,53 +766,40 @@ pub fn fake_loop(
                 rpc_response::Result::UnsubscribeNewsletter(crate::UnsubscribeNewsletterResponse {})
             }
             Some(rpc_request::Request::SetChatPin(request)) => {
+                let chat = chat_settings
+                    .entry(request.chat_id.clone())
+                    .or_insert_with(|| fixture_chat(&request.chat_id, None));
+                chat.pinned = request.pinned;
                 rpc_response::Result::SetChatPin(crate::SetChatPinResponse {
-                    chat: Some(Chat {
-                        id: request.chat_id.clone(),
-                        kind: ChatKind::Direct as i32,
-                        pinned: request.pinned,
-                        ..Default::default()
-                    }),
+                    chat: Some(fixture_chat(&request.chat_id, Some(chat))),
                 })
             }
             Some(rpc_request::Request::SetChatArchive(request)) => {
                 let chat = chat_settings
                     .entry(request.chat_id.clone())
-                    .or_insert_with(|| Chat {
-                        id: request.chat_id.clone(),
-                        kind: ChatKind::Direct as i32,
-                        ..Default::default()
-                    });
+                    .or_insert_with(|| fixture_chat(&request.chat_id, None));
                 chat.archived = request.archived;
                 rpc_response::Result::SetChatArchive(crate::SetChatArchiveResponse {
-                    chat: Some(chat.clone()),
+                    chat: Some(fixture_chat(&request.chat_id, Some(chat))),
                 })
             }
             Some(rpc_request::Request::SetChatMute(request)) => {
                 let chat = chat_settings
                     .entry(request.chat_id.clone())
-                    .or_insert_with(|| Chat {
-                        id: request.chat_id.clone(),
-                        kind: ChatKind::Direct as i32,
-                        ..Default::default()
-                    });
+                    .or_insert_with(|| fixture_chat(&request.chat_id, None));
                 chat.mute_until_ms = request.mute_until_ms;
                 chat.muted = request.mute_until_ms > 0;
                 rpc_response::Result::SetChatMute(crate::SetChatMuteResponse {
-                    chat: Some(chat.clone()),
+                    chat: Some(fixture_chat(&request.chat_id, Some(chat))),
                 })
             }
             Some(rpc_request::Request::SetChatBlock(request)) => {
                 let chat = chat_settings
                     .entry(request.chat_id.clone())
-                    .or_insert_with(|| Chat {
-                        id: request.chat_id.clone(),
-                        kind: ChatKind::Direct as i32,
-                        ..Default::default()
-                    });
+                    .or_insert_with(|| fixture_chat(&request.chat_id, None));
                 chat.blocked = request.blocked;
                 rpc_response::Result::SetChatBlock(crate::SetChatBlockResponse {
-                    chat: Some(chat.clone()),
+                    chat: Some(fixture_chat(&request.chat_id, Some(chat))),
                 })
             }
             Some(rpc_request::Request::SendImage(request)) => {
@@ -1392,6 +1380,32 @@ pub fn fake_live_event_pair(
 ///
 /// The dataset is deterministic: the index of the chat decides every field,
 /// so the visual QA of the UI has a stable reference.
+/// The chat of the fixture for an id, with the flags the client changed.
+///
+/// The setters return the whole chat, the way the real sidecar does: a client
+/// that replaces the row with a partial one loses the title and the avatar.
+pub fn fixture_chat(chat_id: &str, settings: Option<&Chat>) -> Chat {
+    let number = chat_id
+        .strip_prefix("chat-")
+        .and_then(|rest| rest.parse::<usize>().ok());
+    let mut chat = match number {
+        Some(number) => fake_chat(number),
+        None => Chat {
+            id: chat_id.to_string(),
+            kind: ChatKind::Direct as i32,
+            ..Default::default()
+        },
+    };
+    if let Some(settings) = settings {
+        chat.pinned = settings.pinned;
+        chat.archived = settings.archived;
+        chat.muted = settings.muted;
+        chat.blocked = settings.blocked;
+        chat.mute_until_ms = settings.mute_until_ms;
+    }
+    chat
+}
+
 pub fn fake_chat(id: usize) -> Chat {
     Chat {
         id: format!("chat-{id}"),
