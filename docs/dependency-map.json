@@ -1,0 +1,849 @@
+{
+  "generado_por": "scripts/dependency-map.py",
+  "origen": "G:\\Proyectos\\16-whatsapp2",
+  "destino": [
+    {
+      "archivo": "crates/whatfast-core/src/app_helpers.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/backend_lifecycle.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/chat_merge.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/file_drop.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/lib.rs",
+      "loc": 15,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/media_crop.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/message_format.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/notification_policy.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/pairing.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/polls.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/scroll_restoration.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/tab_keyboard.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/unread.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/unsupported.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/whatsapp_formatting.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-core/src/workspace.rs",
+      "loc": 0,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-protocol/build.rs",
+      "loc": 7,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-protocol/src/lib.rs",
+      "loc": 1,
+      "tests": 0
+    },
+    {
+      "archivo": "crates/whatfast-protocol/src/transport.rs",
+      "loc": 0,
+      "tests": 0
+    }
+  ],
+  "totales": {
+    "archivos_frontend": 58,
+    "loc_ts": 16753,
+    "loc_css": 4439,
+    "suites_origen": 24,
+    "casos_origen": 153,
+    "modulos_destino": 19,
+    "tests_destino": 0
+  },
+  "modulos": [
+    {
+      "origen": "App.tsx",
+      "loc": 279,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Avatar.tsx",
+      "loc": 52,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/ChatSwitcher.tsx",
+      "loc": 54,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Composer.tsx",
+      "loc": 787,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Conversation.tsx",
+      "loc": 698,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/EmojiPicker.tsx",
+      "loc": 428,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/MediaEditor.tsx",
+      "loc": 290,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/MemberPanel.tsx",
+      "loc": 44,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/MessageBubble.tsx",
+      "loc": 1353,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/NewsletterPanel.tsx",
+      "loc": 154,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Panels.tsx",
+      "loc": 883,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/ParticipantList.tsx",
+      "loc": 78,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/ParticipantRow.tsx",
+      "loc": 40,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Primitives.tsx",
+      "loc": 49,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Screens.tsx",
+      "loc": 374,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Sidebar.tsx",
+      "loc": 595,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/SpotlightSearch.tsx",
+      "loc": 376,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/StatusStrip.tsx",
+      "loc": 174,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/StickerTray.tsx",
+      "loc": 122,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/Tabs.tsx",
+      "loc": 204,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/ThemeIcon.tsx",
+      "loc": 219,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "components/TitleBar.tsx",
+      "loc": 165,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "index.tsx",
+      "loc": 31,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "lib/bridge.ts",
+      "loc": 732,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-protocol",
+      "nota": "la fachada de comandos desaparece"
+    },
+    {
+      "origen": "lib/browser-mock.ts",
+      "loc": 1411,
+      "bucket": "eliminable",
+      "destino_rust": "-",
+      "nota": "backend fake en Rust"
+    },
+    {
+      "origen": "lib/chat-merge.ts",
+      "loc": 11,
+      "bucket": "reemplazo",
+      "destino_rust": "chat_merge",
+      "nota": ""
+    },
+    {
+      "origen": "lib/emoji-autocomplete.ts",
+      "loc": 123,
+      "bucket": "reemplazo",
+      "destino_rust": "whatfast-ui",
+      "nota": "offsets UTF-16"
+    },
+    {
+      "origen": "lib/file-drop.ts",
+      "loc": 30,
+      "bucket": "reemplazo",
+      "destino_rust": "file_drop",
+      "nota": ""
+    },
+    {
+      "origen": "lib/format.ts",
+      "loc": 157,
+      "bucket": "reemplazo",
+      "destino_rust": "message_format",
+      "nota": "sin suite: tests de caracterizacion"
+    },
+    {
+      "origen": "lib/i18n.ts",
+      "loc": 282,
+      "bucket": "reemplazo",
+      "destino_rust": "whatfast-ui",
+      "nota": "datos puros"
+    },
+    {
+      "origen": "lib/media-crop.ts",
+      "loc": 217,
+      "bucket": "reemplazo",
+      "destino_rust": "media_crop",
+      "nota": "geometria pura"
+    },
+    {
+      "origen": "lib/notification-policy.ts",
+      "loc": 44,
+      "bucket": "reemplazo",
+      "destino_rust": "notification_policy",
+      "nota": ""
+    },
+    {
+      "origen": "lib/notification-routing.ts",
+      "loc": 129,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "timers"
+    },
+    {
+      "origen": "lib/notifications.ts",
+      "loc": 78,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "plugin de Tauri"
+    },
+    {
+      "origen": "lib/participant-avatar-queue.ts",
+      "loc": 178,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "concurrencia"
+    },
+    {
+      "origen": "lib/participant-roster.ts",
+      "loc": 39,
+      "bucket": "reemplazo",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "lib/performance.ts",
+      "loc": 80,
+      "bucket": "reemplazo",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "lib/polls.ts",
+      "loc": 27,
+      "bucket": "reemplazo",
+      "destino_rust": "polls",
+      "nota": ""
+    },
+    {
+      "origen": "lib/send-idempotency.ts",
+      "loc": 43,
+      "bucket": "reemplazo",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "lib/spotlight.ts",
+      "loc": 166,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "ranking + localStorage"
+    },
+    {
+      "origen": "lib/theme.ts",
+      "loc": 292,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "variables CSS -> tokens de GPUI"
+    },
+    {
+      "origen": "lib/types.ts",
+      "loc": 490,
+      "bucket": "directa",
+      "destino_rust": "proto/bridge.proto",
+      "nota": "el contrato ya vive en Rust"
+    },
+    {
+      "origen": "lib/unsupported.ts",
+      "loc": 15,
+      "bucket": "reemplazo",
+      "destino_rust": "unsupported",
+      "nota": ""
+    },
+    {
+      "origen": "lib/voice-note.ts",
+      "loc": 162,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "binario"
+    },
+    {
+      "origen": "lib/whatsapp-formatting.ts",
+      "loc": 434,
+      "bucket": "reescritura",
+      "destino_rust": "whatsapp_formatting",
+      "nota": "no hay soporte en GPUI"
+    },
+    {
+      "origen": "media-editor.css",
+      "loc": 105,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "",
+      "css_clases": 10,
+      "css_variables": 3
+    },
+    {
+      "origen": "perf/harness.ts",
+      "loc": 249,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "state/app-helpers.ts",
+      "loc": 169,
+      "bucket": "reemplazo",
+      "destino_rust": "app_helpers",
+      "nota": "sin suite: tests de caracterizacion"
+    },
+    {
+      "origen": "state/app.ts",
+      "loc": 3023,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "store reactivo -> Entity<Store>"
+    },
+    {
+      "origen": "state/backend-lifecycle.ts",
+      "loc": 83,
+      "bucket": "reemplazo",
+      "destino_rust": "backend_lifecycle",
+      "nota": ""
+    },
+    {
+      "origen": "state/pairing.ts",
+      "loc": 27,
+      "bucket": "reemplazo",
+      "destino_rust": "pairing",
+      "nota": ""
+    },
+    {
+      "origen": "state/preferences.ts",
+      "loc": 194,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "localStorage -> archivo JSON"
+    },
+    {
+      "origen": "state/scroll-restoration.ts",
+      "loc": 48,
+      "bucket": "reemplazo",
+      "destino_rust": "scroll_restoration",
+      "nota": ""
+    },
+    {
+      "origen": "state/sync.ts",
+      "loc": 71,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": ""
+    },
+    {
+      "origen": "state/tab-keyboard.ts",
+      "loc": 57,
+      "bucket": "reemplazo",
+      "destino_rust": "tab_keyboard",
+      "nota": ""
+    },
+    {
+      "origen": "state/unread.ts",
+      "loc": 11,
+      "bucket": "reemplazo",
+      "destino_rust": "unread",
+      "nota": ""
+    },
+    {
+      "origen": "state/workspace.ts",
+      "loc": 232,
+      "bucket": "reemplazo",
+      "destino_rust": "workspace",
+      "nota": "31 tests en el origen"
+    },
+    {
+      "origen": "styles.css",
+      "loc": 4334,
+      "bucket": "reescritura",
+      "destino_rust": "whatfast-ui",
+      "nota": "",
+      "css_clases": 382,
+      "css_variables": 57
+    }
+  ],
+  "suites": [
+    {
+      "suite": "authoritative-resync.test.ts",
+      "modulo": "authoritative-resync",
+      "casos": [
+        "authoritative chat resync deletes stale rows while preserving racing live upserts"
+      ],
+      "total": 1
+    },
+    {
+      "suite": "backend-lifecycle.test.ts",
+      "modulo": "backend-lifecycle",
+      "casos": [
+        "restart lifecycle exposes bounded progress and a fresh resync epoch",
+        "a restart queued during another resync is retained and coalesced to the latest epoch",
+        "a superseding list refresh invalidates old-epoch completion and cleanup",
+        "transient bootstrap failures wait for lifecycle recovery while terminal failures stay fatal",
+        "terminal and exhausted failures are actionable and never resync",
+        "epoch resync refetches every distinct active pane conversation",
+        "epoch refresh retries with bounded exponential delays and returns once complete",
+        "epoch refresh exposes the final error after its retry budget"
+      ],
+      "total": 8
+    },
+    {
+      "suite": "chat-merge.test.ts",
+      "modulo": "chat-merge",
+      "casos": [
+        "chat merge cancels old poll intents without losing canonical work"
+      ],
+      "total": 1
+    },
+    {
+      "suite": "emoji-autocomplete.test.ts",
+      "modulo": "emoji-autocomplete",
+      "casos": [
+        "finds an active shortcode at the start or a sensible token boundary",
+        "a bare colon activates autocomplete",
+        "ignores URLs, times, and colons embedded in words",
+        "rejects unsupported shortcode characters and invalid carets",
+        "detects and replaces the whole token when editing in its middle",
+        "replacement preserves all surrounding text and reports a UTF-16 caret",
+        "replacement refuses a stale match rather than overwriting changed text",
+        "ranks exact keyword, prefix, then substring matches stably",
+        "deduplicates glyphs, honors the result limit, and handles a bare query",
+        "integration helper returns the active match with ranked suggestions"
+      ],
+      "total": 10
+    },
+    {
+      "suite": "file-drop.test.ts",
+      "modulo": "file-drop",
+      "casos": [
+        "homogeneous image drops are reviewed as photos across path formats",
+        "homogeneous video and audio drops retain their media kinds",
+        "documents and mixed drops stay together as one document batch"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "media-crop.test.ts",
+      "modulo": "media-crop",
+      "casos": [
+        "a reversed drag becomes a positive rectangle anchored at the dragged corner",
+        "a rectangle that leaves the source is clamped to its bounds",
+        "a rectangle entirely outside the source collapses to one pixel at the origin",
+        "a crop never covers less than one pixel",
+        "non-finite rectangle components never leak into the result",
+        "a broken source size is a programming error",
+        "rotating by a quarter turn swaps the image dimensions",
+        "the same crop maps to the four expected rectangles in the rotated space",
+        "the rotated crop stays inside the rotated canvas for every angle",
+        "a quarter turn is the bounding box of the four rotated corners",
+        "rotating a crop and rotating it back returns the original rectangle",
+        "the plan outputs the size of the rotated crop",
+        "a plan over the whole image outputs the whole rotated image",
+        "a plan normalises the requested crop before rotating it",
+        "a scaled crop survives the trip back to the original image",
+        "a scaled crop is clamped to the target size",
+        "the canvas transform offsets the crop and scales it onto the canvas",
+        "only a crop that fits the source is valid",
+        "rotating advances a quarter turn clockwise",
+        "any number of degrees parses into the nearest quarter turn"
+      ],
+      "total": 20
+    },
+    {
+      "suite": "notification-routing.test.ts",
+      "modulo": "notification-routing",
+      "casos": [
+        "activation waits for bootstrap and duplicate native deliveries route once",
+        "activation routing pauses across a backend restart until the fresh epoch is ready",
+        "queued activation follows a chat merge and remains ordered",
+        "a chat merge deduplicates a canonical target queued during routing",
+        "invalid activation payloads are ignored",
+        "missing chats and deleted messages have explicit fallback outcomes",
+        "permission denial is cached until the user explicitly retries"
+      ],
+      "total": 7
+    },
+    {
+      "suite": "notifications.test.ts",
+      "modulo": "notifications",
+      "casos": [
+        "notification policy suppresses foreground, muted, outgoing, and disabled messages",
+        "responsive split panes only expose the focused conversation",
+        "notification text obeys the privacy preview preference"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "pairing.test.ts",
+      "modulo": "pairing",
+      "casos": [
+        "only an unpaired startup begins pairing",
+        "QR lifecycle distinguishes waiting, active, and expired codes",
+        "QR codes without a backend expiry remain usable"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "participant-avatar-queue.test.ts",
+      "modulo": "participant-avatar-queue",
+      "casos": [
+        "avatar hydration bounds concurrency and deduplicates subscribers",
+        "unsubscribing drops queued work and ignores a late running result",
+        "cancelScope removes only the switched group's subscribers",
+        "queued, running, and backoff work share one hard admission bound",
+        "busy and timeout errors retry with backoff while privacy failures are terminal",
+        "retryable backend avatar failures are retried and never session-cached",
+        "retry classification is restricted to retryable busy and timeout failures",
+        "exhausted transient retries are not session-cached as privacy failures",
+        "terminal privacy failures evict oldest entries at the configured bound"
+      ],
+      "total": 9
+    },
+    {
+      "suite": "performance.test.ts",
+      "modulo": "performance",
+      "casos": [
+        "BoundedSet evicts the least recently inserted value",
+        "BoundedSet rejects invalid capacities",
+        "message index resolves quotes and reply metadata in one pass",
+        "canonical message windows stay bounded around the requested target",
+        "the 1,000-member roster keeps its mounted DOM budget bounded"
+      ],
+      "total": 5
+    },
+    {
+      "suite": "polls.test.ts",
+      "modulo": "polls",
+      "casos": [
+        "poll reducer changes a vote without duplicating the voter",
+        "poll reducer retracts and restores a complete vote intent",
+        "an older backend update cannot overwrite a newer pending intent",
+        "poll snapshots can be copied from reactive proxy values"
+      ],
+      "total": 4
+    },
+    {
+      "suite": "scroll-restoration.test.ts",
+      "modulo": "scroll-restoration",
+      "casos": [
+        "captures a stable first-visible message anchor instead of a raw scroll offset",
+        "marks a viewport near the bottom as following latest",
+        "restores an existing anchor and preserves its viewport offset",
+        "a viewport that followed latest returns to the newest message",
+        "a first visit prefers the unread boundary and otherwise uses latest",
+        "a trimmed-away anchor falls back to the unread boundary"
+      ],
+      "total": 6
+    },
+    {
+      "suite": "send-idempotency.test.ts",
+      "modulo": "send-idempotency",
+      "casos": [
+        "every send kind reuses its ID for a failed logical retry",
+        "a confirmed send followed by the same payload is a new send",
+        "changing any logical payload selects a fresh ID after failure"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "spotlight.test.ts",
+      "modulo": "spotlight",
+      "casos": [
+        "empty Spotlight puts frequently opened chats ahead of merely recent ones",
+        "text relevance dominates affinity while frequency breaks equal matches",
+        "aliases, phone numbers, multiple terms, and accents are searchable",
+        "archived chats stay out of instant Spotlight results"
+      ],
+      "total": 4
+    },
+    {
+      "suite": "sync.test.ts",
+      "modulo": "sync",
+      "casos": [
+        "only active transfer phases render as syncing",
+        "stale snapshots cannot overwrite newer sync events",
+        "partial and failed states remain visible and actionable",
+        "an empty conversation explains incomplete account history"
+      ],
+      "total": 4
+    },
+    {
+      "suite": "tab-keyboard.test.ts",
+      "modulo": "tab-keyboard",
+      "casos": [
+        "Alt+Shift+Arrow reorders within a pane",
+        "reorder reports first and last tab boundaries",
+        "Control+Shift+Arrow moves to an adjacent pane at a bounded index",
+        "cross-pane movement reports both outer boundaries",
+        "Delete closes while modified Delete and unrelated keys pass through"
+      ],
+      "total": 5
+    },
+    {
+      "suite": "theme.test.ts",
+      "modulo": "theme",
+      "casos": [
+        "ships dark and light skeuomorphic themes without changing the default",
+        "legacy and invalid theme styles normalize to modern",
+        "clone and export retain the trusted structural style",
+        "theme application exposes appearance and structural style on the root"
+      ],
+      "total": 4
+    },
+    {
+      "suite": "unread.test.ts",
+      "modulo": "unread",
+      "casos": [
+        "partial message windows retain the backend unread count",
+        "a read through the newest message can clear the badge optimistically",
+        "a matching authoritative upsert prevents rollback after a lost response"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "unsupported.test.ts",
+      "modulo": "unsupported",
+      "casos": [
+        "poll fallback preserves title and every option",
+        "poll result snapshots remain distinguishable"
+      ],
+      "total": 2
+    },
+    {
+      "suite": "voice-note.test.ts",
+      "modulo": "voice-note",
+      "casos": [
+        "only Ogg Opus recordings are push-to-talk voice notes",
+        "webmOpusToOggOpus passes through existing OggS data",
+        "webmOpusToOggOpus converts WebM SimpleBlocks into valid Ogg Opus container"
+      ],
+      "total": 3
+    },
+    {
+      "suite": "whatsapp-formatting-spoiler.test.ts",
+      "modulo": "whatsapp-formatting-spoiler",
+      "casos": [
+        "parses a spoiler delimited by double pipes",
+        "keeps the text around a spoiler unstyled",
+        "parses several spoilers in the same message",
+        "a spoiler inherits and composes with the other inline styles",
+        "a spoiler keeps links and mentions atomic",
+        "keeps malformed spoilers as literal text",
+        "a spoiler does not leak into the next line"
+      ],
+      "total": 7
+    },
+    {
+      "suite": "whatsapp-formatting.test.ts",
+      "modulo": "whatsapp-formatting",
+      "casos": [
+        "parses WhatsApp inline emphasis and nested formatting",
+        "parses quotes, bullet items, and one or two digit numbered items",
+        "parses a multiline triple-backtick region as a code block",
+        "keeps malformed and in-word delimiters as literal text",
+        "preserves URL syntax and trims sentence punctuation from the link",
+        "mentions are atomic, can inherit formatting, and do not match inside code or email",
+        "HTML-looking input is returned only as inert text tokens"
+      ],
+      "total": 7
+    },
+    {
+      "suite": "workspace.test.ts",
+      "modulo": "workspace",
+      "casos": [
+        "opening a tab that is already open focuses it instead of duplicating it",
+        "selecting an already-open tab focuses it without touching the tab list",
+        "selecting a new chat replaces the active tab in place, not appending",
+        "closing the active tab activates the right-hand neighbour",
+        "closing the last tab in a strip falls back to the left-hand neighbour",
+        "closing an inactive tab leaves the active tab untouched",
+        "closing the last tab of the second pane removes that pane",
+        "closing the last tab of the only pane leaves an empty pane, not zero panes",
+        "every close boundary leaves a deterministic selected tab for focus restoration",
+        "moving a tab to another pane removes it from the source and appends it to the destination",
+        "moving a tab within the same pane reorders it to the requested index",
+        "same-pane rightward drops account for removing the source tab",
+        "remapping a chat id updates a pane's tabs and active chat",
+        "remapping onto a chat id already open drops the duplicate instead of colliding",
+        "switcher initial highlight: reverse always lands on the last candidate",
+        "switcher initial highlight: forward with the active chat leading skips to index 1",
+        "switcher initial highlight: forward with the active chat not leading starts at index 0",
+        "the switcher does not open with fewer than two candidates",
+        "cycling the switcher only moves the highlight, wrapping in both directions",
+        "candidate seeding falls back to the visible chat list until session history has two entries",
+        "candidate seeding stops once session history already has two or more entries",
+        "candidate seeding drops history entries for chats that no longer exist",
+        "the active chat is swapped to the front of the candidate list when already present",
+        "the active chat is inserted at the front when it is not yet in session history",
+        "conversations no longer open in any pane are evicted first",
+        "once every hydrated chat is still open, the cap evicts the least recently focused",
+        "conversation eviction never drops a chat currently visible in a pane",
+        "normalizing a workspace snapshot rejects untrusted shapes",
+        "normalizing a workspace snapshot accepts a well-formed payload and repairs a dangling active id",
+        "normalizing a workspace gives each chat one pane-local viewport",
+        "chat merge deduplicates a canonical chat across panes"
+      ],
+      "total": 31
+    }
+  ],
+  "violaciones": [
+    "crates/whatfast-protocol/build.rs:2: let protoc = protoc_bin_vendored::protoc_bin_path().expect(\"vendored protoc unavailable\");",
+    "crates/whatfast-protocol/build.rs:6: .expect(\"failed to compile bridge.proto\");"
+  ]
+}

@@ -1,0 +1,376 @@
+{
+  "modulos": [
+    {
+      "modulo": "authoritative-resync",
+      "oracle": 1,
+      "ok": 0,
+      "faltan": [
+        "authoritative chat resync deletes stale rows while preserving racing live upserts"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "backend-lifecycle",
+      "oracle": 8,
+      "ok": 0,
+      "faltan": [
+        "restart lifecycle exposes bounded progress and a fresh resync epoch",
+        "a restart queued during another resync is retained and coalesced to the latest epoch",
+        "a superseding list refresh invalidates old-epoch completion and cleanup",
+        "transient bootstrap failures wait for lifecycle recovery while terminal failures stay fatal",
+        "terminal and exhausted failures are actionable and never resync",
+        "epoch resync refetches every distinct active pane conversation",
+        "epoch refresh retries with bounded exponential delays and returns once complete",
+        "epoch refresh exposes the final error after its retry budget"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "chat-merge",
+      "oracle": 1,
+      "ok": 0,
+      "faltan": [
+        "chat merge cancels old poll intents without losing canonical work"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "emoji-autocomplete",
+      "oracle": 10,
+      "ok": 0,
+      "faltan": [
+        "finds an active shortcode at the start or a sensible token boundary",
+        "a bare colon activates autocomplete",
+        "ignores URLs, times, and colons embedded in words",
+        "rejects unsupported shortcode characters and invalid carets",
+        "detects and replaces the whole token when editing in its middle",
+        "replacement preserves all surrounding text and reports a UTF-16 caret",
+        "replacement refuses a stale match rather than overwriting changed text",
+        "ranks exact keyword, prefix, then substring matches stably",
+        "deduplicates glyphs, honors the result limit, and handles a bare query",
+        "integration helper returns the active match with ranked suggestions"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "file-drop",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "homogeneous image drops are reviewed as photos across path formats",
+        "homogeneous video and audio drops retain their media kinds",
+        "documents and mixed drops stay together as one document batch"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "media-crop",
+      "oracle": 20,
+      "ok": 0,
+      "faltan": [
+        "a reversed drag becomes a positive rectangle anchored at the dragged corner",
+        "a rectangle that leaves the source is clamped to its bounds",
+        "a rectangle entirely outside the source collapses to one pixel at the origin",
+        "a crop never covers less than one pixel",
+        "non-finite rectangle components never leak into the result",
+        "a broken source size is a programming error",
+        "rotating by a quarter turn swaps the image dimensions",
+        "the same crop maps to the four expected rectangles in the rotated space",
+        "the rotated crop stays inside the rotated canvas for every angle",
+        "a quarter turn is the bounding box of the four rotated corners",
+        "rotating a crop and rotating it back returns the original rectangle",
+        "the plan outputs the size of the rotated crop",
+        "a plan over the whole image outputs the whole rotated image",
+        "a plan normalises the requested crop before rotating it",
+        "a scaled crop survives the trip back to the original image",
+        "a scaled crop is clamped to the target size",
+        "the canvas transform offsets the crop and scales it onto the canvas",
+        "only a crop that fits the source is valid",
+        "rotating advances a quarter turn clockwise",
+        "any number of degrees parses into the nearest quarter turn"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "notification-routing",
+      "oracle": 7,
+      "ok": 0,
+      "faltan": [
+        "activation waits for bootstrap and duplicate native deliveries route once",
+        "activation routing pauses across a backend restart until the fresh epoch is ready",
+        "queued activation follows a chat merge and remains ordered",
+        "a chat merge deduplicates a canonical target queued during routing",
+        "invalid activation payloads are ignored",
+        "missing chats and deleted messages have explicit fallback outcomes",
+        "permission denial is cached until the user explicitly retries"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "notifications",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "notification policy suppresses foreground, muted, outgoing, and disabled messages",
+        "responsive split panes only expose the focused conversation",
+        "notification text obeys the privacy preview preference"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "pairing",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "only an unpaired startup begins pairing",
+        "QR lifecycle distinguishes waiting, active, and expired codes",
+        "QR codes without a backend expiry remain usable"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "participant-avatar-queue",
+      "oracle": 9,
+      "ok": 0,
+      "faltan": [
+        "avatar hydration bounds concurrency and deduplicates subscribers",
+        "unsubscribing drops queued work and ignores a late running result",
+        "cancelScope removes only the switched group's subscribers",
+        "queued, running, and backoff work share one hard admission bound",
+        "busy and timeout errors retry with backoff while privacy failures are terminal",
+        "retryable backend avatar failures are retried and never session-cached",
+        "retry classification is restricted to retryable busy and timeout failures",
+        "exhausted transient retries are not session-cached as privacy failures",
+        "terminal privacy failures evict oldest entries at the configured bound"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "performance",
+      "oracle": 5,
+      "ok": 0,
+      "faltan": [
+        "BoundedSet evicts the least recently inserted value",
+        "BoundedSet rejects invalid capacities",
+        "message index resolves quotes and reply metadata in one pass",
+        "canonical message windows stay bounded around the requested target",
+        "the 1,000-member roster keeps its mounted DOM budget bounded"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "polls",
+      "oracle": 4,
+      "ok": 0,
+      "faltan": [
+        "poll reducer changes a vote without duplicating the voter",
+        "poll reducer retracts and restores a complete vote intent",
+        "an older backend update cannot overwrite a newer pending intent",
+        "poll snapshots can be copied from reactive proxy values"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "scroll-restoration",
+      "oracle": 6,
+      "ok": 0,
+      "faltan": [
+        "captures a stable first-visible message anchor instead of a raw scroll offset",
+        "marks a viewport near the bottom as following latest",
+        "restores an existing anchor and preserves its viewport offset",
+        "a viewport that followed latest returns to the newest message",
+        "a first visit prefers the unread boundary and otherwise uses latest",
+        "a trimmed-away anchor falls back to the unread boundary"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "send-idempotency",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "every send kind reuses its ID for a failed logical retry",
+        "a confirmed send followed by the same payload is a new send",
+        "changing any logical payload selects a fresh ID after failure"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "spotlight",
+      "oracle": 4,
+      "ok": 0,
+      "faltan": [
+        "empty Spotlight puts frequently opened chats ahead of merely recent ones",
+        "text relevance dominates affinity while frequency breaks equal matches",
+        "aliases, phone numbers, multiple terms, and accents are searchable",
+        "archived chats stay out of instant Spotlight results"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "sync",
+      "oracle": 4,
+      "ok": 0,
+      "faltan": [
+        "only active transfer phases render as syncing",
+        "stale snapshots cannot overwrite newer sync events",
+        "partial and failed states remain visible and actionable",
+        "an empty conversation explains incomplete account history"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "tab-keyboard",
+      "oracle": 5,
+      "ok": 0,
+      "faltan": [
+        "Alt+Shift+Arrow reorders within a pane",
+        "reorder reports first and last tab boundaries",
+        "Control+Shift+Arrow moves to an adjacent pane at a bounded index",
+        "cross-pane movement reports both outer boundaries",
+        "Delete closes while modified Delete and unrelated keys pass through"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "theme",
+      "oracle": 4,
+      "ok": 0,
+      "faltan": [
+        "ships dark and light skeuomorphic themes without changing the default",
+        "legacy and invalid theme styles normalize to modern",
+        "clone and export retain the trusted structural style",
+        "theme application exposes appearance and structural style on the root"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "unread",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "partial message windows retain the backend unread count",
+        "a read through the newest message can clear the badge optimistically",
+        "a matching authoritative upsert prevents rollback after a lost response"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "unsupported",
+      "oracle": 2,
+      "ok": 0,
+      "faltan": [
+        "poll fallback preserves title and every option",
+        "poll result snapshots remain distinguishable"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "voice-note",
+      "oracle": 3,
+      "ok": 0,
+      "faltan": [
+        "only Ogg Opus recordings are push-to-talk voice notes",
+        "webmOpusToOggOpus passes through existing OggS data",
+        "webmOpusToOggOpus converts WebM SimpleBlocks into valid Ogg Opus container"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "whatsapp-formatting-spoiler",
+      "oracle": 7,
+      "ok": 0,
+      "faltan": [
+        "parses a spoiler delimited by double pipes",
+        "keeps the text around a spoiler unstyled",
+        "parses several spoilers in the same message",
+        "a spoiler inherits and composes with the other inline styles",
+        "a spoiler keeps links and mentions atomic",
+        "keeps malformed spoilers as literal text",
+        "a spoiler does not leak into the next line"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "whatsapp-formatting",
+      "oracle": 7,
+      "ok": 0,
+      "faltan": [
+        "parses WhatsApp inline emphasis and nested formatting",
+        "parses quotes, bullet items, and one or two digit numbered items",
+        "parses a multiline triple-backtick region as a code block",
+        "keeps malformed and in-word delimiters as literal text",
+        "preserves URL syntax and trims sentence punctuation from the link",
+        "mentions are atomic, can inherit formatting, and do not match inside code or email",
+        "HTML-looking input is returned only as inert text tokens"
+      ],
+      "sobran": [],
+      "puerto": false
+    },
+    {
+      "modulo": "workspace",
+      "oracle": 31,
+      "ok": 0,
+      "faltan": [
+        "opening a tab that is already open focuses it instead of duplicating it",
+        "selecting an already-open tab focuses it without touching the tab list",
+        "selecting a new chat replaces the active tab in place, not appending",
+        "closing the active tab activates the right-hand neighbour",
+        "closing the last tab in a strip falls back to the left-hand neighbour",
+        "closing an inactive tab leaves the active tab untouched",
+        "closing the last tab of the second pane removes that pane",
+        "closing the last tab of the only pane leaves an empty pane, not zero panes",
+        "every close boundary leaves a deterministic selected tab for focus restoration",
+        "moving a tab to another pane removes it from the source and appends it to the destination",
+        "moving a tab within the same pane reorders it to the requested index",
+        "same-pane rightward drops account for removing the source tab",
+        "remapping a chat id updates a pane's tabs and active chat",
+        "remapping onto a chat id already open drops the duplicate instead of colliding",
+        "switcher initial highlight: reverse always lands on the last candidate",
+        "switcher initial highlight: forward with the active chat leading skips to index 1",
+        "switcher initial highlight: forward with the active chat not leading starts at index 0",
+        "the switcher does not open with fewer than two candidates",
+        "cycling the switcher only moves the highlight, wrapping in both directions",
+        "candidate seeding falls back to the visible chat list until session history has two entries",
+        "candidate seeding stops once session history already has two or more entries",
+        "candidate seeding drops history entries for chats that no longer exist",
+        "the active chat is swapped to the front of the candidate list when already present",
+        "the active chat is inserted at the front when it is not yet in session history",
+        "conversations no longer open in any pane are evicted first",
+        "once every hydrated chat is still open, the cap evicts the least recently focused",
+        "conversation eviction never drops a chat currently visible in a pane",
+        "normalizing a workspace snapshot rejects untrusted shapes",
+        "normalizing a workspace snapshot accepts a well-formed payload and repairs a dangling active id",
+        "normalizing a workspace gives each chat one pane-local viewport",
+        "chat merge deduplicates a canonical chat across panes"
+      ],
+      "sobran": [],
+      "puerto": false
+    }
+  ],
+  "total_oracle": 153,
+  "total_ok": 0,
+  "paridad_pct": 0.0
+}
