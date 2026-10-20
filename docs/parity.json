@@ -183,13 +183,11 @@
     {
       "modulo": "voice-note",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "only Ogg Opus recordings are push-to-talk voice notes",
-        "webmOpusToOggOpus passes through existing OggS data",
-        "webmOpusToOggOpus converts WebM SimpleBlocks into valid Ogg Opus container"
-      ],
-      "en": []
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "voice_note.rs"
+      ]
     },
     {
       "modulo": "whatsapp-formatting-spoiler",
@@ -220,8 +218,8 @@
     }
   ],
   "total_oracle": 153,
-  "total_ok": 150,
-  "paridad_pct": 98.04,
+  "total_ok": 153,
+  "paridad_pct": 100.0,
   "sobran": [],
   "caracterizacion": [
     "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",
