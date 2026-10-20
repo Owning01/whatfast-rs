@@ -1,0 +1,16 @@
+[package]
+name = "whatfast-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Protobuf contract of the Whatfast bridge, generated from proto/bridge.proto."
+
+[dependencies]
+prost.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3.2"

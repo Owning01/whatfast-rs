@@ -1,0 +1,1020 @@
+syntax = "proto3";
+
+package whatfast.bridge.v1;
+
+option go_package = "github.com/Owning01/whatfast/backend/gen/bridgev1;bridgev1";
+
+// Frames are encoded as a 4-byte big-endian length followed by one Envelope.
+// Protocol stdout must never contain logs or any other unframed bytes.
+message Envelope {
+  uint32 protocol_version = 1;
+  uint64 request_id = 2;
+
+  oneof body {
+    RpcRequest request = 10;
+    RpcResponse response = 11;
+    BackendEvent event = 12;
+  }
+}
+
+message RpcRequest {
+  oneof request {
+    HelloRequest hello = 1;
+    GetAuthStateRequest get_auth_state = 2;
+    StartPairingRequest start_pairing = 3;
+    ListChatsRequest list_chats = 4;
+    ListMessagesRequest list_messages = 5;
+    SendTextRequest send_text = 6;
+    MarkReadRequest mark_read = 7;
+    LogoutRequest logout = 8;
+    ShutdownRequest shutdown = 9;
+    GetChatAvatarRequest get_chat_avatar = 10;
+    SendReactionRequest send_reaction = 11;
+    GetParticipantAvatarRequest get_participant_avatar = 12;
+    RepairRecentReactionsRequest repair_recent_reactions = 13;
+    SendImageRequest send_image = 14;
+    GetMessageImageRequest get_message_image = 15;
+    SearchLocalRequest search_local = 16;
+    OpenContactRequest open_contact = 17;
+    ListMessagesAroundRequest list_messages_around = 18;
+    SendStickerRequest send_sticker = 19;
+    OpenMessageWindowRequest open_message_window = 20;
+    ListMessagesAfterRequest list_messages_after = 21;
+    GetChatInfoRequest get_chat_info = 22;
+    SetTypingRequest set_typing = 23;
+    GetMessageAttachmentRequest get_message_attachment = 24;
+    SendAttachmentRequest send_attachment = 25;
+    ListStickersRequest list_stickers = 26;
+    SendStickerFromLibraryRequest send_sticker_from_library = 27;
+    CreatePollRequest create_poll = 28;
+    VotePollRequest vote_poll = 29;
+    SetMessagePinRequest set_message_pin = 30;
+    ListPinnedMessagesRequest list_pinned_messages = 31;
+    ForwardMessageRequest forward_message = 32;
+    EditMessageRequest edit_message = 33;
+    GetSyncStatusRequest get_sync_status = 34;
+    RequestOlderHistoryRequest request_older_history = 35;
+    GetChatHistoryCoverageRequest get_chat_history_coverage = 36;
+    GetHistoryOverviewRequest get_history_overview = 37;
+    ReconnectRequest reconnect = 38;
+    GetIntegrityStatusRequest get_integrity_status = 39;
+    RepairLocalCacheRequest repair_local_cache = 40;
+    DeleteMessageRequest delete_message = 41;
+    ListStatusesRequest list_statuses = 42;
+    SubscribeNewsletterRequest subscribe_newsletter = 43;
+    ListNewslettersRequest list_newsletters = 44;
+    ListNewsletterMessagesRequest list_newsletter_messages = 45;
+    UnsubscribeNewsletterRequest unsubscribe_newsletter = 46;
+    SetChatPinRequest set_chat_pin = 47;
+    SetChatArchiveRequest set_chat_archive = 48;
+    SetChatMuteRequest set_chat_mute = 49;
+    SetChatBlockRequest set_chat_block = 50;
+  }
+}
+
+message RpcResponse {
+  // Exactly one result is always set: either an error or a successful payload.
+  oneof result {
+    RpcError error = 1;
+    HelloResponse hello = 10;
+    AuthStateResponse auth_state = 11;
+    StartPairingResponse start_pairing = 12;
+    ListChatsResponse list_chats = 13;
+    ListMessagesResponse list_messages = 14;
+    SendTextResponse send_text = 15;
+    MarkReadResponse mark_read = 16;
+    LogoutResponse logout = 17;
+    ShutdownResponse shutdown = 18;
+    GetChatAvatarResponse get_chat_avatar = 19;
+    SendReactionResponse send_reaction = 20;
+    GetParticipantAvatarResponse get_participant_avatar = 21;
+    RepairRecentReactionsResponse repair_recent_reactions = 22;
+    SendImageResponse send_image = 23;
+    GetMessageImageResponse get_message_image = 24;
+    SearchLocalResponse search_local = 25;
+    OpenContactResponse open_contact = 26;
+    ListMessagesAroundResponse list_messages_around = 27;
+    SendStickerResponse send_sticker = 28;
+    OpenMessageWindowResponse open_message_window = 29;
+    ListMessagesAfterResponse list_messages_after = 30;
+    GetChatInfoResponse get_chat_info = 31;
+    SetTypingResponse set_typing = 32;
+    GetMessageAttachmentResponse get_message_attachment = 33;
+    SendAttachmentResponse send_attachment = 34;
+    ListStickersResponse list_stickers = 35;
+    SendStickerFromLibraryResponse send_sticker_from_library = 36;
+    CreatePollResponse create_poll = 37;
+    VotePollResponse vote_poll = 38;
+    SetMessagePinResponse set_message_pin = 39;
+    ListPinnedMessagesResponse list_pinned_messages = 40;
+    ForwardMessageResponse forward_message = 41;
+    EditMessageResponse edit_message = 42;
+    SyncStatusResponse sync_status = 43;
+    RequestOlderHistoryResponse request_older_history = 44;
+    GetChatHistoryCoverageResponse get_chat_history_coverage = 45;
+    GetHistoryOverviewResponse get_history_overview = 46;
+    ReconnectResponse reconnect = 47;
+    GetIntegrityStatusResponse get_integrity_status = 48;
+    RepairLocalCacheResponse repair_local_cache = 49;
+    DeleteMessageResponse delete_message = 50;
+    ListStatusesResponse list_statuses = 51;
+    SubscribeNewsletterResponse subscribe_newsletter = 52;
+    ListNewslettersResponse list_newsletters = 53;
+    ListNewsletterMessagesResponse list_newsletter_messages = 54;
+    UnsubscribeNewsletterResponse unsubscribe_newsletter = 55;
+    SetChatPinResponse set_chat_pin = 56;
+    SetChatArchiveResponse set_chat_archive = 57;
+    SetChatMuteResponse set_chat_mute = 58;
+    SetChatBlockResponse set_chat_block = 59;
+  }
+}
+
+message BackendEvent {
+  // Event envelopes always have request_id=0. Sequence is monotonic only for
+  // the lifetime of one backend process and resets after a process restart.
+  uint64 sequence = 1;
+
+  oneof event {
+    ConnectionChanged connection_changed = 10;
+    PairingQr pairing_qr = 11;
+    SyncProgress sync_progress = 12;
+    ChatUpserted chat_upserted = 13;
+    MessageUpserted message_upserted = 14;
+    ReceiptUpdated receipt_updated = 15;
+    BackendProblem problem = 16;
+    ReactionUpdated reaction_updated = 17;
+    RecentReactionsRepaired recent_reactions_repaired = 18;
+    ChatMerged chat_merged = 19;
+    TypingChanged typing_changed = 20;
+    StickersChanged stickers_changed = 21;
+    PinnedMessagesChanged pinned_messages_changed = 22;
+    SyncStatusChanged sync_status_changed = 23;
+    HistoryCoverageChanged history_coverage_changed = 24;
+  }
+}
+
+message RpcError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message HelloRequest {
+  // The initial Hello envelope uses maximum_protocol_version. The backend must
+  // parse Hello before enforcing the envelope version. With no version overlap,
+  // it replies with `unsupported_protocol` using its own framing and exits.
+  // Any non-Hello request before a successful handshake is `handshake_required`.
+  string desktop_version = 1;
+  uint32 minimum_protocol_version = 2;
+  uint32 maximum_protocol_version = 3;
+}
+
+message HelloResponse {
+  string backend_version = 1;
+  uint32 protocol_version = 2;
+}
+
+message GetAuthStateRequest {}
+
+message AuthStateResponse {
+  bool paired = 1;
+  bool logged_in = 2;
+  string own_user_id = 3;
+  ConnectionState connection_state = 4;
+}
+
+message StartPairingRequest {}
+
+message StartPairingResponse {
+  bool started = 1;
+}
+
+message ReconnectRequest {}
+
+message ReconnectResponse {
+  // False means the session is unpaired, already connected, or an attempt is
+  // already running. Reconnect is intentionally user-driven and never queued.
+  bool started = 1;
+}
+
+message GetSyncStatusRequest {}
+
+message SyncStatusResponse { SyncStatus status = 1; }
+
+message ListChatsRequest {
+  // Empty means the newest page. The opaque cursor is exclusive and stable
+  // across chat reordering; clients discard later cached pages on chat upserts.
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message ListChatsResponse {
+  repeated Chat chats = 1;
+  uint64 total_count = 2;
+  string next_cursor = 3;
+}
+
+message ListMessagesRequest {
+  string chat_id = 1;
+  // (0, "") means newest. Otherwise the pair is an exclusive cursor ordered
+  // by timestamp then bytewise message ID, both descending.
+  int64 before_timestamp_ms = 2;
+  string before_message_id = 3;
+  uint32 limit = 4;
+}
+
+message ListMessagesResponse {
+  // Messages are always returned oldest-to-newest for direct rendering.
+  repeated Message messages = 1;
+  bool has_more = 2;
+}
+
+message OpenMessageWindowRequest { string chat_id = 1; }
+
+message OpenMessageWindowResponse {
+  // A bounded, oldest-to-newest window around the first unread message. When
+  // first_unread_message_id is empty, this is the ordinary newest page.
+  repeated Message messages = 1;
+  bool has_older = 2;
+  bool has_newer = 3;
+  string first_unread_message_id = 4;
+}
+
+message ListMessagesAfterRequest {
+  string chat_id = 1;
+  // Exclusive ascending cursor. Both fields are required.
+  int64 after_timestamp_ms = 2;
+  string after_message_id = 3;
+  uint32 limit = 4;
+}
+
+message ListMessagesAfterResponse {
+  repeated Message messages = 1;
+  bool has_more = 2;
+}
+
+message SearchLocalRequest { string query = 1; }
+
+message ContactSearchResult {
+  // A direct WhatsApp address used only when the user chooses this result.
+  string contact_jid = 1;
+  // Present when this contact already has a local conversation.
+  string chat_id = 2;
+  string display_name = 3;
+  string secondary_name = 4;
+  string phone_number = 5;
+}
+
+message MessageSearchResult {
+  string chat_id = 1;
+  string message_id = 2;
+  string chat_title = 3;
+  string sender_name = 4;
+  int64 timestamp_ms = 5;
+  string snippet = 6;
+  string kind = 7;
+  bool archived = 8;
+  Chat chat = 9;
+}
+
+message SearchLocalResponse {
+  repeated ContactSearchResult contacts = 1;
+  repeated Chat groups = 2;
+  repeated MessageSearchResult messages = 3;
+}
+
+message OpenContactRequest { string contact_jid = 1; }
+message OpenContactResponse { Chat chat = 1; }
+
+message ListMessagesAroundRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message ListMessagesAroundResponse {
+  repeated Message messages = 1;
+  bool has_older = 2;
+  bool has_newer = 3;
+  string anchor_message_id = 4;
+}
+
+message SendTextRequest {
+  // A non-empty UUID generated by the desktop and reused across retries. The
+  // backend persists it before sending and never sends the same ID twice.
+  string client_message_id = 1;
+  string chat_id = 2;
+  string text = 3;
+  // Empty for a normal message. Otherwise this message is sent as a native
+  // WhatsApp reply to the referenced message in reply_to_chat_id (or this chat).
+  string reply_to_message_id = 4;
+  // Full JIDs of participants tagged in `text`. Each tagged participant is
+  // referenced in the text as `@<jid-user>`; WhatsApp clients render that
+  // token as the contact's name and notify the mentioned member.
+  repeated string mentioned_jids = 5;
+  // Empty or equal to chat_id for an ordinary reply. For "reply privately",
+  // this is the group containing reply_to_message_id while chat_id is the DM.
+  string reply_to_chat_id = 6;
+}
+
+message SendTextResponse {
+  Message message = 1;
+}
+
+message ForwardMessageRequest {
+  // Stable UUID with the same idempotency contract as SendTextRequest.
+  string client_message_id = 1;
+  string source_chat_id = 2;
+  string message_id = 3;
+  string target_chat_id = 4;
+}
+message ForwardMessageResponse { Message message = 1; }
+
+message EditMessageRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  string text = 3;
+}
+message EditMessageResponse { Message message = 1; }
+
+message DeleteMessageRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  // True revokes for everyone via WhatsApp; false deletes only on this
+  // device and publishes a local revoked state.
+  bool delete_for_everyone = 3;
+}
+message DeleteMessageResponse { Message message = 1; }
+
+message ListStatusesRequest {}
+
+message StatusGroup {
+  // The sender's user JID (e.g. 5493811234567@s.whatsapp.net).
+  string sender_id = 1;
+  string sender_name = 2;
+  string sender_phone_number = 3;
+  // The last 24 hours of that sender's status messages, newest first.
+  repeated Message messages = 4;
+}
+
+message ListStatusesResponse {
+  // The chat id that maps to the status@broadcast transport; uploads and
+  // read receipts for statuses target this chat.
+  string chat_id = 1;
+  repeated StatusGroup groups = 2;
+}
+
+message Newsletter {
+  string jid = 1;
+  string name = 2;
+  int64 subscribed_at_ms = 3;
+  bool muted = 4;
+}
+
+message SubscribeNewsletterRequest { string invite_key = 1; }
+message SubscribeNewsletterResponse { Newsletter newsletter = 1; }
+
+message ListNewslettersRequest {}
+message ListNewslettersResponse { repeated Newsletter newsletters = 1; }
+
+message ListNewsletterMessagesRequest {
+  string jid = 1;
+  int32 limit = 2;
+}
+message ListNewsletterMessagesResponse { repeated Message messages = 1; }
+
+message UnsubscribeNewsletterRequest { string jid = 1; }
+message UnsubscribeNewsletterResponse {}
+
+message SetChatPinRequest {
+  string chat_id = 1;
+  bool pinned = 2;
+}
+message SetChatPinResponse { Chat chat = 1; }
+
+message SetChatArchiveRequest {
+  string chat_id = 1;
+  bool archived = 2;
+}
+message SetChatArchiveResponse { Chat chat = 1; }
+
+message SetChatMuteRequest {
+  string chat_id = 1;
+  // Unix milliseconds until which the chat stays muted. Zero unmutes the chat.
+  int64 mute_until_ms = 2;
+}
+message SetChatMuteResponse { Chat chat = 1; }
+
+message SetChatBlockRequest {
+  string chat_id = 1;
+  bool blocked = 2;
+}
+message SetChatBlockResponse { Chat chat = 1; }
+
+message SendImageRequest {
+  // Stable UUID with the same idempotency contract as SendTextRequest.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // Absolute path selected by the local desktop file picker.
+  string image_path = 3;
+  string caption = 4;
+  string reply_to_message_id = 5;
+  string reply_to_chat_id = 6;
+}
+
+message SendImageResponse { Message message = 1; }
+
+message GetMessageImageRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message GetMessageImageResponse {
+  string chat_id = 1;
+  string message_id = 2;
+  // Full-resolution cache entry used only by the image viewer.
+  string image_path = 3;
+  // Bounded cache entry used by virtualized conversation rows.
+  string thumbnail_path = 4;
+}
+
+message MarkReadRequest {
+  string chat_id = 1;
+  // The backend resolves timestamp and group sender context from this stored
+  // message. Unknown or non-incoming messages are rejected.
+  string through_message_id = 2;
+}
+
+message MarkReadResponse {}
+message LogoutRequest {}
+message LogoutResponse {}
+message ShutdownRequest {}
+message ShutdownResponse {}
+
+message GetChatAvatarRequest {
+  string chat_id = 1;
+}
+
+message GetChatAvatarResponse {
+  string chat_id = 1;
+  // Empty when no picture is set or privacy settings deny access.
+  string avatar_path = 2;
+}
+
+message SendReactionRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  // Empty removes the current user's reaction.
+  string emoji = 3;
+  // Stable UUID for one user action. Retrying the same action with the same
+  // UUID is safe; reusing it with a different payload is rejected.
+  string client_reaction_id = 4;
+}
+
+message SendReactionResponse {
+  Reaction reaction = 1;
+  bool removed = 2;
+}
+
+message GetChatInfoRequest { string chat_id = 1; }
+
+message ChatParticipant {
+  // Address accepted by GetParticipantAvatarRequest for this member.
+  string participant_id = 1;
+  string display_name = 2;
+  string phone_number = 3;
+  bool is_admin = 4;
+  bool is_super_admin = 5;
+  bool is_me = 6;
+}
+
+message GetChatInfoResponse {
+  // Refreshed chat row (title, avatar, flags) for the requested conversation.
+  Chat chat = 1;
+  // Transport address, e.g. 12345@s.whatsapp.net or 1234-567@g.us.
+  string address = 2;
+
+  // Direct chats. Empty when the peer's privacy settings hide them.
+  string about = 3;
+  string verified_name = 4;
+
+  // Groups.
+  string description = 5;
+  int64 created_at_ms = 6;
+  string created_by = 7;
+  uint32 participant_count = 8;
+  repeated ChatParticipant participants = 9;
+  // Only admins may send messages.
+  bool announce_only = 10;
+  // Only admins may edit the group's subject and description.
+  bool locked = 11;
+  uint32 disappearing_timer_seconds = 12;
+  bool is_community = 13;
+  bool join_approval_required = 14;
+}
+
+message SetTypingRequest {
+  string chat_id = 1;
+  // True while the user is composing; false clears the indicator for peers.
+  bool typing = 2;
+}
+message SetTypingResponse {}
+
+message CreatePollRequest {
+  string client_message_id = 1;
+  string chat_id = 2;
+  string question = 3;
+  repeated string options = 4;
+  uint32 selectable_options_count = 5;
+}
+message CreatePollResponse { Message message = 1; }
+
+// Selected options is the complete desired vote. An empty list retracts the
+// caller's vote. Re-sending replaces the previous vote atomically.
+message VotePollRequest {
+  string chat_id = 1;
+  string poll_message_id = 2;
+  repeated string selected_options = 3;
+}
+message VotePollResponse { Message message = 1; }
+
+message SetMessagePinRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  bool pinned = 3;
+}
+message SetMessagePinResponse {}
+message ListPinnedMessagesRequest { string chat_id = 1; }
+message PinnedMessage {
+  string message_id = 1;
+  int64 pinned_at_ms = 2;
+  string pinned_by = 3;
+  Message message = 4;
+  bool available = 5;
+}
+message ListPinnedMessagesResponse { repeated PinnedMessage pins = 1; }
+message PinnedMessagesChanged { string chat_id = 1; }
+
+// A peer started or stopped typing in a chat. Indicators are transient: the
+// desktop must also expire them locally (~10s) because the terminal "paused"
+// update can be lost.
+message TypingChanged {
+  string chat_id = 1;
+  string sender_id = 2;
+  // Resolved display name of the typing member. Empty in direct chats where
+  // the chat title already names the peer.
+  string sender_name = 3;
+  bool typing = 4;
+  // True when the peer is recording a voice message rather than typing.
+  bool recording = 5;
+}
+
+message GetParticipantAvatarRequest { string participant_id = 1; }
+message GetParticipantAvatarResponse {
+  string participant_id = 1;
+  string avatar_path = 2;
+}
+
+message RepairRecentReactionsRequest { string chat_id = 1; }
+message RepairRecentReactionsResponse {
+  string chat_id = 1;
+  bool requested = 2;
+  uint32 attempts = 3;
+}
+
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;
+  CONNECTION_STATE_STARTING = 1;
+  CONNECTION_STATE_PAIRING = 2;
+  CONNECTION_STATE_CONNECTING = 3;
+  CONNECTION_STATE_CONNECTED = 4;
+  CONNECTION_STATE_RECONNECTING = 5;
+  CONNECTION_STATE_OFFLINE = 6;
+  CONNECTION_STATE_LOGGED_OUT = 7;
+  CONNECTION_STATE_FAILED = 8;
+}
+
+enum ChatKind {
+  CHAT_KIND_UNSPECIFIED = 0;
+  CHAT_KIND_DIRECT = 1;
+  CHAT_KIND_GROUP = 2;
+  CHAT_KIND_OTHER = 3;
+}
+
+enum MessageStatus {
+  // Numeric values are wire values, not a sortable state lattice. Implementers
+  // must use explicit transitions (FAILED may later recover to SENT).
+  MESSAGE_STATUS_UNSPECIFIED = 0;
+  MESSAGE_STATUS_PENDING = 1;
+  MESSAGE_STATUS_SENT = 2;
+  MESSAGE_STATUS_DELIVERED = 3;
+  MESSAGE_STATUS_READ = 4;
+  MESSAGE_STATUS_FAILED = 5;
+}
+
+enum AttachmentKind {
+  ATTACHMENT_KIND_UNSPECIFIED = 0;
+  ATTACHMENT_KIND_DOCUMENT = 1;
+  ATTACHMENT_KIND_VIDEO = 2;
+  ATTACHMENT_KIND_AUDIO = 3;
+}
+
+message Chat {
+  // Opaque local conversation ID. It is not a WhatsApp JID.
+  string id = 1;
+  ChatKind kind = 2;
+  string title = 3;
+  string avatar_path = 4;
+  string last_message_preview = 5;
+  int64 last_message_timestamp_ms = 6;
+  uint32 unread_count = 7;
+  bool muted = 8;
+  bool pinned = 9;
+  bool archived = 10;
+  string phone_number = 11;
+  string contact_name = 12;
+  string push_name = 13;
+  string business_name = 14;
+  // True when the last message in the chat was sent by the linked device;
+  // lets the chat list prefix its preview with "You: ".
+  bool last_message_from_me = 15;
+  // The underlying WhatsApp transport JID (e.g. status@broadcast, a
+  // newsletter jid, or a @s.whatsapp.net user). Lets the client hide
+  // special-purpose conversations from the regular chat list.
+  string transport_jid = 16;
+  // Device-local block list. The linked-device transport does not expose
+  // WhatsApp app-state, so the block is owned by this desktop profile.
+  bool blocked = 17;
+  // Unix milliseconds until which the chat stays muted; zero means unmuted.
+  int64 mute_until_ms = 18;
+}
+
+message Message {
+  string id = 1;
+  string chat_id = 2;
+  string sender_id = 3;
+  string sender_name = 4;
+  bool from_me = 5;
+  int64 timestamp_ms = 6;
+  MessageStatus status = 7;
+  bool edited = 8;
+  bool revoked = 9;
+  int64 expires_at_ms = 10;
+  string sender_phone_number = 11;
+  string sender_avatar_path = 12;
+  repeated Reaction reactions = 13;
+  // The message this one quotes, when it is a native WhatsApp reply.
+  string reply_to_message_id = 14;
+  // Zero means this was not forwarded. WhatsApp increments the score each
+  // time a forwarded message is forwarded again.
+  uint32 forwarding_score = 15;
+  // Rendered labels, without the leading @, that occur as native mentions in
+  // the message body or caption.
+  repeated string mention_texts = 16;
+  // The conversation containing reply_to_message_id. Empty means this chat.
+  // A different value is a native private reply to a group message.
+  string reply_to_chat_id = 17;
+
+  oneof content {
+    TextContent text = 20;
+    UnsupportedContent unsupported = 21;
+    ImageContent image = 22;
+    AttachmentContent attachment = 23;
+    ContactsContent contacts = 24;
+    LocationContent location = 25;
+    PollContent poll = 26;
+  }
+}
+
+message Reaction {
+  string chat_id = 1;
+  string message_id = 2;
+  string sender_id = 3;
+  string emoji = 4;
+  int64 timestamp_ms = 5;
+  bool from_me = 6;
+  string sender_name = 7;
+  string sender_phone_number = 8;
+  string sender_avatar_path = 9;
+}
+
+message ReactionUpdated {
+  Reaction reaction = 1;
+  bool removed = 2;
+}
+
+message RecentReactionsRepaired {
+  string chat_id = 1;
+  uint32 recovered_reactions = 2;
+  bool complete = 3;
+}
+
+message ChatMerged {
+  string old_chat_id = 1;
+  string new_chat_id = 2;
+}
+
+// The sticker library changed: a favourite was added/removed via WhatsApp
+// app-state sync, or a new sticker message arrived/was sent. Carries no
+// payload; the desktop re-calls ListStickers when it needs a fresh view.
+message StickersChanged {}
+
+message TextContent {
+  string text = 1;
+  LinkPreview link_preview = 2;
+}
+
+// OpenGraph-style metadata already attached by WhatsApp to an extended text
+// message. The desktop never fetches arbitrary message URLs on its own.
+message LinkPreview {
+  string url = 1;
+  string title = 2;
+  string description = 3;
+  bytes jpeg_thumbnail = 4;
+  uint32 thumbnail_width = 5;
+  uint32 thumbnail_height = 6;
+}
+
+message ImageContent {
+  string caption = 1;
+  string mime_type = 2;
+  // Empty until a historical image has been downloaded into the local cache.
+  string local_path = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint64 file_size = 6;
+  bool downloadable = 7;
+  bool sticker = 8;
+  bool animated = 9;
+  // A bounded rendering asset; local_path remains the full-resolution original.
+  string thumbnail_path = 10;
+  // WhatsApp's embedded preview, available before the full media is downloaded.
+  bytes jpeg_thumbnail = 11;
+}
+
+message AttachmentContent {
+  string kind = 1;
+  string caption = 2;
+  string mime_type = 3;
+  string file_name = 4;
+  string local_path = 5;
+  uint64 file_size = 6;
+  uint32 width = 7;
+  uint32 height = 8;
+  uint32 duration_seconds = 9;
+  bool animated = 10;
+  bool voice_note = 11;
+  bool downloadable = 12;
+}
+
+message ContactContent {
+  string display_name = 1;
+  string vcard = 2;
+}
+
+message ContactsContent { repeated ContactContent contacts = 1; }
+
+message LocationContent {
+  double latitude = 1;
+  double longitude = 2;
+  string name = 3;
+  string address = 4;
+  string url = 5;
+  bool live = 6;
+}
+
+message UnsupportedContent {
+  string type_name = 1;
+  string fallback_text = 2;
+}
+
+message PollOption {
+  string name = 1;
+  uint32 vote_count = 2;
+  bool selected_by_me = 3;
+  repeated PollVoter voters = 4;
+}
+message PollVoter {
+  string user_id = 1;
+  string display_name = 2;
+  string avatar_path = 3;
+  bool from_me = 4;
+}
+message PollContent {
+  string question = 1;
+  repeated PollOption options = 2;
+  uint32 selectable_options_count = 3;
+  uint32 total_voters = 4;
+}
+
+message ConnectionChanged {
+  ConnectionState state = 1;
+  string detail = 2;
+}
+
+message PairingQr {
+  string code = 1;
+  int64 expires_at_ms = 2;
+}
+
+enum SyncPhase {
+  SYNC_PHASE_UNSPECIFIED = 0;
+  SYNC_PHASE_NOT_STARTED = 1;
+  SYNC_PHASE_CONNECTING = 2;
+  SYNC_PHASE_INITIAL_HISTORY = 3;
+  SYNC_PHASE_APP_STATE = 4;
+  SYNC_PHASE_CATCHING_UP = 5;
+  SYNC_PHASE_COMPLETE = 6;
+  SYNC_PHASE_PARTIAL = 7;
+  SYNC_PHASE_FAILED = 8;
+  SYNC_PHASE_OFFLINE = 9;
+}
+
+message SyncStatus {
+  SyncPhase phase = 1;
+  uint64 revision = 2;
+  uint64 chats_processed = 3;
+  uint64 messages_processed = 4;
+  uint32 whatsapp_progress = 5;
+  int64 started_at_ms = 6;
+  int64 completed_at_ms = 7;
+  string detail = 8;
+  uint64 messages_received = 9;
+  uint64 messages_decoded = 10;
+  uint64 messages_failed = 11;
+}
+
+message SyncStatusChanged { SyncStatus status = 1; }
+
+enum HistoryCoverageState {
+  HISTORY_COVERAGE_STATE_UNKNOWN = 0;
+  HISTORY_COVERAGE_STATE_REQUESTING = 1;
+  HISTORY_COVERAGE_STATE_MORE_AVAILABLE = 2;
+  HISTORY_COVERAGE_STATE_EXHAUSTED = 3;
+  HISTORY_COVERAGE_STATE_NO_ANCHOR = 4;
+  HISTORY_COVERAGE_STATE_OFFLINE = 5;
+  HISTORY_COVERAGE_STATE_FAILED = 6;
+  HISTORY_COVERAGE_STATE_STALLED = 7;
+}
+
+message HistoryCoverage {
+  string chat_id = 1;
+  HistoryCoverageState state = 2;
+  uint64 revision = 3;
+  uint64 local_message_count = 4;
+  int64 oldest_message_timestamp_ms = 5;
+  uint64 on_demand_messages_added = 6;
+  uint32 last_requested_count = 7;
+  uint32 last_received_count = 8;
+  uint32 last_added_count = 9;
+  int64 last_requested_at_ms = 10;
+  int64 retry_after_ms = 11;
+  string detail = 12;
+}
+
+message RequestOlderHistoryRequest { string chat_id = 1; }
+message RequestOlderHistoryResponse { HistoryCoverage coverage = 1; }
+message GetChatHistoryCoverageRequest { string chat_id = 1; }
+message GetChatHistoryCoverageResponse { HistoryCoverage coverage = 1; }
+message GetHistoryOverviewRequest {}
+message HistoryOverview {
+  uint64 local_message_count = 1;
+  uint64 chats_with_messages = 2;
+  uint64 chats_checked = 3;
+  uint64 chats_unknown = 4;
+  uint64 chats_without_anchor = 5;
+}
+message GetHistoryOverviewResponse { HistoryOverview overview = 1; }
+message HistoryCoverageChanged { HistoryCoverage coverage = 1; }
+
+message IntegrityStatus {
+  bool database_ok = 1;
+  string detail = 2;
+  uint64 pending_inbound = 3;
+  uint64 failed_inbound = 4;
+  int64 oldest_pending_at_ms = 5;
+  int64 last_message_persisted_at_ms = 6;
+  int64 last_reconciliation_at_ms = 7;
+  uint64 inconsistent_chats = 8;
+}
+message GetIntegrityStatusRequest {}
+message GetIntegrityStatusResponse { IntegrityStatus status = 1; }
+message RepairLocalCacheRequest {}
+message RepairLocalCacheResponse { IntegrityStatus status = 1; }
+
+message SyncProgress {
+  uint64 chats_processed = 1;
+  uint64 messages_processed = 2;
+  bool complete = 3;
+}
+
+message ChatUpserted {
+  Chat chat = 1;
+}
+
+message MessageUpserted {
+  Message message = 1;
+}
+
+message ReceiptUpdated {
+  string chat_id = 1;
+  string message_id = 2;
+  MessageStatus status = 3;
+  int64 timestamp_ms = 4;
+}
+
+message BackendProblem {
+  string code = 1;
+  string message = 2;
+  bool fatal = 3;
+}
+
+message SendStickerRequest {
+  // Stable UUID with the same idempotency contract as other sends.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // A complete WhatsApp-compatible WebP file prepared by the desktop.
+  bytes webp_data = 3;
+  string reply_to_message_id = 4;
+  string reply_to_chat_id = 5;
+}
+
+message SendStickerResponse { Message message = 1; }
+
+message ListStickersRequest {}
+
+// One sticker available for reuse, assembled from local history and/or
+// synced WhatsApp app-state. `id` is stable across calls for the same
+// underlying media: the hex-encoded plaintext file hash when known (history
+// entries), otherwise the hex-encoded encrypted file hash (favourites-only
+// entries, since WhatsApp's favouriteSticker app-state action never carries
+// the plaintext hash). The two ID spaces do not coincide, so the same
+// sticker favourited on the phone and also present in chat history can
+// legitimately appear under two different IDs in two different packs.
+message Sticker {
+  string id = 1;
+  // Empty until this sticker has been downloaded into the local media cache.
+  string local_path = 2;
+  string mime_type = 3;
+  bool animated = 4;
+  int32 width = 5;
+  int32 height = 6;
+  bool favorite = 7;
+  // 0 when unknown (e.g. a favourite never seen in local history).
+  int64 last_used_ms = 8;
+  // A message that can supply this sticker's bytes on demand. Empty for
+  // favourites-only entries; such entries are downloaded directly instead.
+  string source_chat_id = 9;
+  string source_message_id = 10;
+}
+
+message StickerPack {
+  string id = 1;
+  string name = 2;
+  repeated Sticker stickers = 3;
+}
+
+message ListStickersResponse { repeated StickerPack packs = 1; }
+
+message SendStickerFromLibraryRequest {
+  // Stable UUID with the same idempotency contract as other sends.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // A Sticker.id from a previous ListStickers response.
+  string sticker_id = 3;
+  string reply_to_message_id = 4;
+  string reply_to_chat_id = 5;
+}
+
+message SendStickerFromLibraryResponse { Message message = 1; }
+
+message GetMessageAttachmentRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message GetMessageAttachmentResponse {
+  string chat_id = 1;
+  string message_id = 2;
+  // A regular file in the backend-owned media cache. User-selected source
+  // paths are never exposed through the bridge.
+  string local_path = 3;
+}
+
+message SendAttachmentRequest {
+  // Stable UUID with the same idempotency contract as the other send RPCs.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // Absolute path selected by the local desktop file picker. The backend
+  // validates the file type and streams it to WhatsApp without loading the
+  // complete attachment into memory.
+  string file_path = 3;
+  AttachmentKind kind = 4;
+  // Supported for documents and videos. Audio messages do not have captions.
+  string caption = 5;
+  string reply_to_message_id = 6;
+  // Audio only. Voice notes must contain Ogg Opus data.
+  bool voice_note = 7;
+  string reply_to_chat_id = 8;
+}
+
+message SendAttachmentResponse { Message message = 1; }

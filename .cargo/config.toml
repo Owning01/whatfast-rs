@@ -1,0 +1,4 @@
+[build]
+# The G: volume of this machine does not have sccache installed. Uncomment
+# only where sccache exists.
+# rustc-wrapper = "sccache"

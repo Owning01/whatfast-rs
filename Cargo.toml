@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/whatfast-core",
+    "crates/whatfast-protocol",
+]
+exclude = ["crates/whatfast-ui"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Owning01/whatfast-rs"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-channel = "2.5"
+prost = "0.14"
+thiserror = "2.0"
+tracing = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

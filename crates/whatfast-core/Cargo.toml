@@ -1,0 +1,12 @@
+[package]
+name = "whatfast-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure logic ported from the Whatfast SolidJS frontend: formatting, media geometry, workspace and chat state rules."
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

@@ -1,0 +1,8 @@
+/target/
+/build/
+*.db
+*.db-shm
+*.db-wal
+*.log
+/perf-results/
+/.bench/
