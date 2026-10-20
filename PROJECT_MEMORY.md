@@ -155,3 +155,59 @@ necesita **un** `Chat` y **un** `Message`, no dos.
 
 - B-A1 (parser de formato) y B-A4 (consolidacion de DTOs) en curso.
 - Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
+
+## 2026-10-20 ? B-A1 (el slice duro) mergeado y gate de F2 validado
+
+**Qu? se cambi?**
+
+- B-A1 mergeado: `whatsapp_formatting.rs` (el parser de formato de WhatsApp)
+  y sus 14 tests, traducidos 1:1 de las dos suites del oraculo.
+- Paridad: de 89/153 a **103/153 (67,3 %)**. 154 tests en verde.
+- Tercer bug del juez: partia "WhatsApp" en dos tokens al normalizar, y el
+  nombre en Rust lo tiene junto ("whatsapp"). Ahora compara la forma sin
+  separadores. Con control negativo: con solo `media_crop` presente, el juez
+  reporta 20/153 y da FALTAN en el resto.
+- **Gate de F2 cerrado**: el juez (a) pasa contra el origen ? los 14 tests
+  TS del oraculo corren verdes en esta maquina ? y (b) atrapa una rotura
+  deliberada.
+
+**Por qu?**
+
+El gate de F2 de `repo-migrate` exige dos cosas: que el juez pase contra el
+origen y que falle contra una rotura deliberada. Sin la segunda, el juez
+puede estar mirando cualquier cosa.
+
+**Evidencia**
+
+- B-A1: 14/14 casos del oraculo, mas 6 tests internos de la capa de URL.
+  El agente corrio un **harness diferencial contra el oraculo congelado
+  (fuera del repo): 160.272 casos, 0 diferencias**, cubriendo fuzz de
+  delimitadores, spoilers anidados, URLs, IPv4/IPv6, IDN, menciones y code
+  blocks.
+- Gate F2, rotura deliberada: en una COPIA del oraculo se cambio la regexp de
+  las listas numeradas de `. ` a `) `; el juez salio con codigo 1 (falla).
+  El repo de origen quedo con 0 cambios.
+- `cargo clippy --all-targets --locked -- -D warnings`: limpio.
+
+**Desviaciones que el agente documento (y quedan aceptadas)**
+
+- El IDNA del parser de URLs propio esta aproximado con el lowercase de
+  Unicode: no reproduce la descomposicion de compatibilidad ni los criterios
+  de validez (NFC, Bidi, code points no asignados). Un host que solo falla
+  por eso queda como link, mientras el original rechaza la URL entera. El
+  harness diferencial de 160.272 casos dio 0 diferencias sobre el corpus
+  usado, asi que la diferencia esta en casos que el corpus no cubre.
+- El agente escribio ~1.100 lineas de URL Standard de WHATWG a mano porque la
+  crate `url` no esta autorizada. Es codigo grande en un solo archivo: la
+  capa de URL deberia pasar a su propio modulo cuando se refine.
+
+**Trampas**
+
+- `cargo fmt --all` reordena los `pub mod` de `lib.rs`: los agentes lo
+  revierten en sus worktrees. `lib.rs` ya esta ordenado, asi que el comando
+  es inocuo en `main`.
+
+**Pendiente**
+
+- B-A4 (consolidacion de DTOs en `types.rs`) en curso.
+- Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
