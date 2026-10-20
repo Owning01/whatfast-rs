@@ -8,3 +8,5 @@
 /.bench/
 /.cache/
 
+/dist/
+/backend/bin/
