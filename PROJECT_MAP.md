@@ -31,7 +31,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `docs/parity.json` | Resultado del juez, generado por `scripts/parity.py`. |
 | `crates/whatfast-core/` | Lógica pura. 15 módulos declarados en `src/lib.rs`. |
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte. |
-| `crates/whatfast-ui/` | La interfaz GPUI. Empieza en F4. |
+| `crates/whatfast-ui/` | La interfaz GPUI. Tiene su `Cargo.toml` con `gpui` y `gpui-component` pineados al rev `031555662e99a1b5a549990b47f246d475b8288a`. |
 | `proto/bridge.proto` | Copia del contrato v21 del origen. |
 | `scripts/test.cmd`, `scripts/lint.cmd` | Wrappers de cargo con el override de `rustc-wrapper`. |
 
@@ -68,12 +68,19 @@ crates/whatfast-core                ← lógica pura portada del frontend
 
 ## Estado de la migración
 
-| Lote | Alcance | Dueño | Estado |
+| Lote | Alcance | Estado | Paridad |
 |---|---|---|---|
-| B-A1 | `whatsapp_formatting` | agente A1 | en curso |
-| B-A2 | 8 módulos puros | agente A2 | en curso |
-| B-A3 | 6 módulos de estado | agente A3 | en curso |
-| B-R1 | spike del protocolo Rust | agente R1 | en curso |
-| B-P1 | transporte | — | pendiente |
-| B-P2 | `docs/api-mapping.md` | — | pendiente |
-| B-U1..U8 | interfaz GPUI | — | pendiente (F4+) |
+| B-A1 | `whatsapp_formatting` (el slice duro) | cerrado | 14/14 |
+| B-A2 | 8 módulos puros | cerrado | 36/36 |
+| B-A3 | 6 módulos de estado | cerrado | 53/53 |
+| B-A4 | consolidación de DTOs en `types.rs` | cerrado | — |
+| B-A6 | `theme`, `spotlight`, `notification_routing`, `participant_avatar_queue` | cerrado | 24/24 |
+| B-A5 | `send_idempotency`, `emoji_autocomplete`, `performance`, `sync`, `authoritative_resync` | en curso | 23 esperados |
+| B-P1 | transporte protobuf (`whatfast-protocol`) | en curso | — |
+| B-R1 | spike del protocolo Rust | cerrado (D1: el sidecar Go se queda) | — |
+| B-P2 | `docs/api-mapping.md` | pendiente | — |
+| B-U1..U8 | interfaz GPUI | pendiente (F4+) | — |
+| `voice-note` | conversión WebM→Ogg | pendiente (va al crate de medios) | 3 |
+
+**Paridad actual: 127/153 casos del oráculo (83,0 %) + 45 tests de
+caracterización.**
