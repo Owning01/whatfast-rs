@@ -563,3 +563,74 @@ agentes deja de costar 3 GB por worktree.
 - Los proyectos MCP pinean `1.98.0` en su `rust-toolchain.toml`, que no
   esta instalado: cuando se compilen, rustup baja ese toolchain aparte
   (0,56 GB). El `stable` de esta maquina **es** 1.98.0.
+
+## 2026-10-20 - Tanda 1: el sidecar en Go y los tokens del tema
+
+**Que se cambio**
+
+- **`backend/`**: el sidecar en Go del repositorio de origen, copiado al
+  repo nuevo. 32 archivos, **identicos byte a byte** (verificado por
+  SHA256 contra el oraculo), mas tres archivos nuevos: `.gitignore`,
+  `README.md` y `tools/smoke/main.go`.
+- **`crates/whatfast-ui/src/tokens.rs`**: los tokens del tema (1.133 l., 21
+  tests). La escala de la interfaz, las medidas del CSS, los 30 colores del
+  tema convertidos a `Rgba` y la aplicacion del tema sobre `gpui_component`.
+- **`crates/whatfast-ui/src/main.rs`**: la entrada de la app (la ventana, las
+  acciones globales, los modulos).
+- **CI y release**: `.github/workflows/ci.yml` (tests, lint y juez de
+  paridad) y `release.yml` (el paquete de Windows y de Linux).
+- **`scripts/build.cmd`**, **`scripts/medir.ps1`** y **`scripts/capturas.ps1`**.
+- **`docs/api-mapping.md`** cerrado: los 50 RPC del sidecar y los 56 comandos
+  de la app web, con lo que falta (22 cubiertos, 28 pendientes).
+
+**Evidencia**
+
+- `go build ./...` y `go test ./...`: exit 0. 226 casos, 220 pasan, 6 se
+  saltan (tests de permisos POSIX que hacen `Skip` en Windows, tal como en
+  el oraculo).
+- **El binario real responde un `Hello`**: `hello ok: protocol_version=21
+  backend_version="0.1.0"` y `shutdown ok: the sidecar exited with code 0`.
+  El smoke test levanta el binario de produccion con un `--data-dir`
+  temporal, manda el `Hello` con el codec de produccion y lee la respuesta
+  con el mismo framing que el lado Rust.
+- El modelo de dominio del tema **coincide exacto con el oraculo en los 7
+  temas built-in**: 0 diferencias en los 4 temas con objeto plano y 0 en los
+  32 overrides de los 3 temas derivados.
+
+**El hallazgo del tema**
+
+- **El CSS no declara ningun color de tema.** Las unicas custom properties
+  del `:root` son la escala, cuatro radios, tres alturas y seis colores del
+  *swatch* de los ajustes (hardcodeados, no son el tema). Los 30 colores los
+  escribe en runtime `applyTheme` de `lib/theme.ts` sobre el `<html>`. Por
+  eso la comparacion real es contra el TypeScript, no contra el CSS.
+- Hay **dos juegos de radios distintos**: el `:root` usa 6/8/12 px, y el
+  estilo skeuomorfico (`html[data-theme-style="skeuomorphic"]`, lineas
+  4345-4351 del CSS) los reemplaza por 5/7/9.
+- `--radius-full` (999px) es un literal en los dos bloques: la escala no lo
+  toca.
+
+**Trampas (dos, una de entorno)**
+
+1. **El GOROOT de esta maquina estaba incompleto**: le faltaban 70 archivos
+   de la distribucion oficial de Go 1.26.7 (`src/go/build/` completo,
+   `src/cmd/dist/` y `src/cmd/vendor/golang.org/x/build/`). Por eso
+   `go build ./...` pasaba pero **`go test ./...` fallaba en los 8 paquetes
+   con tests**: `go/build/constraint` importa `go/parser`, y el grafo de
+   tests lo necesita. **Se arreglo el toolchain, no el codigo**: se bajo
+   `go1.26.7.src.tar.gz` de go.dev, se verifico el SHA256 contra el
+   publicado y se restauraron los 70 archivos.
+2. El `bridge.proto` del oraculo usa **LF** y el del repo nuevo usa
+   **CRLF**: el contenido es identico (comparado normalizado), pero los
+   SHA256 crudos no coinciden. Los 13 archivos del oraculo que usan CRLF
+   quedaron con LF por la normalizacion estandar de git.
+
+**Pendiente**
+
+- Faltan los modulos `app.rs`, `rpc.rs`, `text.rs`, `render.rs` y
+  `helpers.rs` de la interfaz (dos agentes en curso).
+- En la integracion: reconciliar `apply_theme_scale` (el del tema y el que
+  trae el oraculo), llamar `tokens::apply_theme` al arrancar y sacar el
+  `#![allow(dead_code)]` del modulo de tokens.
+- Los 28 RPC que faltan y los 11 componentes que el cliente GPUI del
+  oraculo no tiene (los que estan en `gpui_component`).
