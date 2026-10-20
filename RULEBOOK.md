@@ -108,9 +108,16 @@ a propósito: es el loop rápido).
   esta máquina no tiene `sccache` instalado. Los wrappers
   `scripts/test.cmd` y `scripts/lint.cmd` ya lo hacen. **Usar los wrappers.**
 - Rust stable, edición 2024, `rust-version = "1.85"`.
-- `gpui` y `gpui-component` van **pineados** al rev
-  `031555662e99a1b5a549990b47f246d475b8288a`. No se actualizan a mitad de la
-  migración: cambiar el pin invalida los lotes ya mergeados.
+- `gpui` y `gpui_platform` van **pineados al rev
+  `1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba`** del repo de Zed, y
+  `gpui-component` / `gpui-component-assets` al rev
+  `031555662e99a1b5a549990b47f246d475b8288a` de `longbridge/gpui-component`.
+  **Los dos revs van juntos**: `gpui-component` no compila contra el HEAD de
+  Zed (la firma de `wrap_line` cambió y el componente llama con los
+  argumentos viejos). Se descubrí el rev de `gpui` en el `Cargo.lock` del
+  crate `desktop/` del repo de origen.
+- No se actualizan a mitad de la migración: cambiar un rev invalida los
+  lotes ya mergeados.
 
 ## 3. Convenciones de traducción
 

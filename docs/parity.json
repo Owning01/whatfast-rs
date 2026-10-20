@@ -3,11 +3,11 @@
     {
       "modulo": "authoritative-resync",
       "oracle": 1,
-      "ok": 0,
-      "faltan": [
-        "authoritative chat resync deletes stale rows while preserving racing live upserts"
-      ],
-      "en": []
+      "ok": 1,
+      "faltan": [],
+      "en": [
+        "authoritative_resync.rs"
+      ]
     },
     {
       "modulo": "backend-lifecycle",
@@ -30,20 +30,11 @@
     {
       "modulo": "emoji-autocomplete",
       "oracle": 10,
-      "ok": 0,
-      "faltan": [
-        "finds an active shortcode at the start or a sensible token boundary",
-        "a bare colon activates autocomplete",
-        "ignores URLs, times, and colons embedded in words",
-        "rejects unsupported shortcode characters and invalid carets",
-        "detects and replaces the whole token when editing in its middle",
-        "replacement preserves all surrounding text and reports a UTF-16 caret",
-        "replacement refuses a stale match rather than overwriting changed text",
-        "ranks exact keyword, prefix, then substring matches stably",
-        "deduplicates glyphs, honors the result limit, and handles a bare query",
-        "integration helper returns the active match with ranked suggestions"
-      ],
-      "en": []
+      "ok": 10,
+      "faltan": [],
+      "en": [
+        "emoji_autocomplete.rs"
+      ]
     },
     {
       "modulo": "file-drop",
@@ -102,15 +93,11 @@
     {
       "modulo": "performance",
       "oracle": 5,
-      "ok": 0,
-      "faltan": [
-        "BoundedSet evicts the least recently inserted value",
-        "BoundedSet rejects invalid capacities",
-        "message index resolves quotes and reply metadata in one pass",
-        "canonical message windows stay bounded around the requested target",
-        "the 1,000-member roster keeps its mounted DOM budget bounded"
-      ],
-      "en": []
+      "ok": 5,
+      "faltan": [],
+      "en": [
+        "performance.rs"
+      ]
     },
     {
       "modulo": "polls",
@@ -133,13 +120,11 @@
     {
       "modulo": "send-idempotency",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "every send kind reuses its ID for a failed logical retry",
-        "a confirmed send followed by the same payload is a new send",
-        "changing any logical payload selects a fresh ID after failure"
-      ],
-      "en": []
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "send_idempotency.rs"
+      ]
     },
     {
       "modulo": "spotlight",
@@ -153,14 +138,11 @@
     {
       "modulo": "sync",
       "oracle": 4,
-      "ok": 0,
-      "faltan": [
-        "only active transfer phases render as syncing",
-        "stale snapshots cannot overwrite newer sync events",
-        "partial and failed states remain visible and actionable",
-        "an empty conversation explains incomplete account history"
-      ],
-      "en": []
+      "ok": 4,
+      "faltan": [],
+      "en": [
+        "sync.rs"
+      ]
     },
     {
       "modulo": "tab-keyboard",
@@ -238,8 +220,8 @@
     }
   ],
   "total_oracle": 153,
-  "total_ok": 127,
-  "paridad_pct": 83.01,
+  "total_ok": 150,
+  "paridad_pct": 98.04,
   "sobran": [],
   "caracterizacion": [
     "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",

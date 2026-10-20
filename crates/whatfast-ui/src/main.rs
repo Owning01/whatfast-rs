@@ -11,17 +11,40 @@
 //! - the linked-device credentials never enter this process: they live in
 //!   the Go sidecar and only the RPC results reach here
 
-use gpui::{App, Window, WindowOptions};
+use gpui::{Context, Render, Window, WindowBounds, WindowOptions, div, px, size};
+use gpui_component::{Theme, ThemeMode};
+use gpui_component_assets::Assets;
 
-/// The shell of the application. The real layout (three panes, tab strip,
-/// title bar) arrives with the batches B-U1 and B-U2.
+/// The root view of the application.
+///
+/// The real layout (three panes, tab strip, title bar, the chat list) arrives
+/// with the batches B-U1 (tokens) and B-U2 (shell).
+struct Whatfast;
+
+impl Render for Whatfast {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        div()
+            .flex_1()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .child(div().text_2xl().child("Whatfast"))
+    }
+}
+
 fn main() {
-    gpui::Application::new().run(|app: &mut App| {
-        let _ = app.open_window(WindowOptions {
-            title: "Whatfast".into(),
+    gpui_platform::application().with_assets(Assets).run(|cx| {
+        gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            window_min_size: Some(size(px(480.), px(560.))),
             ..Default::default()
-        }, |window: &mut Window, _| {
-            window.render(|_frame, _cx| {});
-        });
+        };
+        cx.spawn(async move |cx| {
+            cx.open_window(options, |_window, cx| cx.new(|_cx| Whatfast))
+                .expect("open the Whatfast window");
+        })
+        .detach();
     });
 }
