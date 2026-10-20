@@ -10,8 +10,8 @@ description = "Native GPUI user interface of Whatfast."
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
-whatfast-core = { path = "\.\./whatfast-core" }
-whatfast-model = { path = "\.\./whatfast-model" }
+whatfast-core = { path = "../whatfast-core" }
+whatfast-model = { path = "../whatfast-model" }
 whatfast-protocol = { path = "../whatfast-protocol" }
 # The GPUI stack comes from the Zed repository. Do NOT add `rev = ...` here:
 # the crates inside that repository depend on each other by plain git URL, so
