@@ -437,14 +437,14 @@ solucion no es solo limpiar: es que **las compilaciones no vivan en C:**.
    `vcvars64.bat` y importa el entorno, en vez de tener las rutas fijas.
 2. **Mover `.gradle` y el AVD no es un rename**: son volumenes distintos, y
    hay que reescribir las rutas absolutas. El `.ini` del AVD
-   (`leonsys.ini`) tiene un `path=C:\Users\perca\.android\avd\leonsys.avd`
+   (`leonsys.ini`) tiene un `path=<perfil>\.android\avd\leonsys.avd`
    que hay que cambiar a mano.
 
 **Pendiente**
 
 - La distro de WSL y el AVD de Android **no son caches**: se pueden borrar
   (libran 16 GB), pero se pierden el sistema y el emulador.
-- El `opencode.db` (5,79 GB en `C:\Users\perca\.local\share\opencode`) es
+- El `opencode.db` (5,79 GB en `<perfil>\.local\share\opencode`) es
   el historial de sesiones: no se toco.
 
 ## 2026-10-20 - El target compartido se resuelve solo (sin variables de entorno)

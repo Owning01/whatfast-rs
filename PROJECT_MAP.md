@@ -45,10 +45,10 @@ crates/whatfast-core                ← lógica pura portada del frontend
 
 ## Reglas de trabajo de esta máquina
 
-- El linker del MSVC no está en el PATH: `. C:\Users\perca\AppData\Local\Temp\opencode\msvc.ps1` y usá `scripts\test.cmd` / `scripts\lint.cmd` (que resuelven el target compartido y usan `sccache`).
+- El linker del MSVC no está en el PATH: `. %TEMP%\opencode\msvc.ps1` y usá `scripts\test.cmd` / `scripts\lint.cmd` (que resuelven el target compartido y usan `sccache`).
 - Las compilaciones **no van al disco C:**: los wrappers resuelven `<repo principal>\.cache\target`, que es un enlace a `G:\_build\whatfast-target`.
 - Un lote = una partición de archivos. Cada agente tiene su worktree en
-  `C:\Users\perca\AppData\Local\Temp\opencode\wf\<lote>`.
+  `%TEMP%\opencode\wf\<lote>`.
 - `crates/whatfast-core/src/lib.rs` y `crates/whatfast-ui/src/main.rs` los
   mantiene el orquestador: los agentes escriben su módulo, no el `lib.rs`.
 - El repo de ORIGEN (`G:\Proyectos\16-whatsapp2`) es de solo lectura para
