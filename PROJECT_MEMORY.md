@@ -327,3 +327,67 @@ linea de comandos.
 
 - B-U1 (backend fake) y B-A7 (voice_note) en curso.
 - Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
+
+## 2026-10-20 ? B-A7 cierra la paridad del oraculo: 153/153
+
+**Que se cambio**
+
+- `voice_note.rs`: el remuxer de WebM a Ogg Opus. La paridad del oraculo pasa
+  de 150/153 a **153/153 (100 %)**. 253 tests en verde en el workspace.
+
+**Por que**
+
+WhatsApp exige contenedores Ogg Opus (OggS con OpusHead) para las notas de voz
+push-to-talk, y el grabador del sistema produce `audio/webm`. El modulo
+reempaqueta los frames Opus ya codificados: no necesita ningun encoder, asi
+que es portable sin dependencias nuevas.
+
+**Evidencia**
+
+- **Paridad byte a byte con el oraculo**: el modulo TS congelado corrido con
+  Node 24 y el modulo Rust corrido con `rustc` sobre las mismas entradas
+  producen salida identica (hex y longitud): el WebM sintetico del test da
+  131 bytes, y un WebM con 3 SimpleBlocks da 191 bytes.
+- El test **redemuxea el contenedor generado**: lee pagina por pagina (magic
+  `OggS`, `headerType`, granule, serial, secuencia, tabla de segmentos,
+  payload), recalcula el checksum con el campo CRC en cero y lo compara con el
+  almacenado. El CRC del test se calcula **bit a bit, con otro algoritmo**
+  que la tabla del modulo, para que un error no se repita dos veces. Afirma:
+  3 paginas, BOS `0x02` en la de OpusHead, `0x00` en la de OpusTags, EOS
+  `0x04` en la del audio, granule 960, serial unico y el payload del audio
+  igual al frame extraido del WebM.
+- `scripts/parity.py`: **153/153 (100,0 %)**, sin casos "sobra".
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: limpio.
+
+**Rarezas que hubo que portar tal cual**
+
+- Todos los campos de la pagina Ogg son **little endian**, la granule
+  position incluida: el original usa `setBigInt64(6, granulePos, true)` y
+  `true` es little endian.
+- El conteo de segmentos se trunca a 8 bits (`page[26] = segmentTable.length`
+  sobre un `Uint8Array`).
+- El scanner EBML del original es ingenuo y asi queda: en el WebM sintetico
+  encuentra el `0xA3` que cierra la magic EBML, lee los 8 bytes siguientes
+  como tamano de bloque (el `0x01` del tamano EBML es un varint con el
+  marcador en su bit mas bajo) y se queda con 4 bytes, no con los 2 del
+  payload. Documentado en el test: cambiarlo romperia la paridad.
+- La tabla CRC de 256 entradas se construye en `const fn` en tiempo de
+  compilacion, y **no** es el CRC-32 de zlib: es el de Ogg (polinomio
+  0x04C11DB7).
+
+**Trampa (la misma de disco, segunda aparicion)**
+
+- C: quedo **con 0 GB libres** y la compilacion del workspace fallo con
+  "Espacio en disco insuficiente". Los worktrees de los agentes estan en C: y
+  cada uno compila su propio `target/`; con el stack de GPUI son 3 GB por
+  worktree. Ya esta corregido: `scripts/test.cmd` y `scripts/lint.cmd` fijan
+  `CARGO_TARGET_DIR` a un target compartido en G:.
+
+**Pendiente**
+
+- B-U1 (backend fake) en curso: sin el, la UI no tiene datos con los que
+  trabajar.
+- Faltan los lotes de UI (B-U2 shell + sidebar como corte vertical, B-U3
+  tokens, B-U4 a B-U8).
+- Deuda anotada: el parser de URLs de `whatsapp_formatting.rs` son ~1.100
+  lineas de WHATWG dentro de un solo archivo; deberia pasar a su modulo.

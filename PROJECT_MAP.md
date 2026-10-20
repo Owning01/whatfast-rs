@@ -31,7 +31,8 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `docs/parity.json` | Resultado del juez, generado por `scripts/parity.py`. |
 | `crates/whatfast-core/` | Lógica pura. 15 módulos declarados en `src/lib.rs`. |
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte. |
-| `crates/whatfast-ui/` | La interfaz GPUI. Tiene su `Cargo.toml` con `gpui` y `gpui-component` pineados al rev `031555662e99a1b5a549990b47f246d475b8288a`. |
+| `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `sticker`, `emoji_picker`. Cero GPUI en su árbol de dependencias. |
+| `crates/whatfast-ui/` | La interfaz GPUI. Tiene su `Cargo.toml` con `gpui` y `gpui-component`; el commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
 | `proto/bridge.proto` | Copia del contrato v21 del origen. |
 | `scripts/test.cmd`, `scripts/lint.cmd` | Wrappers de cargo con el override de `rustc-wrapper`. |
 
@@ -74,13 +75,14 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | B-A2 | 8 módulos puros | cerrado | 36/36 |
 | B-A3 | 6 módulos de estado | cerrado | 53/53 |
 | B-A4 | consolidación de DTOs en `types.rs` | cerrado | — |
+| B-A5 | `send_idempotency`, `emoji_autocomplete`, `performance`, `sync`, `authoritative_resync` | cerrado | 23/23 |
 | B-A6 | `theme`, `spotlight`, `notification_routing`, `participant_avatar_queue` | cerrado | 24/24 |
-| B-A5 | `send_idempotency`, `emoji_autocomplete`, `performance`, `sync`, `authoritative_resync` | en curso | 23 esperados |
-| B-P1 | transporte protobuf (`whatfast-protocol`) | en curso | — |
+| B-A7 | `voice_note` (remuxer Ogg) | cerrado | 3/3 |
+| B-P1 | transporte protobuf (`whatfast-protocol`) | cerrado | 18/18 |
 | B-R1 | spike del protocolo Rust | cerrado (D1: el sidecar Go se queda) | — |
-| B-P2 | `docs/api-mapping.md` | pendiente | — |
-| B-U1..U8 | interfaz GPUI | pendiente (F4+) | — |
-| `voice-note` | conversión WebM→Ogg | pendiente (va al crate de medios) | 3 |
+| B-U0 | crate `whatfast-model` (el modelo de datos, sin GPUI) | cerrado | 31/31 |
+| B-U1 | backend fake (los 50 RPC de demostración) | en curso | — |
+| B-U2..U8 | interfaz GPUI | pendiente (F4+) | — |
 
-**Paridad actual: 127/153 casos del oráculo (83,0 %) + 45 tests de
-caracterización.**
+**Paridad del oráculo: 153/153 (100 %) + 45 tests de caracterización.
+253 tests en verde en el workspace; clippy limpio.**
