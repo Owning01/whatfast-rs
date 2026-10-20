@@ -446,3 +446,45 @@ solucion no es solo limpiar: es que **las compilaciones no vivan en C:**.
   (libran 16 GB), pero se pierden el sistema y el emulador.
 - El `opencode.db` (5,79 GB en `C:\Users\perca\.local\share\opencode`) es
   el historial de sesiones: no se toco.
+
+## 2026-10-20 - El target compartido se resuelve solo (sin variables de entorno)
+
+**Que se cambio**
+
+- `scripts/test.cmd` y `scripts/lint.cmd` resuelven el target compartido en
+  este orden: `CARGO_TARGET_DIR`, despues `WHATFAST_TARGET_DIR`, y si no hay
+  ninguno, **el `.cache\target` del worktree principal**, que se localiza
+  con `git rev-parse --git-common-dir`.
+- `G:\Proyectos\17-whatfast-rs\.cache\target` es un **enlace de directorio**
+  (junction) que apunta a `G:\_build\whatfast-target`. Los bytes viven en
+  `G:\_build`; el repo solo tiene el puntero. `.cache/` esta en el
+  `.gitignore`.
+- Verificado simulando a un agente: desde un worktree en `C:`, **sin ninguna
+  variable de entorno**, `scripts\test.cmd` compila en el target de `G:` y
+  **no crea** `target\` en el worktree.
+
+**Por que**
+
+Los procesos que ya estaban abiertos (el opencode de esta sesion, y por lo
+tanto los agentes que lanza) no ven las variables de entorno nuevas: el
+proceso tiene su propia copia del entorno desde que arranco. Con el enlace,
+el path se deriva del repositorio y no hace falta configurar nada.
+
+**Trampas (dos, y las dos costaron tiempo)**
+
+1. **Dentro de `for /f`, el `=` se come**: `for /f "delims=" %%i in ('git
+   rev-parse --path-format=absolute --git-common-dir')` se ejecuta como
+   `--path-format absolute` y git falla en silencio. **La forma que si
+   funciona** es `git rev-parse --git-common-dir` a secas: en un worktree
+   devuelve igual la ruta absoluta del `.git` del repo principal.
+2. **Un worktree tiene su propia copia de los scripts**. El worktree `u2`
+   se creo antes del arreglo y seguia con la version vieja, que apuntaba a
+   una carpeta que ya no existia: por eso compilaba en el disco local. Los
+   worktrees de los agentes se crean desde `main`, asi que hay que
+   **commitear el arreglo antes de crear el worktree**.
+
+**Pendiente**
+
+- `whatfast-ui` tiene un `[profile]` en su `Cargo.toml` y cargo avisa:
+  "profiles for the non root package will be ignored". Anotado para el
+  lote de UI: el perfil tiene que estar en la raiz del workspace.
