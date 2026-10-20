@@ -7,35 +7,25 @@
       "faltan": [
         "authoritative chat resync deletes stale rows while preserving racing live upserts"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "backend-lifecycle",
       "oracle": 8,
-      "ok": 0,
-      "faltan": [
-        "restart lifecycle exposes bounded progress and a fresh resync epoch",
-        "a restart queued during another resync is retained and coalesced to the latest epoch",
-        "a superseding list refresh invalidates old-epoch completion and cleanup",
-        "transient bootstrap failures wait for lifecycle recovery while terminal failures stay fatal",
-        "terminal and exhausted failures are actionable and never resync",
-        "epoch resync refetches every distinct active pane conversation",
-        "epoch refresh retries with bounded exponential delays and returns once complete",
-        "epoch refresh exposes the final error after its retry budget"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 8,
+      "faltan": [],
+      "en": [
+        "backend_lifecycle.rs"
+      ]
     },
     {
       "modulo": "chat-merge",
       "oracle": 1,
-      "ok": 0,
-      "faltan": [
-        "chat merge cancels old poll intents without losing canonical work"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 1,
+      "faltan": [],
+      "en": [
+        "chat_merge.rs"
+      ]
     },
     {
       "modulo": "emoji-autocomplete",
@@ -53,49 +43,25 @@
         "deduplicates glyphs, honors the result limit, and handles a bare query",
         "integration helper returns the active match with ranked suggestions"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "file-drop",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "homogeneous image drops are reviewed as photos across path formats",
-        "homogeneous video and audio drops retain their media kinds",
-        "documents and mixed drops stay together as one document batch"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "file_drop.rs"
+      ]
     },
     {
       "modulo": "media-crop",
       "oracle": 20,
-      "ok": 0,
-      "faltan": [
-        "a reversed drag becomes a positive rectangle anchored at the dragged corner",
-        "a rectangle that leaves the source is clamped to its bounds",
-        "a rectangle entirely outside the source collapses to one pixel at the origin",
-        "a crop never covers less than one pixel",
-        "non-finite rectangle components never leak into the result",
-        "a broken source size is a programming error",
-        "rotating by a quarter turn swaps the image dimensions",
-        "the same crop maps to the four expected rectangles in the rotated space",
-        "the rotated crop stays inside the rotated canvas for every angle",
-        "a quarter turn is the bounding box of the four rotated corners",
-        "rotating a crop and rotating it back returns the original rectangle",
-        "the plan outputs the size of the rotated crop",
-        "a plan over the whole image outputs the whole rotated image",
-        "a plan normalises the requested crop before rotating it",
-        "a scaled crop survives the trip back to the original image",
-        "a scaled crop is clamped to the target size",
-        "the canvas transform offsets the crop and scales it onto the canvas",
-        "only a crop that fits the source is valid",
-        "rotating advances a quarter turn clockwise",
-        "any number of degrees parses into the nearest quarter turn"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 20,
+      "faltan": [],
+      "en": [
+        "media_crop.rs"
+      ]
     },
     {
       "modulo": "notification-routing",
@@ -110,32 +76,25 @@
         "missing chats and deleted messages have explicit fallback outcomes",
         "permission denial is cached until the user explicitly retries"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "notifications",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "notification policy suppresses foreground, muted, outgoing, and disabled messages",
-        "responsive split panes only expose the focused conversation",
-        "notification text obeys the privacy preview preference"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "notification_policy.rs"
+      ]
     },
     {
       "modulo": "pairing",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "only an unpaired startup begins pairing",
-        "QR lifecycle distinguishes waiting, active, and expired codes",
-        "QR codes without a backend expiry remain usable"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "pairing.rs"
+      ]
     },
     {
       "modulo": "participant-avatar-queue",
@@ -152,8 +111,7 @@
         "exhausted transient retries are not session-cached as privacy failures",
         "terminal privacy failures evict oldest entries at the configured bound"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "performance",
@@ -166,36 +124,25 @@
         "canonical message windows stay bounded around the requested target",
         "the 1,000-member roster keeps its mounted DOM budget bounded"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "polls",
       "oracle": 4,
-      "ok": 0,
-      "faltan": [
-        "poll reducer changes a vote without duplicating the voter",
-        "poll reducer retracts and restores a complete vote intent",
-        "an older backend update cannot overwrite a newer pending intent",
-        "poll snapshots can be copied from reactive proxy values"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 4,
+      "faltan": [],
+      "en": [
+        "polls.rs"
+      ]
     },
     {
       "modulo": "scroll-restoration",
       "oracle": 6,
-      "ok": 0,
-      "faltan": [
-        "captures a stable first-visible message anchor instead of a raw scroll offset",
-        "marks a viewport near the bottom as following latest",
-        "restores an existing anchor and preserves its viewport offset",
-        "a viewport that followed latest returns to the newest message",
-        "a first visit prefers the unread boundary and otherwise uses latest",
-        "a trimmed-away anchor falls back to the unread boundary"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 6,
+      "faltan": [],
+      "en": [
+        "scroll_restoration.rs"
+      ]
     },
     {
       "modulo": "send-idempotency",
@@ -206,8 +153,7 @@
         "a confirmed send followed by the same payload is a new send",
         "changing any logical payload selects a fresh ID after failure"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "spotlight",
@@ -219,8 +165,7 @@
         "aliases, phone numbers, multiple terms, and accents are searchable",
         "archived chats stay out of instant Spotlight results"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "sync",
@@ -232,22 +177,16 @@
         "partial and failed states remain visible and actionable",
         "an empty conversation explains incomplete account history"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "tab-keyboard",
       "oracle": 5,
-      "ok": 0,
-      "faltan": [
-        "Alt+Shift+Arrow reorders within a pane",
-        "reorder reports first and last tab boundaries",
-        "Control+Shift+Arrow moves to an adjacent pane at a bounded index",
-        "cross-pane movement reports both outer boundaries",
-        "Delete closes while modified Delete and unrelated keys pass through"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 5,
+      "faltan": [],
+      "en": [
+        "tab_keyboard.rs"
+      ]
     },
     {
       "modulo": "theme",
@@ -259,31 +198,25 @@
         "clone and export retain the trusted structural style",
         "theme application exposes appearance and structural style on the root"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "unread",
       "oracle": 3,
-      "ok": 0,
-      "faltan": [
-        "partial message windows retain the backend unread count",
-        "a read through the newest message can clear the badge optimistically",
-        "a matching authoritative upsert prevents rollback after a lost response"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 3,
+      "faltan": [],
+      "en": [
+        "unread.rs"
+      ]
     },
     {
       "modulo": "unsupported",
       "oracle": 2,
-      "ok": 0,
-      "faltan": [
-        "poll fallback preserves title and every option",
-        "poll result snapshots remain distinguishable"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 2,
+      "faltan": [],
+      "en": [
+        "unsupported.rs"
+      ]
     },
     {
       "modulo": "voice-note",
@@ -294,8 +227,7 @@
         "webmOpusToOggOpus passes through existing OggS data",
         "webmOpusToOggOpus converts WebM SimpleBlocks into valid Ogg Opus container"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "whatsapp-formatting-spoiler",
@@ -310,8 +242,7 @@
         "keeps malformed spoilers as literal text",
         "a spoiler does not leak into the next line"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "whatsapp-formatting",
@@ -326,51 +257,67 @@
         "mentions are atomic, can inherit formatting, and do not match inside code or email",
         "HTML-looking input is returned only as inert text tokens"
       ],
-      "sobran": [],
-      "puerto": false
+      "en": []
     },
     {
       "modulo": "workspace",
       "oracle": 31,
-      "ok": 0,
-      "faltan": [
-        "opening a tab that is already open focuses it instead of duplicating it",
-        "selecting an already-open tab focuses it without touching the tab list",
-        "selecting a new chat replaces the active tab in place, not appending",
-        "closing the active tab activates the right-hand neighbour",
-        "closing the last tab in a strip falls back to the left-hand neighbour",
-        "closing an inactive tab leaves the active tab untouched",
-        "closing the last tab of the second pane removes that pane",
-        "closing the last tab of the only pane leaves an empty pane, not zero panes",
-        "every close boundary leaves a deterministic selected tab for focus restoration",
-        "moving a tab to another pane removes it from the source and appends it to the destination",
-        "moving a tab within the same pane reorders it to the requested index",
-        "same-pane rightward drops account for removing the source tab",
-        "remapping a chat id updates a pane's tabs and active chat",
-        "remapping onto a chat id already open drops the duplicate instead of colliding",
-        "switcher initial highlight: reverse always lands on the last candidate",
-        "switcher initial highlight: forward with the active chat leading skips to index 1",
-        "switcher initial highlight: forward with the active chat not leading starts at index 0",
-        "the switcher does not open with fewer than two candidates",
-        "cycling the switcher only moves the highlight, wrapping in both directions",
-        "candidate seeding falls back to the visible chat list until session history has two entries",
-        "candidate seeding stops once session history already has two or more entries",
-        "candidate seeding drops history entries for chats that no longer exist",
-        "the active chat is swapped to the front of the candidate list when already present",
-        "the active chat is inserted at the front when it is not yet in session history",
-        "conversations no longer open in any pane are evicted first",
-        "once every hydrated chat is still open, the cap evicts the least recently focused",
-        "conversation eviction never drops a chat currently visible in a pane",
-        "normalizing a workspace snapshot rejects untrusted shapes",
-        "normalizing a workspace snapshot accepts a well-formed payload and repairs a dangling active id",
-        "normalizing a workspace gives each chat one pane-local viewport",
-        "chat merge deduplicates a canonical chat across panes"
-      ],
-      "sobran": [],
-      "puerto": false
+      "ok": 31,
+      "faltan": [],
+      "en": [
+        "workspace.rs"
+      ]
     }
   ],
   "total_oracle": 153,
-  "total_ok": 0,
-  "paridad_pct": 0.0
+  "total_ok": 89,
+  "paridad_pct": 58.17,
+  "sobran": [],
+  "caracterizacion": [
+    "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",
+    "sort_chats_breaks_the_tie_with_the_locale_collation_of_the_ids (app_helpers.rs)",
+    "sort_chats_breaks_a_full_tie_with_the_id (app_helpers.rs)",
+    "merge_chats_lets_the_incoming_chat_win_and_keeps_the_first_seen_order (app_helpers.rs)",
+    "merge_chats_keeps_the_previous_optional_flags_when_the_incoming_chat_has_none (app_helpers.rs)",
+    "reconcile_authoritative_chats_keeps_the_local_copy_of_a_chat_whose_revision_moved (app_helpers.rs)",
+    "merge_messages_merges_by_id_and_sorts_the_window (app_helpers.rs)",
+    "merge_messages_keeps_the_local_image_path_the_backend_does_not_know (app_helpers.rs)",
+    "merge_messages_keeps_the_local_attachment_path (app_helpers.rs)",
+    "merge_messages_drops_the_media_when_the_incoming_message_is_text (app_helpers.rs)",
+    "sort_messages_orders_by_timestamp_and_then_by_id (app_helpers.rs)",
+    "upsert_sorted_message_appends_a_newer_message_at_the_end (app_helpers.rs)",
+    "upsert_sorted_message_inserts_a_message_in_the_middle (app_helpers.rs)",
+    "upsert_sorted_message_inserts_a_message_at_the_beginning (app_helpers.rs)",
+    "upsert_sorted_message_replaces_an_existing_message_in_place (app_helpers.rs)",
+    "upsert_sorted_message_resorts_an_existing_message_that_moved (app_helpers.rs)",
+    "upsert_sorted_message_honours_an_explicit_existing_index (app_helpers.rs)",
+    "trim_messages_leaves_a_window_under_the_cap_untouched (app_helpers.rs)",
+    "trim_messages_drops_the_oldest_window_when_it_drops_older (app_helpers.rs)",
+    "trim_messages_drops_the_newest_window_when_it_drops_newer (app_helpers.rs)",
+    "encode_mentions_replaces_the_visible_names_with_the_bare_jid_user (app_helpers.rs)",
+    "encode_mentions_skips_a_mention_that_is_not_visible (app_helpers.rs)",
+    "encode_mentions_replaces_every_occurrence_of_the_visible_name (app_helpers.rs)",
+    "media_key_joins_the_chat_and_the_message_with_a_nul (app_helpers.rs)",
+    "read_recent_chats_drops_the_entries_that_are_not_strings (app_helpers.rs)",
+    "write_recent_chats_serializes_the_list_for_the_storage (app_helpers.rs)",
+    "remember_recent_chat_moves_a_known_chat_to_the_front (app_helpers.rs)",
+    "remember_recent_chat_prepends_a_new_chat (app_helpers.rs)",
+    "remember_recent_chat_caps_the_history_at_ten_entries (app_helpers.rs)",
+    "clone_draft_copies_the_draft_and_its_mentions (app_helpers.rs)",
+    "draft_is_empty_only_accepts_a_draft_without_content (app_helpers.rs)",
+    "the_time_of_a_day_follows_the_captured_format_of_the_locale (message_format.rs)",
+    "the_time_of_a_day_follows_the_offset_of_the_time_zone (message_format.rs)",
+    "the_chat_time_of_a_day_follows_the_captured_format_of_the_locale (message_format.rs)",
+    "the_day_of_a_message_follows_the_captured_format_of_the_locale (message_format.rs)",
+    "the_day_key_keeps_the_zero_based_month_of_the_original (message_format.rs)",
+    "the_text_of_a_message_follows_the_captured_values (message_format.rs)",
+    "the_subtitle_of_a_chat_follows_the_captured_values (message_format.rs)",
+    "the_initials_of_a_name_follow_the_captured_values (message_format.rs)",
+    "the_hue_of_a_name_follows_the_captured_values (message_format.rs)",
+    "the_size_of_a_file_follows_the_captured_values (message_format.rs)",
+    "the_duration_of_a_voice_note_follows_the_captured_values (message_format.rs)",
+    "the_countdown_of_a_disappearing_message_follows_the_captured_values (message_format.rs)",
+    "the_label_of_a_connection_follows_the_captured_values (message_format.rs)",
+    "the_safe_http_url_of_a_value_follows_the_captured_values (message_format.rs)"
+  ]
 }
