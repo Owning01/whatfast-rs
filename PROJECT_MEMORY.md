@@ -495,12 +495,19 @@ el path se deriva del repositorio y no hace falta configurar nada.
 
 - **El perfil de desarrollo**. El `[profile.dev]` estaba en
   `crates/whatfast-ui/Cargo.toml`, y cargo **ignora los perfiles de los
-  miembros del workspace**: se compilaba con el debug completo. Ahora esta
-  en la raiz del workspace, con `debug = "line-tables-only"`.
-  **Medido**: el rlib de `image` pesa 62,6 MB con `limited` y 24,4 MB con
-  `line-tables-only` (igual que sin debug, pero conserva los numeros de
-  linea, asi que los backtraces siguen apuntando a una linea).
-  El target paso de **10,95 GB a 2,64 GB**.
+  miembros del workspace**: no se aplicaba ninguno. Ahora esta en la raiz
+  del workspace, con `debug = "line-tables-only"`.
+  **Medido por crate**: el rlib de `image` pesa 62,6 MB con `limited` y
+  24,4 MB con `line-tables-only` (igual que sin debug, pero conserva los
+  numeros de linea).
+  **Medido sobre el stack completo: NO ahorra nada** (3,40 GB con el perfil
+  viejo y 3,41 GB con el nuevo, dos builds limpios en directorios
+  separados). El tama?o lo domina el stack de Zed, no la info de debug.
+  Se deja `line-tables-only` porque es el ajuste correcto y no cuesta nada.
+  **La correccion importante**: los 10,95 GB que pesaba el target NO eran
+  el tama?o de una compilacion: eran el accumulo de varias configuraciones
+  de perfil, porque **cargo nunca borra los artefactos que quedaron
+  viejos**. Un `cargo clean` y a compilar de nuevo: **2,64 GB**.
 - **sccache 0.18.0** instalado (binario precompilado, 9,2 MB) en
   `G:\Dev\cargo\bin`, con la cache en `G:\_build\sccache` y un tope de
   8 GiB. `RUSTC_WRAPPER=sccache` a nivel de maquina: los nueve proyectos
