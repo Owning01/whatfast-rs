@@ -10,6 +10,14 @@ description = "Protobuf contract of the Whatfast bridge, generated from proto/br
 [dependencies]
 prost.workspace = true
 thiserror.workspace = true
+# The transport's queues are `async_channel`, the same FIFO abstraction the
+# origin used: it works with any executor, so the crate imposes no runtime.
+async-channel.workspace = true
+
+[dev-dependencies]
+# The ported cases of the origin drive a fake sidecar through the same
+# channels the transport uses.
+async-channel.workspace = true
 
 [build-dependencies]
 prost-build = "0.14"

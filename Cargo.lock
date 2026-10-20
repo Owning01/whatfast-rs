@@ -7658,6 +7658,7 @@ dependencies = [
 name = "whatfast-protocol"
 version = "0.2.0"
 dependencies = [
+ "async-channel",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
