@@ -12,10 +12,16 @@ anyhow.workspace = true
 async-channel.workspace = true
 whatfast-core = { path = "../whatfast-core" }
 whatfast-protocol = { path = "../whatfast-protocol" }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba" }
+# The GPUI stack comes from the Zed repository. Do NOT add `rev = ...` here:
+# the crates inside that repository depend on each other by plain git URL, so
+# a `rev` on the direct dependencies would resolve to a SECOND copy of gpui
+# and the `AssetSource` trait would not match. The commit is pinned in
+# `Cargo.lock` (zed#1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba), and that is
+# what `gpui-component` at its pinned revision compiles against.
+gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
 emojis = "0.9.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 qrcode = { version = "0.14", default-features = false }

@@ -32,6 +32,5 @@ pub mod theme;
 pub mod types;
 pub mod unread;
 pub mod unsupported;
-pub mod voice_note;
 pub mod whatsapp_formatting;
 pub mod workspace;

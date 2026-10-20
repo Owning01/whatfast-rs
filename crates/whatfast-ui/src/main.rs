@@ -11,7 +11,10 @@
 //! - the linked-device credentials never enter this process: they live in
 //!   the Go sidecar and only the RPC results reach here
 
-use gpui::{Context, Render, Window, WindowBounds, WindowOptions, div, px, size};
+use gpui::{
+    AppContext, Context, ParentElement as _, Render, Styled as _, Window, WindowBounds, WindowOptions,
+    div, px, size,
+};
 use gpui_component::{Theme, ThemeMode};
 use gpui_component_assets::Assets;
 
