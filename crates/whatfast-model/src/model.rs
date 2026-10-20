@@ -5,7 +5,10 @@
 //! `crate::geom`'s, and the protobuf DTOs come from `whatfast-protocol`
 //! instead of the origin's private `proto` module.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use crate::geom::{Pixels, Size, px, size};
 
@@ -58,6 +61,30 @@ pub struct Store {
     pub fatal_error: Option<String>,
     pub toast_error: Option<String>,
     pub last_mark_read_id: Option<String>,
+    /// The progress of the synchronization of the account.
+    ///
+    /// port: the origin keeps this in the state of the web client
+    /// (`state/app.ts`, `applySyncStatus`). It arrives with `GetSyncStatus`
+    /// and with the `SyncStatusChanged` event.
+    pub sync_status: Option<whatfast_protocol::SyncStatus>,
+    /// The summary of the history of every conversation of the account.
+    pub history_overview: Option<whatfast_protocol::HistoryOverview>,
+    /// The health of the local database of the sidecar.
+    pub integrity_status: Option<whatfast_protocol::IntegrityStatus>,
+    /// The coverage of the history, one entry per conversation.
+    pub history_coverage: HashMap<String, whatfast_protocol::HistoryCoverage>,
+    /// The pinned messages, one list per conversation.
+    pub pinned_messages: HashMap<String, Vec<whatfast_protocol::PinnedMessage>>,
+    /// The library of stickers, grouped in packs.
+    pub sticker_packs: Vec<whatfast_protocol::StickerPack>,
+    /// The statuses of the profile, grouped by their sender.
+    pub statuses: Vec<whatfast_protocol::StatusGroup>,
+    /// The conversation that carries the statuses.
+    pub statuses_chat_id: String,
+    /// The newsletters the account is subscribed to.
+    pub newsletters: Vec<whatfast_protocol::Newsletter>,
+    /// The posts of each newsletter.
+    pub newsletter_messages: HashMap<String, Vec<whatfast_protocol::Message>>,
     chat_index: HashMap<String, usize>,
     inbox_chat_ids: Rc<Vec<String>>,
     archived_chat_ids: Rc<Vec<String>>,
@@ -452,6 +479,324 @@ impl Store {
         false
     }
 
+    /// Applies the status of the synchronization of the account.
+    ///
+    /// port: the origin applies a status only when its revision is not older
+    /// than the one it already has (`shouldApplySyncStatus` in
+    /// `state/sync.ts`). The port keeps the same rule.
+    ///
+    /// Returns whether the status was applied.
+    pub fn apply_sync_status(&mut self, status: whatfast_protocol::SyncStatus) -> bool {
+        if let Some(current) = &self.sync_status
+            && status.revision < current.revision
+        {
+            return false;
+        }
+        self.sync_status = Some(status);
+        true
+    }
+
+    /// Keeps the summary of the history of the account.
+    pub fn set_history_overview(&mut self, overview: whatfast_protocol::HistoryOverview) {
+        self.history_overview = Some(overview);
+    }
+
+    /// Keeps the health of the local database of the sidecar.
+    pub fn set_integrity_status(&mut self, status: whatfast_protocol::IntegrityStatus) {
+        self.integrity_status = Some(status);
+    }
+
+    /// Keeps the coverage of the history of one conversation.
+    ///
+    /// port: the origin only replaces a coverage with one that is not older
+    /// than the one it has (`coverage.revision >= current.revision`).
+    ///
+    /// Returns whether the coverage was applied.
+    pub fn set_history_coverage(&mut self, coverage: whatfast_protocol::HistoryCoverage) -> bool {
+        let chat_id = coverage.chat_id.clone();
+        if chat_id.is_empty() {
+            return false;
+        }
+        if let Some(current) = self.history_coverage.get(&chat_id)
+            && coverage.revision < current.revision
+        {
+            return false;
+        }
+        self.history_coverage.insert(chat_id, coverage);
+        true
+    }
+
+    /// The coverage of the history of one conversation.
+    pub fn history_coverage(&self, chat_id: &str) -> Option<&whatfast_protocol::HistoryCoverage> {
+        self.history_coverage.get(chat_id)
+    }
+
+    /// Keeps the pinned messages of one conversation.
+    pub fn set_pinned_messages(
+        &mut self,
+        chat_id: String,
+        pins: Vec<whatfast_protocol::PinnedMessage>,
+    ) {
+        self.pinned_messages.insert(chat_id, pins);
+    }
+
+    /// The pinned messages of one conversation.
+    pub fn pinned_messages(&self, chat_id: &str) -> &[whatfast_protocol::PinnedMessage] {
+        self.pinned_messages.get(chat_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether one message of one conversation is pinned.
+    pub fn message_is_pinned(&self, chat_id: &str, message_id: &str) -> bool {
+        self.pinned_messages
+            .get(chat_id)
+            .is_some_and(|pins| pins.iter().any(|pin| pin.message_id == message_id))
+    }
+
+    /// Keeps the library of stickers.
+    pub fn set_sticker_packs(&mut self, packs: Vec<whatfast_protocol::StickerPack>) {
+        self.sticker_packs = packs;
+    }
+
+    /// The library of stickers.
+    pub fn sticker_packs(&self) -> &[whatfast_protocol::StickerPack] {
+        &self.sticker_packs
+    }
+
+    /// One sticker of the library, by its id.
+    pub fn find_sticker(&self, sticker_id: &str) -> Option<&whatfast_protocol::Sticker> {
+        self.sticker_packs
+            .iter()
+            .flat_map(|pack| pack.stickers.iter())
+            .find(|sticker| sticker.id == sticker_id)
+    }
+
+    /// Keeps the statuses of the profile and the conversation that carries
+    /// them.
+    pub fn set_statuses(&mut self, chat_id: String, groups: Vec<whatfast_protocol::StatusGroup>) {
+        self.statuses_chat_id = chat_id;
+        self.statuses = groups;
+    }
+
+    /// The statuses of the profile.
+    pub fn statuses(&self) -> &[whatfast_protocol::StatusGroup] {
+        &self.statuses
+    }
+
+    /// The conversation that carries the statuses.
+    pub fn statuses_chat_id(&self) -> &str {
+        &self.statuses_chat_id
+    }
+
+    /// Keeps the newsletters the account is subscribed to.
+    pub fn set_newsletters(&mut self, newsletters: Vec<whatfast_protocol::Newsletter>) {
+        self.newsletters = newsletters;
+    }
+
+    /// The newsletters the account is subscribed to.
+    pub fn newsletters(&self) -> &[whatfast_protocol::Newsletter] {
+        &self.newsletters
+    }
+
+    /// Adds one newsletter, replacing the one with the same jid.
+    ///
+    /// port: the origin subscribes with
+    /// `[...items.filter((item) => item.jid !== jid), newsletter]`.
+    pub fn add_newsletter(&mut self, newsletter: whatfast_protocol::Newsletter) {
+        self.newsletters.retain(|item| item.jid != newsletter.jid);
+        self.newsletters.push(newsletter);
+    }
+
+    /// Drops one newsletter. Returns whether it was there.
+    pub fn remove_newsletter(&mut self, jid: &str) -> bool {
+        let before = self.newsletters.len();
+        self.newsletters.retain(|item| item.jid != jid);
+        self.newsletters.len() != before
+    }
+
+    /// Keeps the posts of one newsletter.
+    pub fn set_newsletter_messages(
+        &mut self,
+        jid: String,
+        messages: Vec<whatfast_protocol::Message>,
+    ) {
+        self.newsletter_messages.insert(jid, messages);
+    }
+
+    /// The posts of one newsletter.
+    pub fn newsletter_messages(&self, jid: &str) -> &[whatfast_protocol::Message] {
+        self.newsletter_messages.get(jid).map_or(&[], Vec::as_slice)
+    }
+
+    /// Keeps the path of the cached file of one attachment.
+    ///
+    /// Returns whether the path changed.
+    pub fn set_message_attachment_path(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        path: String,
+    ) -> bool {
+        let Some(message) = self
+            .message_index
+            .get(message_id)
+            .and_then(|index| self.messages.get_mut(*index))
+            .filter(|message| message.chat_id == chat_id)
+        else {
+            return false;
+        };
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            message.content.as_mut()
+        else {
+            return false;
+        };
+        if attachment.local_path == path {
+            return false;
+        }
+        attachment.local_path = path;
+        true
+    }
+
+    /// Pins or unpins one conversation, keeping the order of the sidebar.
+    pub fn set_chat_pinned(&mut self, chat_id: &str, pinned: bool) -> bool {
+        let Some(index) = self.chat_index.get(chat_id).copied() else {
+            return false;
+        };
+        let Some(chat) = self.chats.get_mut(index) else {
+            return false;
+        };
+        if chat.pinned == pinned {
+            return true;
+        }
+        chat.pinned = pinned;
+        // port: the origin sorts the list again when a conversation is
+        // pinned, because the pinned ones go first.
+        self.sort_chats();
+        true
+    }
+
+    /// Archives or unarchives one conversation.
+    pub fn set_chat_archived(&mut self, chat_id: &str, archived: bool) -> bool {
+        let Some(index) = self.chat_index.get(chat_id).copied() else {
+            return false;
+        };
+        let Some(chat) = self.chats.get_mut(index) else {
+            return false;
+        };
+        chat.archived = archived;
+        // port: the archived conversations leave the inbox of the sidebar.
+        self.rebuild_chat_ids();
+        true
+    }
+
+    /// Mutes or unmutes one conversation.
+    pub fn set_chat_muted(&mut self, chat_id: &str, muted: bool, mute_until_ms: i64) -> bool {
+        let Some(index) = self.chat_index.get(chat_id).copied() else {
+            return false;
+        };
+        let Some(chat) = self.chats.get_mut(index) else {
+            return false;
+        };
+        chat.muted = muted;
+        chat.mute_until_ms = mute_until_ms;
+        true
+    }
+
+    /// Blocks or unblocks one conversation.
+    pub fn set_chat_blocked(&mut self, chat_id: &str, blocked: bool) -> bool {
+        let Some(index) = self.chat_index.get(chat_id).copied() else {
+            return false;
+        };
+        let Some(chat) = self.chats.get_mut(index) else {
+            return false;
+        };
+        chat.blocked = blocked;
+        true
+    }
+
+    /// Marks one message as revoked, the way a delete looks locally, and
+    /// returns the message it replaced so the caller can roll it back.
+    ///
+    /// port: the origin sets `{ ...current, revoked: true, content: null }`.
+    pub fn revoke_message(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Option<whatfast_protocol::Message> {
+        let index = self.message_index.get(message_id).copied()?;
+        let message = self.messages.get_mut(index)?;
+        if message.chat_id != chat_id {
+            return None;
+        }
+        let previous = message.clone();
+        message.revoked = true;
+        message.content = None;
+        self.invalidate_message_height(message_id);
+        Some(previous)
+    }
+
+    /// Puts a message back where it was, after a failed change.
+    pub fn restore_message(&mut self, message: whatfast_protocol::Message) {
+        self.upsert_message(message);
+    }
+
+    /// Applies one complete vote intent to the poll of one message and
+    /// returns the poll it replaced, so the caller can roll it back.
+    pub fn apply_poll_vote(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        selected_options: &[String],
+    ) -> Option<whatfast_protocol::PollContent> {
+        let index = self.message_index.get(message_id).copied()?;
+        let message = self.messages.get_mut(index)?;
+        if message.chat_id != chat_id {
+            return None;
+        }
+        let Some(whatfast_protocol::message::Content::Poll(poll)) = message.content.as_mut() else {
+            return None;
+        };
+        let previous = poll.clone();
+        *poll = optimistic_poll_vote(poll, selected_options);
+        Some(previous)
+    }
+
+    /// Puts the poll of one message back where it was, after a failed vote.
+    pub fn restore_poll_content(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        content: whatfast_protocol::PollContent,
+    ) -> bool {
+        let Some(index) = self.message_index.get(message_id).copied() else {
+            return false;
+        };
+        let Some(message) = self.messages.get_mut(index) else {
+            return false;
+        };
+        if message.chat_id != chat_id {
+            return false;
+        }
+        let Some(whatfast_protocol::message::Content::Poll(poll)) = message.content.as_mut() else {
+            return false;
+        };
+        *poll = content;
+        true
+    }
+
+    /// Forgets the height of one message, because its content changed.
+    fn invalidate_message_height(&mut self, id: &str) {
+        for heights in self.message_height_cache.values_mut() {
+            heights.remove(id);
+        }
+        self.measured_width_bucket = None;
+    }
+
+    /// Sorts the conversations of the sidebar again.
+    fn sort_chats(&mut self) {
+        self.chats.sort_by(compare_chats);
+        self.reindex_chats();
+    }
+
     fn reindex_chats(&mut self) {
         self.chat_index.clear();
         self.chat_index.reserve(self.chats.len());
@@ -561,6 +906,61 @@ pub fn message_text(message: &whatfast_protocol::Message) -> &str {
         }
         Some(whatfast_protocol::message::Content::Poll(poll)) => poll.question.as_str(),
         None => "Unsupported message",
+    }
+}
+
+/// Applies one complete local vote intent to a poll.
+///
+/// port: the origin reduces the vote in `tauri/src/lib/polls.ts`, over the
+/// DTOs of `tauri/src/lib/types.ts`. The store works over the DTOs of the
+/// bridge, so the reducer is repeated here with the same rules: the selected
+/// options are the whole intent, an empty list retracts the vote and the
+/// total of voters follows.
+fn optimistic_poll_vote(
+    poll: &whatfast_protocol::PollContent,
+    selected_options: &[String],
+) -> whatfast_protocol::PollContent {
+    let previous: HashSet<&str> = poll
+        .options
+        .iter()
+        .filter(|option| option.selected_by_me)
+        .map(|option| option.name.as_str())
+        .collect();
+    let next: HashSet<&str> = selected_options.iter().map(String::as_str).collect();
+
+    let total_voters = if previous.is_empty() && !next.is_empty() {
+        poll.total_voters.saturating_add(1)
+    } else if !previous.is_empty() && next.is_empty() {
+        poll.total_voters.saturating_sub(1)
+    } else {
+        poll.total_voters
+    };
+
+    whatfast_protocol::PollContent {
+        question: poll.question.clone(),
+        options: poll
+            .options
+            .iter()
+            .map(|option| {
+                let was_selected = previous.contains(option.name.as_str());
+                let is_selected = next.contains(option.name.as_str());
+                let vote_count = if was_selected && !is_selected {
+                    option.vote_count.saturating_sub(1)
+                } else if !was_selected && is_selected {
+                    option.vote_count.saturating_add(1)
+                } else {
+                    option.vote_count
+                };
+                whatfast_protocol::PollOption {
+                    name: option.name.clone(),
+                    vote_count,
+                    selected_by_me: is_selected,
+                    voters: option.voters.clone(),
+                }
+            })
+            .collect(),
+        selectable_options_count: poll.selectable_options_count,
+        total_voters,
     }
 }
 
@@ -1273,12 +1673,60 @@ mod tests {
             ..Default::default()
         });
         store.upsert_message(message(1));
+        store.apply_sync_status(whatfast_protocol::SyncStatus {
+            revision: 9,
+            ..Default::default()
+        });
+        store.set_history_overview(whatfast_protocol::HistoryOverview {
+            local_message_count: 12,
+            ..Default::default()
+        });
+        store.set_integrity_status(whatfast_protocol::IntegrityStatus {
+            database_ok: false,
+            ..Default::default()
+        });
+        store.set_pinned_messages(
+            "private-chat".into(),
+            vec![whatfast_protocol::PinnedMessage {
+                message_id: "1".into(),
+                ..Default::default()
+            }],
+        );
+        store.set_sticker_packs(vec![whatfast_protocol::StickerPack {
+            id: "favorites".into(),
+            ..Default::default()
+        }]);
+        store.set_statuses("status@broadcast".into(), Vec::new());
+        store.set_newsletters(vec![whatfast_protocol::Newsletter {
+            jid: "news@newsletter".into(),
+            ..Default::default()
+        }]);
         store.clear_account_state();
         assert!(store.chats.is_empty());
         assert!(store.messages.is_empty());
         assert!(store.selected_chat_id.is_none());
         assert!(store.qr_code.is_none());
         assert_eq!(store.total_chats, 0);
+        assert!(store.sync_status.is_none());
+        assert!(store.history_overview.is_none());
+        assert!(store.integrity_status.is_none());
+        assert!(store.pinned_messages.is_empty());
+        assert!(store.sticker_packs.is_empty());
+        assert!(store.newsletters.is_empty());
+        assert!(store.statuses_chat_id.is_empty());
+    }
+
+    #[test]
+    fn a_message_of_another_conversation_is_ignored() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut other = message(1);
+        other.chat_id = "other".into();
+        store.upsert_message(other);
+
+        assert!(store.messages.is_empty());
     }
 
     #[test]
@@ -1351,5 +1799,392 @@ mod tests {
             store.message("2").map(|message| message.id.as_str()),
             Some("2")
         );
+    }
+
+    fn chat(id: &str) -> whatfast_protocol::Chat {
+        whatfast_protocol::Chat {
+            id: id.into(),
+            title: id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn poll_message(id: &str) -> whatfast_protocol::Message {
+        let mut message = message(1);
+        message.id = id.into();
+        message.content = Some(whatfast_protocol::message::Content::Poll(
+            whatfast_protocol::PollContent {
+                question: "Lunch?".into(),
+                selectable_options_count: 2,
+                total_voters: 1,
+                options: vec![
+                    whatfast_protocol::PollOption {
+                        name: "Pizza".into(),
+                        vote_count: 1,
+                        selected_by_me: true,
+                        voters: vec![whatfast_protocol::PollVoter {
+                            user_id: "me".into(),
+                            display_name: "You".into(),
+                            from_me: true,
+                            ..Default::default()
+                        }],
+                    },
+                    whatfast_protocol::PollOption {
+                        name: "Sushi".into(),
+                        vote_count: 0,
+                        selected_by_me: false,
+                        voters: Vec::new(),
+                    },
+                ],
+            },
+        ));
+        message
+    }
+
+    #[test]
+    fn the_sync_status_ignores_an_older_revision() {
+        let mut store = Store::default();
+        assert!(store.apply_sync_status(whatfast_protocol::SyncStatus {
+            revision: 4,
+            chats_processed: 10,
+            ..Default::default()
+        }));
+        assert!(!store.apply_sync_status(whatfast_protocol::SyncStatus {
+            revision: 3,
+            chats_processed: 99,
+            ..Default::default()
+        }));
+        assert_eq!(
+            store.sync_status.as_ref().map(|status| status.revision),
+            Some(4)
+        );
+        assert_eq!(
+            store
+                .sync_status
+                .as_ref()
+                .map(|status| status.chats_processed),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn the_history_coverage_ignores_an_older_revision() {
+        let mut store = Store::default();
+        let coverage = |revision: u64| whatfast_protocol::HistoryCoverage {
+            chat_id: "chat".into(),
+            revision,
+            local_message_count: revision,
+            ..Default::default()
+        };
+        assert!(store.set_history_coverage(coverage(7)));
+        assert!(!store.set_history_coverage(coverage(6)));
+        assert_eq!(
+            store
+                .history_coverage("chat")
+                .map(|coverage| coverage.local_message_count),
+            Some(7)
+        );
+        assert!(store.history_coverage("other").is_none());
+    }
+
+    #[test]
+    fn the_overview_and_the_integrity_status_keep_the_last_answer() {
+        let mut store = Store::default();
+        store.set_history_overview(whatfast_protocol::HistoryOverview {
+            local_message_count: 120,
+            chats_with_messages: 3,
+            ..Default::default()
+        });
+        store.set_integrity_status(whatfast_protocol::IntegrityStatus {
+            database_ok: false,
+            pending_inbound: 5,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            store
+                .history_overview
+                .as_ref()
+                .map(|overview| overview.local_message_count),
+            Some(120)
+        );
+        assert_eq!(
+            store
+                .integrity_status
+                .as_ref()
+                .map(|status| status.pending_inbound),
+            Some(5)
+        );
+        assert!(
+            store
+                .integrity_status
+                .as_ref()
+                .is_some_and(|status| !status.database_ok)
+        );
+    }
+
+    #[test]
+    fn the_pinned_messages_are_kept_per_conversation() {
+        let mut store = Store::default();
+        let pin = |message_id: &str| whatfast_protocol::PinnedMessage {
+            message_id: message_id.into(),
+            pinned_at_ms: 1_900_000_000_000,
+            pinned_by: "me".into(),
+            available: true,
+            ..Default::default()
+        };
+        store.set_pinned_messages("chat".into(), vec![pin("m1")]);
+        store.set_pinned_messages("other".into(), vec![pin("m2")]);
+
+        assert_eq!(store.pinned_messages("chat").len(), 1);
+        assert!(store.message_is_pinned("chat", "m1"));
+        assert!(!store.message_is_pinned("chat", "m2"));
+        assert!(store.message_is_pinned("other", "m2"));
+        assert!(store.pinned_messages("missing").is_empty());
+    }
+
+    #[test]
+    fn the_sticker_library_is_searchable_by_id() {
+        let mut store = Store::default();
+        store.set_sticker_packs(vec![whatfast_protocol::StickerPack {
+            id: "favorites".into(),
+            name: "Favourites".into(),
+            stickers: vec![whatfast_protocol::Sticker {
+                id: "fav-1".into(),
+                favorite: true,
+                ..Default::default()
+            }],
+        }]);
+
+        assert_eq!(store.sticker_packs().len(), 1);
+        assert_eq!(
+            store.find_sticker("fav-1").map(|sticker| sticker.favorite),
+            Some(true)
+        );
+        assert!(store.find_sticker("missing").is_none());
+    }
+
+    #[test]
+    fn the_statuses_keep_the_conversation_that_carries_them() {
+        let mut store = Store::default();
+        store.set_statuses(
+            "status@broadcast".into(),
+            vec![whatfast_protocol::StatusGroup {
+                sender_id: "maya@s.whatsapp.net".into(),
+                sender_name: "Maya Nair".into(),
+                ..Default::default()
+            }],
+        );
+
+        assert_eq!(store.statuses().len(), 1);
+        assert_eq!(store.statuses_chat_id(), "status@broadcast");
+    }
+
+    #[test]
+    fn the_newsletters_are_added_once_and_dropped_by_jid() {
+        let mut store = Store::default();
+        store.set_newsletters(vec![whatfast_protocol::Newsletter {
+            jid: "news@newsletter".into(),
+            name: "Whatfast News".into(),
+            ..Default::default()
+        }]);
+        store.add_newsletter(whatfast_protocol::Newsletter {
+            jid: "news@newsletter".into(),
+            name: "Whatfast News Renamed".into(),
+            ..Default::default()
+        });
+
+        assert_eq!(store.newsletters().len(), 1);
+        assert_eq!(store.newsletters()[0].name, "Whatfast News Renamed");
+
+        assert!(store.remove_newsletter("news@newsletter"));
+        assert!(!store.remove_newsletter("news@newsletter"));
+        assert!(store.newsletters().is_empty());
+    }
+
+    #[test]
+    fn the_posts_of_a_newsletter_are_kept_per_jid() {
+        let mut store = Store::default();
+        let mut post = message(1);
+        post.chat_id = "news@newsletter".into();
+        store.set_newsletter_messages("news@newsletter".into(), vec![post]);
+
+        assert_eq!(store.newsletter_messages("news@newsletter").len(), 1);
+        assert!(store.newsletter_messages("other").is_empty());
+    }
+
+    #[test]
+    fn the_path_of_an_attachment_lands_on_its_message() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut with_attachment = message(1);
+        with_attachment.content = Some(whatfast_protocol::message::Content::Attachment(
+            whatfast_protocol::AttachmentContent {
+                file_name: "agenda.pdf".into(),
+                downloadable: true,
+                ..Default::default()
+            },
+        ));
+        store.upsert_message(with_attachment);
+
+        assert!(store.set_message_attachment_path("chat", "1", "/cache/agenda.pdf".into()));
+        assert!(
+            !store.set_message_attachment_path("chat", "1", "/cache/agenda.pdf".into()),
+            "the same path is not a change"
+        );
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("attachment content missing");
+        };
+        assert_eq!(attachment.local_path, "/cache/agenda.pdf");
+        assert!(!store.set_message_attachment_path("other", "1", "/cache/x".into()));
+        assert!(!store.set_message_attachment_path("chat", "missing", "/cache/x".into()));
+    }
+
+    #[test]
+    fn pinning_a_conversation_moves_it_to_the_front_of_the_sidebar() {
+        let mut store = Store::default();
+        store.replace_chat_page(
+            "",
+            vec![chat("first"), chat("second"), chat("third")],
+            3,
+            String::new(),
+        );
+
+        assert!(store.set_chat_pinned("third", true));
+        assert_eq!(store.chats[0].id, "third");
+        assert!(store.chat("third").is_some_and(|chat| chat.pinned));
+
+        assert!(store.set_chat_pinned("third", false));
+        assert_eq!(store.chats[0].id, "first");
+        assert!(!store.set_chat_pinned("missing", true));
+    }
+
+    #[test]
+    fn archiving_a_conversation_takes_it_out_of_the_inbox() {
+        let mut store = Store::default();
+        store.replace_chat_page("", vec![chat("inbox"), chat("archived")], 2, String::new());
+
+        assert!(store.set_chat_archived("archived", true));
+        assert_eq!(store.chat_ids(ChatView::Inbox).as_slice(), ["inbox"]);
+        assert_eq!(store.chat_ids(ChatView::Archived).as_slice(), ["archived"]);
+
+        assert!(store.set_chat_archived("archived", false));
+        assert_eq!(
+            store.chat_ids(ChatView::Inbox).as_slice(),
+            ["archived", "inbox"]
+        );
+        assert!(!store.set_chat_archived("missing", true));
+    }
+
+    #[test]
+    fn muting_and_blocking_a_conversation_keep_their_flags() {
+        let mut store = Store::default();
+        store.replace_chat_page("", vec![chat("chat")], 1, String::new());
+
+        assert!(store.set_chat_muted("chat", true, 1_900_000_000_000));
+        assert!(store.chat("chat").is_some_and(|chat| chat.muted));
+        assert_eq!(
+            store.chat("chat").map(|chat| chat.mute_until_ms),
+            Some(1_900_000_000_000)
+        );
+
+        assert!(store.set_chat_blocked("chat", true));
+        assert!(store.chat("chat").is_some_and(|chat| chat.blocked));
+
+        assert!(store.set_chat_muted("chat", false, 0));
+        assert!(!store.chat("chat").is_some_and(|chat| chat.muted));
+        assert_eq!(store.chat("chat").map(|chat| chat.mute_until_ms), Some(0));
+        assert!(!store.set_chat_blocked("missing", true));
+    }
+
+    #[test]
+    fn a_deleted_message_is_revoked_and_can_be_put_back() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(message(1));
+
+        let previous = store
+            .revoke_message("chat", "1")
+            .expect("the message is there");
+        assert!(store.messages[0].revoked);
+        assert!(store.messages[0].content.is_none());
+        assert_eq!(previous.id, "1");
+
+        store.restore_message(previous);
+        assert!(!store.messages[0].revoked);
+        assert!(store.revoke_message("other", "1").is_none());
+    }
+
+    #[test]
+    fn the_vote_of_a_poll_is_optimistic_and_can_be_rolled_back() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(poll_message("poll"));
+
+        let previous = store
+            .apply_poll_vote("chat", "poll", &["Sushi".to_string()])
+            .expect("the poll is there");
+        let Some(whatfast_protocol::message::Content::Poll(poll)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("poll content missing");
+        };
+        assert_eq!(poll.total_voters, 1);
+        assert_eq!(poll.options[0].vote_count, 0);
+        assert!(!poll.options[0].selected_by_me);
+        assert_eq!(poll.options[1].vote_count, 1);
+        assert!(poll.options[1].selected_by_me);
+
+        assert!(store.restore_poll_content("chat", "poll", previous));
+        let Some(whatfast_protocol::message::Content::Poll(restored)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("poll content missing");
+        };
+        assert_eq!(restored.options[0].vote_count, 1);
+        assert!(restored.options[0].selected_by_me);
+        assert!(store.apply_poll_vote("chat", "missing", &[]).is_none());
+    }
+
+    #[test]
+    fn the_poll_reducer_retracts_and_restores_a_complete_vote_intent() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(poll_message("poll"));
+
+        let retracted = store
+            .apply_poll_vote("chat", "poll", &[])
+            .expect("the poll is there");
+        let Some(whatfast_protocol::message::Content::Poll(poll)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("poll content missing");
+        };
+        assert_eq!(poll.total_voters, 0);
+        assert_eq!(poll.options[0].vote_count, 0);
+
+        store.restore_poll_content("chat", "poll", retracted);
+        store.apply_poll_vote("chat", "poll", &["Pizza".to_string(), "Sushi".to_string()]);
+        let Some(whatfast_protocol::message::Content::Poll(restored)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("poll content missing");
+        };
+        let counts: Vec<u32> = restored
+            .options
+            .iter()
+            .map(|option| option.vote_count)
+            .collect();
+        assert_eq!(counts, vec![1, 1]);
     }
 }

@@ -40,13 +40,13 @@ use whatfast_model::{
     settings, sticker,
 };
 use whatfast_protocol::{
-    BackendEvent, Chat, ChatParticipant, ConnectionState, ContactSearchResult, MessageSearchResult,
-    RpcResponse, backend_event, rpc_request, rpc_response,
+    AttachmentKind, BackendEvent, Chat, ChatParticipant, ConnectionState, ContactSearchResult,
+    MessageSearchResult, RpcResponse, backend_event, rpc_request, rpc_response,
 };
 
 use crate::rpc::{
-    BridgeMessage, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY, RpcClient, RpcIncoming,
-    TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
+    BridgeMessage, OutgoingAttachment, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY,
+    RpcClient, RpcIncoming, TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
 };
 use crate::text::{
     encode_mentions, format_typing_label, mention_display_name, mention_token_start,
@@ -95,6 +95,18 @@ pub(crate) const SMOOTH_SCROLL_FRICTION: f32 = 10.0;
 pub(crate) const SMOOTH_SCROLL_STOP_VELOCITY: f32 = 18.0;
 /// How many participants the mention picker shows at most.
 pub(crate) const MAX_MENTION_ROWS: usize = 8;
+/// How many posts of a newsletter the client asks for.
+pub(crate) const NEWSLETTER_PAGE_SIZE: i32 = 25;
+/// How often the statuses of the profile are read again.
+///
+/// port: the origin polls the store every forty five seconds, because the
+/// statuses arrive without a push event.
+pub(crate) const STATUS_REFRESH: Duration = Duration::from_secs(45);
+/// The moment a conversation muted without an end stops being muted.
+///
+/// port: the origin uses the last moment of the calendar of JavaScript,
+/// `253_402_300_799_000`, for a mute that has no end.
+pub(crate) const MUTE_UNTIL_INDEFINITE: i64 = 253_402_300_799_000;
 /// How long a typing indicator lives without an update.
 pub(crate) const TYPING_INDICATOR_TTL: Duration = Duration::from_secs(10);
 /// How often the composer re-broadcasts "still typing" while text keeps
@@ -200,6 +212,13 @@ pub(crate) struct ChatDraft {
     /// Participants tagged via the @ picker. Each entry backs an `@Name`
     /// token in `text`; tokens the user has since deleted are dropped at send.
     pub(crate) mentions: Vec<MentionEntry>,
+    /// The message the user is editing, when the composer holds an edit and
+    /// not a new message.
+    ///
+    /// port: the origin keeps the same field in its draft
+    /// (`editingMessageId`) and sends an edit instead of a text when it is
+    /// there.
+    pub(crate) editing_message_id: Option<String>,
 }
 
 /// One participant the user tagged with the @ picker.
@@ -220,8 +239,16 @@ pub(crate) struct MentionPicker {
 }
 
 impl ChatDraft {
+    /// Whether the draft holds nothing.
+    ///
+    /// port: the origin checks the same fields of its draft
+    /// (`draftIsEmpty`): a draft that edits a message is not empty, because
+    /// the message it edits is still the one the user is working on.
     pub(crate) fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.reply_to_message_id.is_none()
+        self.text.is_empty()
+            && self.reply_to_message_id.is_none()
+            && self.editing_message_id.is_none()
+            && self.mentions.is_empty()
     }
 }
 
@@ -519,6 +546,31 @@ pub(crate) struct Whatfast {
     pub(crate) sticker_preparing: bool,
     pub(crate) reaction_repair_attempted: HashSet<String>,
     pub(crate) latest_reaction_intents: HashMap<(String, String), String>,
+    /// The generation of every vote of a poll that is in flight, so an old
+    /// answer cannot overwrite a newer intent of the user.
+    pub(crate) poll_vote_generations: HashMap<(String, String), u64>,
+    /// The poll of every message with a vote in flight, kept to roll the
+    /// optimistic change back and to protect it from stale snapshots.
+    pub(crate) pending_poll_votes: HashMap<(String, String), (u64, whatfast_protocol::PollContent)>,
+    /// The message of every deletion in flight, kept to roll the optimistic
+    /// change back.
+    pub(crate) pending_message_deletes: HashMap<(String, String), whatfast_protocol::Message>,
+    /// The generation of every pin of a message that is in flight.
+    pub(crate) pin_generations: HashMap<(String, String), u64>,
+    /// The attachments whose download was already asked for.
+    pub(crate) attachment_download_attempted: HashSet<(String, String)>,
+    /// The attachments whose download failed.
+    pub(crate) attachment_failures: HashMap<(String, String), String>,
+    /// Whether the health of the local database is being checked.
+    pub(crate) integrity_checking: bool,
+    /// Whether the library of stickers is being loaded.
+    pub(crate) sticker_library_loading: bool,
+    /// Whether the newsletters are being loaded.
+    pub(crate) newsletters_loading: bool,
+    /// The newsletter whose posts are open.
+    pub(crate) selected_newsletter: Option<String>,
+    /// When the statuses of the profile were read the last time.
+    pub(crate) last_status_refresh: Instant,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -681,6 +733,17 @@ impl Whatfast {
             sticker_preparing: false,
             reaction_repair_attempted: HashSet::new(),
             latest_reaction_intents: HashMap::new(),
+            poll_vote_generations: HashMap::new(),
+            pending_poll_votes: HashMap::new(),
+            pending_message_deletes: HashMap::new(),
+            pin_generations: HashMap::new(),
+            attachment_download_attempted: HashSet::new(),
+            attachment_failures: HashMap::new(),
+            integrity_checking: false,
+            sticker_library_loading: false,
+            newsletters_loading: false,
+            selected_newsletter: None,
+            last_status_refresh: Instant::now(),
             _subscriptions,
         };
         if let Some(error) = startup_error {
@@ -789,10 +852,8 @@ impl Whatfast {
     /// Sends a request to the backend, or shows the fatal screen when the
     /// request could not even be queued.
     pub(crate) fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
-        if let Err(error) = self.rpc.send(request, pending) {
-            self.store.screen = Screen::Fatal;
-            self.store.fatal_error = Some(error.to_string());
-        }
+        let sent = self.rpc.send(request, pending);
+        report_failed_request(&mut self.store, sent);
     }
 
     /// Sweeps the requests that outlived their deadline and undoes what they
@@ -805,6 +866,14 @@ impl Whatfast {
             indicators.retain(|_, indicator| indicator.expires_at > now);
             !indicators.is_empty()
         });
+        // port: the statuses arrive without a push event, so the client polls
+        // the store every forty five seconds to keep them fresh.
+        if self.store.connection == ConnectionState::Connected
+            && self.last_status_refresh.elapsed() >= STATUS_REFRESH
+        {
+            self.last_status_refresh = Instant::now();
+            self.load_statuses();
+        }
         for (_, pending) in self.rpc.expire() {
             match pending {
                 PendingRequest::Hello | PendingRequest::Auth => {
@@ -926,6 +995,105 @@ impl Whatfast {
                 PendingRequest::Search { .. } => {}
                 // Best-effort presence broadcast; peers expire it on their own.
                 PendingRequest::SetTyping => {}
+                PendingRequest::SetChatPin {
+                    chat_id,
+                    previous_pinned,
+                } => {
+                    self.store.set_chat_pinned(&chat_id, previous_pinned);
+                    self.store.toast_error = Some("Pinning the chat timed out. Try again.".into());
+                }
+                PendingRequest::SetChatArchive {
+                    chat_id,
+                    previous_archived,
+                } => {
+                    self.store.set_chat_archived(&chat_id, previous_archived);
+                    self.store.toast_error =
+                        Some("Archiving the chat timed out. Try again.".into());
+                }
+                PendingRequest::SetChatMute {
+                    chat_id,
+                    previous_muted,
+                    previous_mute_until_ms,
+                } => {
+                    self.store
+                        .set_chat_muted(&chat_id, previous_muted, previous_mute_until_ms);
+                    self.store.toast_error = Some("Muting the chat timed out. Try again.".into());
+                }
+                PendingRequest::SetChatBlock {
+                    chat_id,
+                    previous_blocked,
+                } => {
+                    self.store.set_chat_blocked(&chat_id, previous_blocked);
+                    self.store.toast_error = Some("Blocking the chat timed out. Try again.".into());
+                }
+                PendingRequest::DeleteMessage {
+                    chat_id,
+                    message_id,
+                } => {
+                    if let Some(previous) = self
+                        .pending_message_deletes
+                        .remove(&(chat_id.clone(), message_id.clone()))
+                    {
+                        self.store.restore_message(previous);
+                    }
+                    self.store.toast_error =
+                        Some("Deleting the message timed out. Try again.".into());
+                }
+                PendingRequest::VotePoll {
+                    chat_id,
+                    poll_message_id,
+                    generation,
+                } => {
+                    self.rollback_poll_vote(&chat_id, &poll_message_id, generation);
+                    self.store.toast_error = Some("The vote timed out. Try again.".into());
+                }
+                PendingRequest::EditMessage {
+                    chat_id,
+                    message_id,
+                    draft_text,
+                } => {
+                    self.restore_failed_edit(&chat_id, &message_id, &draft_text, window, cx);
+                    self.store.toast_error = Some(
+                        "Editing the message timed out. Your draft was restored; try again.".into(),
+                    );
+                }
+                PendingRequest::OlderHistory { chat_id } => {
+                    report_failed_request(
+                        &mut self.store,
+                        self.rpc.request_history_coverage(chat_id.clone()),
+                    );
+                    self.store.toast_error =
+                        Some("Asking for older history timed out. Try again.".into());
+                }
+                PendingRequest::Reconnect => {
+                    self.store.connection = ConnectionState::Offline;
+                    self.store.connection_detail = "Reconnect failed".into();
+                    self.store.toast_error = Some("Reconnect timed out. Try again.".into());
+                }
+                PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache => {
+                    self.integrity_checking = false;
+                    self.store.toast_error =
+                        Some("Checking the local storage timed out. Try again.".into());
+                }
+                PendingRequest::Stickers => {
+                    self.sticker_library_loading = false;
+                    self.store.toast_error =
+                        Some("Loading the stickers timed out. Try again.".into());
+                }
+                PendingRequest::Newsletters => {
+                    self.newsletters_loading = false;
+                    self.store.toast_error =
+                        Some("Loading the newsletters timed out. Try again.".into());
+                }
+                PendingRequest::MessageAttachment {
+                    chat_id,
+                    message_id,
+                } => {
+                    self.attachment_failures.insert(
+                        (chat_id.clone(), message_id.clone()),
+                        "Downloading the file timed out · Click to retry".into(),
+                    );
+                }
                 _ => {
                     self.store.toast_error = Some("Backend request timed out. Try again.".into());
                 }
@@ -1317,6 +1485,120 @@ impl Whatfast {
                 self.store.restore_unread(chat_id, *previous_unread);
                 self.store.last_mark_read_id = None;
             }
+            // The changes below are optimistic: the client shows them before
+            // the backend answers, so a failure has to put them back.
+            if let PendingRequest::SetChatPin {
+                chat_id,
+                previous_pinned,
+            } = &pending
+            {
+                self.store.set_chat_pinned(chat_id, *previous_pinned);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::SetChatArchive {
+                chat_id,
+                previous_archived,
+            } = &pending
+            {
+                self.store.set_chat_archived(chat_id, *previous_archived);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::SetChatMute {
+                chat_id,
+                previous_muted,
+                previous_mute_until_ms,
+            } = &pending
+            {
+                self.store
+                    .set_chat_muted(chat_id, *previous_muted, *previous_mute_until_ms);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::SetChatBlock {
+                chat_id,
+                previous_blocked,
+            } = &pending
+            {
+                self.store.set_chat_blocked(chat_id, *previous_blocked);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::DeleteMessage {
+                chat_id,
+                message_id,
+            } = &pending
+            {
+                if let Some(previous) = self
+                    .pending_message_deletes
+                    .remove(&(chat_id.clone(), message_id.clone()))
+                {
+                    self.store.restore_message(previous);
+                }
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::VotePoll {
+                chat_id,
+                poll_message_id,
+                generation,
+            } = &pending
+            {
+                self.rollback_poll_vote(chat_id, poll_message_id, *generation);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::EditMessage {
+                chat_id,
+                message_id,
+                draft_text,
+            } = &pending
+            {
+                self.restore_failed_edit(chat_id, message_id, draft_text, window, cx);
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::OlderHistory { chat_id } = &pending {
+                // port: the origin reads the coverage again when the request
+                // of more history fails, because the failure moves it.
+                report_failed_request(
+                    &mut self.store,
+                    self.rpc.request_history_coverage(chat_id.clone()),
+                );
+                self.store.toast_error = Some(error.message.clone());
+                return;
+            }
+            if let PendingRequest::Reconnect = &pending {
+                self.store.connection = ConnectionState::Offline;
+                self.store.connection_detail = "Reconnect failed".into();
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
+            if let PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache = &pending {
+                self.integrity_checking = false;
+            }
+            if let PendingRequest::Stickers = &pending {
+                self.sticker_library_loading = false;
+            }
+            if let PendingRequest::Newsletters = &pending {
+                self.newsletters_loading = false;
+            }
+            if let PendingRequest::MessageAttachment {
+                chat_id,
+                message_id,
+            } = &pending
+            {
+                self.attachment_failures.insert(
+                    (chat_id.clone(), message_id.clone()),
+                    if error.retryable {
+                        "Couldn't download the file · Click to retry".into()
+                    } else {
+                        "That file is no longer available".into()
+                    },
+                );
+                return;
+            }
             if matches!(&pending, PendingRequest::Logout) {
                 self.confirming_logout = false;
                 self.store.screen = Screen::Fatal;
@@ -1360,6 +1642,9 @@ impl Whatfast {
                 if auth.paired {
                     self.store.screen = Screen::Syncing;
                     self.load_chats(String::new());
+                    // port: the origin reads the status of the sync with the
+                    // state of the account, in the same round trip.
+                    self.load_sync_status();
                 } else {
                     self.begin_pairing();
                 }
@@ -1614,6 +1899,249 @@ impl Whatfast {
             (PendingRequest::Logout, rpc_response::Result::Logout(_)) => {
                 self.begin_pairing();
             }
+            (PendingRequest::SyncStatus, rpc_response::Result::SyncStatus(status)) => {
+                if let Some(status) = status.status {
+                    self.store.apply_sync_status(status);
+                }
+            }
+            (
+                PendingRequest::OlderHistory { .. },
+                rpc_response::Result::RequestOlderHistory(response),
+            ) => {
+                if let Some(coverage) = response.coverage {
+                    self.store.set_history_coverage(coverage);
+                }
+            }
+            (
+                PendingRequest::HistoryCoverage { .. },
+                rpc_response::Result::GetChatHistoryCoverage(response),
+            ) => {
+                if let Some(coverage) = response.coverage {
+                    self.store.set_history_coverage(coverage);
+                }
+            }
+            (
+                PendingRequest::HistoryOverview,
+                rpc_response::Result::GetHistoryOverview(response),
+            ) => {
+                if let Some(overview) = response.overview {
+                    self.store.set_history_overview(overview);
+                }
+            }
+            (
+                PendingRequest::IntegrityStatus,
+                rpc_response::Result::GetIntegrityStatus(response),
+            ) => {
+                self.integrity_checking = false;
+                if let Some(status) = response.status {
+                    self.store.set_integrity_status(status);
+                }
+            }
+            (
+                PendingRequest::RepairLocalCache,
+                rpc_response::Result::RepairLocalCache(response),
+            ) => {
+                self.integrity_checking = false;
+                if let Some(status) = response.status {
+                    self.store.set_integrity_status(status);
+                }
+                // port: the origin reloads the chats and the open
+                // conversations after the repair, because the cache changed.
+                self.load_chats(String::new());
+                if self.store.selected_chat_id.is_some() {
+                    self.refresh_latest();
+                }
+            }
+            (PendingRequest::Reconnect, rpc_response::Result::Reconnect(reconnect)) => {
+                self.store.connection_detail = if reconnect.started {
+                    "Connecting on your request".into()
+                } else {
+                    "Reconnect is already running or this device is not linked".into()
+                };
+            }
+            (PendingRequest::SendAttachment { .. }, rpc_response::Result::SendAttachment(sent)) => {
+                if let Some(message) = sent.message {
+                    let sent_to_selected_chat =
+                        self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
+                    self.store.upsert_message(message);
+                    if sent_to_selected_chat {
+                        self.scroll_to_bottom_generation = Some(self.message_generation);
+                    }
+                }
+            }
+            (
+                PendingRequest::MessageAttachment {
+                    chat_id,
+                    message_id,
+                },
+                rpc_response::Result::GetMessageAttachment(response),
+            ) if response.chat_id == chat_id && response.message_id == message_id => {
+                let key = (chat_id.clone(), message_id.clone());
+                if response.local_path.is_empty() {
+                    self.attachment_failures
+                        .insert(key, "That file is no longer available".into());
+                } else {
+                    self.attachment_failures.remove(&key);
+                    self.store.set_message_attachment_path(
+                        &chat_id,
+                        &message_id,
+                        response.local_path,
+                    );
+                }
+            }
+            (PendingRequest::Stickers, rpc_response::Result::ListStickers(response)) => {
+                self.sticker_library_loading = false;
+                self.store.set_sticker_packs(response.packs);
+            }
+            (
+                PendingRequest::SendStickerFromLibrary { .. },
+                rpc_response::Result::SendStickerFromLibrary(sent),
+            ) => {
+                if let Some(message) = sent.message {
+                    let sent_to_selected_chat =
+                        self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
+                    self.store.upsert_message(message);
+                    if sent_to_selected_chat {
+                        self.scroll_to_bottom_generation = Some(self.message_generation);
+                    }
+                }
+            }
+            (
+                PendingRequest::ForwardMessage { target_chat_id, .. },
+                rpc_response::Result::ForwardMessage(sent),
+            ) => {
+                if let Some(message) = sent.message {
+                    let sent_to_selected_chat =
+                        self.store.selected_chat_id.as_deref() == Some(target_chat_id.as_str());
+                    self.store.upsert_message(message);
+                    if sent_to_selected_chat {
+                        self.scroll_to_bottom_generation = Some(self.message_generation);
+                    }
+                }
+            }
+            (PendingRequest::EditMessage { .. }, rpc_response::Result::EditMessage(edited)) => {
+                if let Some(message) = edited.message {
+                    self.store.upsert_message(message);
+                    self.scroll_to_bottom_generation = Some(self.message_generation);
+                }
+            }
+            (
+                PendingRequest::DeleteMessage {
+                    chat_id,
+                    message_id,
+                },
+                rpc_response::Result::DeleteMessage(deleted),
+            ) => {
+                self.pending_message_deletes
+                    .remove(&(chat_id.clone(), message_id.clone()));
+                if let Some(message) = deleted.message {
+                    self.store.upsert_message(message);
+                }
+            }
+            (
+                PendingRequest::SetMessagePin {
+                    chat_id,
+                    message_id,
+                    generation,
+                },
+                rpc_response::Result::SetMessagePin(_),
+            ) => {
+                // port: the origin reloads the pinned messages when the pin
+                // that is still the current one settles.
+                let key = (chat_id.clone(), message_id.clone());
+                if self.pin_generations.get(&key).copied() == Some(generation) {
+                    self.load_pinned_messages(chat_id);
+                }
+            }
+            (
+                PendingRequest::PinnedMessages { chat_id },
+                rpc_response::Result::ListPinnedMessages(response),
+            ) => {
+                self.store.set_pinned_messages(chat_id, response.pins);
+            }
+            (PendingRequest::CreatePoll { .. }, rpc_response::Result::CreatePoll(created)) => {
+                if let Some(message) = created.message {
+                    self.store.upsert_message(message);
+                    self.scroll_to_bottom_generation = Some(self.message_generation);
+                }
+            }
+            (
+                PendingRequest::VotePoll {
+                    chat_id,
+                    poll_message_id,
+                    generation,
+                },
+                rpc_response::Result::VotePoll(voted),
+            ) => {
+                let key = (chat_id.clone(), poll_message_id.clone());
+                let current = self.poll_vote_generations.get(&key).copied() == Some(generation);
+                if current {
+                    self.pending_poll_votes.remove(&key);
+                    if let Some(message) = voted.message {
+                        self.store.upsert_message(message);
+                    }
+                }
+            }
+            (PendingRequest::Statuses, rpc_response::Result::ListStatuses(response)) => {
+                self.store.set_statuses(response.chat_id, response.groups);
+            }
+            (
+                PendingRequest::SubscribeNewsletter,
+                rpc_response::Result::SubscribeNewsletter(response),
+            ) => {
+                if let Some(newsletter) = response.newsletter {
+                    let jid = newsletter.jid.clone();
+                    self.store.add_newsletter(newsletter);
+                    self.select_newsletter(jid);
+                }
+            }
+            (PendingRequest::Newsletters, rpc_response::Result::ListNewsletters(response)) => {
+                self.newsletters_loading = false;
+                self.store.set_newsletters(response.newsletters);
+            }
+            (
+                PendingRequest::NewsletterMessages { jid },
+                rpc_response::Result::ListNewsletterMessages(response),
+            ) => {
+                self.store.set_newsletter_messages(jid, response.messages);
+            }
+            (
+                PendingRequest::UnsubscribeNewsletter { jid },
+                rpc_response::Result::UnsubscribeNewsletter(_),
+            ) => {
+                if self.store.remove_newsletter(&jid)
+                    && self.selected_newsletter.as_deref() == Some(&jid)
+                {
+                    self.selected_newsletter = None;
+                    self.store.set_newsletter_messages(jid, Vec::new());
+                }
+            }
+            (PendingRequest::SetChatPin { .. }, rpc_response::Result::SetChatPin(response)) => {
+                if let Some(chat) = response.chat {
+                    self.store.upsert_chat(chat);
+                }
+            }
+            (
+                PendingRequest::SetChatArchive { .. },
+                rpc_response::Result::SetChatArchive(response),
+            ) => {
+                if let Some(chat) = response.chat {
+                    self.store.upsert_chat(chat);
+                }
+            }
+            (PendingRequest::SetChatMute { .. }, rpc_response::Result::SetChatMute(response)) => {
+                if let Some(chat) = response.chat {
+                    self.store.upsert_chat(chat);
+                }
+            }
+            (PendingRequest::SetChatBlock { .. }, rpc_response::Result::SetChatBlock(response)) => {
+                if let Some(chat) = response.chat {
+                    self.store.upsert_chat(chat);
+                }
+            }
+            (PendingRequest::Shutdown, rpc_response::Result::Shutdown(_)) => {
+                self.store.toast_error = Some("The local backend was asked to stop".into());
+            }
             _ => {}
         }
     }
@@ -1693,10 +2221,19 @@ impl Whatfast {
                     self.load_chats(String::new());
                 }
             }
-            // Detailed sync/coverage UI is implemented by the primary Tauri
-            // shell. The legacy behavioral reference keeps its coarse status.
-            Some(backend_event::Event::SyncStatusChanged(_)) => {}
-            Some(backend_event::Event::HistoryCoverageChanged(_)) => {}
+            // The status of the sync and the coverage of the history are
+            // domain state: the client keeps them even when no panel shows
+            // them yet.
+            Some(backend_event::Event::SyncStatusChanged(changed)) => {
+                if let Some(status) = changed.status {
+                    self.store.apply_sync_status(status);
+                }
+            }
+            Some(backend_event::Event::HistoryCoverageChanged(changed)) => {
+                if let Some(coverage) = changed.coverage {
+                    self.store.set_history_coverage(coverage);
+                }
+            }
             Some(backend_event::Event::ChatUpserted(upsert)) => {
                 if let Some(chat) = upsert.chat {
                     self.store.upsert_chat(chat);
@@ -1755,6 +2292,10 @@ impl Whatfast {
                     {
                         self.store.newer_activity = true;
                     } else {
+                        let mut message = message;
+                        // A vote that is in flight owns the poll of the
+                        // message until its own answer arrives.
+                        self.preserve_pending_poll_intent(&mut message);
                         self.store.upsert_message(message);
                         self.refresh_reaction_details();
                     }
@@ -1801,11 +2342,22 @@ impl Whatfast {
             }
             Some(backend_event::Event::RecentReactionsRepaired(_)) => {}
             // The sticker tray lives only in the Tauri desktop shell; this
-            // legacy GPUI reference has nothing to refresh in response.
-            Some(backend_event::Event::StickersChanged(_)) => {}
-            // Pinned-message browsing is implemented by the primary Tauri
-            // shell; the legacy GPUI behavioral reference has no surface.
-            Some(backend_event::Event::PinnedMessagesChanged(_)) => {}
+            // legacy GPUI reference only keeps the library.
+            Some(backend_event::Event::StickersChanged(_)) => {
+                // port: the origin asks for the library again when it needs
+                // a fresh view. Here the library is only reloaded when it was
+                // already open, so a change does not wake the sidecar.
+                if !self.store.sticker_packs().is_empty() {
+                    self.load_stickers();
+                }
+            }
+            // Pinned-message browsing lives in the Tauri desktop shell; this
+            // client keeps the list of the pinned messages.
+            Some(backend_event::Event::PinnedMessagesChanged(changed)) => {
+                if self.store.selected_chat_id.as_deref() == Some(changed.chat_id.as_str()) {
+                    self.load_pinned_messages(changed.chat_id.clone());
+                }
+            }
             Some(backend_event::Event::Problem(problem)) => {
                 if problem.fatal {
                     self.store.screen = Screen::Fatal;
@@ -2155,7 +2707,20 @@ impl Whatfast {
                     jid: jid.clone(),
                 })
                 .collect(),
+            editing_message_id: None,
         };
+        self.restore_draft(chat_id, failed_draft, window, cx);
+    }
+
+    /// Puts a draft back into the composer, when the message it carries
+    /// could not be sent.
+    fn restore_draft(
+        &mut self,
+        chat_id: &str,
+        failed_draft: ChatDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let should_restore = self
             .chat_drafts
             .get(chat_id)
@@ -2648,6 +3213,10 @@ impl Whatfast {
                 generation: self.message_generation,
             },
         );
+        // port: the origin reads the coverage and the pinned messages of
+        // every conversation it opens.
+        self.load_history_coverage(chat_id.clone());
+        self.load_pinned_messages(chat_id.clone());
         self.repair_recent_reactions(chat_id);
     }
 
@@ -2752,6 +3321,16 @@ impl Whatfast {
         self.image_failures.clear();
         self.reaction_repair_attempted.clear();
         self.latest_reaction_intents.clear();
+        self.poll_vote_generations.clear();
+        self.pending_poll_votes.clear();
+        self.pending_message_deletes.clear();
+        self.pin_generations.clear();
+        self.attachment_download_attempted.clear();
+        self.attachment_failures.clear();
+        self.integrity_checking = false;
+        self.sticker_library_loading = false;
+        self.newsletters_loading = false;
+        self.selected_newsletter = None;
         self.emoji_target = None;
         self.reaction_details = None;
         self.image_viewer = None;
@@ -2794,6 +3373,24 @@ impl Whatfast {
         }
         self.store.toast_error = None;
         let reply_to_message_id = self.replying_to_message_id.clone();
+        let editing_message_id = self
+            .chat_drafts
+            .get(&chat_id)
+            .and_then(|draft| draft.editing_message_id.clone());
+        if let Some(message_id) = editing_message_id {
+            // port: the origin sends an edit instead of a text when the draft
+            // carries the id of the message being edited.
+            self.mention_picker = None;
+            self.typing_signal = None;
+            self.clear_active_draft();
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            report_failed_request(
+                &mut self.store,
+                self.rpc.request_edit_message(chat_id, message_id, text),
+            );
+            return;
+        }
         let draft_mentions = self
             .chat_drafts
             .get(&chat_id)
@@ -3008,6 +3605,575 @@ impl Whatfast {
             },
         );
     }
+
+    // ---------------------------------------------------------------------
+    // The sync, the coverage of the history and the health of the cache
+    // ---------------------------------------------------------------------
+
+    /// Asks the sidecar for the progress of the synchronization.
+    pub(crate) fn load_sync_status(&mut self) {
+        report_failed_request(&mut self.store, self.rpc.request_sync_status());
+    }
+
+    /// Asks WhatsApp for more history of one conversation.
+    pub(crate) fn request_older_history(&mut self, chat_id: String) {
+        report_failed_request(&mut self.store, self.rpc.request_older_history(chat_id));
+    }
+
+    /// Asks the sidecar for the coverage of the history of one conversation.
+    pub(crate) fn load_history_coverage(&mut self, chat_id: String) {
+        report_failed_request(&mut self.store, self.rpc.request_history_coverage(chat_id));
+    }
+
+    /// Asks the sidecar for the summary of the history of the account.
+    pub(crate) fn load_history_overview(&mut self) {
+        report_failed_request(&mut self.store, self.rpc.request_history_overview());
+    }
+
+    /// Asks the sidecar for the health of the local database.
+    pub(crate) fn load_integrity_status(&mut self) {
+        self.integrity_checking = true;
+        report_failed_request(&mut self.store, self.rpc.request_integrity_status());
+    }
+
+    /// Repairs the local database of the sidecar.
+    pub(crate) fn repair_local_cache(&mut self) {
+        self.integrity_checking = true;
+        report_failed_request(&mut self.store, self.rpc.request_repair_local_cache());
+    }
+
+    /// Asks the sidecar to reconnect to WhatsApp.
+    ///
+    /// port: the origin refuses to reconnect when the account is already
+    /// connected, and it shows the state of the connection while it waits.
+    pub(crate) fn reconnect(&mut self) {
+        if self.store.connection == ConnectionState::Connected
+            || self.store.connection == ConnectionState::Connecting
+        {
+            return;
+        }
+        self.store.connection = ConnectionState::Connecting;
+        self.store.connection_detail = "Connecting on your request".into();
+        report_failed_request(&mut self.store, self.rpc.request_reconnect());
+    }
+
+    /// Asks the sidecar to stop.
+    pub(crate) fn shutdown(&mut self) {
+        report_failed_request(&mut self.store, self.rpc.request_shutdown());
+    }
+
+    // ---------------------------------------------------------------------
+    // The attachments
+    // ---------------------------------------------------------------------
+
+    /// Sends a file that is not an image.
+    pub(crate) fn send_attachment(
+        &mut self,
+        path: PathBuf,
+        kind: AttachmentKind,
+        caption: String,
+        voice_note: bool,
+    ) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        };
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        self.store.toast_error = None;
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_send_attachment(OutgoingAttachment {
+                client_message_id: Uuid::new_v4().to_string(),
+                chat_id,
+                file_path: path.to_string_lossy().into_owned(),
+                kind,
+                caption,
+                reply_to_message_id: String::new(),
+                voice_note,
+            }),
+        );
+    }
+
+    /// Asks the user for a file and sends it to the open conversation.
+    pub(crate) fn choose_attachment(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        kind: AttachmentKind,
+    ) {
+        if self.store.connection != ConnectionState::Connected
+            || self.store.selected_chat_id.is_none()
+        {
+            return;
+        }
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a file to send".into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        this.send_attachment(path, kind, String::new(), false);
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Downloads the file of one attachment into the local cache.
+    pub(crate) fn load_message_attachment(&mut self, chat_id: String, message_id: String) {
+        let key = (chat_id.clone(), message_id.clone());
+        if self.attachment_download_attempted.contains(&key) || self.rpc.pending_media_count() >= 4
+        {
+            return;
+        }
+        self.attachment_download_attempted.insert(key);
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_message_attachment(chat_id, message_id),
+        );
+    }
+
+    /// Downloads the file of one attachment again, after a failure.
+    pub(crate) fn retry_message_attachment(&mut self, chat_id: String, message_id: String) {
+        let key = (chat_id.clone(), message_id.clone());
+        self.attachment_failures.remove(&key);
+        self.attachment_download_attempted.remove(&key);
+        self.store
+            .set_message_attachment_path(&chat_id, &message_id, String::new());
+        self.load_message_attachment(chat_id, message_id);
+    }
+
+    // ---------------------------------------------------------------------
+    // The library of stickers
+    // ---------------------------------------------------------------------
+
+    /// Asks the sidecar for the library of stickers.
+    pub(crate) fn load_stickers(&mut self) {
+        self.sticker_library_loading = true;
+        report_failed_request(&mut self.store, self.rpc.request_stickers());
+    }
+
+    /// Sends one sticker of the library to the open conversation.
+    pub(crate) fn send_sticker_from_library(&mut self, sticker_id: String) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        };
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        if sticker_id.trim().is_empty() {
+            self.store.toast_error = Some("That sticker is no longer available".into());
+            return;
+        }
+        self.store.toast_error = None;
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_send_sticker_from_library(
+                Uuid::new_v4().to_string(),
+                chat_id,
+                sticker_id,
+            ),
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The messages: forward, edit and delete
+    // ---------------------------------------------------------------------
+
+    /// Sends one message to another conversation.
+    pub(crate) fn forward_message(
+        &mut self,
+        source_chat_id: String,
+        message_id: String,
+        target_chat_id: String,
+    ) {
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        self.store.toast_error = None;
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_forward_message(
+                Uuid::new_v4().to_string(),
+                source_chat_id,
+                message_id,
+                target_chat_id,
+            ),
+        );
+    }
+
+    /// Puts the text of one message in the composer to edit it.
+    ///
+    /// port: the origin does the same: the draft carries the id of the
+    /// message being edited and the composer sends an edit instead of a text.
+    pub(crate) fn start_edit(
+        &mut self,
+        message_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let Some(message) = self.store.message(&message_id) else {
+            return;
+        };
+        if !message.from_me || message.revoked {
+            return;
+        }
+        let Some(whatfast_protocol::message::Content::Text(text)) = message.content.as_ref() else {
+            return;
+        };
+        let text = text.text.clone();
+        let draft = self.chat_drafts.entry(chat_id.clone()).or_default();
+        draft.text = text.clone();
+        draft.reply_to_message_id = None;
+        draft.mentions.clear();
+        draft.editing_message_id = Some(message_id);
+        self.replying_to_message_id = None;
+        self.composer
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+    }
+
+    /// Drops the edit of a message and empties the composer.
+    ///
+    /// port: the origin empties the whole draft when the edit is cancelled.
+    pub(crate) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        self.chat_drafts.remove(&chat_id);
+        self.replying_to_message_id = None;
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Deletes one message of the open conversation.
+    ///
+    /// port: the origin marks the message as revoked before the answer
+    /// arrives, and puts it back when the backend refuses.
+    pub(crate) fn delete_message(&mut self, message_id: String, delete_for_everyone: bool) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let Some(message) = self.store.message(&message_id).cloned() else {
+            return;
+        };
+        if delete_for_everyone && !message.from_me {
+            self.store.toast_error =
+                Some("Only your own messages can be deleted for everyone".into());
+            return;
+        }
+        let Some(previous) = self.store.revoke_message(&chat_id, &message_id) else {
+            return;
+        };
+        self.pending_message_deletes
+            .insert((chat_id.clone(), message_id.clone()), previous);
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_delete_message(chat_id, message_id, delete_for_everyone),
+        );
+    }
+
+    /// Pins or unpins one message of the open conversation.
+    pub(crate) fn set_message_pin(&mut self, message_id: String, pinned: bool) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let key = (chat_id.clone(), message_id.clone());
+        let generation = {
+            let entry = self.pin_generations.entry(key).or_insert(0);
+            *entry = entry.wrapping_add(1);
+            *entry
+        };
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_set_message_pin(chat_id, message_id, pinned, generation),
+        );
+    }
+
+    /// Asks the sidecar for the pinned messages of one conversation.
+    pub(crate) fn load_pinned_messages(&mut self, chat_id: String) {
+        report_failed_request(&mut self.store, self.rpc.request_pinned_messages(chat_id));
+    }
+
+    // ---------------------------------------------------------------------
+    // The polls
+    // ---------------------------------------------------------------------
+
+    /// Creates one poll in the open conversation.
+    pub(crate) fn create_poll(
+        &mut self,
+        question: String,
+        options: Vec<String>,
+        selectable_options_count: u32,
+    ) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        };
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        self.store.toast_error = None;
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_create_poll(
+                Uuid::new_v4().to_string(),
+                chat_id,
+                question,
+                options,
+                selectable_options_count,
+            ),
+        );
+    }
+
+    /// Votes one poll of the open conversation.
+    ///
+    /// port: the origin reduces the vote on the message right away and keeps
+    /// the generation of the vote, so an old answer does not overwrite a
+    /// newer intent of the user.
+    pub(crate) fn vote_poll(&mut self, poll_message_id: String, selected_options: Vec<String>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let key = (chat_id.clone(), poll_message_id.clone());
+        let generation = {
+            let entry = self.poll_vote_generations.entry(key.clone()).or_insert(0);
+            *entry = entry.wrapping_add(1);
+            *entry
+        };
+        let Some(previous) =
+            self.store
+                .apply_poll_vote(&chat_id, &poll_message_id, &selected_options)
+        else {
+            return;
+        };
+        self.pending_poll_votes.insert(key, (generation, previous));
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_vote_poll(chat_id, poll_message_id, selected_options, generation),
+        );
+    }
+
+    /// Puts the poll of one message back where it was, after a failed vote.
+    fn rollback_poll_vote(&mut self, chat_id: &str, poll_message_id: &str, generation: u64) {
+        let key = (chat_id.to_owned(), poll_message_id.to_owned());
+        if self.poll_vote_generations.get(&key).copied() != Some(generation) {
+            // A newer vote is in flight: its intent is the one that counts.
+            return;
+        }
+        let Some((_, previous)) = self.pending_poll_votes.remove(&key) else {
+            return;
+        };
+        self.store
+            .restore_poll_content(chat_id, poll_message_id, previous);
+    }
+
+    /// Puts the pending vote of one message back into a snapshot of the
+    /// poll, so an unsolicited snapshot does not overwrite the intent of the
+    /// user.
+    ///
+    /// port: `preservePendingPollIntent` in `tauri/src/lib/polls.ts`.
+    fn preserve_pending_poll_intent(&self, message: &mut whatfast_protocol::Message) {
+        let key = (message.chat_id.clone(), message.id.clone());
+        let Some((_, pending)) = self.pending_poll_votes.get(&key) else {
+            return;
+        };
+        if !matches!(
+            message.content,
+            Some(whatfast_protocol::message::Content::Poll(_))
+        ) {
+            return;
+        }
+        message.content = Some(whatfast_protocol::message::Content::Poll(pending.clone()));
+    }
+
+    // ---------------------------------------------------------------------
+    // The statuses and the newsletters
+    // ---------------------------------------------------------------------
+
+    /// Asks the sidecar for the statuses of the profile.
+    pub(crate) fn load_statuses(&mut self) {
+        report_failed_request(&mut self.store, self.rpc.request_statuses());
+    }
+
+    /// Asks the sidecar for the newsletters of the account.
+    pub(crate) fn load_newsletters(&mut self) {
+        self.newsletters_loading = true;
+        report_failed_request(&mut self.store, self.rpc.request_newsletters());
+    }
+
+    /// Subscribes to one newsletter with its invite key.
+    pub(crate) fn subscribe_newsletter(&mut self, invite_key: String) {
+        let key = invite_key.trim().to_owned();
+        if key.is_empty() {
+            return;
+        }
+        report_failed_request(&mut self.store, self.rpc.request_subscribe_newsletter(key));
+    }
+
+    /// Opens one newsletter and asks for its posts.
+    pub(crate) fn select_newsletter(&mut self, jid: String) {
+        self.selected_newsletter = Some(jid.clone());
+        self.store.set_newsletter_messages(jid.clone(), Vec::new());
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_newsletter_messages(jid, NEWSLETTER_PAGE_SIZE),
+        );
+    }
+
+    /// Drops one newsletter.
+    pub(crate) fn unsubscribe_newsletter(&mut self, jid: String) {
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_unsubscribe_newsletter(jid),
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The flags of a conversation
+    // ---------------------------------------------------------------------
+
+    /// Pins or unpins one conversation.
+    pub(crate) fn set_chat_pinned(&mut self, chat_id: String, pinned: bool) {
+        let Some(chat) = self.store.chat(&chat_id) else {
+            return;
+        };
+        let previous_pinned = chat.pinned;
+        self.store.set_chat_pinned(&chat_id, pinned);
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_set_chat_pin(chat_id, pinned, previous_pinned),
+        );
+    }
+
+    /// Archives or unarchives one conversation.
+    pub(crate) fn set_chat_archived(&mut self, chat_id: String, archived: bool) {
+        let Some(chat) = self.store.chat(&chat_id) else {
+            return;
+        };
+        let previous_archived = chat.archived;
+        self.store.set_chat_archived(&chat_id, archived);
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_set_chat_archive(chat_id, archived, previous_archived),
+        );
+    }
+
+    /// Mutes or unmutes one conversation.
+    ///
+    /// port: the origin mutes a conversation for a while, and the moment the
+    /// mute ends is computed with the clock of the machine.
+    pub(crate) fn set_chat_muted(
+        &mut self,
+        chat_id: String,
+        muted: bool,
+        duration_ms: Option<i64>,
+    ) {
+        let Some(chat) = self.store.chat(&chat_id) else {
+            return;
+        };
+        let previous_muted = chat.muted;
+        let previous_mute_until_ms = chat.mute_until_ms;
+        let mute_until_ms = if muted {
+            match duration_ms {
+                Some(duration) if duration > 0 => now_ms().saturating_add(duration),
+                _ => MUTE_UNTIL_INDEFINITE,
+            }
+        } else {
+            0
+        };
+        self.store.set_chat_muted(&chat_id, muted, mute_until_ms);
+        report_failed_request(
+            &mut self.store,
+            self.rpc.request_set_chat_mute(
+                chat_id,
+                mute_until_ms,
+                previous_muted,
+                previous_mute_until_ms,
+            ),
+        );
+    }
+
+    /// Blocks or unblocks one conversation.
+    pub(crate) fn set_chat_blocked(&mut self, chat_id: String, blocked: bool) {
+        let Some(chat) = self.store.chat(&chat_id) else {
+            return;
+        };
+        let previous_blocked = chat.blocked;
+        self.store.set_chat_blocked(&chat_id, blocked);
+        report_failed_request(
+            &mut self.store,
+            self.rpc
+                .request_set_chat_block(chat_id, blocked, previous_blocked),
+        );
+    }
+
+    /// Puts the draft of an edit back where it was, after a failed edit.
+    fn restore_failed_edit(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        draft_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_draft(
+            chat_id,
+            ChatDraft {
+                text: draft_text.to_owned(),
+                reply_to_message_id: None,
+                mentions: Vec::new(),
+                editing_message_id: Some(message_id.to_owned()),
+            },
+            window,
+            cx,
+        );
+    }
+}
+
+/// Reports a request that could not even be queued: the sidecar is gone.
+///
+/// port: the origin showed the fatal screen when the bridge could not send a
+/// request. The helper is a free function because the call borrows two
+/// fields of the application at the same time: the store it writes and the
+/// client it asks.
+fn report_failed_request(store: &mut Store, request: anyhow::Result<u64>) {
+    if let Err(error) = request {
+        store.screen = Screen::Fatal;
+        store.fatal_error = Some(error.to_string());
+    }
+}
+
+/// The current instant, in milliseconds of the epoch.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// The scale the profile stored, or the default one.
@@ -3026,4 +4192,54 @@ fn save_ui_scale(scale: f32) -> std::io::Result<()> {
 /// Applies the scale of the interface to the theme of the window.
 fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut App) {
     crate::tokens::apply_theme_scale(scale, window, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The instant of the clock is what the client uses to say until when a
+    /// conversation stays muted.
+    #[test]
+    fn the_instant_of_the_clock_is_in_milliseconds_of_the_epoch() {
+        let now = now_ms();
+        assert!(now > 1_700_000_000_000, "the clock is not in milliseconds");
+        assert!(now < 10_000_000_000_000, "the clock is not in milliseconds");
+    }
+
+    /// A request that could not even be queued leaves the client without a
+    /// sidecar: the fatal screen is the only honest answer.
+    #[test]
+    fn a_request_that_could_not_be_queued_shows_the_fatal_screen() {
+        let mut store = Store::default();
+        report_failed_request(&mut store, Err(anyhow::anyhow!("the sidecar is gone")));
+
+        assert_eq!(store.screen, Screen::Fatal);
+        assert_eq!(store.fatal_error.as_deref(), Some("the sidecar is gone"));
+    }
+
+    /// A request that was queued leaves the screen alone.
+    #[test]
+    fn a_request_that_was_queued_leaves_the_screen_alone() {
+        let mut store = Store::default();
+        report_failed_request(&mut store, Ok(7));
+
+        assert_eq!(store.screen, Screen::Starting);
+        assert!(store.fatal_error.is_none());
+    }
+
+    /// A draft that edits a message is not empty: the message it edits is
+    /// still the one the user is working on.
+    #[test]
+    fn a_draft_that_edits_a_message_is_not_empty() {
+        let draft = ChatDraft {
+            editing_message_id: Some("message".into()),
+            ..Default::default()
+        };
+        assert!(!draft.is_empty());
+        assert!(
+            ChatDraft::default().is_empty(),
+            "a draft with nothing in it is empty"
+        );
+    }
 }
