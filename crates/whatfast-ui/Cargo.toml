@@ -1,0 +1,38 @@
+[package]
+name = "whatfast-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native GPUI user interface of Whatfast."
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+whatfast-core = { path = "../whatfast-core" }
+whatfast-protocol = { path = "../whatfast-protocol" }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
+emojis = "0.9.0"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+qrcode = { version = "0.14", default-features = false }
+smol = "2"
+uuid = { version = "1.18", features = ["v4"] }
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3.2"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

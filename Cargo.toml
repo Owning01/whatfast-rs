@@ -3,8 +3,8 @@ resolver = "3"
 members = [
     "crates/whatfast-core",
     "crates/whatfast-protocol",
+    "crates/whatfast-ui",
 ]
-exclude = ["crates/whatfast-ui"]
 
 [workspace.package]
 version = "0.2.0"
