@@ -58,6 +58,10 @@ jobs:
   linux:
     name: linux
     runs-on: ubuntu-latest
+    # The Windows package is the one that is tested. The Linux build is an
+    # attempt: if the GPUI stack does not compile there, the Windows release
+    # must not be blocked by it.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,6 +69,14 @@ jobs:
         with:
           go-version: "1.25"
           cache-dependency-path: backend/go.sum
+      - name: las dependencias del sistema que pide el stack de GPUI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential cmake clang lld pkg-config \
+            libfontconfig-dev libfreetype6-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libssl-dev libvulkan1 libglib2.0-dev libzstd-dev
       - name: el sidecar en Go
         run: |
           cd backend
