@@ -5,12 +5,20 @@
 
 ## Objetivo (una frase, medible)
 
-**Que `whatfast-rs` sea un cliente de escritorio de WhatsApp 100 % Rust —sin
-webview, sin SolidJS, sin Electron— que arranque la ventana en menos de 0,5 s
-y ocupe menos de 120 MB de RAM en reposo (working set del árbol de procesos
-completo, medido con el sidecar real y 10.000 chats cargados), con paridad
+**Que `whatfast-rs` tenga la interfaz 100 % Rust —sin webview, sin SolidJS,
+sin Electron, sin Chromium— que arranque la ventana en menos de 0,5 s y ocupe
+menos de 120 MB de RAM en reposo (working set del árbol de procesos completo,
+medido con el sidecar real y 10.000 chats cargados), con paridad
 comportamental del 100 % de la suite actual de 153 tests y de los 64 comandos
 de la API del bridge.**
+
+> **Excepción adoptada el 20/10/2026 (ver "Decisión D1" más abajo):** el
+> protocolo de WhatsApp **sigue en Go** (sidecar `whatsmeow`). La interfaz, el
+> núcleo, la lógica y el transporte son Rust. La razón es que la librería
+> Rust del protocolo no puede reusar una sesión ya emparejada, y obligar a
+> los usuarios a volver a escanear el QR es una regresión de producto que no
+> compra RAM: el sidecar ocupa 31,8 MB de los 120 MB de la meta, y el 85 % de
+> la RAM que se quiere eliminar es el WebView2, que sí se elimina entero.
 
 ## Baseline medido (origen, 20/10/2026, esta máquina)
 
@@ -30,17 +38,30 @@ nuestro DOM.
 
 ## Qué NO se migra
 
-1. **El protocolo de WhatsApp no se reescribe a mano.** Se evalúa
-   `wa-rs` / `whatsapp-rust` (crates Rust existentes, 50K SLoC, MIT) contra
-   los 50 RPC de `proto/bridge.proto` en F1/F4. Si ninguno cubre lo que
-   necesita el cliente, el sidecar Go (`whatsmeow`) **se queda** y el trabajo
-   termina en "UI en Rust, protocolo en Go". Eso es un outcome válido, no un
-   fracaso: el ahorro de RAM (el WebView2) ya estáLogging hecho.
-2. **No se migra el mock de navegador** (`tauri/src/lib/browser-mock.ts`,
-   1.411 líneas): es un artefacto de desarrollo web, sin equivalente ni
-   sentido en una app nativa. Se reemplaza por un backend fake en Rust.
-3. **No se migra el CSS.** Las 4.439 líneas de CSS se reinterpretan como un
-   sistema de tokens de GPUI. No hay equivalencia lineal.
+1. **El protocolo de WhatsApp NO se migra.** Decidido con evidencia en el
+   spike B-R1 (`docs/protocol-spike.md`, 20/10/2026), verificado de forma
+   independiente:
+   - `whatsapp-rust` 0.7.0 (MIT, 928 estrellas, 146.955 descargas) cubre la
+     capa de WhatsApp: Noise, Signal propio, app-state, newsletters,
+     multimedia, polls.
+   - **Pero su esquema SQLite es incompatible** (`device`, `identities`,
+     `sessions`, `prekeys`) con el de `whatsmeow` (`whatsmeow_device`,
+     `whatsmeow_session`), y su store (423 KB de `sqlite_store.rs`) tiene
+     **0 menciones de `whatsmeow`**: no hay importador. Un usuario ya
+     emparejado tendría que volver a escanear el QR.
+   - `wa-rs` 0.2.0 está parado desde el 17/02/2026, con 8 estrellas y un
+     solo mantenedor: no es una base sobre la que construir.
+   - Reescribir el sidecar son 13.526 líneas de Go que no mueven la meta de
+     RAM y sí rompen el requisito más duro (no perder la sesión).
+   - **Consecuencia**: el sidecar Go se queda. La app es un binario Rust que
+     habla con un sidecar Go por protobuf sobre stdio, igual que hoy, pero
+     **sin webview**. Esto sigue siendo un cliente de escritorio nativo, no
+     una página web empaquetada.
+2. **El mock de navegador** (`tauri/src/lib/browser-mock.ts`, 1.411 líneas): es
+   un artefacto de desarrollo web, sin equivalente ni sentido en una app
+   nativa. Se reemplaza por un backend fake en Rust.
+3. **El CSS.** Las 4.439 líneas de CSS se reinterpretan como un sistema de
+   tokens de GPUI. No hay equivalencia lineal.
 4. **No se tocan los tests de paridad del origen.** Los 153 tests TS y los 64
    tests Rust de `desktop/` quedan congelados en `whatfast` como oráculo.
 5. **No se migra `tauri/src-tauri/`** tal cual: el núcleo Rust se reutiliza
@@ -66,6 +87,16 @@ nuestro DOM.
 | No hay librería Rust de protocolo maduro y probada | spike en F4 con el criterio de gate escrito: si no pasa, el sidecar Go se queda |
 | La RAM de GPUI (Skia) puede comerse parte del ahorro | la meta de 120 MB es un gate de F8 medido, no una promesa; si no se cumple, se publica el número real y se documenta el gap |
 | Un store reactivo de 113 acciones no tiene traducción directa | `state/app.ts` se rediseña (no se porta): `Entity<Store>` + `cx.notify()`, con las acciones repartidas en submódulos |
+
+## Decisiones tomadas (con su evidencia)
+
+| # | Decisión | Evidencia | Fecha |
+|---|---|---|---|
+| **D1** | **El sidecar Go se queda.** El objetivo es "interfaz 100 % Rust sin webview", no "100 % Rust". | Spike B-R1: `whatsapp-rust` no puede reusar una sesión emparejada (esquema incompatible, sin importador) y `wa-rs` está parado | 20/10/2026 |
+| **D2** | **Los usuarios ya emparejados no pierden su sesión.** No se acepta re-emparejamiento. | Consecuencia directa de D1 | 20/10/2026 |
+| **D3** | **No se abre el lote de reescritura del sidecar** (13.526 líneas de Go, 4-6 semanas). | No mueve la meta de RAM (31,8 MB de 120 MB) y rompe D2 | 20/10/2026 |
+| **D4** | **El transporte sigue siendo protobuf sobre stdio** entre el binario Rust y el sidecar Go. | Ya existe, ya está versionado (v21) y falla cerrado; un puente nuevo no aporta | 20/10/2026 |
+| **D5** | **El spike de 2 días de `whatsapp-rust`** (emparejar en un crate aparte, medir RSS, probar si el `SessionRecord` de libsignal-go se decodifica) queda **para atrás**. | El gate de D3 no se cumple si D1 no se cumple | 20/10/2026 |
 
 ## Gates (resumen)
 
