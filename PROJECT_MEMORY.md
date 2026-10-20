@@ -271,3 +271,59 @@ plan de la interfaz caia.
   vertical, y B-U4..B-U8).
 - Deuda anotada: el parser de URLs de `whatsapp_formatting.rs` son ~1.100
   lineas de WHATWG dentro de un solo archivo; deberia pasar a su modulo.
+
+## 2026-10-20 ? B-U0: el modelo de datos sale del cliente GPUI a un crate propio
+
+**Que se cambio**
+
+- Crate nuevo `crates/whatfast-model`: `model.rs` (1.267 l.), `paths.rs`,
+  `settings.rs`, `sticker.rs` y `emoji_picker.rs`, portados del cliente GPUI
+  del oraculo, con **cero GPUI** en el arbol de dependencias (verificado con
+  `cargo tree`).
+- 31 tests en verde (32 en el oraculo: uno es `#[cfg(unix)]`).
+- 250 tests en verde en el workspace.
+
+**Por que**
+
+El modelo de datos es la base de la UI nativa y no deberia arrastrar el motor
+de render: un crate que depende de GPUI no se puede testear sin levantar una
+ventana, y no se puede reusar desde el binario ni desde una herramienta de
+linea de comandos.
+
+**Evidencia**
+
+- `model.rs` usaba GPUI solo por `Pixels`, `Size`, `px` y `size`. El crate
+  nuevo define un modulo `geom` con `pub type Pixels = f32`,
+  `pub struct Size<T = Pixels> { width: T, height: T }`, `px()` y `size()`.
+  No hubo que reimplementar ningun metodo: el modelo solo guardaba
+  `Size<Pixels>` y estimaba alturas con `f32`.
+- Los DTOs del bridge salen de `whatfast-protocol` (tipos generados en la raiz
+  del crate): no hay copia de los tipos.
+
+**Desvios que el agente documento**
+
+1. Cuatro funciones pasaron de `pub(crate)` a `pub`: en el oraculo eran un
+   binario, aca la UI es otro crate.
+2. `sticker.rs`: el `try_into().unwrap()` de produccion del oraculo se
+   lee byte a byte. Mismo valor, sin `unwrap`.
+3. `model.rs`, caso `cached_sidebar_ids_allocate_only_when_chats_mutate`: el
+   oraculo contaba alocaciones con un `#[global_allocator]` propio, que
+   exige `unsafe`, y F7 lo prohibe. Se reescribio con un contador
+   `#[cfg(test)] chat_id_rebuilds` (el patron que el propio oraculo ya usa
+   para `full_message_reindexes`): conserva el nombre, el montaje y las
+   comprobaciones de puntero `Rc`.
+
+**Trampa (nueva, de disco)**
+
+- Los worktrees de los agentes viven en `C:`, y cada uno compilaba su
+  propio `target/`. Con el stack de GPUI (que son 3 GB por worktree) **C:
+  quedo con 5,8 GB libres** y una compilacion se mato por falta de espacio.
+  **Solucion**: `scripts/test.cmd` y `scripts/lint.cmd` ahora fijan
+  `CARGO_TARGET_DIR` a un unico target compartido en `G:` (si la carpeta
+  existe; si no, cargo usa el local). Con eso, N agentes no llenan el disco
+  con N copias de la compilacion.
+
+**Pendiente**
+
+- B-U1 (backend fake) y B-A7 (voice_note) en curso.
+- Sigue sin resolverse donde vive el snapshot del workspace en GPUI (D4).
