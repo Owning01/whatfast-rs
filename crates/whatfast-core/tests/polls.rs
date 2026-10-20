@@ -3,10 +3,13 @@
 //! Every case of the oracle suite has its own test here, with the same name
 //! translated to snake_case.
 
-use whatfast_core::message_format::{Message, MessageContent, PollContent, PollOption, PollVoter};
+use whatfast_core::message_format::{MessageContent, PollContent, PollOption, PollVoter};
 use whatfast_core::polls::{
     clone_poll_content, optimistic_poll_vote, preserve_pending_poll_intent,
 };
+// The projection the poll reducer works on; the canonical `Message` lives in
+// `whatfast_core::types`.
+use whatfast_core::types::MessageSummary as Message;
 
 fn poll() -> PollContent {
     PollContent {

@@ -37,7 +37,12 @@ pub use crate::types::{
 };
 // port: the projections the formatters read. The canonical DTOs of the app are
 // `crate::types::Chat` and `crate::types::Message`.
-pub use crate::types::{ChatSummary as Chat, MessageSummary as Message};
+// The projections of the domain DTOs. They are private aliases on purpose:
+// the crate has exactly one public `Chat` and one public `Message`, and they
+// live in `crate::types`. Re-exporting a `Chat` alias from here would make
+// `message_format::Chat` and `types::Chat` two different types with the
+// same name.
+use crate::types::{ChatSummary as Chat, MessageSummary as Message};
 
 // -------------------------------------------------------------- the clock
 
