@@ -9,18 +9,18 @@
 //! - public API is snake_case; no panics, errors are `Option`/`Result`
 //! - the port keeps the TypeScript semantics, including the quirks
 
-pub mod whatsapp_formatting;
+pub mod app_helpers;
+pub mod backend_lifecycle;
+pub mod chat_merge;
+pub mod file_drop;
 pub mod media_crop;
 pub mod message_format;
-pub mod polls;
-pub mod chat_merge;
-pub mod unsupported;
-pub mod file_drop;
-pub mod unread;
-pub mod pairing;
-pub mod workspace;
-pub mod app_helpers;
-pub mod tab_keyboard;
 pub mod notification_policy;
-pub mod backend_lifecycle;
+pub mod pairing;
+pub mod polls;
 pub mod scroll_restoration;
+pub mod tab_keyboard;
+pub mod unread;
+pub mod unsupported;
+pub mod whatsapp_formatting;
+pub mod workspace;
