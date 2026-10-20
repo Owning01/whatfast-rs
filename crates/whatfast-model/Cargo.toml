@@ -1,0 +1,24 @@
+[package]
+name = "whatfast-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Data model of Whatfast without GPUI: the chat store, the profile paths, the settings file, sticker preparation and the emoji catalog."
+
+[dependencies]
+# The bridge DTOs. The store keeps exactly the same chats, messages and
+# reactions the origin kept, so they come from the shared contract crate
+# instead of a private copy of the protobuf types.
+whatfast-protocol = { path = "../whatfast-protocol" }
+# Decoding of the sticker source formats. Same version and features as the
+# origin's desktop crate: JPEG, PNG, GIF and WebP, nothing else.
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+# The WebP encoder. `image` only decodes WebP, and the origin encoded the
+# prepared stickers with this crate.
+webp = { version = "0.3.1", default-features = false }
+# The Unicode emoji catalog, with its skin-tone variants.
+emojis = "0.9.0"
+# Atomic replacement of the settings file: the origin wrote it the same way.
+tempfile = "3.23"

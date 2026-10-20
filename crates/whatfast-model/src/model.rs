@@ -1,0 +1,1355 @@
+//! The chat store of the client: the state the user interface renders.
+//!
+//! port: taken from the origin's `desktop/src/model.rs`. The only change is
+//! the toolkit: GPUI's `Pixels`, `Size`, `px` and `size` became
+//! `crate::geom`'s, and the protobuf DTOs come from `whatfast-protocol`
+//! instead of the origin's private `proto` module.
+
+use std::{collections::HashMap, rc::Rc};
+
+use crate::geom::{Pixels, Size, px, size};
+
+pub const CHAT_PAGE_SIZE: u32 = 100;
+pub const MESSAGE_PAGE_SIZE: u32 = 50;
+pub const MAX_ACTIVE_MESSAGES: usize = 2_000;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChatView {
+    #[default]
+    Inbox,
+    Archived,
+}
+
+impl ChatView {
+    fn includes(self, chat: &whatfast_protocol::Chat) -> bool {
+        chat.archived == matches!(self, Self::Archived)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Screen {
+    #[default]
+    Starting,
+    Pairing,
+    Syncing,
+    Chats,
+    Fatal,
+}
+
+#[derive(Default)]
+pub struct Store {
+    pub screen: Screen,
+    pub connection: whatfast_protocol::ConnectionState,
+    pub connection_detail: String,
+    pub sync_chats: u64,
+    pub sync_messages: u64,
+    pub sync_active: bool,
+    pub sync_complete: bool,
+    pub qr_code: Option<String>,
+    pub qr_expires_at_ms: i64,
+    pub chats: Vec<whatfast_protocol::Chat>,
+    pub total_chats: u64,
+    pub next_chat_cursor: String,
+    pub selected_chat_id: Option<String>,
+    pub messages: Vec<whatfast_protocol::Message>,
+    pub has_older_messages: bool,
+    pub has_newer_messages: bool,
+    pub newer_activity: bool,
+    pub fatal_error: Option<String>,
+    pub toast_error: Option<String>,
+    pub last_mark_read_id: Option<String>,
+    chat_index: HashMap<String, usize>,
+    inbox_chat_ids: Rc<Vec<String>>,
+    archived_chat_ids: Rc<Vec<String>>,
+    message_index: HashMap<String, usize>,
+    reply_metadata: HashMap<String, ReplyMetadata>,
+    message_sizes: Rc<Vec<Size<Pixels>>>,
+    measured_width_bucket: Option<i32>,
+    message_height_cache: HashMap<i32, HashMap<String, Pixels>>,
+    participant_avatar_paths: HashMap<String, String>,
+    loaded_later_chat_page: bool,
+    #[cfg(test)]
+    full_message_reindexes: usize,
+    #[cfg(test)]
+    chat_id_rebuilds: usize,
+}
+
+#[derive(Default)]
+struct ReplyMetadata {
+    count: usize,
+    first_reply_id: String,
+}
+impl Store {
+    pub fn clear_account_state(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn selected_chat(&self) -> Option<&whatfast_protocol::Chat> {
+        let id = self.selected_chat_id.as_deref()?;
+        self.chats.iter().find(|chat| chat.id == id)
+    }
+
+    pub fn chat(&self, id: &str) -> Option<&whatfast_protocol::Chat> {
+        self.chat_index
+            .get(id)
+            .and_then(|index| self.chats.get(*index))
+    }
+
+    pub fn chat_ids(&self, view: ChatView) -> Rc<Vec<String>> {
+        match view {
+            ChatView::Inbox => self.inbox_chat_ids.clone(),
+            ChatView::Archived => self.archived_chat_ids.clone(),
+        }
+    }
+
+    pub fn apply_sync_progress(&mut self, chats: u64, messages: u64, complete: bool) {
+        self.sync_chats = self.sync_chats.saturating_add(chats);
+        self.sync_messages = self.sync_messages.saturating_add(messages);
+        self.sync_active = !complete;
+        self.sync_complete = complete;
+    }
+
+    pub fn message(&self, id: &str) -> Option<&whatfast_protocol::Message> {
+        self.message_index
+            .get(id)
+            .and_then(|index| self.messages.get(*index))
+    }
+
+    pub fn reply_count(&self, message_id: &str) -> usize {
+        self.reply_metadata
+            .get(message_id)
+            .map_or(0, |metadata| metadata.count)
+    }
+
+    pub fn first_reply_id(&self, message_id: &str) -> Option<&str> {
+        self.reply_metadata
+            .get(message_id)
+            .map(|metadata| metadata.first_reply_id.as_str())
+    }
+
+    pub fn select_chat(&mut self, id: String) {
+        self.selected_chat_id = Some(id);
+        self.messages.clear();
+        self.has_older_messages = false;
+        self.has_newer_messages = false;
+        self.newer_activity = false;
+        self.message_index.clear();
+        self.reply_metadata.clear();
+        self.message_sizes = Rc::new(Vec::new());
+        self.measured_width_bucket = None;
+        self.last_mark_read_id = None;
+    }
+
+    pub fn merge_chat_id(&mut self, old_id: &str, new_id: &str) -> bool {
+        self.chats.retain(|chat| chat.id != old_id);
+        self.reindex_chats();
+        if self.selected_chat_id.as_deref() == Some(old_id) {
+            self.selected_chat_id = Some(new_id.to_owned());
+            return true;
+        }
+        false
+    }
+
+    pub fn upsert_chat(&mut self, chat: whatfast_protocol::Chat) {
+        let old_index = self.chat_index.remove(&chat.id);
+        if let Some(index) = old_index {
+            self.chats.remove(index);
+        }
+        let index = self
+            .chats
+            .binary_search_by(|existing| compare_chats(existing, &chat))
+            .unwrap_or_else(|index| index);
+        self.chats.insert(index, chat);
+        let start = old_index.map_or(index, |old| old.min(index));
+        let end = old_index.map_or(self.chats.len(), |old| old.max(index).saturating_add(1));
+        for item_index in start..end.min(self.chats.len()) {
+            self.chat_index
+                .insert(self.chats[item_index].id.clone(), item_index);
+        }
+        self.rebuild_chat_ids();
+    }
+
+    pub fn upsert_message(&mut self, mut message: whatfast_protocol::Message) {
+        if self.selected_chat_id.as_deref() != Some(message.chat_id.as_str()) {
+            return;
+        }
+        for heights in self.message_height_cache.values_mut() {
+            heights.remove(&message.id);
+        }
+        let old_index = self.message_index.remove(&message.id);
+        if let Some(index) = old_index {
+            preserve_local_image_path(&mut message, &self.messages[index]);
+            self.messages.remove(index);
+        }
+        let index = self
+            .messages
+            .binary_search_by(|existing| compare_messages(existing, &message))
+            .unwrap_or_else(|index| index);
+        self.messages.insert(index, message);
+        if self.trim_after_live_append() {
+            self.reindex_messages();
+        } else {
+            let start = old_index.map_or(index, |old| old.min(index));
+            let end = old_index.map_or(self.messages.len(), |old| old.max(index).saturating_add(1));
+            self.reindex_message_range(start, end);
+        }
+        self.rebuild_reply_metadata();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn prepend_messages(&mut self, incoming: Vec<whatfast_protocol::Message>) {
+        let mut by_id: HashMap<String, whatfast_protocol::Message> = self
+            .messages
+            .drain(..)
+            .map(|message| (message.id.clone(), message))
+            .collect();
+        for mut message in incoming {
+            for heights in self.message_height_cache.values_mut() {
+                heights.remove(&message.id);
+            }
+            if let Some(existing) = by_id.get(&message.id) {
+                preserve_local_image_path(&mut message, existing);
+            }
+            by_id.insert(message.id.clone(), message);
+        }
+        self.messages = by_id.into_values().collect();
+        self.messages.sort_by(compare_messages);
+        if self.messages.len() > MAX_ACTIVE_MESSAGES {
+            self.messages.truncate(MAX_ACTIVE_MESSAGES);
+            self.has_newer_messages = true;
+        }
+        self.reindex_messages();
+        self.rebuild_reply_metadata();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn append_newer_messages(
+        &mut self,
+        incoming: Vec<whatfast_protocol::Message>,
+        has_more: bool,
+    ) {
+        let mut by_id: HashMap<String, whatfast_protocol::Message> = self
+            .messages
+            .drain(..)
+            .map(|message| (message.id.clone(), message))
+            .collect();
+        for mut message in incoming {
+            for heights in self.message_height_cache.values_mut() {
+                heights.remove(&message.id);
+            }
+            if let Some(existing) = by_id.get(&message.id) {
+                preserve_local_image_path(&mut message, existing);
+            }
+            by_id.insert(message.id.clone(), message);
+        }
+        self.messages = by_id.into_values().collect();
+        self.messages.sort_by(compare_messages);
+        if self.messages.len() > MAX_ACTIVE_MESSAGES {
+            let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
+            self.messages.drain(..excess);
+            self.has_older_messages = true;
+        }
+        self.has_newer_messages = has_more || self.newer_activity;
+        self.reindex_messages();
+        self.rebuild_reply_metadata();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn replace_message_window(
+        &mut self,
+        mut messages: Vec<whatfast_protocol::Message>,
+        has_older: bool,
+        has_newer: bool,
+    ) {
+        messages.sort_by(compare_messages);
+        if messages.len() > MAX_ACTIVE_MESSAGES {
+            messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
+        }
+        self.messages = messages;
+        self.has_older_messages = has_older;
+        self.has_newer_messages = has_newer;
+        self.newer_activity = false;
+        self.reindex_messages();
+        self.rebuild_reply_metadata();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn update_receipt(&mut self, receipt: whatfast_protocol::ReceiptUpdated) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == receipt.message_id && message.chat_id == receipt.chat_id)
+        {
+            message.status = receipt.status;
+        }
+    }
+
+    pub fn mark_selected_chat_read_locally(&mut self) -> Option<u32> {
+        let id = self.selected_chat_id.as_deref()?;
+        if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
+            let previous = chat.unread_count;
+            chat.unread_count = 0;
+            return Some(previous);
+        }
+        None
+    }
+
+    pub fn restore_unread(&mut self, chat_id: &str, unread: u32) {
+        if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id) {
+            chat.unread_count = unread;
+        }
+    }
+
+    pub fn set_chat_avatar(&mut self, chat_id: &str, avatar_path: String) {
+        if let Some(chat) = self
+            .chat_index
+            .get(chat_id)
+            .and_then(|index| self.chats.get_mut(*index))
+        {
+            chat.avatar_path = avatar_path;
+        }
+    }
+
+    pub fn set_participant_avatar(&mut self, participant_id: String, avatar_path: String) {
+        self.participant_avatar_paths
+            .insert(participant_id, avatar_path);
+    }
+
+    pub fn set_message_image_paths(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        image_path: String,
+        thumbnail_path: String,
+    ) -> bool {
+        let Some(message) = self
+            .message_index
+            .get(message_id)
+            .and_then(|index| self.messages.get_mut(*index))
+            .filter(|message| message.chat_id == chat_id)
+        else {
+            return false;
+        };
+        let Some(whatfast_protocol::message::Content::Image(image)) = message.content.as_mut()
+        else {
+            return false;
+        };
+        if image.local_path == image_path && image.thumbnail_path == thumbnail_path {
+            return false;
+        }
+        image.local_path = image_path;
+        image.thumbnail_path = thumbnail_path;
+        true
+    }
+
+    pub fn participant_avatar_path(&self, participant_id: &str) -> Option<&str> {
+        self.participant_avatar_paths
+            .get(participant_id)
+            .map(String::as_str)
+            .filter(|path| !path.is_empty())
+    }
+
+    pub fn apply_reaction(&mut self, reaction: whatfast_protocol::Reaction, removed: bool) {
+        let Some(index) = self.message_index.get(&reaction.message_id).copied() else {
+            return;
+        };
+        let message = &mut self.messages[index];
+        if message.chat_id != reaction.chat_id {
+            return;
+        }
+        if message.reactions.iter().any(|existing| {
+            existing.sender_id == reaction.sender_id
+                && existing.timestamp_ms > reaction.timestamp_ms
+        }) {
+            return;
+        }
+        message
+            .reactions
+            .retain(|existing| existing.sender_id != reaction.sender_id);
+        if !removed && !reaction.emoji.is_empty() {
+            message.reactions.push(reaction);
+            message.reactions.sort_by(|left, right| {
+                (left.timestamp_ms, left.sender_id.as_str())
+                    .cmp(&(right.timestamp_ms, right.sender_id.as_str()))
+            });
+        }
+        for heights in self.message_height_cache.values_mut() {
+            heights.remove(&message.id);
+        }
+        self.measured_width_bucket = None;
+    }
+
+    pub fn message_sizes(&self) -> Rc<Vec<Size<Pixels>>> {
+        self.message_sizes.clone()
+    }
+
+    pub fn message_sizes_need_measurement(&self, width_bucket: i32) -> bool {
+        self.measured_width_bucket != Some(width_bucket)
+            || self.message_sizes.len() != self.messages.len()
+    }
+
+    pub fn set_measured_message_sizes(&mut self, width_bucket: i32, sizes: Vec<Size<Pixels>>) {
+        debug_assert_eq!(sizes.len(), self.messages.len());
+        self.message_sizes = Rc::new(sizes);
+        self.measured_width_bucket = Some(width_bucket);
+        self.message_height_cache
+            .retain(|bucket, _| *bucket == width_bucket);
+    }
+
+    pub fn cached_message_height(&self, id: &str, width_bucket: i32) -> Option<Pixels> {
+        self.message_height_cache
+            .get(&width_bucket)
+            .and_then(|heights| heights.get(id))
+            .copied()
+    }
+
+    pub fn cache_message_height(&mut self, id: String, width_bucket: i32, height: Pixels) {
+        self.message_height_cache
+            .entry(width_bucket)
+            .or_default()
+            .insert(id, height);
+    }
+
+    pub fn invalidate_all_message_heights(&mut self) {
+        self.message_height_cache.clear();
+        self.measured_width_bucket = None;
+    }
+
+    pub fn replace_chat_page(
+        &mut self,
+        cursor: &str,
+        chats: Vec<whatfast_protocol::Chat>,
+        total_count: u64,
+        next_cursor: String,
+    ) {
+        let mut by_id: HashMap<String, whatfast_protocol::Chat> = self
+            .chats
+            .drain(..)
+            .map(|chat| (chat.id.clone(), chat))
+            .collect();
+        by_id.extend(chats.into_iter().map(|chat| (chat.id.clone(), chat)));
+        self.chats = by_id.into_values().collect();
+        self.chats.sort_by(compare_chats);
+        self.reindex_chats();
+        self.total_chats = total_count;
+        if cursor.is_empty() {
+            if !self.loaded_later_chat_page {
+                self.next_chat_cursor = next_cursor;
+            }
+        } else {
+            self.loaded_later_chat_page = true;
+            self.next_chat_cursor = next_cursor;
+        }
+    }
+
+    fn trim_after_live_append(&mut self) -> bool {
+        if self.messages.len() > MAX_ACTIVE_MESSAGES {
+            let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
+            self.messages.drain(..excess);
+            self.has_older_messages = true;
+            return true;
+        }
+        false
+    }
+
+    fn reindex_chats(&mut self) {
+        self.chat_index.clear();
+        self.chat_index.reserve(self.chats.len());
+        for (index, chat) in self.chats.iter().enumerate() {
+            self.chat_index.insert(chat.id.clone(), index);
+        }
+        self.rebuild_chat_ids();
+    }
+
+    fn rebuild_chat_ids(&mut self) {
+        let mut inbox = Vec::with_capacity(self.chats.len());
+        let mut archived = Vec::new();
+        for chat in &self.chats {
+            if ChatView::Archived.includes(chat) {
+                archived.push(chat.id.clone());
+            } else {
+                inbox.push(chat.id.clone());
+            }
+        }
+        self.inbox_chat_ids = Rc::new(inbox);
+        self.archived_chat_ids = Rc::new(archived);
+        #[cfg(test)]
+        {
+            self.chat_id_rebuilds += 1;
+        }
+    }
+
+    fn reindex_messages(&mut self) {
+        self.message_index.clear();
+        self.message_index.reserve(self.messages.len());
+        for (index, message) in self.messages.iter().enumerate() {
+            self.message_index.insert(message.id.clone(), index);
+        }
+        #[cfg(test)]
+        {
+            self.full_message_reindexes += 1;
+        }
+    }
+
+    fn reindex_message_range(&mut self, start: usize, end: usize) {
+        for index in start..end.min(self.messages.len()) {
+            self.message_index
+                .insert(self.messages[index].id.clone(), index);
+        }
+    }
+
+    fn rebuild_reply_metadata(&mut self) {
+        self.reply_metadata.clear();
+        for message in &self.messages {
+            if message.reply_to_message_id.is_empty() {
+                continue;
+            }
+            self.reply_metadata
+                .entry(message.reply_to_message_id.clone())
+                .and_modify(|metadata| metadata.count += 1)
+                .or_insert_with(|| ReplyMetadata {
+                    count: 1,
+                    first_reply_id: message.id.clone(),
+                });
+        }
+    }
+
+    fn rebuild_message_sizes(&mut self) {
+        self.message_sizes = Rc::new(
+            self.messages
+                .iter()
+                .map(|message| size(px(1.), estimate_message_height(message)))
+                .collect(),
+        );
+        self.measured_width_bucket = None;
+    }
+}
+
+pub fn message_text(message: &whatfast_protocol::Message) -> &str {
+    if message.revoked {
+        return "This message was deleted";
+    }
+    match &message.content {
+        Some(whatfast_protocol::message::Content::Text(text)) => text.text.as_str(),
+        Some(whatfast_protocol::message::Content::Image(image)) => image.caption.as_str(),
+        Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
+            if !attachment.caption.is_empty() {
+                attachment.caption.as_str()
+            } else if !attachment.file_name.is_empty() {
+                attachment.file_name.as_str()
+            } else {
+                attachment.kind.as_str()
+            }
+        }
+        Some(whatfast_protocol::message::Content::Contacts(contacts)) => contacts
+            .contacts
+            .first()
+            .map(|contact| contact.display_name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Contact"),
+        Some(whatfast_protocol::message::Content::Location(location)) => {
+            if !location.name.is_empty() {
+                location.name.as_str()
+            } else if !location.address.is_empty() {
+                location.address.as_str()
+            } else {
+                "Location"
+            }
+        }
+        Some(whatfast_protocol::message::Content::Unsupported(unsupported)) => {
+            unsupported.fallback_text.as_str()
+        }
+        Some(whatfast_protocol::message::Content::Poll(poll)) => poll.question.as_str(),
+        None => "Unsupported message",
+    }
+}
+
+fn preserve_local_image_path(
+    incoming: &mut whatfast_protocol::Message,
+    existing: &whatfast_protocol::Message,
+) {
+    let Some(whatfast_protocol::message::Content::Image(incoming_image)) =
+        incoming.content.as_mut()
+    else {
+        return;
+    };
+    if let Some(whatfast_protocol::message::Content::Image(existing_image)) =
+        existing.content.as_ref()
+    {
+        if incoming_image.local_path.is_empty() {
+            incoming_image
+                .local_path
+                .clone_from(&existing_image.local_path);
+        }
+        if incoming_image.thumbnail_path.is_empty() {
+            incoming_image
+                .thumbnail_path
+                .clone_from(&existing_image.thumbnail_path);
+        }
+        if incoming_image.jpeg_thumbnail.is_empty() {
+            incoming_image
+                .jpeg_thumbnail
+                .clone_from(&existing_image.jpeg_thumbnail);
+        }
+    }
+}
+
+pub fn image_row_path(image: &whatfast_protocol::ImageContent) -> &str {
+    image.thumbnail_path.as_str()
+}
+
+pub fn image_viewer_path(image: &whatfast_protocol::ImageContent) -> &str {
+    image.local_path.as_str()
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ReactionCount<'a> {
+    pub emoji: &'a str,
+    pub count: usize,
+    pub from_me: bool,
+}
+
+pub fn reaction_counts(message: &whatfast_protocol::Message) -> Vec<ReactionCount<'_>> {
+    let mut counts: Vec<ReactionCount<'_>> = Vec::new();
+    for reaction in message
+        .reactions
+        .iter()
+        .filter(|reaction| !reaction.emoji.is_empty())
+    {
+        if let Some(existing) = counts
+            .iter_mut()
+            .find(|existing| existing.emoji == reaction.emoji.as_str())
+        {
+            existing.count += 1;
+            existing.from_me |= reaction.from_me;
+        } else {
+            counts.push(ReactionCount {
+                emoji: reaction.emoji.as_str(),
+                count: 1,
+                from_me: reaction.from_me,
+            });
+        }
+    }
+    counts
+}
+
+pub fn reactions_for_emoji(
+    message: &whatfast_protocol::Message,
+    emoji: &str,
+) -> Vec<whatfast_protocol::Reaction> {
+    let mut reactions: Vec<whatfast_protocol::Reaction> = Vec::new();
+    for reaction in message
+        .reactions
+        .iter()
+        .filter(|reaction| reaction.emoji == emoji)
+    {
+        let existing = reactions.iter().position(|candidate| {
+            (reaction.from_me && candidate.from_me)
+                || (!reaction.sender_id.is_empty() && reaction.sender_id == candidate.sender_id)
+        });
+        if let Some(index) = existing {
+            if reaction.timestamp_ms >= reactions[index].timestamp_ms {
+                reactions[index] = reaction.clone();
+            }
+        } else {
+            reactions.push(reaction.clone());
+        }
+    }
+    reactions.sort_by(|left, right| {
+        right.from_me.cmp(&left.from_me).then_with(|| {
+            reaction_sender_name(left)
+                .to_lowercase()
+                .cmp(&reaction_sender_name(right).to_lowercase())
+        })
+    });
+    reactions
+}
+
+pub fn reaction_sender_name(reaction: &whatfast_protocol::Reaction) -> &str {
+    if reaction.from_me {
+        "You"
+    } else if !reaction.sender_name.trim().is_empty() {
+        reaction.sender_name.trim()
+    } else if !reaction.sender_phone_number.trim().is_empty() {
+        reaction.sender_phone_number.trim()
+    } else if !reaction.sender_id.trim().is_empty() {
+        reaction.sender_id.trim()
+    } else {
+        "Unknown contact"
+    }
+}
+
+pub fn reaction_sender_detail(reaction: &whatfast_protocol::Reaction) -> &str {
+    let phone = reaction.sender_phone_number.trim();
+    if !phone.is_empty() && phone != reaction_sender_name(reaction) {
+        phone
+    } else if reaction.from_me {
+        "Your reaction"
+    } else {
+        let sender_id = reaction.sender_id.trim();
+        if !sender_id.is_empty() && sender_id != reaction_sender_name(reaction) {
+            sender_id
+        } else {
+            "WhatsApp contact"
+        }
+    }
+}
+
+fn compare_chats(
+    left: &whatfast_protocol::Chat,
+    right: &whatfast_protocol::Chat,
+) -> std::cmp::Ordering {
+    right
+        .pinned
+        .cmp(&left.pinned)
+        .then_with(|| {
+            right
+                .last_message_timestamp_ms
+                .cmp(&left.last_message_timestamp_ms)
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn compare_messages(
+    left: &whatfast_protocol::Message,
+    right: &whatfast_protocol::Message,
+) -> std::cmp::Ordering {
+    (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
+}
+
+fn estimate_message_height(message: &whatfast_protocol::Message) -> Pixels {
+    let text = message_text(message);
+    let lines = text
+        .lines()
+        .map(|line| (line.chars().count().max(1) as f32 / 46.0).ceil())
+        .sum::<f32>()
+        .max(1.0);
+    let image_height = match message.content.as_ref() {
+        Some(whatfast_protocol::message::Content::Image(image)) => estimated_image_height(image),
+        _ => 0.0,
+    };
+    let reply_height = if message.reply_to_message_id.is_empty() {
+        0.0
+    } else {
+        54.0
+    };
+    px(48.0 + (lines - 1.0) * 18.0 + image_height + reply_height)
+}
+
+fn estimated_image_height(image: &whatfast_protocol::ImageContent) -> f32 {
+    if image.width == 0 || image.height == 0 {
+        return 220.0;
+    }
+    let max_edge = if image.sticker { 220.0 } else { 320.0 };
+    let source_width = image.width as f32;
+    let source_height = image.height as f32;
+    let scale = (max_edge / source_width).min(max_edge / source_height);
+    source_height * scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hint::black_box;
+
+    fn message(id: usize) -> whatfast_protocol::Message {
+        whatfast_protocol::Message {
+            id: id.to_string(),
+            chat_id: "chat".into(),
+            timestamp_ms: id as i64,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn message_window_is_bounded_and_sorted() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        for id in (0..MAX_ACTIVE_MESSAGES + 50).rev() {
+            store.upsert_message(message(id));
+        }
+        assert_eq!(store.messages.len(), MAX_ACTIVE_MESSAGES);
+        assert_eq!(store.messages.first().unwrap().id, "50");
+        assert!(store.has_older_messages);
+    }
+
+    #[test]
+    fn upserts_are_idempotent() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(message(1));
+        store.upsert_message(message(1));
+        assert_eq!(store.messages.len(), 1);
+    }
+
+    #[test]
+    fn reply_count_tracks_messages_pointing_at_the_same_target() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(message(1));
+        let mut first_reply = message(2);
+        first_reply.reply_to_message_id = "1".into();
+        store.upsert_message(first_reply);
+        let mut second_reply = message(3);
+        second_reply.reply_to_message_id = "1".into();
+        store.upsert_message(second_reply);
+
+        assert_eq!(store.reply_count("1"), 2);
+        assert_eq!(store.reply_count("2"), 0);
+        assert_eq!(store.first_reply_id("1"), Some("2"));
+        assert_eq!(store.first_reply_id("2"), None);
+
+        store.upsert_message(message(3));
+        assert_eq!(store.reply_count("1"), 1);
+        assert_eq!(store.first_reply_id("1"), Some("2"));
+    }
+
+    #[test]
+    fn chat_views_keep_archived_conversations_out_of_the_inbox() {
+        let mut store = Store::default();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "inbox".into(),
+            title: "Inbox".into(),
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "archived".into(),
+            title: "Archived".into(),
+            archived: true,
+            ..Default::default()
+        });
+
+        assert_eq!(store.chat_ids(ChatView::Inbox).as_slice(), ["inbox"]);
+        assert_eq!(store.chat_ids(ChatView::Archived).as_slice(), ["archived"]);
+    }
+
+    #[test]
+    fn cached_sidebar_ids_allocate_only_when_chats_mutate() {
+        let mut store = Store::default();
+        let chats = (0..1_000)
+            .map(|id| whatfast_protocol::Chat {
+                id: format!("chat-{id}"),
+                archived: id % 10 == 0,
+                last_message_timestamp_ms: id,
+                ..Default::default()
+            })
+            .collect();
+        store.replace_chat_page("", chats, 1_000, String::new());
+        let original = store.chat_ids(ChatView::Inbox);
+        let rebuilds = store.chat_id_rebuilds;
+
+        for _ in 0..100 {
+            black_box(store.chat_ids(ChatView::Inbox));
+        }
+
+        // port: the origin counted the allocations of the global allocator,
+        // which needs `unsafe`. This crate forbids `unsafe`, so the cache is
+        // observed through the rebuild counter: reading the ids must not
+        // rebuild them.
+        assert_eq!(store.chat_id_rebuilds, rebuilds);
+        assert!(Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+
+        let uncached = store
+            .chats
+            .iter()
+            .filter(|chat| ChatView::Inbox.includes(chat))
+            .map(|chat| chat.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(uncached, original.as_slice());
+
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "new-chat".into(),
+            ..Default::default()
+        });
+        assert!(!Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+        assert!(store.chat_id_rebuilds > rebuilds);
+    }
+
+    #[test]
+    fn live_upserts_repair_only_the_shifted_message_index_range() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window((0..1_000).map(message).collect(), false, false);
+        let full_reindexes = store.full_message_reindexes;
+        let mut moved = message(500);
+        moved.timestamp_ms = 1_500;
+        store.upsert_message(moved);
+
+        assert_eq!(store.full_message_reindexes, full_reindexes);
+        for (index, message) in store.messages.iter().enumerate() {
+            assert_eq!(store.message_index[&message.id], index);
+        }
+        assert_eq!(store.messages.last().unwrap().id, "500");
+    }
+
+    #[test]
+    fn sync_progress_is_cumulative_and_records_completion() {
+        let mut store = Store::default();
+        store.apply_sync_progress(8, 120, false);
+        store.apply_sync_progress(3, 40, true);
+
+        assert_eq!(store.sync_chats, 11);
+        assert_eq!(store.sync_messages, 160);
+        assert!(!store.sync_active);
+        assert!(store.sync_complete);
+    }
+
+    #[test]
+    fn new_message_kinds_have_readable_timeline_text() {
+        let with_content = |content| whatfast_protocol::Message {
+            content: Some(content),
+            ..Default::default()
+        };
+        let attachment = with_content(whatfast_protocol::message::Content::Attachment(
+            whatfast_protocol::AttachmentContent {
+                file_name: "agenda.pdf".into(),
+                kind: "document".into(),
+                ..Default::default()
+            },
+        ));
+        let contacts = with_content(whatfast_protocol::message::Content::Contacts(
+            whatfast_protocol::ContactsContent {
+                contacts: vec![whatfast_protocol::ContactContent {
+                    display_name: "Fast Friend".into(),
+                    ..Default::default()
+                }],
+            },
+        ));
+        let location = with_content(whatfast_protocol::message::Content::Location(
+            whatfast_protocol::LocationContent {
+                address: "Cat Street".into(),
+                ..Default::default()
+            },
+        ));
+
+        assert_eq!(message_text(&attachment), "agenda.pdf");
+        assert_eq!(message_text(&contacts), "Fast Friend");
+        assert_eq!(message_text(&location), "Cat Street");
+    }
+
+    #[test]
+    fn reactions_replace_by_sender_remove_and_invalidate_height() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(message(1));
+        store.set_measured_message_sizes(42, vec![size(px(1.), px(48.))]);
+        let reaction = |emoji: &str| whatfast_protocol::Reaction {
+            chat_id: "chat".into(),
+            message_id: "1".into(),
+            sender_id: "participant".into(),
+            emoji: emoji.into(),
+            ..Default::default()
+        };
+
+        store.apply_reaction(reaction("👍"), false);
+        assert_eq!(store.messages[0].reactions[0].emoji, "👍");
+        assert!(store.message_sizes_need_measurement(42));
+
+        store.apply_reaction(reaction("❤️"), false);
+        assert_eq!(store.messages[0].reactions.len(), 1);
+        assert_eq!(store.messages[0].reactions[0].emoji, "❤️");
+
+        let mut stale_removal = reaction("");
+        stale_removal.timestamp_ms = -1;
+        store.apply_reaction(stale_removal, true);
+        assert_eq!(store.messages[0].reactions[0].emoji, "❤️");
+
+        store.apply_reaction(reaction(""), true);
+        assert!(store.messages[0].reactions.is_empty());
+    }
+
+    #[test]
+    fn historical_reactions_survive_message_upsert_and_group_into_chips() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut historical = message(1);
+        historical.reactions = vec![
+            whatfast_protocol::Reaction {
+                emoji: "👍".into(),
+                sender_id: "one".into(),
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction {
+                emoji: "❤️".into(),
+                sender_id: "two".into(),
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction {
+                emoji: "👍".into(),
+                sender_id: "three".into(),
+                from_me: true,
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction::default(),
+        ];
+        store.upsert_message(historical);
+
+        assert_eq!(
+            reaction_counts(&store.messages[0]),
+            vec![
+                ReactionCount {
+                    emoji: "👍",
+                    count: 2,
+                    from_me: true,
+                },
+                ReactionCount {
+                    emoji: "❤️",
+                    count: 1,
+                    from_me: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reactor_details_filter_one_emoji_put_you_first_and_resolve_identity() {
+        let mut historical = message(1);
+        historical.reactions = vec![
+            whatfast_protocol::Reaction {
+                emoji: "👍".into(),
+                sender_id: "lid-one".into(),
+                sender_name: "Saved Contact".into(),
+                sender_phone_number: "+10000000001".into(),
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction {
+                emoji: "❤️".into(),
+                sender_name: "Other Emoji".into(),
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction {
+                emoji: "👍".into(),
+                sender_id: "me".into(),
+                from_me: true,
+                ..Default::default()
+            },
+            whatfast_protocol::Reaction {
+                emoji: "👍".into(),
+                sender_id: "lid-phone".into(),
+                sender_phone_number: "+10000000002".into(),
+                ..Default::default()
+            },
+        ];
+
+        let reactors = reactions_for_emoji(&historical, "👍");
+        assert_eq!(reactors.len(), 3);
+        assert_eq!(reaction_sender_name(&reactors[0]), "You");
+        assert_eq!(reaction_sender_detail(&reactors[0]), "Your reaction");
+        assert_eq!(reaction_sender_name(&reactors[1]), "+10000000002");
+        assert_eq!(reaction_sender_name(&reactors[2]), "Saved Contact");
+        assert_eq!(reaction_sender_detail(&reactors[2]), "+10000000001");
+    }
+
+    #[test]
+    fn reaction_events_never_create_message_bubbles() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.apply_reaction(
+            whatfast_protocol::Reaction {
+                chat_id: "chat".into(),
+                message_id: "missing-message".into(),
+                sender_id: "participant".into(),
+                emoji: "👍".into(),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(store.messages.is_empty());
+    }
+
+    #[test]
+    fn participant_avatars_are_cached_by_sender() {
+        let mut store = Store::default();
+        store.set_participant_avatar("participant".into(), "/tmp/avatar.jpg".into());
+        assert_eq!(
+            store.participant_avatar_path("participant"),
+            Some("/tmp/avatar.jpg")
+        );
+        assert_eq!(store.participant_avatar_path("unknown"), None);
+    }
+
+    #[test]
+    fn image_download_path_survives_message_replay() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut image_message = message(1);
+        image_message.content = Some(whatfast_protocol::message::Content::Image(
+            whatfast_protocol::ImageContent {
+                mime_type: "image/jpeg".into(),
+                downloadable: true,
+                ..Default::default()
+            },
+        ));
+        store.upsert_message(image_message.clone());
+        assert!(store.set_message_image_paths(
+            "chat",
+            "1",
+            "/cache/photo.jpg".into(),
+            "/cache/photo.thumb.png".into()
+        ));
+        store.upsert_message(image_message);
+        let Some(whatfast_protocol::message::Content::Image(image)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("image content missing");
+        };
+        assert_eq!(image.local_path, "/cache/photo.jpg");
+        assert_eq!(image.thumbnail_path, "/cache/photo.thumb.png");
+        assert_eq!(image_row_path(image), "/cache/photo.thumb.png");
+        assert_eq!(image_viewer_path(image), "/cache/photo.jpg");
+        assert_eq!(message_text(&store.messages[0]), "");
+    }
+
+    #[test]
+    fn chat_pages_bulk_merge_to_ten_thousand_without_duplicates() {
+        let mut store = Store::default();
+        for page in 0..100 {
+            let cursor = if page == 0 {
+                String::new()
+            } else {
+                (page * 100).to_string()
+            };
+            let chats = (page * 100..(page + 1) * 100)
+                .map(|id| whatfast_protocol::Chat {
+                    id: format!("chat-{id}"),
+                    last_message_timestamp_ms: 10_000 - id as i64,
+                    ..Default::default()
+                })
+                .collect();
+            store.replace_chat_page(&cursor, chats, 10_000, ((page + 1) * 100).to_string());
+        }
+        assert_eq!(store.chats.len(), 10_000);
+        assert_eq!(store.chat_index.len(), 10_000);
+        assert_eq!(store.chats.first().unwrap().id, "chat-0");
+    }
+
+    #[test]
+    fn first_page_refresh_preserves_loaded_pages_selection_order_and_cursor() {
+        let mut store = Store::default();
+        store.replace_chat_page(
+            "",
+            vec![
+                whatfast_protocol::Chat {
+                    id: "first".into(),
+                    title: "old title".into(),
+                    last_message_timestamp_ms: 400,
+                    ..Default::default()
+                },
+                whatfast_protocol::Chat {
+                    id: "second".into(),
+                    last_message_timestamp_ms: 300,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-2".into(),
+        );
+        store.replace_chat_page(
+            "page-2",
+            vec![
+                whatfast_protocol::Chat {
+                    id: "third".into(),
+                    last_message_timestamp_ms: 200,
+                    ..Default::default()
+                },
+                whatfast_protocol::Chat {
+                    id: "fourth".into(),
+                    last_message_timestamp_ms: 100,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-3".into(),
+        );
+        store.selected_chat_id = Some("third".into());
+
+        store.replace_chat_page(
+            "",
+            vec![
+                whatfast_protocol::Chat {
+                    id: "first".into(),
+                    title: "refreshed title".into(),
+                    last_message_timestamp_ms: 500,
+                    ..Default::default()
+                },
+                whatfast_protocol::Chat {
+                    id: "second".into(),
+                    last_message_timestamp_ms: 300,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-2-regressed".into(),
+        );
+
+        assert_eq!(store.chats.len(), 4);
+        assert_eq!(
+            store
+                .chats
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third", "fourth"]
+        );
+        assert_eq!(store.chat("first").unwrap().title, "refreshed title");
+        assert_eq!(store.selected_chat_id.as_deref(), Some("third"));
+        assert_eq!(store.next_chat_cursor, "page-3");
+    }
+
+    #[test]
+    fn prepend_at_capacity_keeps_older_window_and_exposes_newer_navigation() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        for id in 100..100 + MAX_ACTIVE_MESSAGES {
+            store.upsert_message(message(id));
+        }
+        store.prepend_messages((0..100).map(message).collect());
+        assert_eq!(store.messages.len(), MAX_ACTIVE_MESSAGES);
+        assert_eq!(store.messages.first().unwrap().id, "0");
+        assert_eq!(store.messages.last().unwrap().id, "1999");
+        assert!(store.has_newer_messages);
+    }
+
+    #[test]
+    fn forward_pages_append_in_order_without_duplicates() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1), message(2)], true, true);
+        store.append_newer_messages(vec![message(2), message(3)], false);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+        assert!(!store.has_newer_messages);
+        assert!(store.has_older_messages);
+    }
+
+    #[test]
+    fn forward_page_keeps_activity_that_arrived_during_the_request() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1)], false, true);
+        store.newer_activity = true;
+        store.append_newer_messages(vec![message(2)], false);
+        assert!(store.has_newer_messages);
+    }
+
+    #[test]
+    fn clearing_account_state_removes_cross_account_data() {
+        let mut store = Store {
+            selected_chat_id: Some("private-chat".into()),
+            total_chats: 1,
+            qr_code: Some("stale".into()),
+            ..Default::default()
+        };
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "private-chat".into(),
+            ..Default::default()
+        });
+        store.upsert_message(message(1));
+        store.clear_account_state();
+        assert!(store.chats.is_empty());
+        assert!(store.messages.is_empty());
+        assert!(store.selected_chat_id.is_none());
+        assert!(store.qr_code.is_none());
+        assert_eq!(store.total_chats, 0);
+    }
+
+    #[test]
+    fn live_chat_reorder_updates_only_affected_indices_correctly() {
+        let mut store = Store::default();
+        store.replace_chat_page(
+            "",
+            (0..1_000)
+                .map(|id| whatfast_protocol::Chat {
+                    id: format!("chat-{id}"),
+                    last_message_timestamp_ms: 1_000 - id,
+                    ..Default::default()
+                })
+                .collect(),
+            1_000,
+            String::new(),
+        );
+        let moved_id = store.chats[800].id.clone();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: moved_id.clone(),
+            last_message_timestamp_ms: 50_000,
+            ..Default::default()
+        });
+        assert_eq!(store.chats[0].id, moved_id);
+        for (index, chat) in store.chats.iter().enumerate() {
+            assert_eq!(store.chat_index.get(&chat.id), Some(&index));
+        }
+    }
+
+    #[test]
+    fn chat_merge_redirects_the_active_selection_and_removes_the_loser() {
+        let mut store = Store::default();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "c:old".into(),
+            title: "Old".into(),
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "c:new".into(),
+            title: "New".into(),
+            ..Default::default()
+        });
+        store.select_chat("c:old".into());
+
+        assert!(store.merge_chat_id("c:old", "c:new"));
+        assert_eq!(store.selected_chat_id.as_deref(), Some("c:new"));
+        assert!(store.chats.iter().all(|chat| chat.id != "c:old"));
+        assert_eq!(store.chat_index.get("c:new"), Some(&0));
+    }
+
+    #[test]
+    fn centered_message_window_preserves_order_and_navigation_flags() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(3), message(1), message(2)], true, true);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+        assert!(store.has_older_messages);
+        assert!(store.has_newer_messages);
+        assert!(!store.newer_activity);
+        assert_eq!(
+            store.message("2").map(|message| message.id.as_str()),
+            Some("2")
+        );
+    }
+}

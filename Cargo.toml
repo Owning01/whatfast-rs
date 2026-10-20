@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/whatfast-core",
+    "crates/whatfast-model",
     "crates/whatfast-protocol",
     "crates/whatfast-ui",
 ]
