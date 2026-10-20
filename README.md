@@ -1,67 +1,98 @@
-# whatfast-rs
+# Whatfast
 
-**Whatfast en Rust nativo: sin webview, sin SolidJS, sin Chromium.**
+Cliente de escritorio de WhatsApp, rápido y chico. No es una página web
+empaquetada: es una **app nativa** escrita en Rust, con un motor en Go que
+habla el protocolo de dispositivos vinculados.
 
-Este repo es el destino de la migración descrita en
-[`CHARTER.md`](CHARTER.md) y ejecutada según [`PLAN.md`](PLAN.md).
-El origen (la app con webview) vive aparte, en `Owning01/whatfast`, y queda
-congelado como **oráculo de paridad**: sus tests son la especificación.
+![Lista de chats de Whatfast](docs/screenshots/01-lista-de-chats.png)
 
-## Qué es este repo ahora
+> **Estado:** en desarrollo. Es un cliente no oficial. La cuenta de
+> WhatsApp nunca entra en el proceso que dibuja la pantalla.
 
-| Crate | Qué es | Estado |
+---
+
+## Qué es
+
+- **Interfaz nativa en Rust (GPUI)**: dibuja directamente, sin webview, sin
+  DOM y sin motor de navegador.
+- **Sidecar en Go** (`whatsmeow`) como único dueño de la conexión, el
+  historial, los medios y las bases de datos.
+
+La interfaz nunca ve tus credenciales: el QR, el token del dispositivo y las
+bases de datos viven en el sidecar, y la interfaz habla con él por RPC tipados
+con protobuf.
+
+Todo el historial es **local** (SQLite: `session.db` y `client.db`).
+
+---
+
+## Qué hay adentro
+
+| Crate | Qué es | Líneas |
 |---|---|---|
-| `crates/whatfast-core` | Lógica pura portada del frontend: parser de formato, geometría del editor de imagen, reglas de workspace, orden de chats, políticas | en construcción (lote B-A*) |
-| `crates/whatfast-protocol` | Contrato protobuf (`proto/bridge.proto`) + framing y ciclo de vida del transporte | esqueleto |
-| `crates/whatfast-ui` | La interfaz GPUI | empieza en F4 |
+| `whatfast-core` | El dominio: formato de mensajes, reacciones, sincronización, tema, notas de voz, recortes. Sin dependencias de la interfaz. | 8.955 |
+| `whatfast-protocol` | El contrato (protobuf) y el transporte: framing, ciclo de vida de los pedidos, clasificación de la salida del sidecar y el backend de demostración. | 2.260 |
+| `whatfast-model` | El modelo de datos: chats, mensajes, borradores, avatares, stickers, rutas. Sin GPUI: se puede testear sin abrir una ventana. | 1.813 |
+| `whatfast-ui` | La interfaz: GPUI, sin webview. | (en construcción) |
+| `backend/` | El sidecar en Go. | ~20.000 |
 
-## Por qué
+El dominio está **completo y verificado**: los 153 casos de prueba del
+repositorio de origen están portados y en verde, y el juez de paridad
+(`scripts/parity.py`) los compara uno por uno.
 
-La app con webview usa **432 MB** de RAM en reposo. 367 de esos MB son el
-WebView2: seis procesos de Chromium existen solo para pintar nuestro DOM.
-La meta de esta migración es **menos de 120 MB** y una ventana visible en
-**menos de 0,5 s**, sin perder una sola función.
+---
 
-## Cómo se trabaja acá
-
-- [`RULEBOOK.md`](RULEBOOK.md) manda. Si dos implementadores podrían
-  responder distinto, la respuesta está en el rulebook, no en el código.
-- Un lote = una partición de archivos. Nadie toca el archivo de otro.
-- Los tests del origen son el oráculo y **no se tocan**. Los tests de Rust
-  se escriben nuevos, traducidos caso por caso.
-- Nada de stubs: `unwrap()`, `todo!()` y `unimplemented!()` están
-  prohibidos fuera de los tests.
-
-## Comandos
+## Compilar y correr
 
 ```sh
 scripts/test.cmd        # cargo test --workspace
 scripts/lint.cmd        # cargo clippy --all-targets --locked -- -D warnings
+scripts/build.cmd       # deja dist\whatfast.exe y dist\whatfast-backend.exe
 ```
 
-Los wrappers existen porque el toolchain está pineado y porque todos los
-worktrees de este repo tienen que compilar en el **mismo** sitio: cada
-worktree con su propio `target/` llena el disco con una copia de la
-compilación, y con el stack de Zed eso son 3 GB por worktree.
-
-El target compartido se resuelve solo:
-
-1. `CARGO_TARGET_DIR`, si ya está definida.
-2. `WHATFAST_TARGET_DIR`, si está definida.
-3. El `.cache/target` del worktree principal, que se localiza con
-   `git worktree list --porcelain`. No hay que configurar nada.
-
-Además, cuando `sccache` está en el `PATH`, los wrappers lo usan: la cache
-de compilaciones es de toda la máquina, así que el stack de Zed se compila
-**una vez** y el resto de los proyectos la reutilizan. Sin `sccache` el build
-es el mismo, solo que repetido tarda más.
-
-Para que las compilaciones no caigan en el disco del repo, exportá
-`WHATFAST_TARGET_DIR` a una carpeta de caches:
+Para correr sin una cuenta de WhatsApp (y sin red), el backend de demostración
+trae 10.000 chats simulados:
 
 ```sh
-export WHATFAST_TARGET_DIR=/ruta/a/caches/whatfast-target
+dist\whatfast.exe --fake-backend
 ```
+
+El backend real es el sidecar en Go: el binario tiene que estar al lado del
+ejecutable de la interfaz, o en la variable `WHATFAST_BACKEND`.
+
+### El toolchain
+
+- Rust estable (el `rust-toolchain.toml` lo fija).
+- Go 1.25 o superior, solo para el sidecar.
+
+Los wrappers de `scripts/` resuelven el directorio de compilaciones
+compartido, así que varios worktrees no llenan el disco con una copia de la
+compilación cada uno, y usan `sccache` cuando está disponible.
+
+---
+
+## El protocolo
+
+El sidecar habla un protocolo propio: protobuf enmarcado (4 bytes big-endian
+de longitud + payload) sobre stdin/stdout.
+
+- El contrato está en [`proto/bridge.proto`](proto/bridge.proto).
+- El mapeo de los 50 RPC y de los 56 comandos de la app web está en
+  [`docs/api-mapping.md`](docs/api-mapping.md).
+- La paridad con el cliente de origen está en [`docs/oracle.md`](docs/oracle.md).
+
+---
+
+## Checks
+
+| Qué | Cómo |
+|---|---|
+| Los tests | `scripts\test.cmd` |
+| El lint | `scripts\lint.cmd` |
+| La paridad con el oráculo | `python scripts\parity.py` |
+| El mapa de dependencias | `python scripts\dependency-map.py` |
+
+---
 
 ## Licencia
 
