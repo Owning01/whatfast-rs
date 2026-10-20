@@ -119,16 +119,29 @@ Los tres lotes son disjuntos por archivo. El orquestador mantiene
 
 ### Grupo 3 · UI nativa (GPUI) — arranca cuando el grupo 2 está verde
 
-| Lote | Agente | Alcance |
-|---|---|---|
-| **B-U1** | U1 | Sistema de tokens: los 14 custom properties del CSS + los 359 classes como tokens de GPUI, con un test por token |
-| **B-U2** | U2 | Shell: ventana, barra de título, layout de 3 panes, panes/tabs |
-| **B-U3** | U3 | Sidebar (el corte vertical de F4) |
-| **B-U4** | U4 | Lista de mensajes virtualizada + burbuja |
-| **B-U5** | U5 | Compositor: texto, adjuntos, voz, emoji, menciones, polls |
-| **B-U6** | U6 | Paneles: ficha del chat, ajustes, miembros, newsletters, estados |
-| **B-U7** | U7 | Buscador global, switcher de chats, bandeja de stickers, visor de imagen |
-| **B-U8** | U8 | Editor de imagen (recorte libre + rotación) en GPUI |
+**Hallazgo que cambió el plan (20/10/2026):** el repo de origen **ya tiene
+una implementación GPUI** en `desktop/` (9 archivos, 10.187 líneas, 64 tests):
+`main.rs` con 6.503 líneas de `render_*`, más `model.rs`, `bridge.rs`,
+`rpc.rs`, `paths.rs`, `settings.rs`, `sticker.rs`, `emoji_picker.rs`.
+
+O sea: la interfaz **no se porta desde SolidJS**, se separa, se limpa y se
+completa. Lo que falta en esa implementación_gpuI (11 componentes, 42 RPC) es
+lo que hay que escribir de verdad, y sale de los componentes SolidJS.
+
+| Lote | Agente | Alcance | Origen |
+|---|---|---|---|
+| **B-U0** | U0 | **Crate `whatfast-model`**: el modelo de datos (`model.rs`, 1.267 l., 23 tests) + `paths.rs` + `settings.rs` + `sticker.rs` + `emoji_picker.rs`, sin dependencia de GPUI | `desktop/src/` del oráculo |
+| **B-U1** | U1 | **El backend fake** (`fake_loop`, los 50 RPC con datos de demostración) en `whatfast-protocol/src/fake.rs` | `desktop/src/bridge.rs` (la parte fake) |
+| **B-U2** | U2 | **Shell + sidebar** (corte vertical del F4): ventana, layout de 3 paneles, lista de chats con filtros, no leídos y fijados | `desktop/src/main.rs` |
+| **B-U3** | U3 | **Tokens del tema**: las 14 custom properties del CSS y los 30 tokens del tema, como sistema de estilos de GPUI | `tauri/src/styles.css` + `whatfast-core/theme.rs` (ya portado) |
+| **B-U4** | U4 | Lista de mensajes virtualizada + burbuja (reacciones, replies, adjuntos, polls, quoted, link preview) | `desktop/src/main.rs` + `MessageBubble.tsx` |
+| **B-U5** | U5 | Compositor: texto, adjuntos, voz, emoji, menciones, polls | `Composer.tsx` |
+| **B-U6** | U6 | Barra de título, strip de tabs, panel de ficha del chat, ajustes, miembros, newsletters, estados | `TitleBar.tsx`, `Tabs.tsx`, `Panels.tsx`, `MemberPanel.tsx`, `NewsletterPanel.tsx`, `StatusStrip.tsx` |
+| **B-U7** | U7 | Buscador global, switcher de chats, bandeja de stickers, visor de imagen | `SpotlightSearch.tsx`, `ChatSwitcher.tsx`, `StickerTray.tsx`, `ImageViewer` |
+| **B-U8** | U8 | Editor de imagen (recorte libre + rotación) en GPUI | `MediaEditor.tsx` + `whatfast-core/media_crop.rs` (ya portado) |
+
+**Orden**: U0 y U1 en paralelo (son la base y no se tocan), después U2 (el
+corte vertical), después U3, y de ahí U4 a U8 en el orden del riesgo.
 
 ### Grupo 4 · protocolo en Rust (spike con gate)
 
