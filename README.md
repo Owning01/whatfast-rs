@@ -63,9 +63,12 @@ preview de links y la marca de la salida.
 
 ![Conversación](docs/screenshots/02-conversacion.png)
 
-### Búsqueda sobre contactos y mensajes
+### Mensaje con foto
 
-![Búsqueda](docs/screenshots/03-busqueda.png)
+La imagen la genera el backend de demostración y la dibuja la interfaz
+nativa, sin pasar por un webview.
+
+![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png)
 
 ---
 
