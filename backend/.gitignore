@@ -1,0 +1,2 @@
+# The build output of the sidecar never enters git.
+/bin/

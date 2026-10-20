@@ -1,0 +1,7442 @@
+package wa
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"log/slog"
+	"math"
+	"mime"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/Owning01/whatfast/backend/internal/domain"
+	"github.com/Owning01/whatfast/backend/internal/linkpreview"
+	searchutil "github.com/Owning01/whatfast/backend/internal/search"
+	"github.com/Owning01/whatfast/backend/internal/securefs"
+	"github.com/Owning01/whatfast/backend/internal/sqliteprivacy"
+	"github.com/Owning01/whatfast/backend/internal/store"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
+	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
+	wastore "go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	_ "modernc.org/sqlite"
+)
+
+type Event struct {
+	Kind                              string
+	Message                           domain.Message
+	Reaction                          domain.Reaction
+	Chat                              domain.Chat
+	ChatJID                           string
+	OldChatJID                        string
+	SenderJID                         string
+	Typing                            bool
+	Recording                         bool
+	MessageID                         string
+	Status                            domain.MessageStatus
+	QR                                string
+	QRExpires                         time.Time
+	Detail                            string
+	ChatsProcessed, MessagesProcessed uint64
+	Complete                          bool
+	RecoveredReactions                uint32
+	RepairComplete                    bool
+	SyncStatus                        store.SyncStatus
+	HistoryCoverage                   store.HistoryCoverage
+}
+type Sink func(Event)
+
+type Client struct {
+	ctx                 context.Context
+	wa                  *whatsmeow.Client
+	sessions            *sqlstore.Container
+	db                  *sql.DB
+	store               *store.Store
+	sink                Sink
+	log                 *slog.Logger
+	lifecycleMu         sync.Mutex
+	eventMu             sync.Mutex
+	pairingMu           sync.Mutex
+	pairing             bool
+	pairingAttempt      *pairingAttempt
+	handlerID           uint32
+	reducer             chan func()
+	reducerWG           sync.WaitGroup
+	reducerDone         chan struct{}
+	closeOnce           sync.Once
+	accepting           atomic.Bool
+	generation          atomic.Uint64
+	logoutFn            func(context.Context) error
+	clearSessionDataFn  func(context.Context) error
+	clearAccountDataFn  func(context.Context) error
+	markReadFn          func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error
+	avatarDir           string
+	mediaDir            string
+	contactCache        sync.Map
+	avatarCache         sync.Map
+	avatarFetchMu       sync.Mutex
+	avatarFetches       map[string]*avatarFetch
+	negativeAvatarMu    sync.Mutex
+	negativeAvatars     map[string]time.Time
+	appStateProjection  sync.Mutex
+	projectionComplete  atomic.Bool
+	syncMu              sync.Mutex
+	syncStatus          store.SyncStatus
+	syncEpoch           atomic.Uint64
+	historySyncComplete atomic.Bool
+	historyRequestMu    sync.Mutex
+	historyRequest      *olderHistoryRequest
+	fetchAppStateFn     func(context.Context, appstate.WAPatchName, bool, bool) error
+	groupNameFetchMu    sync.Mutex
+	groupNameFetches    map[string]*groupNameFetch
+	linkPreviews        *linkpreview.Resolver
+	getGroupInfoFn      func(context.Context, *whatsmeow.Client, types.JID) (*types.GroupInfo, error)
+	sendPresenceFn      func(context.Context, *whatsmeow.Client, types.Presence) error
+	connectFn           func(context.Context, *whatsmeow.Client) error
+	connecting          atomic.Bool
+	inboundRetryWake    chan struct{}
+	maintenanceWG       sync.WaitGroup
+	inboundMemoryMu     sync.Mutex
+	inboundMemory       []pendingInboundMessage
+	catchUpMu           sync.Mutex
+	catchUpTimer        *time.Timer
+}
+
+type pendingInboundMessage struct {
+	message         domain.Message
+	incrementUnread bool
+}
+
+type olderHistoryRequest struct {
+	chatID        string
+	anchorID      string
+	anchorTime    time.Time
+	requestedAtMS int64
+}
+
+type avatarFetch struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
+type groupNameFetch struct {
+	generation uint64
+	done       chan struct{}
+}
+
+type pairingAttempt struct {
+	generation uint64
+	cancel     context.CancelFunc
+	done       chan struct{}
+}
+
+type cachedContactDetails struct {
+	details   ContactDetails
+	expiresAt time.Time
+	complete  bool
+}
+
+type cachedAvatarMetadata struct {
+	path      string
+	expiresAt time.Time
+}
+
+// whatsmeowLogger keeps WhatsMeow diagnostics on stderr/backend.log. Its
+// stdout protocol stream is framed protobuf and must never receive logs.
+type whatsmeowLogger struct{ log *slog.Logger }
+
+func (l whatsmeowLogger) Warnf(message string, args ...any) {
+	l.log.Warn(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Errorf(message string, args ...any) {
+	l.log.Error(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Infof(message string, args ...any) {
+	l.log.Info(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Debugf(message string, args ...any) {
+	l.log.Debug(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Sub(module string) waLog.Logger {
+	return whatsmeowLogger{log: l.log.With("whatsmeow_module", module)}
+}
+
+func newWhatsmeowClient(device *wastore.Device, log *slog.Logger) *whatsmeow.Client {
+	client := whatsmeow.NewClient(device, whatsmeowLogger{log: log.With("component", "whatsmeow")})
+	// Transient disconnects must heal without operator action. Bound upstream's
+	// retry loop so a permanently rejected session eventually settles offline
+	// and the explicit Reconnect action remains useful.
+	client.EnableAutoReconnect = true
+	client.AutoReconnectHook = func(err error) bool {
+		log.Warn("automatic reconnect failed", "attempt", client.AutoReconnectErrors, "error", err)
+		return client.AutoReconnectErrors < 8
+	}
+	return client
+}
+
+type ContactDetails struct {
+	PhoneNumber  string
+	ContactName  string
+	PushName     string
+	BusinessName string
+}
+
+type ChatPresentation struct {
+	Details    ContactDetails
+	AvatarPath string
+}
+
+type ContactSearchResult struct {
+	JID, ChatID, DisplayName, SecondaryName, PhoneNumber string
+	Score                                                int
+}
+
+type LogoutError struct {
+	Stage         string
+	Remote, Local error
+}
+
+var (
+	ErrInvalidAttachment       = errors.New("invalid attachment")
+	ErrForwardUnsupported      = errors.New("this message type cannot be forwarded")
+	ErrEditNotAllowed          = errors.New("this message can no longer be edited")
+	ErrDeleteNotAllowed        = errors.New("this message can no longer be deleted")
+	errAttachmentDownloadLimit = errors.New("attachment exceeds the 2 GiB download limit")
+	errImageDownloadLimit      = errors.New("image exceeds the 32 MiB download limit")
+)
+
+// RevokeWindow is the longest a sent message may be deleted for everyone.
+// whatsmeow does not enforce a client-side window, but the WhatsApp server
+// rejects revokes after roughly 48 hours.
+const RevokeWindow = 48 * time.Hour
+
+func (e *LogoutError) Error() string {
+	switch e.Stage {
+	case "isolation":
+		return "logout_isolation_failed: " + e.Local.Error()
+	case "local_clear":
+		return fmt.Sprintf("logout_local_clear_failed: remote=%v local=%v", e.Remote, e.Local)
+	default:
+		return "logout_remote_failed_after_local_clear: " + e.Remote.Error()
+	}
+}
+
+func New(ctx context.Context, dataDir string, productStore *store.Store, sink Sink, log *slog.Logger) (*Client, error) {
+	sessionPath := filepath.Join(dataDir, "session.db")
+	if err := securefs.EnsurePrivateFile(sessionPath); err != nil {
+		return nil, fmt.Errorf("secure whatsmeow database: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := securefs.RestrictFileIfPresent(sessionPath + suffix); err != nil {
+			return nil, fmt.Errorf("secure whatsmeow database sidecar: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", sessionPath)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err = sqliteprivacy.EnableSecureDelete(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure whatsmeow database privacy: %w", err)
+	}
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"} {
+		if _, err = db.ExecContext(ctx, pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("configure whatsmeow database: %w", err)
+		}
+	}
+	container := sqlstore.NewWithDB(db, "sqlite3", nil)
+	if err = container.Upgrade(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("upgrade whatsmeow store: %w", err)
+	}
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		container.Close()
+		return nil, err
+	}
+	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), inboundRetryWake: make(chan struct{}, 1), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch), linkPreviews: linkpreview.New(linkpreview.Options{})}
+	if syncStatus, syncErr := productStore.SyncStatus(ctx); syncErr != nil {
+		c.log.Warn("load persisted sync status", "error", syncErr)
+	} else {
+		c.syncStatus = syncStatus
+		c.historySyncComplete.Store(
+			syncStatus.WhatsAppProgress >= 100 &&
+				(syncStatus.Phase == "app_state" || syncStatus.Phase == "complete"),
+		)
+	}
+	c.loadCachedAvatars()
+	c.bindWhatsmeow(newWhatsmeowClient(device, log))
+	c.clearSessionDataFn = c.clearSessionData
+	c.clearAccountDataFn = productStore.ClearAccountData
+	c.accepting.Store(true)
+	c.reducerWG.Add(1)
+	go func() {
+		defer c.reducerWG.Done()
+		for {
+			select {
+			case <-c.reducerDone:
+				return
+			default:
+			}
+			select {
+			case task := <-c.reducer:
+				task()
+			case <-c.reducerDone:
+				return
+			}
+		}
+	}()
+	c.maintenanceWG.Add(1)
+	go c.runInboundReplay()
+	c.wakeInboundReplay()
+	return c, nil
+}
+
+func (c *Client) bindWhatsmeow(client *whatsmeow.Client) {
+	// Archive and cross-device read state live in app-state snapshots. Without
+	// this, whatsmeow updates its own session cache during an initial sync but
+	// does not project those events into Whatfast's product database.
+	client.EmitAppStateEventsOnFullSync = true
+	c.wa = client
+	c.fetchAppStateFn = client.FetchAppState
+	c.logoutFn = client.Logout
+	c.markReadFn = client.MarkRead
+	sourceGeneration := c.generation.Load()
+	c.handlerID = client.AddEventHandler(func(raw any) { c.handleEvent(client, sourceGeneration, raw) })
+}
+
+func (c *Client) Connect() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.connectLocked(c.wa, c.generation.Load())
+}
+
+// PrepareConnect captures the paired client synchronously so callers can
+// safely schedule the returned function. A delayed startup goroutine will
+// become a no-op if logout changes the account generation first.
+func (c *Client) PrepareConnect() func() error {
+	if !c.connecting.CompareAndSwap(false, true) {
+		return nil
+	}
+	c.lifecycleMu.Lock()
+	source := c.wa
+	generation := c.generation.Load()
+	paired := source != nil && source.Store.ID != nil && c.accepting.Load() && !source.IsConnected()
+	c.lifecycleMu.Unlock()
+	if !paired {
+		c.connecting.Store(false)
+		return nil
+	}
+	return func() error {
+		c.lifecycleMu.Lock()
+		defer c.lifecycleMu.Unlock()
+		defer c.connecting.Store(false)
+		err := c.connectLocked(source, generation)
+		if err != nil && c.wa == source && c.generation.Load() == generation && c.accepting.Load() {
+			c.sink(Event{Kind: "connection", Detail: "offline"})
+		}
+		return err
+	}
+}
+
+// Reconnect starts one user-requested connection attempt. It never queues a
+// second attempt and returns before the network dial completes.
+func (c *Client) Reconnect() bool {
+	connect := c.PrepareConnect()
+	if connect == nil {
+		return false
+	}
+	go func() {
+		if err := connect(); err != nil {
+			c.log.Error("manual reconnect failed", "error", err)
+			c.sink(Event{Kind: "problem", Detail: "Reconnect failed: " + err.Error()})
+		}
+	}()
+	return true
+}
+
+func (c *Client) connectLocked(source *whatsmeow.Client, generation uint64) error {
+	if source == nil || c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return nil
+	}
+	c.sink(Event{Kind: "connection", Detail: "connecting"})
+	if c.connectFn != nil {
+		return c.connectFn(c.ctx, source)
+	}
+	return source.ConnectContext(c.ctx)
+}
+func (c *Client) IsPaired() bool    { return c.wa.Store.ID != nil }
+func (c *Client) IsConnected() bool { return c.wa.IsConnected() }
+func (c *Client) OwnID() string {
+	if c.wa.Store.ID == nil {
+		return ""
+	}
+	return c.wa.Store.ID.String()
+}
+
+func (c *Client) SyncStatus() store.SyncStatus {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	return c.syncStatus
+}
+
+func shouldCatchUpAfterConnect(status store.SyncStatus, historyComplete bool) bool {
+	return historyComplete && status.WhatsAppProgress >= 100
+}
+
+func (c *Client) updateSyncStatus(update func(*store.SyncStatus)) {
+	c.syncMu.Lock()
+	update(&c.syncStatus)
+	c.syncStatus.Revision++
+	snapshot := c.syncStatus
+	if c.store != nil {
+		if err := c.store.SaveSyncStatus(c.ctx, snapshot); err != nil {
+			c.log.Error("persist sync status", "error", err)
+			c.syncStatus.Phase = "failed"
+			c.syncStatus.Detail = "Sync progress could not be saved locally"
+			c.syncStatus.CompletedAtMS = 0
+			snapshot = c.syncStatus
+		}
+	}
+	c.syncMu.Unlock()
+	if c.sink != nil && c.store != nil {
+		c.sink(Event{Kind: "sync_status", SyncStatus: snapshot})
+	}
+}
+
+func (c *Client) beginInitialSync() {
+	epoch := c.syncEpoch.Add(1)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if status.Phase == "not_started" || status.StartedAtMS == 0 {
+			status.ChatsProcessed = 0
+			status.MessagesProcessed = 0
+			status.MessagesReceived = 0
+			status.MessagesDecoded = 0
+			status.MessagesFailed = 0
+			status.WhatsAppProgress = 0
+			status.CompletedAtMS = 0
+			status.StartedAtMS = time.Now().UnixMilli()
+		}
+		if status.ChatsProcessed > 0 || status.MessagesProcessed > 0 {
+			status.Phase = "catching_up"
+			status.Detail = "Resuming chat history sync"
+		} else {
+			status.Phase = "connecting"
+			status.Detail = "Waiting for WhatsApp history"
+		}
+	})
+	generation := c.generation.Load()
+	go func() {
+		timer := time.NewTimer(60 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-c.ctx.Done():
+			return
+		}
+		if c.generation.Load() != generation || c.syncEpoch.Load() != epoch {
+			return
+		}
+		current := c.SyncStatus()
+		if current.Phase == "complete" || current.Phase == "failed" || current.Phase == "offline" {
+			return
+		}
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "WhatsApp has not finished sending initial chat history"
+		})
+	}()
+}
+
+func (c *Client) scheduleCatchUpCompletion() {
+	current := c.SyncStatus()
+	if current.Phase != "catching_up" {
+		return
+	}
+	c.catchUpMu.Lock()
+	defer c.catchUpMu.Unlock()
+	if c.catchUpTimer == nil {
+		c.catchUpTimer = time.AfterFunc(3*time.Second, func() {
+			c.enqueue(c.finishCatchUp)
+		})
+		return
+	}
+	c.catchUpTimer.Reset(3 * time.Second)
+}
+
+func (c *Client) finishCatchUp() {
+	c.catchUpMu.Lock()
+	c.catchUpTimer = nil
+	c.catchUpMu.Unlock()
+	if !c.IsConnected() {
+		return
+	}
+	health, err := c.store.InboundJournalHealth(c.ctx)
+	if err != nil || health.Pending > 0 {
+		if err != nil {
+			c.reportInboundFailure("inspect inbound journal after reconnect", err)
+		}
+		c.scheduleCatchUpCompletion()
+		return
+	}
+	completedAt := time.Now()
+	if err = c.store.RecordReconciliation(c.ctx, completedAt); err != nil {
+		c.reportInboundFailure("record reconnect reconciliation", err)
+		c.scheduleCatchUpCompletion()
+		return
+	}
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if status.Phase == "catching_up" {
+			status.Phase = "complete"
+			status.Detail = "Up to date"
+			status.CompletedAtMS = completedAt.UnixMilli()
+		}
+	})
+}
+
+func (c *Client) resetSyncTracking() {
+	c.syncEpoch.Add(1)
+	c.historySyncComplete.Store(false)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		revision := status.Revision
+		*status = store.SyncStatus{
+			Phase:    "not_started",
+			Revision: revision,
+			Detail:   "Sync has not started",
+		}
+	})
+}
+
+func (c *Client) resolveConversation(rawJID string) (string, string, error) {
+	jid, err := types.ParseJID(rawJID)
+	if err != nil {
+		return "", "", err
+	}
+	jid = jid.ToNonAD()
+	transport := jid.String()
+	addresses := []string{transport}
+	if c.wa != nil && jid.Server == types.HiddenUserServer {
+		if pn, mapErr := c.wa.Store.LIDs.GetPNForLID(c.ctx, jid); mapErr != nil {
+			c.log.Warn("resolve PN alias for LID", "jid", transport, "error", mapErr)
+		} else if !pn.IsEmpty() {
+			addresses = append(addresses, pn.ToNonAD().String())
+		}
+	} else if c.wa != nil && jid.Server == types.DefaultUserServer {
+		if lid, mapErr := c.wa.Store.LIDs.GetLIDForPN(c.ctx, jid); mapErr != nil {
+			c.log.Warn("resolve LID alias for PN", "jid", transport, "error", mapErr)
+		} else if !lid.IsEmpty() {
+			addresses = append(addresses, lid.ToNonAD().String())
+		}
+	}
+	chatID, merges, err := c.store.EnsureConversation(c.ctx, addresses...)
+	if err != nil {
+		return "", "", err
+	}
+	for _, merge := range merges {
+		if c.sink != nil {
+			c.sink(Event{Kind: "chat_merge", OldChatJID: merge.OldChatID, ChatJID: merge.NewChatID})
+		}
+	}
+	return chatID, transport, nil
+}
+
+func (c *Client) ChatAvatar(ctx context.Context, chatID string) (string, error) {
+	addresses, err := c.store.ConversationAddresses(ctx, chatID)
+	if err != nil {
+		return "", err
+	}
+	return c.avatarForAddresses(ctx, addresses...)
+}
+
+func (c *Client) ContactDetails(ctx context.Context, rawJID string) ContactDetails {
+	return c.contactDetailsForAddresses(ctx, rawJID)
+}
+
+func (c *Client) ContactDetailsForChat(ctx context.Context, chatID string) ContactDetails {
+	addresses, err := c.store.ConversationAddresses(ctx, chatID)
+	if err != nil {
+		return ContactDetails{}
+	}
+	return c.contactDetailsForAddresses(ctx, addresses...)
+}
+
+func (c *Client) ChatPresentation(ctx context.Context, chatID string) (ContactDetails, string) {
+	presentations, err := c.ChatPresentations(ctx, []string{chatID})
+	if err != nil {
+		return ContactDetails{}, ""
+	}
+	presentation := presentations[chatID]
+	return presentation.Details, presentation.AvatarPath
+}
+
+// ChatPresentations resolves all presentation data for a chat page without
+// repeating product-store, contact-store, or filesystem work for every row.
+func (c *Client) ChatPresentations(ctx context.Context, chatIDs []string) (map[string]ChatPresentation, error) {
+	presentations := make(map[string]ChatPresentation, len(chatIDs))
+	addressesByChat, err := c.store.ConversationAddressesForChats(ctx, chatIDs)
+	if err != nil {
+		return nil, err
+	}
+	type pendingPresentation struct {
+		chatID    string
+		addresses []string
+		jids      []types.JID
+	}
+	pending := make([]pendingPresentation, 0, len(chatIDs))
+	pns := make([]types.JID, 0, len(chatIDs))
+	for _, chatID := range chatIDs {
+		addresses := addressesByChat[chatID]
+		jids := explicitIdentityJIDs(addresses...)
+		presentation := ChatPresentation{AvatarPath: c.cachedAvatarForJIDs(jids)}
+		if len(jids) == 0 || jids[0].Server == types.GroupServer {
+			presentations[chatID] = presentation
+			continue
+		}
+		if details, ok := c.cachedContactDetailsForAddresses(addresses); ok {
+			presentation.Details = details
+			presentations[chatID] = presentation
+			continue
+		}
+		for _, jid := range jids {
+			if jid.Server == types.DefaultUserServer {
+				pns = append(pns, jid)
+			}
+		}
+		presentations[chatID] = presentation
+		pending = append(pending, pendingPresentation{chatID: chatID, addresses: addresses, jids: jids})
+	}
+	if len(pending) == 0 || c.wa == nil || c.wa.Store == nil {
+		return presentations, nil
+	}
+	lidsByPN, _ := c.wa.Store.LIDs.GetManyLIDsForPNs(ctx, pns)
+	contacts, err := c.wa.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load chat presentation contacts: %w", err)
+	}
+	for _, item := range pending {
+		seen := make(map[string]bool, len(item.jids)+1)
+		for _, jid := range item.jids {
+			seen[jid.String()] = true
+		}
+		for _, jid := range append([]types.JID(nil), item.jids...) {
+			if lid := lidsByPN[jid]; !lid.IsEmpty() && !seen[lid.String()] {
+				item.jids = append(item.jids, lid.ToNonAD())
+				seen[lid.String()] = true
+			}
+		}
+		details := contactDetailsFromMap(item.jids, contacts)
+		c.cacheContactDetails(item.addresses, item.jids, details)
+		presentation := presentations[item.chatID]
+		presentation.Details = details
+		if presentation.AvatarPath == "" {
+			presentation.AvatarPath = c.cachedAvatarForJIDs(item.jids)
+		}
+		presentations[item.chatID] = presentation
+	}
+	return presentations, nil
+}
+
+type ChatParticipant struct {
+	ID           string
+	DisplayName  string
+	PhoneNumber  string
+	IsAdmin      bool
+	IsSuperAdmin bool
+	IsMe         bool
+}
+
+type ChatInfo struct {
+	Address              string
+	About                string
+	VerifiedName         string
+	Description          string
+	CreatedAt            time.Time
+	CreatedBy            string
+	ParticipantCount     int
+	Participants         []ChatParticipant
+	AnnounceOnly         bool
+	Locked               bool
+	DisappearingTimer    uint32
+	IsCommunity          bool
+	JoinApprovalRequired bool
+}
+
+// ChatInfo resolves the rich metadata behind the desktop's chat info pane.
+// Group facts come live from the server; contact facts come from the local
+// contact store plus a best-effort about/verified-name lookup.
+func (c *Client) ChatInfo(ctx context.Context, chatID string) (ChatInfo, error) {
+	addresses, err := c.store.ConversationAddresses(ctx, chatID)
+	if err != nil {
+		return ChatInfo{}, err
+	}
+	jids := explicitIdentityJIDs(addresses...)
+	if len(jids) == 0 {
+		return ChatInfo{}, fmt.Errorf("chat %s has no resolvable address", chatID)
+	}
+	if jids[0].Server == types.GroupServer {
+		return c.groupChatInfo(ctx, jids[0])
+	}
+	return c.directChatInfo(ctx, jids), nil
+}
+
+func (c *Client) directChatInfo(ctx context.Context, jids []types.JID) ChatInfo {
+	info := ChatInfo{Address: jids[0].String()}
+	lookup := make([]types.JID, 0, len(jids))
+	for _, jid := range jids {
+		if jid.Server == types.DefaultUserServer {
+			lookup = append(lookup, jid)
+		}
+	}
+	if len(lookup) > 0 {
+		info.Address = lookup[0].String()
+	} else {
+		lookup = jids[:1]
+	}
+	if c.wa == nil || !c.wa.IsConnected() {
+		return info
+	}
+	// The about text and verified business name are server-side and may be
+	// hidden by the peer's privacy settings; absence is not an error.
+	users, err := c.wa.GetUserInfo(ctx, lookup)
+	if err != nil {
+		c.log.Warn("chat info user lookup", "jid", info.Address, "error", err)
+		return info
+	}
+	for _, user := range users {
+		if info.About == "" {
+			info.About = user.Status
+		}
+		if info.VerifiedName == "" && user.VerifiedName != nil && user.VerifiedName.Details != nil {
+			info.VerifiedName = user.VerifiedName.Details.GetVerifiedName()
+		}
+	}
+	return info
+}
+
+func (c *Client) groupChatInfo(ctx context.Context, jid types.JID) (ChatInfo, error) {
+	info := ChatInfo{Address: jid.String()}
+	if c.wa == nil {
+		return info, fmt.Errorf("whatsapp client is not ready")
+	}
+	group, err := c.wa.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return info, err
+	}
+	info.Description = group.Topic
+	info.CreatedAt = group.GroupCreated
+	info.AnnounceOnly = group.IsAnnounce
+	info.Locked = group.IsLocked
+	if group.IsEphemeral {
+		info.DisappearingTimer = group.DisappearingTimer
+	}
+	info.IsCommunity = group.IsParent
+	info.JoinApprovalRequired = group.IsJoinApprovalRequired
+
+	contacts := map[types.JID]types.ContactInfo{}
+	if c.wa.Store != nil {
+		if all, contactsErr := c.wa.Store.Contacts.GetAllContacts(ctx); contactsErr == nil {
+			contacts = all
+		}
+	}
+	own := make(map[string]bool, 2)
+	if c.wa.Store != nil && c.wa.Store.ID != nil {
+		own[c.wa.Store.ID.ToNonAD().String()] = true
+	}
+	if c.wa.Store != nil && !c.wa.Store.LID.IsEmpty() {
+		own[c.wa.Store.LID.ToNonAD().String()] = true
+	}
+
+	if creator := groupMemberCandidates(group.OwnerJID, group.OwnerPN); len(creator) > 0 {
+		details := contactDetailsFromMap(creator, contacts)
+		info.CreatedBy = firstNonEmpty(
+			details.ContactName,
+			details.PushName,
+			details.BusinessName,
+			details.PhoneNumber,
+		)
+	}
+
+	participants := make([]ChatParticipant, 0, len(group.Participants))
+	for _, member := range group.Participants {
+		candidates := groupMemberCandidates(member.JID, member.PhoneNumber, member.LID)
+		if len(candidates) == 0 {
+			continue
+		}
+		details := contactDetailsFromMap(candidates, contacts)
+		participant := ChatParticipant{
+			ID:           candidates[0].String(),
+			PhoneNumber:  details.PhoneNumber,
+			IsAdmin:      member.IsAdmin || member.IsSuperAdmin,
+			IsSuperAdmin: member.IsSuperAdmin,
+		}
+		for _, candidate := range candidates {
+			if own[candidate.String()] {
+				participant.IsMe = true
+				break
+			}
+		}
+		participant.DisplayName = firstNonEmpty(
+			details.ContactName,
+			details.PushName,
+			details.BusinessName,
+			member.DisplayName,
+			participant.PhoneNumber,
+			candidates[0].User,
+		)
+		participants = append(participants, participant)
+	}
+	sort.SliceStable(participants, func(i, j int) bool {
+		left, right := participants[i], participants[j]
+		if left.IsMe != right.IsMe {
+			return left.IsMe
+		}
+		if left.IsSuperAdmin != right.IsSuperAdmin {
+			return left.IsSuperAdmin
+		}
+		if left.IsAdmin != right.IsAdmin {
+			return left.IsAdmin
+		}
+		return strings.ToLower(left.DisplayName) < strings.ToLower(right.DisplayName)
+	})
+	info.Participants = participants
+	info.ParticipantCount = group.ParticipantCount
+	if info.ParticipantCount < len(participants) {
+		info.ParticipantCount = len(participants)
+	}
+	return info, nil
+}
+
+func groupMemberCandidates(jids ...types.JID) []types.JID {
+	candidates := make([]types.JID, 0, len(jids))
+	seen := make(map[string]bool, len(jids))
+	for _, jid := range jids {
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || seen[jid.String()] {
+			continue
+		}
+		seen[jid.String()] = true
+		candidates = append(candidates, jid)
+	}
+	return candidates
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (c *Client) contactDetailsForAddresses(ctx context.Context, rawJIDs ...string) ContactDetails {
+	if details, ok := c.cachedContactDetailsForAddresses(rawJIDs); ok {
+		return details
+	}
+	candidates := c.identityJIDs(ctx, rawJIDs...)
+	if len(candidates) == 0 || candidates[0].Server == types.GroupServer {
+		return ContactDetails{}
+	}
+	var info types.ContactInfo
+	phone := ""
+	for _, jid := range candidates {
+		resolved, _ := c.wa.Store.Contacts.GetContact(ctx, jid)
+		info = mergeContactInfo(info, resolved)
+		if phone == "" && jid.Server == types.DefaultUserServer && jid.User != "" {
+			phone = "+" + jid.User
+		}
+	}
+	if phone == "" && info.RedactedPhone != "" {
+		phone = info.RedactedPhone
+	}
+	details := contactDetails(info, phone)
+	c.cacheContactDetails(rawJIDs, candidates, details)
+	return details
+}
+
+func (c *Client) cachedContactDetailsForAddresses(rawJIDs []string) (ContactDetails, bool) {
+	for _, rawJID := range rawJIDs {
+		if cached, ok := c.contactCache.Load(rawJID); ok {
+			entry, valid := cached.(cachedContactDetails)
+			if valid && time.Now().Before(entry.expiresAt) && (entry.complete || len(rawJIDs) == 1) {
+				return entry.details, true
+			}
+			c.contactCache.Delete(rawJID)
+		}
+	}
+	return ContactDetails{}, false
+}
+
+func (c *Client) cacheContactDetails(rawJIDs []string, candidates []types.JID, details ContactDetails) {
+	// Identity mappings and push names are imported asynchronously. Only cache a
+	// complete identity for a long period; partial/negative entries must be
+	// retried soon so an early list request cannot poison the whole session.
+	complete := details.PhoneNumber != "" && (details.ContactName != "" || details.PushName != "" || details.BusinessName != "")
+	ttl := 5 * time.Second
+	if complete {
+		ttl = 10 * time.Minute
+	}
+	entry := cachedContactDetails{details: details, expiresAt: time.Now().Add(ttl), complete: complete}
+	for _, jid := range candidates {
+		c.contactCache.Store(jid.String(), entry)
+	}
+	for _, rawJID := range rawJIDs {
+		c.contactCache.Store(rawJID, entry)
+	}
+}
+
+func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JID {
+	candidates := explicitIdentityJIDs(rawJIDs...)
+	seen := make(map[string]bool, len(rawJIDs)+1)
+	for _, jid := range candidates {
+		seen[jid.String()] = true
+	}
+	add := func(jid types.JID) {
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || seen[jid.String()] {
+			return
+		}
+		seen[jid.String()] = true
+		candidates = append(candidates, jid)
+	}
+	// Conversation callers already supply both aliases. Avoid querying the
+	// whatsmeow mapping database once per alias (and again for cached avatars)
+	// when the explicit set is sufficient.
+	hasLID, hasPN := false, false
+	for _, jid := range candidates {
+		hasLID = hasLID || jid.Server == types.HiddenUserServer
+		hasPN = hasPN || jid.Server == types.DefaultUserServer
+	}
+	if c.wa != nil && c.wa.Store != nil && !(hasLID && hasPN) {
+		original := append([]types.JID(nil), candidates...)
+		for _, jid := range original {
+			if jid.Server != types.HiddenUserServer && jid.Server != types.DefaultUserServer {
+				continue
+			}
+			if alt, altErr := c.wa.Store.GetAltJID(ctx, jid); altErr == nil {
+				add(alt)
+			}
+		}
+	}
+	return candidates
+}
+
+func explicitIdentityJIDs(rawJIDs ...string) []types.JID {
+	candidates := make([]types.JID, 0, len(rawJIDs))
+	seen := make(map[string]bool, len(rawJIDs))
+	for _, rawJID := range rawJIDs {
+		jid, err := types.ParseJID(rawJID)
+		if err != nil {
+			continue
+		}
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || seen[jid.String()] {
+			continue
+		}
+		seen[jid.String()] = true
+		candidates = append(candidates, jid)
+	}
+	return candidates
+}
+
+func contactDetailsFromMap(candidates []types.JID, contacts map[types.JID]types.ContactInfo) ContactDetails {
+	var info types.ContactInfo
+	phone := ""
+	for _, jid := range candidates {
+		info = mergeContactInfo(info, contacts[jid])
+		if phone == "" && jid.Server == types.DefaultUserServer && jid.User != "" {
+			phone = "+" + jid.User
+		}
+	}
+	if phone == "" && info.RedactedPhone != "" {
+		phone = info.RedactedPhone
+	}
+	return contactDetails(info, phone)
+}
+
+func contactDetails(info types.ContactInfo, phone string) ContactDetails {
+	contactName := info.FullName
+	if contactName == "" {
+		contactName = info.FirstName
+	}
+	return ContactDetails{PhoneNumber: phone, ContactName: contactName, PushName: info.PushName, BusinessName: info.BusinessName}
+}
+
+func mergeContactInfo(first, second types.ContactInfo) types.ContactInfo {
+	if first.FirstName == "" {
+		first.FirstName = second.FirstName
+	}
+	if first.FullName == "" {
+		first.FullName = second.FullName
+	}
+	if first.PushName == "" {
+		first.PushName = second.PushName
+	}
+	if first.BusinessName == "" {
+		first.BusinessName = second.BusinessName
+	}
+	if first.RedactedPhone == "" {
+		first.RedactedPhone = second.RedactedPhone
+	}
+	return first
+}
+
+func (c *Client) SearchContacts(ctx context.Context, query string, limit int) ([]ContactSearchResult, error) {
+	contacts, err := c.wa.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	addressMap, err := c.store.ConversationAddressMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type aggregate struct {
+		jid        types.JID
+		identities []types.JID
+		info       types.ContactInfo
+	}
+	aggregates := make(map[string]*aggregate)
+	for jid, info := range contacts {
+		jid = jid.ToNonAD()
+		if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+			continue
+		}
+		identities := c.identityJIDs(ctx, jid.String())
+		canonical := jid
+		for _, identity := range identities {
+			if identity.Server == types.DefaultUserServer {
+				canonical = identity
+				break
+			}
+		}
+		key := canonical.String()
+		entry := aggregates[key]
+		if entry == nil {
+			entry = &aggregate{jid: canonical}
+			aggregates[key] = entry
+		}
+		entry.info = mergeContactInfo(entry.info, info)
+		for _, identity := range identities {
+			if !slices.ContainsFunc(entry.identities, func(existing types.JID) bool { return existing.String() == identity.String() }) {
+				entry.identities = append(entry.identities, identity)
+			}
+		}
+	}
+	matcher := searchutil.New(query)
+	queryDigits := searchutil.Digits(query)
+	ownID := c.OwnID()
+	if parsedOwn, parseErr := types.ParseJID(ownID); parseErr == nil {
+		ownID = parsedOwn.ToNonAD().String()
+	}
+	results := make([]ContactSearchResult, 0, len(aggregates))
+	for _, entry := range aggregates {
+		if slices.ContainsFunc(entry.identities, func(identity types.JID) bool { return identity.ToNonAD().String() == ownID }) {
+			continue
+		}
+		info := entry.info
+		phone := info.RedactedPhone
+		for _, identity := range entry.identities {
+			if identity.Server == types.DefaultUserServer && identity.User != "" {
+				phone = "+" + identity.User
+				break
+			}
+		}
+		displayName := info.FullName
+		if displayName == "" {
+			displayName = info.FirstName
+		}
+		if displayName == "" {
+			displayName = info.BusinessName
+		}
+		if displayName == "" {
+			displayName = info.PushName
+		}
+		if displayName == "" {
+			displayName = phone
+		}
+		if displayName == "" {
+			displayName = entry.jid.User
+		}
+		secondary := info.BusinessName
+		if secondary == "" || secondary == displayName {
+			secondary = info.PushName
+		}
+		if secondary == displayName {
+			secondary = ""
+		}
+		score := searchutil.NoMatch
+		for _, field := range []struct {
+			value string
+			bonus int
+		}{{info.FullName, 300}, {info.FirstName, 280}, {info.BusinessName, 220}, {info.PushName, 180}} {
+			if match := matcher.Score(field.value); match != searchutil.NoMatch && match+field.bonus > score {
+				score = match + field.bonus
+			}
+		}
+		if queryDigits != "" {
+			if match := searchutil.New(queryDigits).Score(searchutil.Digits(phone)); match != searchutil.NoMatch && match+140 > score {
+				score = match + 140
+			}
+		}
+		if score == searchutil.NoMatch {
+			continue
+		}
+		chatID := ""
+		for _, identity := range entry.identities {
+			if mapped := addressMap[identity.String()]; mapped != "" {
+				chatID = mapped
+				break
+			}
+		}
+		results = append(results, ContactSearchResult{JID: entry.jid.String(), ChatID: chatID, DisplayName: displayName, SecondaryName: secondary, PhoneNumber: phone, Score: score})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].DisplayName < results[j].DisplayName
+	})
+	if limit <= 0 || limit > 8 {
+		limit = 8
+	}
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func (c *Client) OpenContact(ctx context.Context, rawJID string) (domain.Chat, error) {
+	jid, err := types.ParseJID(rawJID)
+	if err != nil || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
+		return domain.Chat{}, fmt.Errorf("invalid direct-contact JID")
+	}
+	chatID, _, err := c.resolveConversation(jid.ToNonAD().String())
+	if err != nil {
+		return domain.Chat{}, err
+	}
+	return c.store.Chat(ctx, chatID)
+}
+
+func (c *Client) Avatar(ctx context.Context, rawJID string) (string, error) {
+	return c.avatarForAddresses(ctx, rawJID)
+}
+
+func (c *Client) avatarForAddresses(ctx context.Context, rawJIDs ...string) (string, error) {
+	candidates := c.identityJIDs(ctx, rawJIDs...)
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("invalid avatar JID")
+	}
+	for _, jid := range candidates {
+		if path := c.cachedAvatarForJID(jid); path != "" {
+			return path, nil
+		}
+	}
+	keys := make([]string, len(candidates))
+	for i := range candidates {
+		keys[i] = candidates[i].String()
+	}
+	sort.Strings(keys)
+	key := strings.Join(keys, "\x00")
+	c.avatarFetchMu.Lock()
+	if existing := c.avatarFetches[key]; existing != nil {
+		c.avatarFetchMu.Unlock()
+		select {
+		case <-existing.done:
+			return existing.path, existing.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &avatarFetch{done: make(chan struct{})}
+	c.avatarFetches[key] = call
+	c.avatarFetchMu.Unlock()
+
+	var lastErr error
+	hadCleanResult := false
+	for _, jid := range candidates {
+		call.path, call.err = c.fetchAvatar(ctx, jid)
+		if call.path != "" {
+			break
+		}
+		if call.err != nil {
+			lastErr = call.err
+		} else {
+			hadCleanResult = true
+		}
+	}
+	if call.path == "" {
+		if hadCleanResult {
+			call.err = nil
+		} else {
+			call.err = lastErr
+		}
+	}
+	c.avatarFetchMu.Lock()
+	delete(c.avatarFetches, key)
+	close(call.done)
+	c.avatarFetchMu.Unlock()
+	return call.path, call.err
+}
+
+func (c *Client) fetchAvatar(ctx context.Context, jid types.JID) (string, error) {
+	if err := os.MkdirAll(c.avatarDir, 0o700); err != nil {
+		return "", fmt.Errorf("create avatar cache: %w", err)
+	}
+	path := c.avatarPath(jid)
+	if stat, statErr := os.Lstat(path); statErr == nil && stat.Mode().IsRegular() && stat.Size() > 0 && time.Since(stat.ModTime()) < 24*time.Hour {
+		return path, nil
+	}
+	c.negativeAvatarMu.Lock()
+	negativeUntil := c.negativeAvatars[jid.String()]
+	c.negativeAvatarMu.Unlock()
+	if time.Now().Before(negativeUntil) {
+		return "", nil
+	}
+	if !c.wa.IsConnected() {
+		return "", fmt.Errorf("WhatsApp is not connected")
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	info, err := c.wa.GetProfilePictureInfo(fetchCtx, jid, &whatsmeow.GetProfilePictureParams{Preview: true})
+	if errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) || errors.Is(err, whatsmeow.ErrProfilePictureNotSet) {
+		c.negativeAvatarMu.Lock()
+		c.negativeAvatars[jid.String()] = time.Now().Add(6 * time.Hour)
+		c.negativeAvatarMu.Unlock()
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get profile picture: %w", err)
+	}
+	if info == nil || info.URL == "" {
+		return "", nil
+	}
+	if err = validateAvatarURL(info.URL); err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, info.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	httpClient := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return fmt.Errorf("too many profile picture redirects")
+			}
+			return validateAvatarURL(req.URL.String())
+		},
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download profile picture: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download profile picture: HTTP %s", resp.Status)
+	}
+	const maxAvatarBytes = 2 * 1024 * 1024
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read profile picture: %w", err)
+	}
+	if len(data) == 0 || len(data) > maxAvatarBytes {
+		return "", fmt.Errorf("profile picture has invalid size")
+	}
+	contentType := strings.Split(http.DetectContentType(data), ";")[0]
+	if contentType != "image/jpeg" && contentType != "image/png" {
+		return "", fmt.Errorf("profile picture has unsupported content type %s", contentType)
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > 2048 || config.Height > 2048 || int64(config.Width)*int64(config.Height) > 4_000_000 {
+		return "", fmt.Errorf("profile picture has invalid dimensions")
+	}
+	temporary, err := os.CreateTemp(c.avatarDir, ".avatar-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create avatar cache file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		_, err = temporary.Write(data)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("cache profile picture: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", fmt.Errorf("publish profile picture cache: %w", err)
+	}
+	c.avatarCache.Store(path, cachedAvatarMetadata{path: path, expiresAt: time.Now().Add(24 * time.Hour)})
+	c.pruneAvatarCache(128 * 1024 * 1024)
+	return path, nil
+}
+
+func (c *Client) CachedAvatar(rawJID string) string {
+	for _, jid := range c.identityJIDs(c.ctx, rawJID) {
+		if path := c.cachedAvatarForJID(jid); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func (c *Client) CachedChatAvatar(chatID string) string {
+	addresses, err := c.store.ConversationAddresses(c.ctx, chatID)
+	if err != nil {
+		return ""
+	}
+	for _, jid := range c.identityJIDs(c.ctx, addresses...) {
+		if path := c.cachedAvatarForJID(jid); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func (c *Client) cachedAvatarForJIDs(jids []types.JID) string {
+	for _, jid := range jids {
+		if path := c.cachedAvatarForJID(jid); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func (c *Client) cachedAvatarForJID(jid types.JID) string {
+	path := c.avatarPath(jid.ToNonAD())
+	cached, ok := c.avatarCache.Load(path)
+	if !ok {
+		return ""
+	}
+	metadata, ok := cached.(cachedAvatarMetadata)
+	if !ok || time.Now().After(metadata.expiresAt) {
+		c.avatarCache.Delete(path)
+		return ""
+	}
+	return metadata.path
+}
+
+func (c *Client) loadCachedAvatars() {
+	entries, err := os.ReadDir(c.avatarDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || info.Size() <= 0 || filepath.Ext(entry.Name()) != ".jpg" {
+			continue
+		}
+		expiresAt := info.ModTime().Add(24 * time.Hour)
+		if time.Now().After(expiresAt) {
+			continue
+		}
+		path := filepath.Join(c.avatarDir, entry.Name())
+		c.avatarCache.Store(path, cachedAvatarMetadata{path: path, expiresAt: expiresAt})
+	}
+}
+
+func (c *Client) clearAvatarCache() {
+	c.avatarCache.Range(func(key, _ any) bool {
+		c.avatarCache.Delete(key)
+		return true
+	})
+}
+
+func validateAvatarURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return fmt.Errorf("profile picture URL is not valid HTTPS")
+	}
+	return nil
+}
+
+func (c *Client) pruneAvatarCache(maxBytes int64) {
+	entries, err := os.ReadDir(c.avatarDir)
+	if err != nil {
+		return
+	}
+	type cachedFile struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	files := make([]cachedFile, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".jpg" {
+			continue
+		}
+		files = append(files, cachedFile{path: filepath.Join(c.avatarDir, entry.Name()), size: info.Size(), mod: info.ModTime()})
+		total += info.Size()
+	}
+	if total <= maxBytes {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	for _, file := range files {
+		if total <= maxBytes {
+			break
+		}
+		if os.Remove(file.path) == nil {
+			c.avatarCache.Delete(file.path)
+			total -= file.size
+		}
+	}
+}
+
+func (c *Client) avatarPath(jid types.JID) string {
+	name := fmt.Sprintf("%x.jpg", sha256.Sum256([]byte(jid.String())))
+	return filepath.Join(c.avatarDir, name)
+}
+
+func (c *Client) StartPairing(ctx context.Context) (bool, error) {
+	c.lifecycleMu.Lock()
+	c.pairingMu.Lock()
+	if c.pairing {
+		c.pairingMu.Unlock()
+		c.lifecycleMu.Unlock()
+		return false, nil
+	}
+	if !c.accepting.Load() || c.wa == nil {
+		c.pairingMu.Unlock()
+		c.lifecycleMu.Unlock()
+		return false, errors.New("pairing unavailable during account reset")
+	}
+	source := c.wa
+	generation := c.generation.Load()
+	pairingCtx, cancel := context.WithCancel(ctx)
+	attempt := &pairingAttempt{generation: generation, cancel: cancel, done: make(chan struct{})}
+	c.pairing = true
+	c.pairingAttempt = attempt
+	c.pairingMu.Unlock()
+	if !c.emitPairingEvent(attempt, Event{Kind: "connection", Detail: "pairing"}) {
+		c.abortPairing(attempt)
+		c.lifecycleMu.Unlock()
+		return false, errors.New("pairing interrupted by account reset")
+	}
+	qr, err := source.GetQRChannel(pairingCtx)
+	if err != nil {
+		c.abortPairing(attempt)
+		c.lifecycleMu.Unlock()
+		return false, err
+	}
+	if !source.IsConnected() {
+		if c.connectFn == nil {
+			err = source.ConnectContext(pairingCtx)
+		} else {
+			err = c.connectFn(pairingCtx, source)
+		}
+		if err != nil {
+			resetGeneration := generation
+			c.eventMu.Lock()
+			if c.wa == source && c.generation.Load() == generation {
+				c.accepting.Store(false)
+				resetGeneration = c.generation.Add(1)
+			}
+			c.eventMu.Unlock()
+			c.abortPairing(attempt)
+			c.lifecycleMu.Unlock()
+			resetErr := c.replaceFailedPairingClient(ctx, source, resetGeneration)
+			return false, errors.Join(err, resetErr)
+		}
+	}
+	go func() {
+		defer func() {
+			c.finishPairing(attempt)
+			close(attempt.done)
+		}()
+		for {
+			var item whatsmeow.QRChannelItem
+			var ok bool
+			select {
+			case <-pairingCtx.Done():
+				return
+			case item, ok = <-qr:
+				if !ok {
+					return
+				}
+			}
+			var event Event
+			stopAfterEvent := false
+			switch item.Event {
+			case whatsmeow.QRChannelEventCode:
+				event = Event{Kind: "qr", QR: item.Code, QRExpires: time.Now().Add(item.Timeout)}
+			case whatsmeow.QRChannelEventPasskeyRequest:
+				// A passkey assertion is not a QR refresh. Do not leave the user
+				// looking at a QR code that can no longer finish pairing. The desktop
+				// shell does not yet have a native WebAuthn provider, so report the
+				// precise, recoverable condition instead of the opaque event name.
+				event = Event{Kind: "problem", Detail: "WhatsApp requires a passkey to finish linking this device. Whatfast does not yet support passkey pairing; use a WhatsApp client that supports your passkey, then try again."}
+				stopAfterEvent = true
+			case whatsmeow.QRChannelEventPasskeyResponse:
+				event = Event{Kind: "problem", Detail: "WhatsApp is waiting for passkey verification. Whatfast cannot complete passkey pairing yet; cancel this attempt and use a supported WhatsApp client."}
+				stopAfterEvent = true
+			case "success":
+				// PairSuccess only means the phone accepted the new companion. The
+				// authenticated connection happens after a fresh websocket login;
+				// reporting connected here made the UI load chats before WhatsApp
+				// had accepted requests from the new device.
+				event = Event{Kind: "connection", Detail: "connecting"}
+			case whatsmeow.QRChannelEventError:
+				detail := "pairing failed"
+				if item.Error != nil {
+					detail = item.Error.Error()
+				}
+				event = Event{Kind: "problem", Detail: detail}
+			case "timeout":
+				event = Event{Kind: "connection", Detail: "offline"}
+			case "err-scanned-without-multidevice":
+				event = Event{Kind: "problem", Detail: "Your phone cannot link this device until WhatsApp multi-device support is enabled. Update WhatsApp on your phone and try again."}
+			case "err-client-outdated":
+				event = Event{Kind: "problem", Detail: "WhatsApp rejected this client because it is out of date. Update Whatfast and try again."}
+			case "err-unexpected-state":
+				event = Event{Kind: "problem", Detail: "WhatsApp ended the pairing attempt unexpectedly. Refresh the QR code and try again."}
+			default:
+				event = Event{Kind: "problem", Detail: "pairing ended: " + item.Event}
+			}
+			if !c.emitPairingEvent(attempt, event) {
+				return
+			}
+			if stopAfterEvent {
+				// The QR channel otherwise remains open waiting for a WebAuthn
+				// response that this build cannot produce. Disconnecting lets the
+				// next Refresh QR action start a clean pairing attempt.
+				source.Disconnect()
+				return
+			}
+			if item.Event == "success" {
+				go c.reconnectAfterPairing(source, generation)
+				return
+			}
+		}
+	}()
+	c.lifecycleMu.Unlock()
+	return true, nil
+}
+
+// reconnectAfterPairing establishes the authenticated companion session after
+// WhatsApp accepts the QR link. PairSuccess is deliberately not treated as a
+// usable connection: WhatsMeow documents that callers must wait for Connected.
+func (c *Client) reconnectAfterPairing(source *whatsmeow.Client, generation uint64) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return
+	}
+	source.Disconnect()
+	if err := source.ConnectContext(c.ctx); err != nil {
+		c.log.Error("connect after pairing", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp accepted the device link but the new session could not connect. Refresh the QR code and try again."})
+	}
+}
+
+func (c *Client) replaceFailedPairingClient(ctx context.Context, source *whatsmeow.Client, generation uint64) error {
+	// Follow the same lock order as Logout. Backfills cannot register while
+	// accepting is false, and holding their mutex through the swap prevents an
+	// old result from being mistaken for a fresh-client job.
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation {
+		return nil
+	}
+	clear(c.groupNameFetches)
+	if err := c.reducerBarrier(ctx); err != nil {
+		return fmt.Errorf("isolate failed pairing client: %w", err)
+	}
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	source.Disconnect()
+	source.RemoveEventHandlers()
+	retireDevice(source.Store)
+	if c.sessions == nil {
+		return errors.New("replace failed pairing client: session store unavailable")
+	}
+	c.bindWhatsmeow(newWhatsmeowClient(c.sessions.NewDevice(), c.log))
+	c.projectionComplete.Store(false)
+	c.eventMu.Lock()
+	c.accepting.Store(true)
+	c.eventMu.Unlock()
+	return nil
+}
+
+func (c *Client) emitPairingEvent(attempt *pairingAttempt, event Event) bool {
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if c.generation.Load() != attempt.generation || !c.accepting.Load() {
+		return false
+	}
+	c.pairingMu.Lock()
+	current := c.pairing && c.pairingAttempt == attempt
+	c.pairingMu.Unlock()
+	if !current {
+		return false
+	}
+	c.sink(event)
+	return true
+}
+
+func (c *Client) abortPairing(attempt *pairingAttempt) {
+	c.finishPairing(attempt)
+	close(attempt.done)
+}
+
+func (c *Client) finishPairing(attempt *pairingAttempt) {
+	attempt.cancel()
+	c.pairingMu.Lock()
+	if c.pairingAttempt == attempt {
+		c.pairing = false
+		c.pairingAttempt = nil
+	}
+	c.pairingMu.Unlock()
+}
+
+func (c *Client) cancelAndWaitPairing(ctx context.Context) error {
+	c.pairingMu.Lock()
+	attempt := c.pairingAttempt
+	c.pairing = false
+	c.pairingAttempt = nil
+	if attempt != nil {
+		attempt.cancel()
+	}
+	c.pairingMu.Unlock()
+	if attempt == nil {
+		return nil
+	}
+	select {
+	case <-attempt.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) replyContext(ctx context.Context, chatID, messageID string) (*waE2E.ContextInfo, error) {
+	if messageID == "" {
+		return nil, nil
+	}
+	target, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return &waE2E.ContextInfo{
+		StanzaID:      proto.String(target.ID),
+		Participant:   proto.String(target.SenderJID),
+		RemoteJID:     proto.String(target.TransportJID),
+		QuotedMessage: quotedMessage(target),
+	}, nil
+}
+
+func quotedMessage(message domain.Message) *waE2E.Message {
+	switch message.Kind {
+	case "image":
+		mimeType, caption := "", message.Text
+		if message.Image != nil {
+			mimeType, caption = message.Image.MIMEType, message.Image.Caption
+		}
+		return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String(mimeType), Caption: proto.String(caption)}}
+	case "sticker":
+		mimeType := "image/webp"
+		if message.Image != nil && message.Image.MIMEType != "" {
+			mimeType = message.Image.MIMEType
+		}
+		return &waE2E.Message{StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String(mimeType)}}
+	case "video":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Mimetype: proto.String(attachment.MIMEType), Caption: proto.String(attachment.Caption)}}
+	case "audio":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String(attachment.MIMEType), PTT: proto.Bool(attachment.VoiceNote)}}
+	case "document":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Mimetype: proto.String(attachment.MIMEType), FileName: proto.String(attachment.FileName), Caption: proto.String(attachment.Caption)}}
+	default:
+		return &waE2E.Message{Conversation: proto.String(message.Text)}
+	}
+}
+
+// canonicalMentionJIDs drops malformed entries so one bad tag cannot make
+// WhatsApp reject the whole message.
+func canonicalMentionJIDs(rawJIDs []string) []string {
+	mentions := make([]string, 0, len(rawJIDs))
+	seen := make(map[string]bool, len(rawJIDs))
+	for _, raw := range rawJIDs {
+		jid, err := types.ParseJID(raw)
+		if err != nil || jid.User == "" {
+			continue
+		}
+		if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+			continue
+		}
+		canonical := jid.ToNonAD().String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			mentions = append(mentions, canonical)
+		}
+	}
+	return mentions
+}
+
+func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID, replyToChatID string, mentionedJIDs []string) (domain.Message, error) {
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jid, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: jid.String(), SenderJID: c.OwnID(), Text: text, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "text", ReplyToID: replyToID, ReplyToChatID: replyToChatID}
+	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, chatID, waID)
+	}
+	msg := pending
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	contextInfo := replyContext
+	if mentions := canonicalMentionJIDs(mentionedJIDs); len(mentions) > 0 {
+		if contextInfo == nil {
+			contextInfo = &waE2E.ContextInfo{}
+		}
+		contextInfo.MentionedJID = mentions
+	}
+	outgoing := &waE2E.Message{Conversation: proto.String(text)}
+	if contextInfo != nil {
+		outgoing = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: contextInfo}}
+	}
+	resp, err := c.wa.SendMessage(sendCtx, jid, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	if err != nil {
+		msg.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, msg, false)
+		c.emitChat(chatID)
+		return msg, err
+	}
+	msg.Timestamp = resp.Timestamp
+	msg.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, msg, false)
+	c.emitChat(chatID)
+	c.attachLinkPreview(msg)
+	return msg, err
+}
+
+// ForwardMessage sends a new WhatsApp message carrying the original payload
+// and WhatsApp's native forwarding metadata. Re-forwarding increments the
+// score instead of flattening every forwarded message to the same marker.
+func (c *Client) ForwardMessage(ctx context.Context, clientID, sourceChatID, messageID, targetChatID string) (domain.Message, error) {
+	source, err := c.store.Message(ctx, sourceChatID, messageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if source.Revoked {
+		return domain.Message{}, ErrForwardUnsupported
+	}
+	transport, err := c.store.PreferredJID(ctx, targetChatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	targetChatID, _, err = c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	transport, err = c.store.PreferredJID(ctx, targetChatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	score := source.ForwardingScore
+	if score < ^uint32(0) {
+		score++
+	}
+	if score == 0 {
+		score = 1
+	}
+	contextInfo := &waE2E.ContextInfo{IsForwarded: proto.Bool(true), ForwardingScore: proto.Uint32(score)}
+	var outgoing *waE2E.Message
+	var forwardedPoll *domain.Poll
+	if source.Kind == "poll" && source.Poll != nil && len(source.Poll.Options) >= 2 {
+		selectable := source.Poll.SelectableOptionsCount
+		if selectable == 0 {
+			selectable = 1
+		}
+		options := make([]string, 0, len(source.Poll.Options))
+		for _, option := range source.Poll.Options {
+			if name := strings.TrimSpace(option.Name); name != "" {
+				options = append(options, name)
+			}
+		}
+		if len(options) < 2 {
+			return domain.Message{}, ErrForwardUnsupported
+		}
+		outgoing = c.wa.BuildPollCreation(source.Poll.Question, options, int(selectable))
+		messagePoll(outgoing).ContextInfo = contextInfo
+		forwardedPoll = &domain.Poll{Question: source.Poll.Question, SelectableOptionsCount: selectable}
+		for _, name := range options {
+			forwardedPoll.Options = append(forwardedPoll.Options, domain.PollOption{Name: name})
+		}
+	} else {
+		outgoing, err = forwardedContent(source, contextInfo)
+		if err != nil {
+			return domain.Message{}, err
+		}
+	}
+	waID := string(c.wa.GenerateMessageID())
+	pending := source
+	pending.ID = waID
+	pending.ChatJID = targetChatID
+	pending.TransportJID = jid.String()
+	pending.SenderJID = c.OwnID()
+	pending.Timestamp = time.Now()
+	pending.FromMe = true
+	pending.Status = domain.StatusPending
+	pending.ReplyToID = ""
+	pending.ReplyToChatID = ""
+	pending.EditedAt = time.Time{}
+	pending.ForwardingScore = score
+	pending.Reactions = nil
+	if forwardedPoll != nil {
+		pending.Poll = forwardedPoll
+		pending.Text = pollText(messagePoll(outgoing))
+	}
+	fingerprint, _ := json.Marshal(struct {
+		SourceChatID string `json:"source_chat_id"`
+		MessageID    string `json:"message_id"`
+		TargetChatID string `json:"target_chat_id"`
+	}{sourceChatID, messageID, targetChatID})
+	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, string(fingerprint), pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, targetChatID, waID)
+	}
+	message := pending
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, jid, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	if err != nil {
+		message.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, message, false)
+		c.emitChat(targetChatID)
+		return message, err
+	}
+	message.Timestamp = response.Timestamp
+	message.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, message, false)
+	c.emitChat(targetChatID)
+	return message, err
+}
+
+// EditText uses WhatsApp's protocol-level edit wrapper. The stored message is
+// updated immediately and the later echo from WhatsApp converges through the
+// same ApplyMessage reducer.
+func (c *Client) EditText(ctx context.Context, chatID, messageID, text string) (domain.Message, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if !message.FromMe || message.Revoked || message.Kind != "text" ||
+		message.Timestamp.IsZero() || time.Since(message.Timestamp) > whatsmeow.EditWindow {
+		return domain.Message{}, ErrEditNotAllowed
+	}
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	contextInfo, err := c.replyContext(ctx, firstNonEmpty(message.ReplyToChatID, chatID), message.ReplyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if message.ForwardingScore > 0 {
+		if contextInfo == nil {
+			contextInfo = &waE2E.ContextInfo{}
+		}
+		contextInfo.IsForwarded = proto.Bool(true)
+		contextInfo.ForwardingScore = proto.Uint32(message.ForwardingScore)
+	}
+	content := &waE2E.Message{Conversation: proto.String(text)}
+	if contextInfo != nil {
+		content = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text), ContextInfo: contextInfo,
+		}}
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, jid, c.wa.BuildEdit(jid, types.MessageID(message.ID), content))
+	if err != nil {
+		return domain.Message{}, err
+	}
+	message.Text = text
+	message.EditedAt = response.Timestamp
+	if message.EditedAt.IsZero() {
+		message.EditedAt = time.Now()
+	}
+	if err = c.store.ApplyMessage(ctx, message, false); err != nil {
+		return domain.Message{}, err
+	}
+	c.emitChat(message.ChatJID)
+	return message, nil
+}
+
+// DeleteMessage revokes a sent message for everyone when forEveryone is true,
+// or hides it on this device only. Both paths persist the revoked state so
+// the change survives restarts and is broadcast to the desktop.
+func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID string, forEveryone bool) (domain.Message, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if message.Revoked {
+		return domain.Message{}, ErrDeleteNotAllowed
+	}
+	if forEveryone {
+		if !message.FromMe {
+			return domain.Message{}, ErrDeleteNotAllowed
+		}
+		if message.Timestamp.IsZero() || time.Since(message.Timestamp) > RevokeWindow {
+			return domain.Message{}, ErrDeleteNotAllowed
+		}
+		transport, err := c.store.PreferredJID(ctx, chatID)
+		if err != nil {
+			return domain.Message{}, err
+		}
+		jid, err := types.ParseJID(transport)
+		if err != nil {
+			return domain.Message{}, err
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		if _, err := c.wa.RevokeMessage(sendCtx, jid, types.MessageID(message.ID)); err != nil {
+			return domain.Message{}, err
+		}
+	}
+	message.Revoked = true
+	message.Kind = "revoked"
+	if err := c.store.ApplyMessage(ctx, message, false); err != nil {
+		return domain.Message{}, err
+	}
+	c.emitChat(message.ChatJID)
+	return message, nil
+}
+
+// SubscribeNewsletter subscribes to a channel from an invite key or a full
+// https://whatsapp.com/channel/<key> invite link and persists the subscription.
+func (c *Client) SubscribeNewsletter(ctx context.Context, inviteKey string) (domain.Newsletter, error) {
+	key := inviteKey
+	if strings.Contains(key, "whatsapp.com/channel/") {
+		key = key[strings.LastIndex(key, "/")+1:]
+	}
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 128 {
+		return domain.Newsletter{}, fmt.Errorf("invalid channel invite key")
+	}
+	meta, err := c.wa.GetNewsletterInfoWithInvite(ctx, key)
+	if err != nil {
+		return domain.Newsletter{}, err
+	}
+	jid := meta.ID.String()
+	name := meta.ThreadMeta.Name.Text
+	if err := c.store.UpsertNewsletter(ctx, jid, name); err != nil {
+		return domain.Newsletter{}, err
+	}
+	liveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := c.wa.NewsletterSubscribeLiveUpdates(liveCtx, meta.ID); err != nil {
+		c.log.Warn("subscribe channel live updates", "jid", jid, "error", err)
+	}
+	return domain.Newsletter{JID: jid, Name: name, SubscribedAt: time.Now()}, nil
+}
+
+func (c *Client) ListNewsletters(ctx context.Context) ([]domain.Newsletter, error) {
+	return c.store.Newsletters(ctx)
+}
+
+func (c *Client) UnsubscribeNewsletter(ctx context.Context, jid string) error {
+	return c.store.RemoveNewsletter(ctx, jid)
+}
+
+// NewsletterMessages fetches recent channel posts and maps them to wire
+// messages. Media bodies are exposed as downloadable references; the actual
+// download reuses the regular attachment transport.
+func (c *Client) NewsletterMessages(ctx context.Context, jid string, limit int) ([]domain.Message, error) {
+	parsed, err := types.ParseJID(jid)
+	if err != nil || parsed.Server != types.NewsletterServer {
+		return nil, fmt.Errorf("invalid channel jid")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	posts, err := c.wa.GetNewsletterMessages(ctx, parsed, &whatsmeow.GetNewsletterMessagesParams{Count: limit})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]domain.Message, 0, len(posts))
+	for _, post := range posts {
+		if post.Message == nil {
+			continue
+		}
+		content := extractMessageContent(post.Message, "newsletter")
+		items = append(items, domain.Message{
+			ID:          string(post.MessageID),
+			ChatJID:     jid,
+			TransportJID: jid,
+			SenderJID:   parsed.String(),
+			Text:        content.text,
+			Kind:        content.kind,
+			Image:       content.image,
+			Attachment:  content.attachment,
+			Timestamp:   post.Timestamp,
+		})
+	}
+	return items, nil
+}
+
+func forwardedContent(message domain.Message, contextInfo *waE2E.ContextInfo) (*waE2E.Message, error) {
+	switch message.Kind {
+	case "text":
+		extended := &waE2E.ExtendedTextMessage{Text: proto.String(message.Text), ContextInfo: contextInfo}
+		if message.LinkPreview != nil {
+			extended.MatchedText = proto.String(message.LinkPreview.URL)
+			extended.Title = proto.String(message.LinkPreview.Title)
+			extended.Description = proto.String(message.LinkPreview.Description)
+			extended.JPEGThumbnail = append([]byte(nil), message.LinkPreview.JPEGThumbnail...)
+			extended.ThumbnailWidth = proto.Uint32(message.LinkPreview.ThumbnailWidth)
+			extended.ThumbnailHeight = proto.Uint32(message.LinkPreview.ThumbnailHeight)
+		}
+		return &waE2E.Message{ExtendedTextMessage: extended}, nil
+	case "image":
+		if message.Image == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Image
+		return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype: proto.String(media.MIMEType), Caption: proto.String(media.Caption),
+			FileSHA256: append([]byte(nil), media.FileSHA256...), FileLength: proto.Uint64(media.FileSize),
+			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
+			MediaKey: append([]byte(nil), media.MediaKey...), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
+			DirectPath: proto.String(media.DirectPath), ContextInfo: contextInfo,
+			JPEGThumbnail: append([]byte(nil), media.JPEGThumbnail...),
+		}}, nil
+	case "sticker":
+		if message.Image == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Image
+		return &waE2E.Message{StickerMessage: &waE2E.StickerMessage{
+			Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+			FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), MediaKey: append([]byte(nil), media.MediaKey...),
+			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width), DirectPath: proto.String(media.DirectPath),
+			FileLength: proto.Uint64(media.FileSize), IsAnimated: proto.Bool(media.Animated), ContextInfo: contextInfo,
+		}}, nil
+	case "video", "audio", "document":
+		if message.Attachment == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Attachment
+		switch message.Kind {
+		case "video":
+			return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), Seconds: proto.Uint32(media.DurationSeconds),
+				MediaKey: append([]byte(nil), media.MediaKey...), Caption: proto.String(media.Caption),
+				Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
+				FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), DirectPath: proto.String(media.DirectPath),
+				GifPlayback: proto.Bool(media.Animated), ContextInfo: contextInfo,
+			}}, nil
+		case "audio":
+			return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), Seconds: proto.Uint32(media.DurationSeconds),
+				PTT: proto.Bool(media.VoiceNote), MediaKey: append([]byte(nil), media.MediaKey...),
+				FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), DirectPath: proto.String(media.DirectPath),
+				ContextInfo: contextInfo,
+			}}, nil
+		default:
+			return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), MediaKey: append([]byte(nil), media.MediaKey...),
+				FileName: proto.String(media.FileName), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
+				DirectPath: proto.String(media.DirectPath), Caption: proto.String(media.Caption), ContextInfo: contextInfo,
+			}}, nil
+		}
+	case "contact", "contacts":
+		contacts := make([]*waE2E.ContactMessage, 0, len(message.Contacts))
+		for _, contact := range message.Contacts {
+			contacts = append(contacts, &waE2E.ContactMessage{DisplayName: proto.String(contact.DisplayName), Vcard: proto.String(contact.VCard)})
+		}
+		if len(contacts) == 1 {
+			contacts[0].ContextInfo = contextInfo
+			return &waE2E.Message{ContactMessage: contacts[0]}, nil
+		}
+		if len(contacts) > 1 {
+			return &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+				DisplayName: proto.String(message.Text), Contacts: contacts, ContextInfo: contextInfo,
+			}}, nil
+		}
+	case "location":
+		if message.Location != nil {
+			location := message.Location
+			return &waE2E.Message{LocationMessage: &waE2E.LocationMessage{
+				DegreesLatitude: proto.Float64(location.Latitude), DegreesLongitude: proto.Float64(location.Longitude),
+				Name: proto.String(location.Name), Address: proto.String(location.Address), URL: proto.String(location.URL),
+				IsLive: proto.Bool(location.Live), ContextInfo: contextInfo,
+			}}, nil
+		}
+	}
+	return nil, ErrForwardUnsupported
+}
+
+func domainPoll(poll *waE2E.PollCreationMessage) *domain.Poll {
+	if poll == nil {
+		return nil
+	}
+	result := &domain.Poll{Question: poll.GetName(), SelectableOptionsCount: poll.GetSelectableOptionsCount()}
+	for _, option := range poll.GetOptions() {
+		if name := option.GetOptionName(); name != "" {
+			result.Options = append(result.Options, domain.PollOption{Name: name})
+		}
+	}
+	return result
+}
+
+func domainPollSnapshot(snapshot *waE2E.PollResultSnapshotMessage) *domain.Poll {
+	if snapshot == nil {
+		return nil
+	}
+	result := &domain.Poll{Question: snapshot.GetName()}
+	for _, vote := range snapshot.GetPollVotes() {
+		if vote.GetOptionName() != "" {
+			count := vote.GetOptionVoteCount()
+			if count < 0 {
+				count = 0
+			}
+			result.Options = append(result.Options, domain.PollOption{Name: vote.GetOptionName(), VoteCount: uint32(count)})
+			if uint32(count) > result.TotalVoters {
+				result.TotalVoters = uint32(count)
+			}
+		}
+	}
+	return result
+}
+
+func (c *Client) SendPoll(ctx context.Context, clientID, chatID, question string, options []string, selectable int) (domain.Message, error) {
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	outgoing := c.wa.BuildPollCreation(question, options, selectable)
+	poll := &domain.Poll{Question: question, SelectableOptionsCount: uint32(selectable)}
+	for _, name := range options {
+		poll.Options = append(poll.Options, domain.PollOption{Name: name})
+	}
+	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: pollText(outgoing.GetPollCreationMessage()), Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "poll", Poll: poll}
+	fingerprint, _ := json.Marshal(struct {
+		Question   string   `json:"question"`
+		Options    []string `json:"options"`
+		Selectable int      `json:"selectable"`
+	}{question, options, selectable})
+	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, string(fingerprint), pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, chatID, waID)
+	}
+	pending.ID = waID
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	resp, err := c.wa.SendMessage(sendCtx, chat, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		return pending, err
+	}
+	pending.Timestamp, pending.Status = resp.Timestamp, domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
+func pollSelectedNames(poll *domain.Poll, hashes [][]byte) ([]string, int) {
+	selected := make([]string, 0, len(hashes))
+	matched := make(map[string]bool, len(hashes))
+	for _, option := range poll.Options {
+		sum := sha256.Sum256([]byte(option.Name))
+		for _, hash := range hashes {
+			if bytes.Equal(sum[:], hash) {
+				selected = append(selected, option.Name)
+				matched[string(hash)] = true
+				break
+			}
+		}
+	}
+	unknown := 0
+	for _, hash := range hashes {
+		if !matched[string(hash)] {
+			unknown++
+		}
+	}
+	return selected, unknown
+}
+
+func (c *Client) VotePoll(ctx context.Context, chatID, pollMessageID string, selected []string) (domain.Message, error) {
+	target, err := c.store.Message(ctx, chatID, pollMessageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if target.Poll == nil {
+		return domain.Message{}, fmt.Errorf("target is not a poll")
+	}
+	allowed := make(map[string]bool, len(target.Poll.Options))
+	for _, option := range target.Poll.Options {
+		allowed[option.Name] = true
+	}
+	if len(selected) > int(target.Poll.SelectableOptionsCount) && target.Poll.SelectableOptionsCount > 0 {
+		return domain.Message{}, fmt.Errorf("too many poll options selected")
+	}
+	for _, name := range selected {
+		if !allowed[name] {
+			return domain.Message{}, fmt.Errorf("unknown poll option %q", name)
+		}
+	}
+	chat, err := types.ParseJID(target.TransportJID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	sender, err := types.ParseJID(target.SenderJID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: target.FromMe, IsGroup: chat.Server == types.GroupServer}, ID: types.MessageID(target.ID), Timestamp: target.Timestamp}
+	outgoing, err := c.wa.BuildPollVote(ctx, info, selected)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, chat, outgoing)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	vote := domain.PollVote{ChatJID: chatID, PollMessageID: pollMessageID, VoterJID: c.OwnID(), SelectedOptions: selected, Timestamp: response.Timestamp, FromMe: true}
+	message, _, err := c.store.ApplyPollVote(ctx, vote)
+	if err == nil {
+		c.sink(Event{Kind: "message", Message: message})
+	}
+	return message, err
+}
+
+var ErrPinNotPermitted = errors.New("only group admins can pin messages")
+
+func (c *Client) canPin(ctx context.Context, chat types.JID) error {
+	if chat.Server != types.GroupServer {
+		return nil
+	}
+	info, err := c.wa.GetGroupInfo(ctx, chat)
+	if err != nil {
+		return err
+	}
+	own := c.OwnID()
+	ownJID, _ := types.ParseJID(own)
+	ownJID = ownJID.ToNonAD()
+	for _, participant := range info.Participants {
+		if participant.JID.ToNonAD() == ownJID || participant.PhoneNumber.ToNonAD() == ownJID || participant.LID.ToNonAD() == ownJID {
+			if participant.IsAdmin || participant.IsSuperAdmin {
+				return nil
+			}
+			return ErrPinNotPermitted
+		}
+	}
+	return ErrPinNotPermitted
+}
+
+func (c *Client) SetMessagePin(ctx context.Context, chatID, messageID string, pinned bool) error {
+	target, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return err
+	}
+	chat, err := types.ParseJID(target.TransportJID)
+	if err != nil {
+		return err
+	}
+	if err = c.canPin(ctx, chat); err != nil {
+		return err
+	}
+	key := &waCommon.MessageKey{RemoteJID: proto.String(chat.String()), FromMe: proto.Bool(target.FromMe), ID: proto.String(target.ID)}
+	if chat.Server == types.GroupServer && !target.FromMe {
+		key.Participant = proto.String(target.SenderJID)
+	}
+	kind := waE2E.PinInChatMessage_UNPIN_FOR_ALL
+	if pinned {
+		kind = waE2E.PinInChatMessage_PIN_FOR_ALL
+	}
+	now := time.Now()
+	outgoing := &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{Key: key, Type: kind.Enum(), SenderTimestampMS: proto.Int64(now.UnixMilli())}}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, err = c.wa.SendMessage(sendCtx, chat, outgoing); err != nil {
+		return err
+	}
+	if err = c.store.SetMessagePinned(ctx, chatID, messageID, c.OwnID(), now, pinned); err == nil {
+		c.sink(Event{Kind: "pins", ChatJID: chatID})
+	}
+	return err
+}
+
+const maxImageBytes = 32 * 1024 * 1024
+
+// WhatsApp downloads encrypted media as AES-CBC ciphertext followed by a
+// 10-byte MAC, then decrypts it in place. PKCS#7 may add a full AES block when
+// the plaintext is block-aligned, so the temporary quota must allow both
+// pieces of wire overhead while still bounding the final image to 32 MiB.
+const maxImageDownloadBytes = maxImageBytes + aes.BlockSize + 10
+
+const maxAttachmentBytes int64 = 2 * 1024 * 1024 * 1024
+const mediaCacheBytes int64 = 512 * 1024 * 1024
+
+// Keep decoded images bounded as well as their compressed representation. At
+// four bytes per pixel this caps a single GPUI decode at roughly 64 MiB.
+const maxImagePixels int64 = 16_000_000
+const maxImageEdge = 8192
+const thumbnailMaxEdge = 512
+const maxStaticStickerBytes = 100 * 1024
+const maxAnimatedStickerBytes = 500 * 1024
+const stickerEdge = 512
+
+func supportedImageMIME(data []byte) (string, error) {
+	mimeType := strings.Split(http.DetectContentType(data), ";")[0]
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return mimeType, nil
+	default:
+		return "", fmt.Errorf("unsupported image type %s", mimeType)
+	}
+}
+
+func safeImageConfig(reader io.Reader) (image.Config, error) {
+	config, _, err := image.DecodeConfig(reader)
+	if err != nil {
+		return image.Config{}, fmt.Errorf("decode image dimensions: %w", err)
+	}
+	width, height := int64(config.Width), int64(config.Height)
+	if width <= 0 || height <= 0 || width > maxImageEdge || height > maxImageEdge || width > maxImagePixels/height {
+		return image.Config{}, fmt.Errorf("image dimensions %dx%d exceed the safe limit", config.Width, config.Height)
+	}
+	return config, nil
+}
+
+func safeImageFile(path string) (image.Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return image.Config{}, err
+	}
+	defer file.Close()
+	return safeImageConfig(file)
+}
+
+func stickerMetadata(data []byte) (width, height uint32, animated bool, err error) {
+	if len(data) == 0 || len(data) > maxAnimatedStickerBytes {
+		return 0, 0, false, fmt.Errorf("sticker must be between 1 byte and %d KiB", maxAnimatedStickerBytes/1024)
+	}
+	mimeType, mimeErr := supportedImageMIME(data)
+	if mimeErr != nil || mimeType != "image/webp" {
+		return 0, 0, false, fmt.Errorf("sticker must be a WebP image")
+	}
+	config, _, decodeErr := image.DecodeConfig(bytes.NewReader(data))
+	if decodeErr != nil {
+		return 0, 0, false, fmt.Errorf("decode sticker: %w", decodeErr)
+	}
+	if config.Width != stickerEdge || config.Height != stickerEdge {
+		return 0, 0, false, fmt.Errorf("sticker must be %d×%d", stickerEdge, stickerEdge)
+	}
+	animated = webpIsAnimated(data)
+	if !animated && len(data) > maxStaticStickerBytes {
+		return 0, 0, false, fmt.Errorf("static sticker must be %d KiB or smaller", maxStaticStickerBytes/1024)
+	}
+	return uint32(config.Width), uint32(config.Height), animated, nil
+}
+
+func webpIsAnimated(data []byte) bool {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return false
+	}
+	for offset := 12; offset+8 <= len(data); {
+		kind := string(data[offset : offset+4])
+		size64 := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		payloadStart := offset + 8
+		if size64 > uint64(len(data)-payloadStart) {
+			return false
+		}
+		size := int(size64)
+		payloadEnd := payloadStart + size
+		if kind == "ANIM" || kind == "ANMF" || kind == "VP8X" && size > 0 && data[payloadStart]&0x02 != 0 {
+			return true
+		}
+		offset = payloadEnd + size%2
+	}
+	return false
+}
+
+// webpFirstFrame lifts the first animation frame out of an animated WebP file
+// and returns it as a standalone still image. The WebP decoders ignore the
+// ANIM and ANMF chunks, so an animated file cannot be decoded as a whole even
+// though every frame inside it is a complete VP8 or VP8L bitstream.
+func webpFirstFrame(data []byte) ([]byte, error) {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return nil, fmt.Errorf("not a WebP file")
+	}
+	for offset := 12; offset+8 <= len(data); {
+		kind := string(data[offset : offset+4])
+		size := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		payloadStart := offset + 8
+		if size < 0 || size > len(data)-payloadStart {
+			return nil, fmt.Errorf("WebP chunk %q is truncated", kind)
+		}
+		if kind == "ANMF" {
+			return webpFrameImage(data[payloadStart : payloadStart+size])
+		}
+		offset = payloadStart + size + size%2
+	}
+	return nil, fmt.Errorf("WebP file has no animation frame")
+}
+
+// webpFrameImage lifts the image bitstream out of an ANMF frame payload. The
+// payload starts with a 16 byte frame header and continues with the frame
+// image, optionally preceded by its own alpha chunk.
+func webpFrameImage(frame []byte) ([]byte, error) {
+	const frameHeaderSize = 16
+	if len(frame) <= frameHeaderSize {
+		return nil, fmt.Errorf("animation frame is truncated")
+	}
+	payload := frame[frameHeaderSize:]
+	for offset := 0; offset+8 <= len(payload); {
+		kind := string(payload[offset : offset+4])
+		size := int(binary.LittleEndian.Uint32(payload[offset+4 : offset+8]))
+		start := offset + 8
+		if size < 0 || size > len(payload)-start {
+			return nil, fmt.Errorf("animation frame chunk %q is truncated", kind)
+		}
+		if kind == "VP8 " || kind == "VP8L" {
+			return webpStillFile(kind, payload[start:start+size]), nil
+		}
+		offset = start + size + size%2
+	}
+	return nil, fmt.Errorf("animation frame has no image chunk")
+}
+
+// webpStillFile wraps a single VP8 or VP8L bitstream in a minimal WebP file so
+// the standard decoders can read it.
+func webpStillFile(kind string, payload []byte) []byte {
+	chunkSize := 8 + len(payload) + len(payload)%2
+	file := make([]byte, 0, 12+chunkSize)
+	file = append(file, "RIFF"...)
+	file = binary.LittleEndian.AppendUint32(file, uint32(4+chunkSize))
+	file = append(file, "WEBP"...)
+	file = append(file, kind...)
+	file = binary.LittleEndian.AppendUint32(file, uint32(len(payload)))
+	file = append(file, payload...)
+	if len(payload)%2 == 1 {
+		file = append(file, 0)
+	}
+	return file
+}
+
+// decodeStillImage decodes an image into a single frame. Animated WebP files
+// cannot be decoded as a whole, so their first frame is decoded instead: it
+// is a complete still image and keeps the preview pipeline working for them.
+func decodeStillImage(data []byte) (image.Image, error) {
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err == nil {
+		return decoded, nil
+	}
+	frame, frameErr := webpFirstFrame(data)
+	if frameErr != nil {
+		return nil, err
+	}
+	decoded, _, err = image.Decode(bytes.NewReader(frame))
+	if err != nil {
+		return nil, fmt.Errorf("decode WebP animation frame: %w", err)
+	}
+	return decoded, nil
+}
+
+type attachmentSource struct {
+	file     *os.File
+	path     string
+	fileName string
+	mimeType string
+	size     int64
+}
+
+func openAttachmentSource(sourcePath, kind string, voiceNote bool) (source attachmentSource, err error) {
+	if voiceNote && kind != "audio" {
+		return source, fmt.Errorf("voice notes must be audio attachments")
+	}
+	if !filepath.IsAbs(sourcePath) {
+		return source, fmt.Errorf("attachment path must be absolute")
+	}
+	resolvedPath, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return source, fmt.Errorf("resolve attachment path: %w", err)
+	}
+	if !utf8.ValidString(resolvedPath) {
+		return source, fmt.Errorf("attachment path must be valid UTF-8")
+	}
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return source, fmt.Errorf("open attachment: %w", err)
+	}
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return source, fmt.Errorf("inspect attachment: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return source, fmt.Errorf("attachment must be a regular file between 1 byte and 2 GiB")
+	}
+	fileName := filepath.Base(resolvedPath)
+	if fileName == "." || fileName == string(filepath.Separator) || !utf8.ValidString(fileName) || len(fileName) > 255 {
+		return source, fmt.Errorf("attachment file name is invalid")
+	}
+	header := make([]byte, 512)
+	n, readErr := io.ReadFull(file, header)
+	if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		return source, fmt.Errorf("inspect attachment content: %w", readErr)
+	}
+	header = header[:n]
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return source, fmt.Errorf("rewind attachment: %w", err)
+	}
+	mimeType := detectAttachmentMIME(header, resolvedPath, kind)
+	switch kind {
+	case "document":
+		// Documents intentionally allow arbitrary content types: sending media as a
+		// document is a first-class WhatsApp workflow.
+	case "video":
+		if !strings.HasPrefix(mimeType, "video/") {
+			return source, fmt.Errorf("video attachment has content type %s", mimeType)
+		}
+	case "audio":
+		if !strings.HasPrefix(mimeType, "audio/") {
+			return source, fmt.Errorf("audio attachment has content type %s", mimeType)
+		}
+		if voiceNote {
+			// WhatsApp only accepts Ogg Opus for a voice note, so a file
+			// that is not one is rejected instead of being sent as a plain
+			// audio attachment the caller did not ask for.
+			if !bytes.HasPrefix(header, []byte("OggS")) || !bytes.Contains(header, []byte("OpusHead")) {
+				return source, fmt.Errorf("voice notes must contain Ogg Opus audio")
+			}
+			mimeType = "audio/ogg; codecs=opus"
+		}
+	default:
+		return source, fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+	keepOpen = true
+	return attachmentSource{file: file, path: resolvedPath, fileName: fileName, mimeType: mimeType, size: info.Size()}, nil
+}
+
+func detectAttachmentMIME(header []byte, sourcePath, kind string) string {
+	detected := strings.TrimSpace(strings.SplitN(http.DetectContentType(header), ";", 2)[0])
+	switch {
+	case bytes.HasPrefix(header, []byte("OggS")):
+		detected = "audio/ogg"
+	case len(header) >= 12 && string(header[4:8]) == "ftyp":
+		if kind == "audio" {
+			detected = "audio/mp4"
+		} else {
+			detected = "video/mp4"
+		}
+	case len(header) >= 4 && bytes.Equal(header[:4], []byte{0x1a, 0x45, 0xdf, 0xa3}):
+		if kind == "audio" {
+			detected = "audio/webm"
+		} else {
+			detected = "video/webm"
+		}
+	}
+	if detected == "application/octet-stream" {
+		if extensionType := mime.TypeByExtension(strings.ToLower(filepath.Ext(sourcePath))); extensionType != "" {
+			detected = strings.TrimSpace(strings.SplitN(extensionType, ";", 2)[0])
+		}
+	}
+	if detected == "" {
+		return "application/octet-stream"
+	}
+	return detected
+}
+
+// outgoingImageAnimated reports whether an outgoing image is an animation. A
+// GIF with more than one image descriptor animates, and an animated WebP
+// carries its frames in the animation chunks.
+func outgoingImageAnimated(mimeType string, data []byte) bool {
+	switch mimeType {
+	case "image/gif":
+		frames, err := gifFrameCount(bytes.NewReader(data))
+		return err == nil && frames > 1
+	case "image/webp":
+		return webpIsAnimated(data)
+	default:
+		return false
+	}
+}
+
+// outgoingMediaMetadata describes what an outgoing media file says about
+// itself. Every value comes from parsing the file: none of them is guessed.
+type outgoingMediaMetadata struct {
+	durationSeconds uint32
+	width           uint32
+	height          uint32
+	animated        bool
+}
+
+// probeOutgoingMedia reads the metadata of an outgoing attachment straight
+// from the file. A format that cannot be parsed reports no metadata at all
+// instead of an invented one.
+func probeOutgoingMedia(path string) outgoingMediaMetadata {
+	metadata := outgoingMediaMetadata{}
+	header, err := readFileHeader(path, 64*1024)
+	if err != nil {
+		return metadata
+	}
+	switch {
+	case len(header) >= 6 && (string(header[:6]) == "GIF89a" || string(header[:6]) == "GIF87a"):
+		width, height, animated, ok := probeGIF(path)
+		if ok {
+			metadata.width, metadata.height, metadata.animated = width, height, animated
+		}
+	case len(header) >= 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP":
+		metadata.animated = webpIsAnimated(header)
+	case len(header) >= 12 && string(header[4:8]) == "ftyp":
+		duration, width, height, ok := probeISOBMPF(path)
+		if ok {
+			metadata.durationSeconds, metadata.width, metadata.height = duration, width, height
+		}
+	case len(header) >= 4 && bytes.Equal(header[:4], []byte{0x1a, 0x45, 0xdf, 0xa3}):
+		duration, width, height, ok := probeMatroska(path)
+		if ok {
+			metadata.durationSeconds, metadata.width, metadata.height = duration, width, height
+		}
+	case bytes.HasPrefix(header, []byte("OggS")):
+		duration, ok := probeOgg(path)
+		if ok {
+			metadata.durationSeconds = duration
+		}
+	case len(header) >= 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WAVE":
+		duration, ok := probeWAV(header)
+		if ok {
+			metadata.durationSeconds = duration
+		}
+	}
+	return metadata
+}
+
+// readFileHeader reads the first bytes of a file.
+func readFileHeader(path string, size int) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	header := make([]byte, size)
+	read, err := file.Read(header)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return header[:read], nil
+}
+
+// probeGIF reports the dimensions of a GIF and whether it animates. The
+// std decoder would materialise every frame of an animation, so the frame
+// count comes from a block scan and the dimensions from the decoder header.
+func probeGIF(path string) (width, height uint32, animated bool, ok bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false, false
+	}
+	defer file.Close()
+	config, err := gif.DecodeConfig(file)
+	if err != nil {
+		return 0, 0, false, false
+	}
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, false, false
+	}
+	frames, err := gifFrameCount(file)
+	if err != nil {
+		return uint32(config.Width), uint32(config.Height), false, true
+	}
+	return uint32(config.Width), uint32(config.Height), frames > 1, true
+}
+
+// gifFrameCount counts the image descriptors of a GIF without decoding a
+// single frame.
+func gifFrameCount(reader io.Reader) (int, error) {
+	buffered := bufio.NewReader(reader)
+	header := make([]byte, 13)
+	if _, err := io.ReadFull(buffered, header); err != nil {
+		return 0, err
+	}
+	if string(header[:6]) != "GIF89a" && string(header[:6]) != "GIF87a" {
+		return 0, fmt.Errorf("not a GIF file")
+	}
+	flags := header[10]
+	if flags&0x80 != 0 {
+		if _, err := buffered.Discard(3 * (1 << ((flags & 0x07) + 1))); err != nil {
+			return 0, err
+		}
+	}
+	count := 0
+	for {
+		marker, err := buffered.ReadByte()
+		if err != nil {
+			return count, err
+		}
+		switch marker {
+		case 0x3b: // trailer
+			return count, nil
+		case 0x21: // extension
+			if _, err = buffered.Discard(1); err != nil {
+				return count, err
+			}
+			if err = skipGIFSubBlocks(buffered); err != nil {
+				return count, err
+			}
+		case 0x2c: // image descriptor
+			count++
+			descriptor := make([]byte, 9)
+			if _, err = io.ReadFull(buffered, descriptor); err != nil {
+				return count, err
+			}
+			flags = descriptor[8]
+			if flags&0x80 != 0 {
+				if _, err = buffered.Discard(3 * (1 << ((flags & 0x07) + 1))); err != nil {
+					return count, err
+				}
+			}
+			if _, err = buffered.Discard(1); err != nil {
+				return count, err
+			}
+			if err = skipGIFSubBlocks(buffered); err != nil {
+				return count, err
+			}
+		default:
+			return count, nil
+		}
+	}
+}
+
+// skipGIFSubBlocks skips the data sub-blocks of a GIF block.
+func skipGIFSubBlocks(reader *bufio.Reader) error {
+	for {
+		size, err := reader.ReadByte()
+		if err != nil {
+			return err
+		}
+		if size == 0 {
+			return nil
+		}
+		if _, err = reader.Discard(int(size)); err != nil {
+			return err
+		}
+	}
+}
+
+// isoBox is one ISO base media file format box.
+type isoBox struct {
+	kind        string
+	payloadFrom int64
+	payloadTo   int64
+}
+
+// readISOBoxes lists the boxes inside the [start, end) range of a file.
+func readISOBoxes(file *os.File, start, end int64) ([]isoBox, error) {
+	boxes := make([]isoBox, 0, 8)
+	offset := start
+	for offset+8 <= end {
+		header := make([]byte, 8)
+		if _, err := file.ReadAt(header, offset); err != nil {
+			return nil, err
+		}
+		size := int64(binary.BigEndian.Uint32(header[:4]))
+		kind := string(header[4:8])
+		payloadFrom := offset + 8
+		switch size {
+		case 0:
+			size = end - offset
+		case 1:
+			extended := make([]byte, 8)
+			if _, err := file.ReadAt(extended, payloadFrom); err != nil {
+				return nil, err
+			}
+			size = int64(binary.BigEndian.Uint64(extended))
+			payloadFrom += 8
+		}
+		if size < 8 {
+			return nil, fmt.Errorf("invalid %q box size", kind)
+		}
+		payloadTo := offset + size
+		if payloadTo > end {
+			payloadTo = end
+		}
+		boxes = append(boxes, isoBox{kind: kind, payloadFrom: payloadFrom, payloadTo: payloadTo})
+		offset = payloadTo
+	}
+	return boxes, nil
+}
+
+// probeISOBMPF reads the duration and the display size of an ISO base media
+// file format container.
+func probeISOBMPF(path string) (duration uint32, width, height uint32, ok bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	boxes, err := readISOBoxes(file, 0, info.Size())
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	for _, box := range boxes {
+		if box.kind != "moov" {
+			continue
+		}
+		meta, err := readISOMovie(file, box)
+		if err != nil {
+			continue
+		}
+		if meta.duration > 0 {
+			duration = meta.duration
+		}
+		if meta.width > 0 {
+			width = meta.width
+		}
+		if meta.height > 0 {
+			height = meta.height
+		}
+		ok = true
+	}
+	return duration, width, height, ok
+}
+
+// isoMeta holds the metadata of an ISO base media file format movie box.
+type isoMeta struct {
+	duration uint32
+	width    uint32
+	height   uint32
+}
+
+// readISOMovie reads the movie header of a moov box.
+func readISOMovie(file *os.File, box isoBox) (isoMeta, error) {
+	var meta isoMeta
+	boxes, err := readISOBoxes(file, box.payloadFrom, box.payloadTo)
+	if err != nil {
+		return meta, err
+	}
+	for _, child := range boxes {
+		switch child.kind {
+		case "mvhd":
+			payload, err := readISOPayload(file, child)
+			if err != nil {
+				continue
+			}
+			timescale, value, valid := readISOTimescaleDuration(payload)
+			if valid {
+				meta.duration = secondsFromTimescale(value, timescale)
+			}
+		case "trak":
+			track, err := readISOTrack(file, child)
+			if err != nil {
+				continue
+			}
+			if track.width > 0 {
+				meta.width = track.width
+			}
+			if track.height > 0 {
+				meta.height = track.height
+			}
+			if meta.duration == 0 && track.duration > 0 {
+				meta.duration = track.duration
+			}
+		}
+	}
+	return meta, nil
+}
+
+// readISOTrack reads the display size of a track box.
+func readISOTrack(file *os.File, box isoBox) (isoMeta, error) {
+	var meta isoMeta
+	boxes, err := readISOBoxes(file, box.payloadFrom, box.payloadTo)
+	if err != nil {
+		return meta, err
+	}
+	for _, child := range boxes {
+		switch child.kind {
+		case "tkhd":
+			payload, err := readISOPayload(file, child)
+			if err != nil {
+				continue
+			}
+			if len(payload) < 84 {
+				continue
+			}
+			meta.width = binary.BigEndian.Uint32(payload[len(payload)-8:len(payload)-4]) >> 16
+			meta.height = binary.BigEndian.Uint32(payload[len(payload)-4:]) >> 16
+		case "mdia":
+			media, err := readISOMedia(file, child)
+			if err != nil {
+				continue
+			}
+			if media.duration > 0 {
+				meta.duration = media.duration
+			}
+		}
+	}
+	return meta, nil
+}
+
+// readISOMedia reads the media header of a mdia box.
+func readISOMedia(file *os.File, box isoBox) (isoMeta, error) {
+	var meta isoMeta
+	boxes, err := readISOBoxes(file, box.payloadFrom, box.payloadTo)
+	if err != nil {
+		return meta, err
+	}
+	for _, child := range boxes {
+		if child.kind != "mdhd" {
+			continue
+		}
+		payload, err := readISOPayload(file, child)
+		if err != nil {
+			continue
+		}
+		timescale, value, valid := readISOTimescaleDuration(payload)
+		if valid {
+			meta.duration = secondsFromTimescale(value, timescale)
+		}
+	}
+	return meta, nil
+}
+
+// readISOPayload reads the payload of a box.
+func readISOPayload(file *os.File, box isoBox) ([]byte, error) {
+	size := box.payloadTo - box.payloadFrom
+	if size <= 0 || size > 1024 {
+		return nil, fmt.Errorf("unexpected %q box size", box.kind)
+	}
+	payload := make([]byte, size)
+	if _, err := file.ReadAt(payload, box.payloadFrom); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// readISOTimescaleDuration reads the timescale and the duration of an mvhd or
+// mdhd box payload.
+func readISOTimescaleDuration(payload []byte) (timescale, duration uint32, ok bool) {
+	if len(payload) < 4 {
+		return 0, 0, false
+	}
+	switch payload[0] {
+	case 0:
+		if len(payload) < 20 {
+			return 0, 0, false
+		}
+		timescale = binary.BigEndian.Uint32(payload[12:16])
+		duration = binary.BigEndian.Uint32(payload[16:20])
+	case 1:
+		if len(payload) < 32 {
+			return 0, 0, false
+		}
+		timescale = binary.BigEndian.Uint32(payload[20:24])
+		duration = binary.BigEndian.Uint32(payload[24:28])
+	default:
+		return 0, 0, false
+	}
+	return timescale, duration, timescale > 0
+}
+
+// secondsFromTimescale converts a media duration into whole seconds.
+func secondsFromTimescale(duration, timescale uint32) uint32 {
+	if timescale == 0 {
+		return 0
+	}
+	return uint32((uint64(duration) + uint64(timescale)/2) / uint64(timescale))
+}
+
+// EBML element identifiers used by the Matroska probe.
+const (
+	ebmlSegment      = 0x18538067
+	ebmlInfo         = 0x1549a966
+	ebmlTimecodeScale = 0x2ad7b1
+	ebmlDuration     = 0x4489
+	ebmlTracks       = 0x1654ae6b
+	ebmlTrackEntry   = 0xae
+	ebmlVideo        = 0xe0
+	ebmlPixelWidth   = 0xb0
+	ebmlPixelHeight  = 0xba
+)
+
+// ebmlElement is one EBML element.
+type ebmlElement struct {
+	id          uint64
+	payloadFrom int64
+	payloadTo   int64
+}
+
+// readEBMLElements lists the EBML elements inside the [start, end) range.
+func readEBMLElements(file *os.File, start, end int64) ([]ebmlElement, error) {
+	elements := make([]ebmlElement, 0, 8)
+	offset := start
+	for offset < end {
+		id, idLength, err := readEBMLID(file, offset)
+		if err != nil {
+			return elements, err
+		}
+		size, sizeLength, unknown, err := readEBMLSize(file, offset+int64(idLength))
+		if err != nil {
+			return elements, err
+		}
+		payloadFrom := offset + int64(idLength) + int64(sizeLength)
+		payloadTo := payloadFrom + size
+		if unknown || payloadTo > end || payloadTo <= payloadFrom {
+			payloadTo = end
+		}
+		elements = append(elements, ebmlElement{id: id, payloadFrom: payloadFrom, payloadTo: payloadTo})
+		offset = payloadTo
+	}
+	return elements, nil
+}
+
+// readEBMLID reads an EBML element identifier.
+func readEBMLID(file *os.File, offset int64) (uint64, int, error) {
+	first := make([]byte, 1)
+	if _, err := file.ReadAt(first, offset); err != nil {
+		return 0, 0, err
+	}
+	mask := byte(0x80)
+	length := 1
+	for mask > 0 && first[0]&mask == 0 {
+		mask >>= 1
+		length++
+	}
+	if length > 4 {
+		return 0, 0, fmt.Errorf("invalid EBML identifier")
+	}
+	raw := make([]byte, length)
+	if _, err := file.ReadAt(raw, offset); err != nil {
+		return 0, 0, err
+	}
+	value := uint64(0)
+	for _, b := range raw {
+		value = value<<8 | uint64(b)
+	}
+	return value, length, nil
+}
+
+// readEBMLSize reads an EBML element size.
+func readEBMLSize(file *os.File, offset int64) (int64, int, bool, error) {
+	first := make([]byte, 1)
+	if _, err := file.ReadAt(first, offset); err != nil {
+		return 0, 0, false, err
+	}
+	mask := byte(0x80)
+	length := 1
+	for mask > 0 && first[0]&mask == 0 {
+		mask >>= 1
+		length++
+	}
+	if length > 8 {
+		return 0, 0, false, fmt.Errorf("invalid EBML size")
+	}
+	raw := make([]byte, length)
+	if _, err := file.ReadAt(raw, offset); err != nil {
+		return 0, 0, false, err
+	}
+	raw[0] &^= mask
+	value := int64(0)
+	for _, b := range raw {
+		value = value<<8 | int64(b)
+	}
+	unknown := value == int64(1)<<(7*length)-1
+	return value, length, unknown, nil
+}
+
+// probeMatroska reads the duration and the display size of a Matroska or
+// WebM container.
+func probeMatroska(path string) (duration uint32, width, height uint32, ok bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	elements, err := readEBMLElements(file, 0, info.Size())
+	if err != nil && len(elements) == 0 {
+		return 0, 0, 0, false
+	}
+	for _, element := range elements {
+		if element.id != ebmlSegment {
+			continue
+		}
+		children, err := readEBMLElements(file, element.payloadFrom, element.payloadTo)
+		if err != nil && len(children) == 0 {
+			continue
+		}
+		for _, child := range children {
+			switch child.id {
+			case ebmlInfo:
+				seconds, found := readMatroskaInfo(file, child)
+				if found {
+					duration, ok = seconds, true
+				}
+			case ebmlTracks:
+				trackWidth, trackHeight, found := readMatroskaVideo(file, child)
+				if found {
+					width, height, ok = trackWidth, trackHeight, true
+				}
+			}
+		}
+	}
+	return duration, width, height, ok
+}
+
+// readMatroskaInfo reads the duration of a Matroska Info element.
+func readMatroskaInfo(file *os.File, box ebmlElement) (uint32, bool) {
+	children, err := readEBMLElements(file, box.payloadFrom, box.payloadTo)
+	if err != nil && len(children) == 0 {
+		return 0, false
+	}
+	timecodeScale := uint64(1000000)
+	var duration float64
+	found := false
+	for _, child := range children {
+		switch child.id {
+		case ebmlTimecodeScale:
+			payload, err := readEBMLPayload(file, child)
+			if err != nil || len(payload) == 0 {
+				continue
+			}
+			value := uint64(0)
+			for _, b := range payload {
+				value = value<<8 | uint64(b)
+			}
+			if value > 0 {
+				timecodeScale = value
+			}
+		case ebmlDuration:
+			payload, err := readEBMLPayload(file, child)
+			if err != nil {
+				continue
+			}
+			switch len(payload) {
+			case 4:
+				duration = float64(math.Float32frombits(binary.BigEndian.Uint32(payload)))
+			case 8:
+				duration = math.Float64frombits(binary.BigEndian.Uint64(payload))
+			default:
+				continue
+			}
+			found = true
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	seconds := duration * float64(timecodeScale) / 1e9
+	if seconds <= 0 {
+		return 0, false
+	}
+	return uint32(math.Round(seconds)), true
+}
+
+// readMatroskaVideo reads the pixel size of a Matroska Tracks element.
+func readMatroskaVideo(file *os.File, box ebmlElement) (uint32, uint32, bool) {
+	entries, err := readEBMLElements(file, box.payloadFrom, box.payloadTo)
+	if err != nil && len(entries) == 0 {
+		return 0, 0, false
+	}
+	for _, entry := range entries {
+		if entry.id != ebmlTrackEntry {
+			continue
+		}
+		children, err := readEBMLElements(file, entry.payloadFrom, entry.payloadTo)
+		if err != nil && len(children) == 0 {
+			continue
+		}
+		for _, child := range children {
+			if child.id != ebmlVideo {
+				continue
+			}
+			video, err := readEBMLElements(file, child.payloadFrom, child.payloadTo)
+			if err != nil && len(video) == 0 {
+				continue
+			}
+			var width, height uint32
+			for _, property := range video {
+				payload, err := readEBMLPayload(file, property)
+				if err != nil || len(payload) == 0 {
+					continue
+				}
+				value := uint32(0)
+				for _, b := range payload {
+					value = value<<8 | uint32(b)
+				}
+				switch property.id {
+				case ebmlPixelWidth:
+					width = value
+				case ebmlPixelHeight:
+					height = value
+				}
+			}
+			if width > 0 && height > 0 {
+				return width, height, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// readEBMLPayload reads the payload of an EBML element.
+func readEBMLPayload(file *os.File, element ebmlElement) ([]byte, error) {
+	size := element.payloadTo - element.payloadFrom
+	if size <= 0 || size > 1024 {
+		return nil, fmt.Errorf("unexpected EBML payload size")
+	}
+	payload := make([]byte, size)
+	if _, err := file.ReadAt(payload, element.payloadFrom); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// probeOgg reads the duration of an Ogg stream. The granule position of the
+// last page counts samples, so the duration needs the sample rate of the
+// codec the stream carries.
+func probeOgg(path string) (uint32, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	sampleRate := 0
+	var lastGranule int64 = -1
+	for {
+		header := make([]byte, 27)
+		if _, err = io.ReadFull(reader, header); err != nil {
+			break
+		}
+		if string(header[:4]) != "OggS" {
+			break
+		}
+		granule := int64(binary.LittleEndian.Uint64(header[6:14]))
+		segments := int(header[26])
+		table := make([]byte, segments)
+		if _, err = io.ReadFull(reader, table); err != nil {
+			break
+		}
+		payloadSize := 0
+		for _, size := range table {
+			payloadSize += int(size)
+		}
+		if sampleRate == 0 {
+			payload := make([]byte, payloadSize)
+			if _, err = io.ReadFull(reader, payload); err != nil {
+				break
+			}
+			sampleRate = oggSampleRate(payload)
+		} else if _, err = reader.Discard(payloadSize); err != nil {
+			break
+		}
+		if granule >= 0 {
+			lastGranule = granule
+		}
+	}
+	if sampleRate <= 0 || lastGranule <= 0 {
+		return 0, false
+	}
+	return uint32((uint64(lastGranule) + uint64(sampleRate)/2) / uint64(sampleRate)), true
+}
+
+// oggSampleRate reads the sample rate of the codec identification header of
+// an Ogg stream.
+func oggSampleRate(payload []byte) int {
+	if index := bytes.Index(payload, []byte("OpusHead")); index >= 0 {
+		// Opus granule positions always count 48 kHz samples.
+		return 48000
+	}
+	if index := bytes.Index(payload, []byte("vorbis")); index >= 1 && len(payload) >= index+15 {
+		return int(binary.LittleEndian.Uint32(payload[index+11 : index+15]))
+	}
+	return 0
+}
+
+// probeWAV reads the duration of a RIFF WAVE file.
+func probeWAV(header []byte) (uint32, bool) {
+	if len(header) < 12 {
+		return 0, false
+	}
+	var byteRate, dataSize uint32
+	offset := 12
+	for offset+8 <= len(header) {
+		kind := string(header[offset : offset+4])
+		size := binary.LittleEndian.Uint32(header[offset+4 : offset+8])
+		payload := offset + 8
+		switch kind {
+		case "fmt ":
+			if payload+12 <= len(header) {
+				byteRate = binary.LittleEndian.Uint32(header[payload+8 : payload+12])
+			}
+		case "data":
+			dataSize = size
+		}
+		if size > uint32(len(header)-payload) {
+			break
+		}
+		offset = payload + int(size) + int(size)%2
+	}
+	if byteRate == 0 {
+		return 0, false
+	}
+	return dataSize / byteRate, true
+}
+
+func validCacheExtension(extension string) bool {
+	if len(extension) < 2 || len(extension) > 12 || extension[0] != '.' {
+		return false
+	}
+	for _, char := range extension[1:] {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func attachmentExtension(mimeType, fileName string) string {
+	if extension := strings.ToLower(filepath.Ext(fileName)); validCacheExtension(extension) {
+		return extension
+	}
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err == nil {
+		if extensions, extensionErr := mime.ExtensionsByType(mediaType); extensionErr == nil {
+			for _, extension := range extensions {
+				extension = strings.ToLower(extension)
+				if validCacheExtension(extension) {
+					return extension
+				}
+			}
+		}
+	}
+	return ".bin"
+}
+
+func attachmentCacheKey(chatID, messageID string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(chatID+"\x00"+messageID)))
+}
+
+func (c *Client) attachmentPath(chatID, messageID string, attachment *domain.Attachment) string {
+	return filepath.Join(c.mediaDir, attachmentCacheKey(chatID, messageID)+attachmentExtension(attachment.MIMEType, attachment.FileName))
+}
+
+func validLocalAttachment(path string, expectedSize uint64) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return false
+	}
+	return expectedSize == 0 || uint64(info.Size()) == expectedSize
+}
+
+func pathWithin(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func validManagedAttachment(mediaDir, path string, expectedSize uint64) bool {
+	if !filepath.IsAbs(mediaDir) || !filepath.IsAbs(path) {
+		return false
+	}
+	root, err := filepath.EvalSymlinks(mediaDir)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithin(root, resolved) {
+		return false
+	}
+	// Reject a final-component symlink even when it resolves back into the
+	// cache. Only backend-created regular files are valid bridge assets.
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return false
+	}
+	return expectedSize == 0 || uint64(info.Size()) == expectedSize
+}
+
+func (c *Client) CachedAttachmentPath(chatID, messageID string, attachment *domain.Attachment) string {
+	if attachment == nil {
+		return ""
+	}
+	path := c.attachmentPath(chatID, messageID, attachment)
+	if validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return path
+	}
+	_ = os.Remove(path)
+	return ""
+}
+
+// materializeAttachmentSource publishes an immutable snapshot of a local
+// attachment under the backend-owned media directory. The source may be a
+// user-selected path, but the returned path is always the stable cache name
+// derived from the chat and message IDs.
+func (c *Client) materializeAttachmentSource(chatID, messageID string, attachment *domain.Attachment, sourcePath string, opened *os.File) (path string, err error) {
+	if attachment == nil {
+		return "", fmt.Errorf("attachment metadata is missing")
+	}
+	if !filepath.IsAbs(sourcePath) {
+		return "", fmt.Errorf("attachment source path must be absolute")
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", fmt.Errorf("create media cache: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(c.mediaDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve media cache: %w", err)
+	}
+	path = c.attachmentPath(chatID, messageID, attachment)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil || parent != root || !pathWithin(root, filepath.Join(parent, filepath.Base(path))) {
+		return "", fmt.Errorf("attachment cache path escapes the media directory")
+	}
+	if validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return path, nil
+	}
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return "", fmt.Errorf("replace invalid attachment cache file: %w", removeErr)
+	}
+
+	resolvedSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve attachment source: %w", err)
+	}
+	if !filepath.IsAbs(resolvedSource) {
+		return "", fmt.Errorf("resolved attachment source path must be absolute")
+	}
+	sourceInfo, err := os.Stat(resolvedSource)
+	if err != nil {
+		return "", fmt.Errorf("inspect attachment source: %w", err)
+	}
+	if !sourceInfo.Mode().IsRegular() || sourceInfo.Size() <= 0 || sourceInfo.Size() > maxAttachmentBytes {
+		return "", fmt.Errorf("attachment source must be a regular file between 1 byte and 2 GiB")
+	}
+	if attachment.FileSize > 0 && uint64(sourceInfo.Size()) != attachment.FileSize {
+		return "", fmt.Errorf("attachment source size does not match metadata")
+	}
+
+	source := opened
+	closeSource := false
+	if source == nil {
+		source, err = os.Open(resolvedSource)
+		if err != nil {
+			return "", fmt.Errorf("open attachment source: %w", err)
+		}
+		closeSource = true
+	} else {
+		openedInfo, statErr := source.Stat()
+		if statErr != nil || !os.SameFile(sourceInfo, openedInfo) {
+			return "", fmt.Errorf("attachment source changed after validation")
+		}
+	}
+	if closeSource {
+		defer source.Close()
+	}
+	if _, err = source.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind attachment source: %w", err)
+	}
+
+	temporary, err := os.CreateTemp(c.mediaDir, ".attachment-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create attachment cache file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		var copied int64
+		copied, err = io.Copy(temporary, io.LimitReader(source, maxAttachmentBytes+1))
+		if err == nil && (copied <= 0 || copied > maxAttachmentBytes || copied != sourceInfo.Size()) {
+			err = fmt.Errorf("attachment source changed while it was cached")
+		}
+		if err == nil && attachment.FileSize > 0 && uint64(copied) != attachment.FileSize {
+			err = fmt.Errorf("cached attachment size does not match metadata")
+		}
+		if err == nil {
+			err = temporary.Sync()
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("cache attachment source: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil && !validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return "", fmt.Errorf("publish attachment cache: %w", err)
+	}
+	if !validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return "", fmt.Errorf("published attachment cache file is invalid")
+	}
+	return path, nil
+}
+
+func imageExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".img"
+	}
+}
+
+func (c *Client) mediaPath(chatID, messageID, mimeType string) string {
+	name := fmt.Sprintf("%x%s", sha256.Sum256([]byte(chatID+"\x00"+messageID)), imageExtension(mimeType))
+	return filepath.Join(c.mediaDir, name)
+}
+
+func (c *Client) thumbnailPath(chatID, messageID string) string {
+	name := fmt.Sprintf("%x.thumb.png", sha256.Sum256([]byte(chatID+"\x00"+messageID)))
+	return filepath.Join(c.mediaDir, name)
+}
+
+// favoriteStickerPath is keyed the same way mediaPath is (a hash of an
+// identifier, never the identifier itself) so a favourite ID of unexpected
+// shape can never influence the on-disk file name.
+func (c *Client) favoriteStickerPath(id, mimeType string) string {
+	name := fmt.Sprintf("fav-%x%s", sha256.Sum256([]byte(id)), imageExtension(mimeType))
+	return filepath.Join(c.mediaDir, name)
+}
+
+func validCachedImage(path string) bool {
+	stat, err := os.Lstat(path)
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || stat.Size() > maxImageBytes {
+		return false
+	}
+	_, err = safeImageFile(path)
+	return err == nil
+}
+
+func thumbnailDimensions(width, height int) (int, int) {
+	if width <= 0 || height <= 0 {
+		return 0, 0
+	}
+	if width <= thumbnailMaxEdge && height <= thumbnailMaxEdge {
+		return width, height
+	}
+	if width >= height {
+		return thumbnailMaxEdge, max(1, height*thumbnailMaxEdge/width)
+	}
+	return max(1, width*thumbnailMaxEdge/height), thumbnailMaxEdge
+}
+
+func (c *Client) writeThumbnail(originalPath, thumbnailPath string) error {
+	config, err := safeImageFile(originalPath)
+	if err != nil {
+		return err
+	}
+	width, height := thumbnailDimensions(config.Width, config.Height)
+	if width == 0 || height == 0 {
+		return fmt.Errorf("thumbnail source has invalid dimensions")
+	}
+	data, err := readImageFile(originalPath)
+	if err != nil {
+		return err
+	}
+	animated := webpIsAnimated(data)
+	temporary, err := os.CreateTemp(c.mediaDir, ".thumbnail-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil && width == config.Width && height == config.Height && !animated {
+		// Already-bounded animated GIF assets must retain their animation;
+		// copying also avoids a needless decode when no resize is required.
+		// Animated WebP assets are the exception: their frames are lifted
+		// into a PNG preview because the raw WebP bytes are not a valid
+		// image for every renderer that reads the thumbnail.
+		_, err = temporary.Write(data)
+	} else if err == nil {
+		var decoded image.Image
+		decoded, err = decodeStillImage(data)
+		if err == nil {
+			thumbnail := image.NewRGBA(image.Rect(0, 0, width, height))
+			xdraw.CatmullRom.Scale(thumbnail, thumbnail.Bounds(), decoded, decoded.Bounds(), xdraw.Over, nil)
+			err = png.Encode(temporary, thumbnail)
+		} else if animated {
+			// An animated WebP that cannot be decoded even frame by frame
+			// still deserves a thumbnail: keep the original bytes so the
+			// animation survives instead of failing the whole download.
+			_, err = temporary.Write(data)
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("write thumbnail: %w", err)
+	}
+	if err = os.Rename(temporaryPath, thumbnailPath); err != nil {
+		return fmt.Errorf("publish thumbnail: %w", err)
+	}
+	return nil
+}
+
+// readImageFile reads a cached image file within the image size limit.
+func readImageFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > maxImageBytes {
+		return nil, fmt.Errorf("cached image has invalid size")
+	}
+	return data, nil
+}
+
+// embeddedJPEGThumbnail returns the JPEG preview embedded in a WhatsApp media
+// message. A format that cannot be decoded yields no preview instead of an
+// error: the preview is an optimisation, and refusing to send a message
+// because its preview is missing would lose the attachment itself.
+func embeddedJPEGThumbnail(path string) ([]byte, error) {
+	data, err := readImageFile(path)
+	if err != nil {
+		return nil, err
+	}
+	thumbnail, err := decodeStillImage(data)
+	if err != nil {
+		return nil, nil
+	}
+	var encoded bytes.Buffer
+	if err = jpeg.Encode(&encoded, thumbnail, &jpeg.Options{Quality: 72}); err != nil {
+		return nil, fmt.Errorf("encode embedded thumbnail: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+// cachedImagePaths returns an all-or-nothing cache pair. Legacy originals only
+// get upgraded from the asynchronous media path so listing messages never
+// performs image decodes on the main request loop.
+func (c *Client) cachedImagePaths(chatID, messageID, mimeType string, generateThumbnail bool) (string, string) {
+	originalPath := c.mediaPath(chatID, messageID, mimeType)
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
+	if !validCachedImage(originalPath) {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	if _, err := os.Lstat(thumbnailPath); errors.Is(err, os.ErrNotExist) {
+		if !generateThumbnail {
+			return "", ""
+		}
+		if err = c.writeThumbnail(originalPath, thumbnailPath); err != nil {
+			_ = os.Remove(originalPath)
+			_ = os.Remove(thumbnailPath)
+			return "", ""
+		}
+		c.pruneMediaCache(mediaCacheBytes)
+	}
+	if !validCachedImage(thumbnailPath) {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	config, err := safeImageFile(thumbnailPath)
+	if err != nil || config.Width > thumbnailMaxEdge || config.Height > thumbnailMaxEdge {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	return originalPath, thumbnailPath
+}
+
+func (c *Client) CachedImagePaths(chatID, messageID, mimeType string) (string, string) {
+	return c.cachedImagePaths(chatID, messageID, mimeType, false)
+}
+
+// CachedFavoriteStickerPath returns the on-disk path for a favourite that has
+// already been downloaded, or "" if it has not (or the cache evicted it).
+func (c *Client) CachedFavoriteStickerPath(id, mimeType string) string {
+	path := c.favoriteStickerPath(id, mimeType)
+	if !validCachedImage(path) {
+		return ""
+	}
+	return path
+}
+
+func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte) (string, string, error) {
+	if _, err := safeImageConfig(bytes.NewReader(data)); err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", "", fmt.Errorf("create media cache: %w", err)
+	}
+	path := c.mediaPath(chatID, messageID, mimeType)
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
+	temporary, err := os.CreateTemp(c.mediaDir, ".image-*.tmp")
+	if err != nil {
+		return "", "", fmt.Errorf("create image cache file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		_, err = temporary.Write(data)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("write image cache: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", "", fmt.Errorf("publish image cache: %w", err)
+	}
+	if err = c.writeThumbnail(path, thumbnailPath); err != nil {
+		_ = os.Remove(path)
+		_ = os.Remove(thumbnailPath)
+		return "", "", err
+	}
+	c.pruneMediaCache(mediaCacheBytes)
+	return path, thumbnailPath, nil
+}
+
+func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, caption, replyToID, replyToChatID string) (domain.Message, error) {
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("open image: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxImageBytes {
+		return domain.Message{}, fmt.Errorf("image must be a regular file between 1 byte and %d MiB", maxImageBytes/(1024*1024))
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxImageBytes+1))
+	if err != nil || len(data) == 0 || len(data) > maxImageBytes {
+		return domain.Message{}, fmt.Errorf("read image: invalid size or data")
+	}
+	mimeType, err := supportedImageMIME(data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	config, err := safeImageConfig(bytes.NewReader(data))
+	if err != nil {
+		return domain.Message{}, err
+	}
+	width, height := uint32(config.Width), uint32(config.Height)
+	animated := outgoingImageAnimated(mimeType, data)
+	waID := string(c.wa.GenerateMessageID())
+	localPath, thumbnailPath, err := c.cacheImageBytes(chatID, waID, mimeType, data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jpegThumbnail, err := embeddedJPEGThumbnail(thumbnailPath)
+	if err != nil {
+		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
+		return domain.Message{}, err
+	}
+	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: caption, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "image", ReplyToID: replyToID, ReplyToChatID: replyToChatID,
+		Image: &domain.Image{Caption: caption, MIMEType: mimeType, LocalPath: localPath, JPEGThumbnail: jpegThumbnail, Width: width, Height: height, FileSize: uint64(len(data)), Animated: animated}}
+	if pending.Text == "" {
+		pending.Text = "📷 Photo"
+	}
+	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
+	if err != nil {
+		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
+		return domain.Message{}, err
+	}
+	if existed {
+		if pending.ID != waID {
+			_ = os.Remove(localPath)
+			_ = os.Remove(thumbnailPath)
+		}
+		return c.store.Message(ctx, chatID, waID)
+	}
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, 90*time.Second)
+	upload, err := c.wa.Upload(uploadCtx, data, whatsmeow.MediaImage)
+	cancelUpload()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		return pending, fmt.Errorf("upload image: %w", err)
+	}
+	pending.Image.DirectPath = upload.DirectPath
+	pending.Image.MediaKey = upload.MediaKey
+	pending.Image.FileSHA256 = upload.FileSHA256
+	pending.Image.FileEncSHA256 = upload.FileEncSHA256
+	imageMessage := &waE2E.ImageMessage{
+		Caption: proto.String(caption), Mimetype: proto.String(mimeType), Width: proto.Uint32(width), Height: proto.Uint32(height),
+		URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, ContextInfo: replyContext, JPEGThumbnail: jpegThumbnail,
+	}
+	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
+	response, err := c.wa.SendMessage(sendCtx, chat, &waE2E.Message{ImageMessage: imageMessage}, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	cancelSend()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	pending.Timestamp = response.Timestamp
+	pending.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
+func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data []byte, replyToID, replyToChatID string) (domain.Message, error) {
+	width, height, animated, err := stickerMetadata(data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	localPath, thumbnailPath, err := c.cacheImageBytes(chatID, waID, "image/webp", data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	pending := domain.Message{
+		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: "Sticker",
+		Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "sticker", ReplyToID: replyToID, ReplyToChatID: replyToChatID,
+		Image: &domain.Image{MIMEType: "image/webp", LocalPath: localPath, Width: width, Height: height, FileSize: uint64(len(data)), Animated: animated},
+	}
+	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
+	if err != nil {
+		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
+		return domain.Message{}, err
+	}
+	if existed {
+		if pending.ID != waID {
+			_ = os.Remove(localPath)
+			_ = os.Remove(thumbnailPath)
+		}
+		return c.store.Message(ctx, chatID, waID)
+	}
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, 90*time.Second)
+	upload, err := c.wa.Upload(uploadCtx, data, whatsmeow.MediaImage)
+	cancelUpload()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("upload sticker: %w", err)
+	}
+	pending.Image.DirectPath = upload.DirectPath
+	pending.Image.MediaKey = upload.MediaKey
+	pending.Image.FileSHA256 = upload.FileSHA256
+	pending.Image.FileEncSHA256 = upload.FileEncSHA256
+	stickerMessage := &waE2E.StickerMessage{
+		Mimetype: proto.String("image/webp"), Width: proto.Uint32(width), Height: proto.Uint32(height), IsAnimated: proto.Bool(animated),
+		URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, ContextInfo: replyContext,
+	}
+	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
+	response, err := c.wa.SendMessage(sendCtx, chat, &waE2E.Message{StickerMessage: stickerMessage}, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	cancelSend()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	pending.Timestamp = response.Timestamp
+	pending.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
+// Sticker is one entry in the assembled sticker library returned by
+// StickerLibrary, already resolved against the local media cache.
+type Sticker struct {
+	ID              string
+	LocalPath       string
+	MIMEType        string
+	Animated        bool
+	Width, Height   uint32
+	Favorite        bool
+	LastUsedMs      int64
+	SourceChatID    string
+	SourceMessageID string
+}
+
+// StickerLibraryPack is one named group of stickers (favourites/recent/all).
+type StickerLibraryPack struct {
+	ID, Name string
+	Stickers []Sticker
+}
+
+const stickerPackLimit = 300
+
+// StickerLibrary assembles the user's reusable stickers from the sources
+// that are actually available to a linked-device client: stickers already
+// present in local message history (both received and sent), the account's
+// WhatsApp-favourited stickers synced through app-state, and a "recently
+// used" pack derived from the desktop's own outgoing sticker history.
+//
+// A synced "recently used" list is not reconstructable: WhatsApp's
+// removeRecentSticker app-state index only ever carries a removal marker,
+// never the sticker it refers to or a positive "used" event, so there is no
+// server-provided list to read here. The "recent" pack is therefore local
+// only, derived from this client's own outgoing sticker messages ordered by
+// time; a sticker used only on the phone or another linked device will not
+// appear in it.
+//
+// Entries are not force-downloaded: LocalPath is empty until a caller
+// requests the bytes (via SendStickerFromLibrary, or the desktop hydrating a
+// visible tray cell through GetMessageImage/a future dedicated download
+// call), matching how ordinary image and attachment messages already behave
+// in this codebase.
+func (c *Client) StickerLibrary(ctx context.Context) ([]StickerLibraryPack, error) {
+	favorites, err := c.store.FavoriteStickers(ctx, stickerPackLimit)
+	if err != nil {
+		return nil, err
+	}
+	favoritePack := make([]Sticker, len(favorites))
+	// Favourites are keyed by hex(FileEncSHA256) (WhatsApp never syncs a
+	// favourite's plaintext hash) while history entries are keyed by
+	// hex(FileSHA256), so this membership check is best-effort: the same
+	// sticker favourited on the phone and also present in chat history can
+	// legitimately carry two different IDs and therefore not cross-mark here.
+	favoriteIDs := make(map[string]bool, len(favorites))
+	for i, fav := range favorites {
+		favoriteIDs[fav.ID] = true
+		favoritePack[i] = Sticker{
+			ID: fav.ID, LocalPath: c.CachedFavoriteStickerPath(fav.ID, fav.MIMEType), MIMEType: fav.MIMEType,
+			Animated: fav.Animated, Width: fav.Width, Height: fav.Height, Favorite: true, LastUsedMs: fav.UpdatedAtMs,
+		}
+	}
+	candidates, err := c.store.RecentStickerMessages(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	allPack := make([]Sticker, 0, min(len(candidates), stickerPackLimit))
+	recentPack := make([]Sticker, 0, min(len(candidates), stickerPackLimit))
+	seenAll := make(map[string]bool, len(candidates))
+	seenRecent := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if len(allPack) >= stickerPackLimit && len(recentPack) >= stickerPackLimit {
+			break
+		}
+		if len(allPack) < stickerPackLimit && !seenAll[candidate.ID] {
+			seenAll[candidate.ID] = true
+			allPack = append(allPack, c.wireStickerCandidate(candidate, favoriteIDs[candidate.ID]))
+		}
+		if candidate.FromMe && len(recentPack) < stickerPackLimit && !seenRecent[candidate.ID] {
+			seenRecent[candidate.ID] = true
+			recentPack = append(recentPack, c.wireStickerCandidate(candidate, favoriteIDs[candidate.ID]))
+		}
+	}
+	return []StickerLibraryPack{
+		{ID: "favorites", Name: "Favourites", Stickers: favoritePack},
+		{ID: "recent", Name: "Recently used", Stickers: recentPack},
+		{ID: "all", Name: "From your chats", Stickers: allPack},
+	}, nil
+}
+
+func (c *Client) wireStickerCandidate(candidate domain.StickerCandidate, favorite bool) Sticker {
+	localPath, _ := c.CachedImagePaths(candidate.ChatJID, candidate.MessageID, candidate.MIMEType)
+	return Sticker{
+		ID: candidate.ID, LocalPath: localPath, MIMEType: candidate.MIMEType, Animated: candidate.Animated,
+		Width: candidate.Width, Height: candidate.Height, Favorite: favorite, LastUsedMs: candidate.TimestampMs,
+		SourceChatID: candidate.ChatJID, SourceMessageID: candidate.MessageID,
+	}
+}
+
+// SendStickerFromLibrary resends an already-known sticker's cached bytes
+// without the client-side create-a-sticker-from-image pipeline: it resolves
+// the sticker by ID (a WhatsApp favourite or a message already in local
+// history), downloading it into the cache first if necessary, then hands the
+// plaintext bytes to SendSticker so upload, validation, and the
+// client_message_id idempotency contract all stay in one place.
+func (c *Client) SendStickerFromLibrary(ctx context.Context, clientID, chatID, stickerID, replyToID, replyToChatID string) (domain.Message, error) {
+	data, err := c.stickerLibraryBytes(ctx, stickerID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	return c.SendSticker(ctx, clientID, chatID, data, replyToID, replyToChatID)
+}
+
+func (c *Client) stickerLibraryBytes(ctx context.Context, stickerID string) ([]byte, error) {
+	favorite, err := c.store.FavoriteSticker(ctx, stickerID)
+	if err == nil {
+		path, downloadErr := c.DownloadFavoriteSticker(ctx, favorite.ID)
+		if downloadErr != nil {
+			return nil, downloadErr
+		}
+		return readCappedImageFile(path)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	chatID, messageID, _, err := c.store.StickerMessageBySHA256(ctx, stickerID)
+	if err != nil {
+		return nil, err
+	}
+	path, _, err := c.DownloadImage(ctx, chatID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return readCappedImageFile(path)
+}
+
+func readCappedImageFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > maxImageBytes {
+		return nil, fmt.Errorf("cached sticker has invalid size")
+	}
+	return data, nil
+}
+
+func attachmentMediaType(kind string) (whatsmeow.MediaType, error) {
+	switch kind {
+	case "document":
+		return whatsmeow.MediaDocument, nil
+	case "video":
+		return whatsmeow.MediaVideo, nil
+	case "audio":
+		return whatsmeow.MediaAudio, nil
+	default:
+		return "", fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+}
+
+func attachmentFallback(kind, caption, fileName string, voiceNote bool) string {
+	if caption != "" {
+		return caption
+	}
+	switch kind {
+	case "document":
+		if fileName != "" {
+			return fileName
+		}
+		return "📄 Document"
+	case "video":
+		return "🎬 Video"
+	case "audio":
+		if voiceNote {
+			return "🎤 Voice message"
+		}
+		return "🎵 Audio"
+	default:
+		return "Attachment"
+	}
+}
+
+func attachmentPayloadFingerprint(source attachmentSource, kind, caption, replyToID, replyToChatID string, voiceNote bool) string {
+	digest := sha256.New()
+	var encodedLength [8]byte
+	for _, value := range []string{kind, source.path, source.mimeType, caption, replyToID, replyToChatID} {
+		binary.BigEndian.PutUint64(encodedLength[:], uint64(len(value)))
+		_, _ = digest.Write(encodedLength[:])
+		_, _ = digest.Write([]byte(value))
+	}
+	binary.BigEndian.PutUint64(encodedLength[:], uint64(source.size))
+	_, _ = digest.Write(encodedLength[:])
+	if voiceNote {
+		_, _ = digest.Write([]byte{1})
+	} else {
+		_, _ = digest.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+func outgoingAttachmentMessage(kind string, attachment *domain.Attachment, upload whatsmeow.UploadResponse, contextInfo *waE2E.ContextInfo) (*waE2E.Message, error) {
+	switch kind {
+	case "document":
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			FileName: proto.String(attachment.FileName), Caption: proto.String(attachment.Caption), ContextInfo: contextInfo,
+		}}, nil
+	case "video":
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			Caption: proto.String(attachment.Caption), ContextInfo: contextInfo,
+			// The duration, the display size and the GIF flag come from the
+			// file itself. Without them the receiving client cannot tell a
+			// GIF from a still video nor show the length of the clip.
+			Seconds: proto.Uint32(attachment.DurationSeconds), Width: proto.Uint32(attachment.Width), Height: proto.Uint32(attachment.Height),
+			GifPlayback: proto.Bool(attachment.Animated),
+		}}, nil
+	case "audio":
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			PTT: proto.Bool(attachment.VoiceNote), ContextInfo: contextInfo, Seconds: proto.Uint32(attachment.DurationSeconds),
+		}}, nil
+	default:
+		return nil, fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+}
+
+func validUploadResponse(upload whatsmeow.UploadResponse, expectedSize int64) bool {
+	return upload.FileLength == uint64(expectedSize) && upload.URL != "" && upload.DirectPath != "" &&
+		len(upload.MediaKey) == sha256.Size && len(upload.FileSHA256) == sha256.Size && len(upload.FileEncSHA256) == sha256.Size
+}
+
+func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePath, kind, caption, replyToID, replyToChatID string, voiceNote bool) (domain.Message, error) {
+	if !utf8.ValidString(caption) || len(caption) > 4096 {
+		return domain.Message{}, fmt.Errorf("%w: caption must be valid UTF-8 up to 4096 bytes", ErrInvalidAttachment)
+	}
+	if kind == "audio" && caption != "" {
+		return domain.Message{}, fmt.Errorf("%w: audio messages do not support captions", ErrInvalidAttachment)
+	}
+	source, err := openAttachmentSource(sourcePath, kind, voiceNote)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("%w: %v", ErrInvalidAttachment, err)
+	}
+	defer source.file.Close()
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	mediaType, err := attachmentMediaType(kind)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	attachment := &domain.Attachment{
+		Caption: caption, MIMEType: source.mimeType, FileName: source.fileName, FileSize: uint64(source.size), VoiceNote: voiceNote,
+	}
+	// The duration, the display size and the animation flag are read from the
+	// file itself so the receiving client and the desktop show the same
+	// metadata the local file carries.
+	media := probeOutgoingMedia(source.path)
+	attachment.DurationSeconds = media.durationSeconds
+	attachment.Width = media.width
+	attachment.Height = media.height
+	attachment.Animated = media.animated
+	pending := domain.Message{
+		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(),
+		Text: attachmentFallback(kind, caption, source.fileName, voiceNote), Timestamp: time.Now(), FromMe: true,
+		Status: domain.StatusPending, Kind: kind, ReplyToID: replyToID, ReplyToChatID: replyToChatID, Attachment: attachment,
+	}
+	payloadFingerprint := attachmentPayloadFingerprint(source, kind, caption, replyToID, replyToChatID, voiceNote)
+	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, payloadFingerprint, pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, chatID, waID)
+	}
+	cachePath, err := c.materializeAttachmentSource(chatID, waID, attachment, source.path, source.file)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("cache %s: %w", kind, err)
+	}
+	attachment.LocalPath = cachePath
+	if err = c.store.SetAttachmentLocalPath(ctx, chatID, waID, cachePath); err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("store cached %s path: %w", kind, err)
+	}
+	uploadSource, err := os.Open(cachePath)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("open cached %s: %w", kind, err)
+	}
+	defer uploadSource.Close()
+	c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, waID))
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, 10*time.Minute)
+	upload, err := c.wa.UploadReader(uploadCtx, uploadSource, nil, mediaType)
+	cancelUpload()
+	if err == nil && !validUploadResponse(upload, source.size) {
+		err = fmt.Errorf("WhatsApp returned incomplete attachment upload metadata")
+	}
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("upload %s: %w", kind, err)
+	}
+	attachment.DirectPath = upload.DirectPath
+	attachment.MediaKey = upload.MediaKey
+	attachment.FileSHA256 = upload.FileSHA256
+	attachment.FileEncSHA256 = upload.FileEncSHA256
+	outgoing, err := outgoingAttachmentMessage(kind, attachment, upload, replyContext)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
+	response, err := c.wa.SendMessage(sendCtx, chat, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	cancelSend()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	pending.Timestamp = response.Timestamp
+	pending.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
+func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (string, string, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return "", "", err
+	}
+	chatID = message.ChatJID
+	if message.Image == nil {
+		return "", "", fmt.Errorf("message is not an image")
+	}
+	imageInfo := message.Image
+	if imageInfo.DirectPath == "" || len(imageInfo.MediaKey) == 0 {
+		imageInfo, err = c.recoverImageDescriptor(ctx, message, imageInfo)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	path := c.mediaPath(chatID, messageID, imageInfo.MIMEType)
+	if cachedPath, thumbnailPath := c.cachedImagePaths(chatID, messageID, imageInfo.MIMEType, true); cachedPath != "" {
+		if imageInfo.LocalPath != path {
+			_ = c.store.SetImageLocalPath(ctx, chatID, messageID, path)
+		}
+		return cachedPath, thumbnailPath, nil
+	}
+	if imageInfo.FileSize > uint64(maxImageBytes) {
+		return "", "", errImageDownloadLimit
+	}
+	if imageInfo.DirectPath == "" || len(imageInfo.MediaKey) == 0 {
+		return "", "", fmt.Errorf("image is not downloadable")
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", "", err
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".download-*.tmp")
+	if err != nil {
+		return "", "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return "", "", err
+	}
+	bounded := &boundedFile{File: temporary, maxSize: maxImageDownloadBytes, limitErr: errImageDownloadLimit}
+	downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), bounded)
+	cancel()
+	if err != nil && !errors.Is(err, errImageDownloadLimit) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// History often contains an expired direct path. Ask the primary for the
+		// current descriptor only after a failed fetch, then retry once; this
+		// keeps normal scrolling network-free and avoids infinite retry loops.
+		refreshed, refreshErr := c.recoverImageDescriptor(ctx, message, imageInfo)
+		if refreshErr == nil {
+			imageInfo = refreshed
+			if imageInfo.FileSize > uint64(maxImageBytes) {
+				refreshErr = errImageDownloadLimit
+			} else {
+				path = c.mediaPath(chatID, messageID, imageInfo.MIMEType)
+			}
+		}
+		if refreshErr == nil {
+			refreshErr = resetDownloadFile(bounded)
+		}
+		if refreshErr == nil {
+			downloadCtx, cancel = context.WithTimeout(ctx, 60*time.Second)
+			err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), bounded)
+			cancel()
+		} else {
+			err = errors.Join(err, refreshErr)
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("download image: %w", err)
+	}
+	stat, err := os.Stat(temporaryPath)
+	if err != nil || stat.Size() <= 0 || stat.Size() > maxImageBytes {
+		return "", "", fmt.Errorf("downloaded image has invalid size")
+	}
+	if _, err = safeImageFile(temporaryPath); err != nil {
+		return "", "", fmt.Errorf("downloaded image is unsafe: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", "", err
+	}
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
+	if err = c.writeThumbnail(path, thumbnailPath); err != nil {
+		_ = os.Remove(path)
+		_ = os.Remove(thumbnailPath)
+		return "", "", err
+	}
+	if err = c.store.SetImageLocalPath(ctx, chatID, messageID, path); err != nil {
+		return "", "", err
+	}
+	c.pruneMediaCache(mediaCacheBytes)
+	return path, thumbnailPath, nil
+}
+
+// DownloadFavoriteSticker fetches and caches a WhatsApp-favourited sticker
+// that has no local message of its own. whatsmeow's StickerAction lacks
+// GetFileSHA256 (WhatsApp never syncs a favourite's plaintext content hash),
+// so it cannot satisfy the whatsmeow.DownloadableMessage interface that
+// DownloadImage relies on; this calls the lower-level path-based download
+// directly instead, with the same bounded-file and size-limit discipline.
+func (c *Client) DownloadFavoriteSticker(ctx context.Context, id string) (string, error) {
+	fav, err := c.store.FavoriteSticker(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	path := c.favoriteStickerPath(fav.ID, fav.MIMEType)
+	if validCachedImage(path) {
+		if fav.LocalPath != path {
+			_ = c.store.SetFavoriteStickerLocalPath(ctx, id, path)
+		}
+		return path, nil
+	}
+	if fav.DirectPath == "" || len(fav.MediaKey) == 0 {
+		return "", fmt.Errorf("favourite sticker is not downloadable")
+	}
+	if fav.FileSize > uint64(maxImageBytes) {
+		return "", errImageDownloadLimit
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".favorite-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return "", err
+	}
+	bounded := &boundedFile{File: temporary, maxSize: maxImageDownloadBytes, limitErr: errImageDownloadLimit}
+	downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	err = c.wa.DownloadMediaWithPathToFile(downloadCtx, fav.DirectPath, fav.FileEncSHA256, nil, fav.MediaKey, whatsmeow.MediaImage, "", true, bounded)
+	cancel()
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("download favourite sticker: %w", err)
+	}
+	stat, err := os.Stat(temporaryPath)
+	if err != nil || stat.Size() <= 0 || stat.Size() > maxImageBytes {
+		return "", fmt.Errorf("downloaded favourite sticker has invalid size")
+	}
+	if _, err = safeImageFile(temporaryPath); err != nil {
+		return "", fmt.Errorf("downloaded favourite sticker is unsafe: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", err
+	}
+	if err = c.store.SetFavoriteStickerLocalPath(ctx, id, path); err != nil {
+		return "", err
+	}
+	c.pruneMediaCache(mediaCacheBytes)
+	return path, nil
+}
+
+type boundedFile struct {
+	*os.File
+	maxSize  int64
+	limitErr error
+}
+
+var _ whatsmeow.File = (*boundedFile)(nil)
+
+func (file *boundedFile) quotaError() error {
+	if file.limitErr != nil {
+		return file.limitErr
+	}
+	return errAttachmentDownloadLimit
+}
+
+func (file *boundedFile) Write(data []byte) (int, error) {
+	offset, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	if offset < 0 || int64(len(data)) > file.maxSize-offset {
+		return 0, file.quotaError()
+	}
+	return file.File.Write(data)
+}
+
+func (file *boundedFile) WriteAt(data []byte, offset int64) (int, error) {
+	if offset < 0 || int64(len(data)) > file.maxSize-offset {
+		return 0, file.quotaError()
+	}
+	return file.File.WriteAt(data, offset)
+}
+
+func (file *boundedFile) Truncate(size int64) error {
+	if size < 0 || size > file.maxSize {
+		return file.quotaError()
+	}
+	return file.File.Truncate(size)
+}
+
+func resetDownloadFile(file whatsmeow.File) error {
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	_, err := file.Seek(0, io.SeekStart)
+	return err
+}
+
+func downloadableAttachment(kind string, attachment *domain.Attachment) (whatsmeow.DownloadableMessage, error) {
+	switch kind {
+	case "document":
+		return &waE2E.DocumentMessage{Mimetype: &attachment.MIMEType, FileName: &attachment.FileName, Caption: &attachment.Caption,
+			DirectPath: &attachment.DirectPath, MediaKey: attachment.MediaKey, FileSHA256: attachment.FileSHA256,
+			FileEncSHA256: attachment.FileEncSHA256, FileLength: &attachment.FileSize}, nil
+	case "video":
+		return &waE2E.VideoMessage{Mimetype: &attachment.MIMEType, Caption: &attachment.Caption, DirectPath: &attachment.DirectPath,
+			MediaKey: attachment.MediaKey, FileSHA256: attachment.FileSHA256, FileEncSHA256: attachment.FileEncSHA256,
+			FileLength: &attachment.FileSize, Width: &attachment.Width, Height: &attachment.Height,
+			Seconds: &attachment.DurationSeconds, GifPlayback: &attachment.Animated}, nil
+	case "audio":
+		return &waE2E.AudioMessage{Mimetype: &attachment.MIMEType, DirectPath: &attachment.DirectPath, MediaKey: attachment.MediaKey,
+			FileSHA256: attachment.FileSHA256, FileEncSHA256: attachment.FileEncSHA256, FileLength: &attachment.FileSize,
+			Seconds: &attachment.DurationSeconds, PTT: &attachment.VoiceNote}, nil
+	default:
+		return nil, fmt.Errorf("message is not a downloadable attachment")
+	}
+}
+
+func attachmentDescriptorChanged(previous, current *domain.Attachment) bool {
+	if current == nil || current.DirectPath == "" || len(current.MediaKey) == 0 {
+		return false
+	}
+	if previous == nil || previous.DirectPath == "" || len(previous.MediaKey) == 0 {
+		return true
+	}
+	return current.DirectPath != previous.DirectPath || !bytes.Equal(current.MediaKey, previous.MediaKey) || !bytes.Equal(current.FileEncSHA256, previous.FileEncSHA256)
+}
+
+func (c *Client) recoverAttachmentDescriptor(ctx context.Context, message domain.Message, previous *domain.Attachment) (*domain.Attachment, error) {
+	if !c.wa.IsConnected() {
+		return nil, fmt.Errorf("attachment metadata is missing and WhatsApp is offline")
+	}
+	chat, err := types.ParseJID(message.TransportJID)
+	if err != nil {
+		return nil, err
+	}
+	sender := types.EmptyJID
+	if !message.FromMe {
+		sender, err = types.ParseJID(message.SenderJID)
+		if err != nil {
+			return nil, err
+		}
+		sender = sender.ToNonAD()
+	}
+	requestCtx, cancelRequest := context.WithTimeout(ctx, 20*time.Second)
+	_, err = c.wa.SendPeerMessage(requestCtx, c.wa.BuildUnavailableMessageRequest(chat, sender, message.ID))
+	cancelRequest()
+	if err != nil {
+		return nil, fmt.Errorf("request attachment metadata from primary phone: %w", err)
+	}
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("primary phone did not return attachment metadata in time")
+		case <-ticker.C:
+			refreshed, loadErr := c.store.Message(ctx, message.ChatJID, message.ID)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if attachmentDescriptorChanged(previous, refreshed.Attachment) {
+				return refreshed.Attachment, nil
+			}
+		}
+	}
+}
+
+func (c *Client) DownloadAttachment(ctx context.Context, chatID, messageID string) (string, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return "", err
+	}
+	if message.Revoked {
+		return "", fmt.Errorf("attachment was deleted")
+	}
+	chatID = message.ChatJID
+	attachment := message.Attachment
+	if attachment == nil {
+		return "", fmt.Errorf("message is not an attachment")
+	}
+	if path := c.CachedAttachmentPath(chatID, messageID, attachment); path != "" {
+		if attachment.LocalPath != path {
+			_ = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path)
+		}
+		return path, nil
+	}
+	var localSourceErr error
+	if attachment.LocalPath != "" {
+		path, cacheErr := c.materializeAttachmentSource(chatID, messageID, attachment, attachment.LocalPath, nil)
+		if cacheErr == nil {
+			if err = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path); err != nil {
+				return "", err
+			}
+			c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, messageID))
+			return path, nil
+		}
+		localSourceErr = fmt.Errorf("cache local attachment source: %w", cacheErr)
+	}
+	if attachment.FileSize > uint64(maxAttachmentBytes) {
+		return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")
+	}
+	if attachment.DirectPath == "" || len(attachment.MediaKey) == 0 {
+		attachment, err = c.recoverAttachmentDescriptor(ctx, message, attachment)
+		if err != nil {
+			return "", errors.Join(localSourceErr, err)
+		}
+		if attachment.FileSize > uint64(maxAttachmentBytes) {
+			return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")
+		}
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".attachment-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	bounded := &boundedFile{File: temporary, maxSize: maxAttachmentBytes + 64, limitErr: errAttachmentDownloadLimit}
+	downloadable, err := downloadableAttachment(message.Kind, attachment)
+	if err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	err = c.wa.DownloadToFile(downloadCtx, downloadable, bounded)
+	cancel()
+	if err != nil && !errors.Is(err, errAttachmentDownloadLimit) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// Direct paths from history can expire. Refresh once from the primary and
+		// retry with the new cryptographic descriptor.
+		refreshed, refreshErr := c.recoverAttachmentDescriptor(ctx, message, attachment)
+		if refreshErr == nil {
+			attachment = refreshed
+			if attachment.FileSize > uint64(maxAttachmentBytes) {
+				refreshErr = fmt.Errorf("attachment exceeds the 2 GiB download limit")
+			} else {
+				downloadable, refreshErr = downloadableAttachment(message.Kind, attachment)
+			}
+		}
+		if refreshErr == nil {
+			refreshErr = resetDownloadFile(temporary)
+		}
+		if refreshErr == nil {
+			downloadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			err = c.wa.DownloadToFile(downloadCtx, downloadable, bounded)
+			cancel()
+		} else {
+			err = errors.Join(err, refreshErr)
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("download attachment: %w", err)
+	}
+	info, err := os.Stat(temporaryPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return "", fmt.Errorf("downloaded attachment has invalid size")
+	}
+	if attachment.FileSize > 0 && uint64(info.Size()) != attachment.FileSize {
+		return "", fmt.Errorf("downloaded attachment size does not match metadata")
+	}
+	path := c.attachmentPath(chatID, messageID, attachment)
+	if err = os.Rename(temporaryPath, path); err != nil && !validLocalAttachment(path, attachment.FileSize) {
+		return "", err
+	}
+	if err = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path); err != nil {
+		return "", err
+	}
+	c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, messageID))
+	return path, nil
+}
+
+func downloadableImage(kind string, image *domain.Image) whatsmeow.DownloadableMessage {
+	if kind == "sticker" {
+		return &waE2E.StickerMessage{Mimetype: &image.MIMEType, DirectPath: &image.DirectPath, MediaKey: image.MediaKey,
+			FileSHA256: image.FileSHA256, FileEncSHA256: image.FileEncSHA256, FileLength: &image.FileSize,
+			Width: &image.Width, Height: &image.Height, IsAnimated: &image.Animated}
+	}
+	return &waE2E.ImageMessage{Mimetype: &image.MIMEType, DirectPath: &image.DirectPath, MediaKey: image.MediaKey,
+		FileSHA256: image.FileSHA256, FileEncSHA256: image.FileEncSHA256, FileLength: &image.FileSize,
+		Width: &image.Width, Height: &image.Height}
+}
+
+func (c *Client) recoverImageDescriptor(ctx context.Context, message domain.Message, previous *domain.Image) (*domain.Image, error) {
+	if !c.wa.IsConnected() {
+		return nil, fmt.Errorf("image metadata is missing and WhatsApp is offline")
+	}
+	chat, err := types.ParseJID(message.TransportJID)
+	if err != nil {
+		return nil, err
+	}
+	sender := types.EmptyJID
+	if !message.FromMe {
+		sender, err = types.ParseJID(message.SenderJID)
+		if err != nil {
+			return nil, err
+		}
+		sender = sender.ToNonAD()
+	}
+	requestCtx, cancelRequest := context.WithTimeout(ctx, 20*time.Second)
+	_, err = c.wa.SendPeerMessage(requestCtx, c.wa.BuildUnavailableMessageRequest(chat, sender, message.ID))
+	cancelRequest()
+	if err != nil {
+		return nil, fmt.Errorf("request image metadata from primary phone: %w", err)
+	}
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("primary phone did not return image metadata in time")
+		case <-ticker.C:
+			refreshed, loadErr := c.store.Message(ctx, message.ChatJID, message.ID)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if refreshed.Image != nil && refreshed.Image.DirectPath != "" && len(refreshed.Image.MediaKey) > 0 && imageDescriptorChanged(previous, refreshed.Image) {
+				return refreshed.Image, nil
+			}
+		}
+	}
+}
+
+func imageDescriptorChanged(previous, current *domain.Image) bool {
+	if current == nil || current.DirectPath == "" || len(current.MediaKey) == 0 {
+		return false
+	}
+	if previous == nil || previous.DirectPath == "" || len(previous.MediaKey) == 0 {
+		return true
+	}
+	return current.DirectPath != previous.DirectPath || !bytes.Equal(current.MediaKey, previous.MediaKey) || !bytes.Equal(current.FileEncSHA256, previous.FileEncSHA256)
+}
+
+func (c *Client) pruneMediaCache(maxBytes int64) {
+	c.pruneMediaCacheExcept(maxBytes, "")
+}
+
+func (c *Client) pruneMediaCacheExcept(maxBytes int64, preserveKey string) {
+	entries, err := os.ReadDir(c.mediaDir)
+	if err != nil {
+		return
+	}
+	type cachedGroup struct {
+		paths []string
+		mod   time.Time
+	}
+	groupsByKey := make(map[string]*cachedGroup, len(entries))
+	var total int64
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		key := strings.SplitN(entry.Name(), ".", 2)[0]
+		group := groupsByKey[key]
+		if group == nil {
+			group = &cachedGroup{}
+			groupsByKey[key] = group
+		}
+		group.paths = append(group.paths, filepath.Join(c.mediaDir, entry.Name()))
+		if group.mod.IsZero() || info.ModTime().Before(group.mod) {
+			group.mod = info.ModTime()
+		}
+		total += info.Size()
+	}
+	groups := make([]*cachedGroup, 0, len(groupsByKey))
+	for _, group := range groupsByKey {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].mod.Before(groups[j].mod) })
+	for _, group := range groups {
+		if total <= maxBytes {
+			break
+		}
+		if preserveKey != "" && len(group.paths) > 0 && strings.HasPrefix(filepath.Base(group.paths[0]), preserveKey+".") {
+			continue
+		}
+		removed := int64(0)
+		for _, path := range group.paths {
+			if info, statErr := os.Stat(path); statErr == nil && os.Remove(path) == nil {
+				removed += info.Size()
+			}
+		}
+		total -= removed
+	}
+}
+
+func (c *Client) SendReaction(ctx context.Context, clientID, chatID, messageID, emoji string) (domain.Reaction, error) {
+	target, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return domain.Reaction{}, err
+	}
+	chatID = target.ChatJID
+	chat, err := types.ParseJID(target.TransportJID)
+	if err != nil {
+		return domain.Reaction{}, err
+	}
+	if chat.Server == types.NewsletterServer {
+		return domain.Reaction{}, fmt.Errorf("newsletter reactions are not supported")
+	}
+	sender := types.EmptyJID
+	if !target.FromMe {
+		sender, err = types.ParseJID(target.SenderJID)
+		if err != nil {
+			return domain.Reaction{}, err
+		}
+	}
+	own, err := types.ParseJID(c.OwnID())
+	if err != nil {
+		return domain.Reaction{}, err
+	}
+	reaction := domain.Reaction{ChatJID: chatID, MessageID: messageID, SenderJID: own.ToNonAD().String(), Emoji: emoji, FromMe: true}
+	reaction, completed, err := c.store.ReserveOutgoingReaction(ctx, clientID, reaction)
+	if err != nil {
+		return domain.Reaction{}, err
+	}
+	if completed {
+		return reaction, nil
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, chat, c.wa.BuildReaction(chat, sender, types.MessageID(messageID), emoji))
+	if err != nil {
+		return domain.Reaction{}, err
+	}
+	reaction.Timestamp = response.Timestamp
+	if reaction.Timestamp.IsZero() {
+		reaction.Timestamp = time.Now()
+	}
+	if err = c.store.CompleteOutgoingReaction(ctx, clientID, reaction); err != nil {
+		return domain.Reaction{}, err
+	}
+	c.sink(Event{Kind: "reaction", Reaction: reaction})
+	return reaction, nil
+}
+
+func (c *Client) HistoryCoverage(ctx context.Context, chatID string) (store.HistoryCoverage, error) {
+	return c.store.HistoryCoverage(ctx, chatID)
+}
+
+func (c *Client) HistoryOverview(ctx context.Context) (store.HistoryOverview, error) {
+	return c.store.HistoryOverview(ctx)
+}
+
+func (c *Client) IntegrityStatus(ctx context.Context) (store.IntegrityStatus, error) {
+	return c.store.IntegrityStatus(ctx)
+}
+
+func (c *Client) RepairLocalCache(ctx context.Context) (store.IntegrityStatus, error) {
+	return c.store.RepairDerivedState(ctx)
+}
+
+func (c *Client) emitHistoryCoverage(coverage store.HistoryCoverage) {
+	c.sink(Event{Kind: "history_coverage", ChatJID: coverage.ChatID, HistoryCoverage: coverage})
+}
+
+func (c *Client) RequestOlderHistory(ctx context.Context, chatID string) (store.HistoryCoverage, error) {
+	coverage, err := c.store.HistoryCoverage(ctx, chatID)
+	if err != nil {
+		return coverage, err
+	}
+	now := time.Now()
+	if coverage.LocalMessageCount == 0 {
+		return coverage, store.ErrHistoryNoAnchor
+	}
+	if coverage.State == "exhausted" {
+		return coverage, store.ErrHistoryExhausted
+	}
+	if coverage.RetryAfterMS > now.UnixMilli() {
+		return coverage, store.ErrHistoryRateLimit
+	}
+	if !c.IsConnected() {
+		coverage.State = "offline"
+		coverage.Detail = "WhatsApp is offline; reconnect before requesting older messages"
+		coverage, _ = c.store.SaveHistoryCoverage(ctx, coverage)
+		c.emitHistoryCoverage(coverage)
+		return coverage, whatsmeow.ErrNotConnected
+	}
+	anchor, err := c.store.OldestMessage(ctx, chatID)
+	if err != nil {
+		return coverage, err
+	}
+	transport, err := types.ParseJID(anchor.TransportJID)
+	if err != nil {
+		return coverage, err
+	}
+
+	c.historyRequestMu.Lock()
+	if c.historyRequest != nil {
+		c.historyRequestMu.Unlock()
+		return coverage, store.ErrHistoryRequestBusy
+	}
+	request := &olderHistoryRequest{chatID: anchor.ChatJID, anchorID: anchor.ID, anchorTime: anchor.Timestamp, requestedAtMS: now.UnixMilli()}
+	c.historyRequest = request
+	c.historyRequestMu.Unlock()
+
+	coverage.State = "requesting"
+	coverage.LastRequestedCount = 50
+	coverage.LastReceivedCount = 0
+	coverage.LastAddedCount = 0
+	coverage.LastRequestedAtMS = request.requestedAtMS
+	coverage.RetryAfterMS = 0
+	coverage.Detail = "Requesting 50 older messages from WhatsApp"
+	coverage, err = c.store.SaveHistoryCoverage(ctx, coverage)
+	if err != nil {
+		c.clearOlderHistoryRequest(request)
+		return coverage, err
+	}
+	c.emitHistoryCoverage(coverage)
+
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: transport, IsFromMe: anchor.FromMe},
+		ID:            types.MessageID(anchor.ID),
+		Timestamp:     anchor.Timestamp,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	_, err = c.wa.SendPeerMessage(sendCtx, c.wa.BuildHistorySyncRequest(info, 50))
+	cancel()
+	if err != nil {
+		c.clearOlderHistoryRequest(request)
+		coverage.State = "failed"
+		coverage.Detail = "Failed to send older-history request: " + err.Error()
+		coverage.RetryAfterMS = time.Now().Add(15 * time.Second).UnixMilli()
+		coverage, _ = c.store.SaveHistoryCoverage(context.Background(), coverage)
+		c.emitHistoryCoverage(coverage)
+		return coverage, err
+	}
+	go c.expireOlderHistoryRequest(request)
+	return coverage, nil
+}
+
+func (c *Client) clearOlderHistoryRequest(request *olderHistoryRequest) bool {
+	c.historyRequestMu.Lock()
+	defer c.historyRequestMu.Unlock()
+	if c.historyRequest != request {
+		return false
+	}
+	c.historyRequest = nil
+	return true
+}
+
+func (c *Client) expireOlderHistoryRequest(request *olderHistoryRequest) {
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-c.ctx.Done():
+		return
+	case <-timer.C:
+	}
+	if !c.clearOlderHistoryRequest(request) {
+		return
+	}
+	coverage, err := c.store.HistoryCoverage(c.ctx, request.chatID)
+	if err != nil || coverage.State != "requesting" || coverage.LastRequestedAtMS != request.requestedAtMS {
+		return
+	}
+	coverage.State = "failed"
+	coverage.Detail = "WhatsApp did not return older messages before the request timed out"
+	coverage.RetryAfterMS = time.Now().Add(15 * time.Second).UnixMilli()
+	if coverage, err = c.store.SaveHistoryCoverage(c.ctx, coverage); err == nil {
+		c.emitHistoryCoverage(coverage)
+	}
+}
+
+func (c *Client) RepairRecentReactions(ctx context.Context, chatID string) (uint32, bool, error) {
+	items, targeted, err := c.store.ReserveLegacyReactionReplays(ctx, chatID, 16)
+	if err != nil {
+		return 0, false, err
+	}
+	if targeted {
+		if len(items) == 0 {
+			return 0, false, store.ErrReactionRepairNotNeeded
+		}
+		var attempts uint32
+		var firstErr error
+		own, ownErr := types.ParseJID(c.OwnID())
+		if ownErr != nil {
+			return 0, false, ownErr
+		}
+		requestID := c.wa.GenerateMessageID()
+		var replayRequest *waE2E.Message
+		for _, item := range items {
+			if item.Attempts > attempts {
+				attempts = item.Attempts
+			}
+			sender := types.EmptyJID
+			if !item.FromMe {
+				var parseErr error
+				sender, parseErr = types.ParseJID(item.SenderJID)
+				if parseErr != nil {
+					if firstErr == nil {
+						firstErr = parseErr
+					}
+					continue
+				}
+				sender = sender.ToNonAD()
+			}
+			if markErr := c.store.MarkLegacyReactionReplayRequested(ctx, chatID, item.EventMessageID, string(requestID)); markErr != nil {
+				if firstErr == nil {
+					firstErr = markErr
+				}
+				continue
+			}
+			transport, parseErr := types.ParseJID(item.TransportJID)
+			if parseErr != nil {
+				if firstErr == nil {
+					firstErr = parseErr
+				}
+				continue
+			}
+			itemRequest := c.wa.BuildUnavailableMessageRequest(transport, sender, item.EventMessageID)
+			if replayRequest == nil {
+				replayRequest = itemRequest
+			} else {
+				target := replayRequest.GetProtocolMessage().GetPeerDataOperationRequestMessage()
+				source := itemRequest.GetProtocolMessage().GetPeerDataOperationRequestMessage()
+				target.PlaceholderMessageResendRequest = append(target.PlaceholderMessageResendRequest, source.GetPlaceholderMessageResendRequest()...)
+			}
+		}
+		if replayRequest != nil {
+			sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			_, sendErr := c.wa.SendMessage(sendCtx, own.ToNonAD(), replayRequest, whatsmeow.SendRequestExtra{ID: requestID, Peer: true})
+			cancel()
+			if sendErr != nil && firstErr == nil {
+				firstErr = sendErr
+			}
+		}
+		return attempts, true, firstErr
+	}
+	job, requested, err := c.store.BeginReactionRepair(ctx, chatID)
+	if err != nil || !requested {
+		return job.Attempts, requested, err
+	}
+	chat, err := types.ParseJID(job.TransportJID)
+	if err != nil {
+		return job.Attempts, false, err
+	}
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, IsFromMe: job.AnchorFromMe},
+		ID:            types.MessageID(job.AnchorMessageID),
+		Timestamp:     job.AnchorTimestamp,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	_, err = c.wa.SendPeerMessage(sendCtx, c.wa.BuildHistorySyncRequest(info, 50))
+	return job.Attempts, true, err
+}
+
+func (c *Client) MarkRead(ctx context.Context, chatID, messageID string) error {
+	m, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return err
+	}
+	if m.FromMe {
+		return fmt.Errorf("message is outgoing")
+	}
+	chatID = m.ChatJID
+	unread, err := c.store.UnreadThrough(ctx, chatID, messageID)
+	if err != nil {
+		return err
+	}
+	// The desktop deliberately does not infer the remaining unread count from a
+	// bounded message window. Publish the exact stored count after every attempt,
+	// including partially persisted multi-sender reads, so chat state stays
+	// authoritative even when a later receipt group fails.
+	defer c.emitChat(chatID)
+	type receiptGroup struct {
+		ids    []types.MessageID
+		rawIDs []string
+		latest time.Time
+		sender types.JID
+		chat   types.JID
+	}
+	groups := make(map[string]*receiptGroup)
+	for _, item := range unread {
+		transportJID, parseErr := types.ParseJID(item.TransportJID)
+		if parseErr != nil {
+			return parseErr
+		}
+		senderJID, parseErr := types.ParseJID(item.SenderJID)
+		if parseErr != nil {
+			return parseErr
+		}
+		key := transportJID.String() + "\x00" + senderJID.String()
+		group := groups[key]
+		if group == nil {
+			group = &receiptGroup{sender: senderJID, chat: transportJID}
+			groups[key] = group
+		}
+		group.ids = append(group.ids, types.MessageID(item.ID))
+		group.rawIDs = append(group.rawIDs, item.ID)
+		if item.Timestamp.After(group.latest) {
+			group.latest = item.Timestamp
+		}
+	}
+	for _, group := range groups {
+		if err = c.markReadFn(ctx, group.ids, group.latest, group.chat, group.sender); err != nil {
+			return err
+		}
+		if err = c.store.MarkReadIDs(ctx, chatID, group.rawIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) Logout(ctx context.Context) error {
+	c.historyRequestMu.Lock()
+	c.historyRequest = nil
+	c.historyRequestMu.Unlock()
+	// Group-name fetch registration reads accepting, generation, and c.wa while
+	// holding this mutex. Keep it through both purges and the fresh-client swap
+	// so no fetch can combine an old client with the new account generation.
+	// Finishing jobs also take this lock around their final product-store write,
+	// so acquiring it first waits out every write already authorized.
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	// Handler entry is serialized with generation invalidation. Anything that
+	// entered first has enqueued its generation-guarded reducer work before the
+	// barrier below; an old handler that resumes later is rejected at entry.
+	c.eventMu.Lock()
+	c.accepting.Store(false)
+	c.generation.Add(1)
+	clear(c.groupNameFetches)
+	c.eventMu.Unlock()
+	// Connect and pairing setup validate their captured generation under this
+	// lock. Keep it until remote logout, both purges, and the fresh bind finish.
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	pairingErr := c.cancelAndWaitPairing(ctx)
+	if err := c.reducerBarrier(ctx); err != nil {
+		return &LogoutError{Stage: "isolation", Local: err}
+	}
+	// FetchAppState writes through whatsmeow outside the reducer. Holding this
+	// lock until the fresh client is installed prevents an old projection from
+	// overlapping either database purge.
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	remoteErr := c.logoutFn(ctx)
+	var localErr error
+	if pairingErr != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("stop pairing stream: %w", pairingErr))
+	}
+	if err := c.clearSessionDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear session database: %w", err))
+	}
+	if err := c.clearAccountDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear product database: %w", err))
+	}
+	if err := os.RemoveAll(c.avatarDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear avatar cache: %w", err))
+	}
+	c.clearAvatarCache()
+	if err := os.RemoveAll(c.mediaDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear media cache: %w", err))
+	}
+	c.clearContactCache()
+	c.negativeAvatarMu.Lock()
+	clear(c.negativeAvatars)
+	c.negativeAvatarMu.Unlock()
+	c.projectionComplete.Store(false)
+	if localErr != nil {
+		return &LogoutError{Stage: "local_clear", Remote: remoteErr, Local: localErr}
+	}
+	c.resetSyncTracking()
+	if remoteErr != nil && !errors.Is(remoteErr, whatsmeow.ErrNotLoggedIn) {
+		return &LogoutError{Stage: "remote", Remote: remoteErr}
+	}
+	c.accepting.Store(true)
+	return nil
+}
+
+func (c *Client) clearSessionData(ctx context.Context) error {
+	oldClient := c.wa
+	oldClient.Disconnect()
+	// The discarded client may also have a QR-channel handler whose internal
+	// expected-disconnect path does not unregister itself.
+	oldClient.RemoveEventHandlers()
+	var clearErr error
+	// A failed remote unlink leaves the device store live. Mark it deleted
+	// before touching SQLite so queued whatsmeow work can only hit NoopStore and
+	// cannot repopulate the database after the purge.
+	if oldClient.Store.ID != nil && !oldClient.Store.Deleted {
+		if err := oldClient.Store.Delete(ctx); err != nil {
+			// Continue with the full-table fallback below. Device.Delete is useful
+			// for its normal cascade, but its failure must not leave recoverable
+			// session bytes behind when the fallback can still purge them.
+			clearErr = errors.Join(clearErr, fmt.Errorf("delete active whatsmeow device: %w", err))
+		}
+	}
+	// Device.Delete swaps the account-scoped stores but leaves the container's
+	// global LID map attached. Retire that store too, and also retire an
+	// unpaired device so an in-flight QR flow cannot save after the purge.
+	retireDevice(oldClient.Store)
+
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT name
+		FROM sqlite_master
+		WHERE type='table' AND name LIKE 'whatsmeow_%' AND name<>'whatsmeow_version'
+		ORDER BY name`)
+	if err != nil {
+		return errors.Join(clearErr, fmt.Errorf("list whatsmeow data tables: %w", err))
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err = rows.Scan(&table); err != nil {
+			rows.Close()
+			return errors.Join(clearErr, fmt.Errorf("scan whatsmeow data table: %w", err))
+		}
+		tables = append(tables, table)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return errors.Join(clearErr, fmt.Errorf("list whatsmeow data tables: %w", err))
+	}
+	if err = rows.Close(); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("close whatsmeow table list: %w", err))
+	}
+
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Join(clearErr, fmt.Errorf("begin whatsmeow data clear: %w", err))
+	}
+	defer tx.Rollback()
+	for _, table := range tables {
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		if _, err = tx.ExecContext(ctx, `DELETE FROM `+quoted); err != nil {
+			return errors.Join(clearErr, fmt.Errorf("clear %s: %w", table, err))
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("commit whatsmeow data clear: %w", err))
+	}
+	if err = sqliteprivacy.PurgeDeletedData(ctx, c.db); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("purge deleted whatsmeow data: %w", err))
+	}
+
+	// Re-wrap (without closing) the same database handle to discard container
+	// caches such as the account-specific LID map, then give pairing a fresh,
+	// non-deleted device store.
+	c.sessions = sqlstore.NewWithDB(c.db, "sqlite3", nil)
+	c.bindWhatsmeow(newWhatsmeowClient(c.sessions.NewDevice(), c.log))
+	return clearErr
+}
+
+func retireDevice(device *wastore.Device) {
+	retiredStore := &wastore.NoopStore{Error: wastore.ErrDeviceDeleted}
+	device.Deleted = true
+	device.SetAllStores(retiredStore)
+	device.LIDs = retiredStore
+	device.Container = retiredStore
+}
+
+func (c *Client) Close() {
+	c.closeOnce.Do(func() {
+		c.catchUpMu.Lock()
+		if c.catchUpTimer != nil {
+			c.catchUpTimer.Stop()
+			c.catchUpTimer = nil
+		}
+		c.catchUpMu.Unlock()
+		c.wa.Disconnect()
+		c.wa.RemoveEventHandler(c.handlerID)
+		close(c.reducerDone)
+		c.reducerWG.Wait()
+		c.maintenanceWG.Wait()
+		_ = c.sessions.Close()
+	})
+}
+
+// resetAfterRemoteLogout turns WhatsApp's permanent 401/logout event into the
+// same clean local state as an operator-initiated logout. WhatsMeow invalidates
+// the current device itself, but its database row remains enough for IsPaired
+// to keep returning true unless we purge it and bind a fresh device store.
+func (c *Client) resetAfterRemoteLogout(source *whatsmeow.Client, generation uint64) {
+	c.eventMu.Lock()
+	current := c.accepting.Load() && c.wa == source && c.generation.Load() == generation
+	c.eventMu.Unlock()
+	if !current {
+		return
+	}
+	if err := c.resetLocalSessionAfterRemoteLogout(c.ctx); err != nil {
+		c.log.Error("reset local state after remote logout", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp logged this device out, and Whatfast could not reset its local session. Restart the app and try again."})
+		return
+	}
+	c.sink(Event{Kind: "connection", Detail: "logged_out"})
+	if _, err := c.StartPairing(c.ctx); err != nil {
+		c.log.Error("start pairing after remote logout", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp logged this device out. Refresh the QR code to try linking again."})
+	}
+}
+
+// resetLocalSessionAfterRemoteLogout mirrors the local half of Logout without
+// sending a logout RPC. The server has already invalidated the socket, so a
+// remote request would necessarily fail and must not prevent recovery.
+func (c *Client) resetLocalSessionAfterRemoteLogout(ctx context.Context) error {
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	c.eventMu.Lock()
+	c.accepting.Store(false)
+	c.generation.Add(1)
+	clear(c.groupNameFetches)
+	c.eventMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	pairingErr := c.cancelAndWaitPairing(ctx)
+	if err := c.reducerBarrier(ctx); err != nil {
+		return fmt.Errorf("isolate remote logout: %w", err)
+	}
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	var localErr error
+	if pairingErr != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("stop pairing stream: %w", pairingErr))
+	}
+	if err := c.clearSessionDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear session database: %w", err))
+	}
+	if err := c.clearAccountDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear product database: %w", err))
+	}
+	if err := os.RemoveAll(c.avatarDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear avatar cache: %w", err))
+	}
+	c.clearAvatarCache()
+	if err := os.RemoveAll(c.mediaDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear media cache: %w", err))
+	}
+	c.clearContactCache()
+	c.negativeAvatarMu.Lock()
+	clear(c.negativeAvatars)
+	c.negativeAvatarMu.Unlock()
+	c.projectionComplete.Store(false)
+	if localErr == nil {
+		c.resetSyncTracking()
+		c.accepting.Store(true)
+	}
+	return localErr
+}
+
+func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, raw any) {
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if !c.accepting.Load() || c.generation.Load() != sourceGeneration {
+		return
+	}
+	switch evt := raw.(type) {
+	case *events.Connected:
+		c.sink(Event{Kind: "connection", Detail: "connected"})
+		syncStatus := c.SyncStatus()
+		if shouldCatchUpAfterConnect(syncStatus, c.historySyncComplete.Load()) {
+			c.updateSyncStatus(func(status *store.SyncStatus) {
+				status.Phase = "catching_up"
+				status.Detail = "Connected; catching up recent messages"
+				status.CompletedAtMS = 0
+			})
+			c.scheduleCatchUpCompletion()
+		} else {
+			c.beginInitialSync()
+		}
+		// WhatsApp only delivers chat-presence (typing) updates to clients
+		// that have marked themselves available. Use the client that emitted
+		// this event: logout may install a fresh unpaired client before this
+		// goroutine runs.
+		go c.sendPresence(source, sourceGeneration)
+		go c.reconcileChatStateForGeneration(sourceGeneration, source.FetchAppState)
+	case *events.Disconnected:
+		c.sink(Event{Kind: "connection", Detail: "offline"})
+		c.historyRequestMu.Lock()
+		pendingHistory := c.historyRequest
+		c.historyRequest = nil
+		c.historyRequestMu.Unlock()
+		if pendingHistory != nil {
+			if coverage, coverageErr := c.store.HistoryCoverage(c.ctx, pendingHistory.chatID); coverageErr == nil {
+				coverage.State = "offline"
+				coverage.Detail = "WhatsApp disconnected while requesting older messages"
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+		}
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "offline"
+			status.Detail = "Offline; sync will resume when connected"
+		})
+	case *events.LoggedOut:
+		// A remote logout permanently invalidates this device. Resetting in a
+		// goroutine avoids taking Logout's event lock recursively from the
+		// WhatsMeow event handler.
+		go c.resetAfterRemoteLogout(source, sourceGeneration)
+	case *events.StreamReplaced:
+		c.sink(Event{Kind: "problem", Detail: "session replaced by another client"})
+	case *events.Message:
+		c.scheduleCatchUpCompletion()
+		c.enqueue(func() { c.reduceMessage(evt, true) })
+	case *events.ChatPresence:
+		c.enqueue(func() { c.reduceChatPresence(evt) })
+	case *events.Receipt:
+		c.enqueue(func() { c.reduceReceipt(evt) })
+	case *events.HistorySync:
+		// Identity mappings and push names are stored asynchronously by
+		// whatsmeow, so identities resolved against an earlier chunk are stale.
+		c.clearContactCache()
+		c.enqueue(func() { c.reduceHistory(evt) })
+	case *events.Archive:
+		c.enqueue(func() { c.reduceArchive(evt) })
+	case *events.Mute:
+		c.enqueue(func() { c.reduceMute(evt) })
+	case *events.MarkChatAsRead:
+		c.enqueue(func() { c.reduceMarkChatAsRead(evt) })
+	case *events.JoinedGroup:
+		c.enqueue(func() { c.reduceJoinedGroup(evt) })
+	case *events.GroupInfo:
+		c.enqueue(func() { c.reduceGroupInfo(evt) })
+	case *events.Contact:
+		c.invalidateContact(evt.JID)
+	case *events.PushName:
+		c.invalidateContact(evt.JID, evt.JIDAlt)
+	case *events.BusinessName:
+		c.invalidateContact(evt.JID)
+	case *events.Picture:
+		for _, jid := range c.identityJIDs(c.ctx, evt.JID.String()) {
+			path := c.avatarPath(jid)
+			_ = os.Remove(path)
+			c.avatarCache.Delete(path)
+			c.negativeAvatarMu.Lock()
+			delete(c.negativeAvatars, jid.String())
+			c.negativeAvatarMu.Unlock()
+		}
+	case *events.AppState:
+		c.enqueue(func() { c.reduceFavoriteSticker(evt) })
+	}
+}
+
+// reduceFavoriteSticker applies a `favoriteSticker` app-state mutation
+// synced from another linked device. whatsmeow has no higher-level event for
+// this action (unlike Mute/Pin/Star/...), so it only ever arrives through
+// the low-level events.AppState catch-all; see StickerAction's doc comment
+// on domain.FavoriteSticker for why the ID is hex(FileEncSHA256) rather than
+// the plaintext content hash used for history-derived stickers.
+func (c *Client) reduceFavoriteSticker(evt *events.AppState) {
+	if len(evt.Index) == 0 || evt.Index[0] != appstate.IndexFavoriteSticker {
+		return
+	}
+	action := evt.GetStickerAction()
+	if action == nil || len(action.GetFileEncSHA256()) == 0 {
+		return
+	}
+	id := hex.EncodeToString(action.GetFileEncSHA256())
+	var changed bool
+	if action.GetIsFavorite() {
+		err := c.store.UpsertFavoriteSticker(c.ctx, domain.FavoriteSticker{
+			ID: id, MIMEType: action.GetMimetype(), DirectPath: action.GetDirectPath(), MediaKey: action.GetMediaKey(),
+			FileEncSHA256: action.GetFileEncSHA256(), Width: action.GetWidth(), Height: action.GetHeight(),
+			Animated: action.GetIsLottie(), FileSize: action.GetFileLength(), UpdatedAtMs: evt.GetTimestamp(),
+		})
+		if err != nil {
+			c.log.Error("record favourite sticker", "error", err)
+			return
+		}
+		changed = true
+	} else {
+		var err error
+		changed, err = c.store.RemoveFavoriteSticker(c.ctx, id)
+		if err != nil {
+			c.log.Error("remove favourite sticker", "error", err)
+			return
+		}
+	}
+	if changed {
+		c.sink(Event{Kind: "stickers"})
+	}
+}
+
+func (c *Client) reconcileChatState() {
+	c.reconcileChatStateForGeneration(c.generation.Load(), c.fetchAppStateFn)
+}
+
+func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(context.Context, appstate.WAPatchName, bool, bool) error) {
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	if c.generation.Load() != generation || !c.accepting.Load() || c.store == nil || fetch == nil {
+		return
+	}
+	if c.projectionComplete.Load() {
+		return
+	}
+	if err := fetch(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
+		c.log.Error("reconcile WhatsApp chat state", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "Chat state could not be fully synchronized"
+		})
+		return
+	}
+	// Mute status lives in the high-priority patch. Fetching it on link — with
+	// EmitAppStateEventsOnFullSync set — replays an events.Mute for every chat
+	// the user already muted on their phone, so muted chats do not raise
+	// notifications after a fresh pairing rather than only after a live toggle.
+	if err := fetch(c.ctx, appstate.WAPatchRegularHigh, true, false); err != nil {
+		c.log.Error("reconcile WhatsApp mute state", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "Mute and archive state could not be fully synchronized"
+		})
+		return
+	}
+	if err := c.reducerBarrier(c.ctx); err != nil {
+		c.log.Error("wait for WhatsApp chat-state projection", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "failed"
+			status.Detail = "Local sync processing did not finish"
+		})
+		return
+	}
+	reconciledAt := time.Now()
+	if c.historySyncComplete.Load() {
+		if err := c.store.RecordReconciliation(c.ctx, reconciledAt); err != nil {
+			c.reportInboundFailure("record initial reconciliation", err)
+			return
+		}
+	}
+	c.projectionComplete.Store(true)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if c.historySyncComplete.Load() {
+			status.Phase = "complete"
+			status.Detail = "Up to date"
+			status.CompletedAtMS = reconciledAt.UnixMilli()
+		} else if status.Phase != "complete" {
+			status.Phase = "app_state"
+			status.Detail = "Finishing local setup"
+		}
+	})
+}
+
+func (c *Client) sendPresence(source *whatsmeow.Client, generation uint64) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return
+	}
+	var err error
+	if c.sendPresenceFn == nil {
+		err = source.SendPresence(c.ctx, types.PresenceAvailable)
+	} else {
+		err = c.sendPresenceFn(c.ctx, source, types.PresenceAvailable)
+	}
+	if err != nil {
+		c.log.Warn("send available presence", "error", err)
+	}
+}
+
+func (c *Client) clearContactCache() {
+	c.contactCache.Range(func(key, _ any) bool {
+		c.contactCache.Delete(key)
+		return true
+	})
+}
+
+func (c *Client) invalidateContact(jids ...types.JID) {
+	for _, jid := range jids {
+		for _, candidate := range c.identityJIDs(c.ctx, jid.String()) {
+			c.contactCache.Delete(candidate.String())
+		}
+	}
+}
+
+func (c *Client) enqueue(task func()) {
+	generation := c.generation.Load()
+	if !c.accepting.Load() {
+		return
+	}
+	guarded := func() {
+		if c.generation.Load() == generation {
+			task()
+		}
+	}
+	select {
+	case c.reducer <- guarded:
+	case <-c.reducerDone:
+	case <-c.ctx.Done():
+	}
+}
+
+func (c *Client) reducerBarrier(ctx context.Context) error {
+	done := make(chan struct{})
+	select {
+	case c.reducer <- func() { close(done) }:
+	case <-c.reducerDone:
+		return fmt.Errorf("reducer stopped")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-c.reducerDone:
+		return fmt.Errorf("reducer stopped")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) reduceMessage(evt *events.Message, unread bool) {
+	// whatsmeow stores Sender/SenderAlt mappings before dispatching the message.
+	// Re-resolve any identity that may have been cached before that mapping was
+	// known so the live event carries the phone/name immediately.
+	c.invalidateContact(evt.Info.Sender, evt.Info.SenderAlt)
+	chatID, transportJID, identityErr := c.resolveConversation(evt.Info.Chat.String())
+	if identityErr != nil {
+		c.log.Error("resolve message conversation", "chat_id", evt.Info.Chat.String(), "error", identityErr)
+		return
+	}
+	if reaction, ok, err := c.reactionFromEvent(c.ctx, evt); ok {
+		if err != nil {
+			c.log.Error("decode reaction", "chat_id", evt.Info.Chat.String(), "event_message_id", evt.Info.ID, "unavailable_request_id", evt.UnavailableRequestID, "error", err)
+			return
+		}
+		reaction.ChatJID = chatID
+		if !c.persistInboundEvent("reaction", chatID, reaction.MessageID, journalReaction{Reaction: reaction, Publish: unread}) {
+			return
+		}
+		if evt.UnavailableRequestID != "" {
+			matched, remaining, completeErr := c.store.CompleteLegacyReactionReplay(c.ctx, chatID, string(evt.Info.ID), string(evt.UnavailableRequestID), evt.Info.IsFromMe)
+			if completeErr != nil {
+				c.log.Error("complete targeted reaction replay", "chat_id", evt.Info.Chat.String(), "event_message_id", evt.Info.ID, "unavailable_request_id", evt.UnavailableRequestID, "error", completeErr)
+			} else if matched {
+				c.sink(Event{Kind: "reaction_repair", ChatJID: chatID, RecoveredReactions: 1, RepairComplete: remaining == 0})
+			}
+		}
+		return
+	}
+	if update := evt.Message.GetPollUpdateMessage(); update != nil {
+		vote, err := c.wa.DecryptPollVote(c.ctx, evt)
+		if err != nil {
+			c.log.Error("decrypt poll vote", "error", err)
+			return
+		}
+		targetID := update.GetPollCreationMessageKey().GetID()
+		poll, err := c.store.Poll(c.ctx, chatID, targetID)
+		if err != nil {
+			c.log.Error("load poll for vote", "error", err)
+			return
+		}
+		selected, unknown := pollSelectedNames(poll, vote.GetSelectedOptions())
+		if unknown > 0 {
+			c.sink(Event{Kind: "problem", Detail: fmt.Sprintf("A poll vote referenced %d unknown option(s); refresh chat history to recover newer poll options", unknown)})
+			return
+		}
+		voteEvent := domain.PollVote{ChatJID: chatID, PollMessageID: targetID, VoterJID: evt.Info.Sender.ToNonAD().String(), SelectedOptions: selected, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe}
+		c.persistInboundEvent("poll_vote", chatID, targetID, journalPollVote{Vote: voteEvent})
+		return
+	}
+	if add := evt.Message.GetPollAddOptionMessage(); add != nil {
+		targetID, option := add.GetPollCreationMessageKey().GetID(), strings.TrimSpace(add.GetAddOption().GetOptionName())
+		if targetID == "" || option == "" {
+			c.sink(Event{Kind: "problem", Detail: "WhatsApp sent an unsupported poll option update without a target or option name"})
+			return
+		}
+		c.persistInboundEvent("poll_option", chatID, targetID, journalPollOption{ChatID: chatID, MessageID: targetID, Option: option})
+		return
+	}
+	if snapshot := messagePollResultSnapshot(evt.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+		targetID := snapshot.GetContextInfo().GetStanzaID()
+		if _, err := c.store.Poll(c.ctx, chatID, targetID); err == nil {
+			poll := domainPollSnapshot(snapshot)
+			c.persistInboundEvent("poll_snapshot", chatID, targetID, journalPollSnapshot{
+				ChatID: chatID, MessageID: targetID, Poll: *poll, At: evt.Info.Timestamp,
+			})
+			return
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			c.log.Error("load poll for result snapshot", "chat_id", chatID, "poll_message_id", targetID, "error", err)
+			return
+		}
+		// If the original poll is outside local history, retain the snapshot as
+		// its own readable bubble instead of discarding the only available data.
+	}
+	if passiveMessage(evt.Message) {
+		if pin := evt.SourceWebMsg.GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+			atMS := pin.GetSenderTimestampMS()
+			if atMS <= 0 {
+				atMS = pin.GetServerTimestampMS()
+			}
+			at := time.UnixMilli(atMS)
+			if atMS <= 0 {
+				at = evt.Info.Timestamp
+			}
+			c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+				ChatID: chatID, MessageID: pin.GetKey().GetID(), At: at,
+				Pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL,
+			})
+		}
+		return
+	}
+	m := domainMessage(evt, chatID, transportJID)
+	c.resolveMessageReplyChat(&m)
+	messagePersisted := c.persistInboundMessage(m, unread)
+	c.attachLinkPreview(m)
+	if pin := evt.SourceWebMsg.GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+		atMS := pin.GetSenderTimestampMS()
+		if atMS <= 0 {
+			atMS = pin.GetServerTimestampMS()
+		}
+		at := time.UnixMilli(atMS)
+		if atMS <= 0 {
+			at = evt.Info.Timestamp
+		}
+		c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+			ChatID: chatID, MessageID: pin.GetKey().GetID(), At: at,
+			Pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL,
+		})
+	}
+	if pin := evt.Message.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
+		pinned := pin.GetType() == waE2E.PinInChatMessage_PIN_FOR_ALL
+		at := time.UnixMilli(pin.GetSenderTimestampMS())
+		if pin.GetSenderTimestampMS() <= 0 {
+			at = evt.Info.Timestamp
+		}
+		c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+			ChatID: chatID, MessageID: pin.GetKey().GetID(), PinnedBy: evt.Info.Sender.ToNonAD().String(),
+			At: at, Pinned: pinned,
+		})
+	}
+	if !messagePersisted {
+		return
+	}
+	if unread {
+		c.sink(Event{Kind: "message", Message: m})
+		c.emitChat(m.ChatJID)
+	}
+}
+
+func inboundRetryDelay(attempt uint32) time.Duration {
+	if attempt > 6 {
+		attempt = 6
+	}
+	return time.Second * time.Duration(1<<attempt)
+}
+
+func (c *Client) wakeInboundReplay() {
+	if c.inboundRetryWake == nil {
+		return
+	}
+	select {
+	case c.inboundRetryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) runInboundReplay() {
+	defer c.maintenanceWG.Done()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.reducerDone:
+			return
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+		case <-c.inboundRetryWake:
+		}
+		c.enqueue(c.replayInboundMessages)
+	}
+}
+
+func (c *Client) retainInboundInMemory(message domain.Message, incrementUnread bool) {
+	c.inboundMemoryMu.Lock()
+	c.inboundMemory = append(c.inboundMemory, pendingInboundMessage{message: message, incrementUnread: incrementUnread})
+	pending := len(c.inboundMemory)
+	c.inboundMemoryMu.Unlock()
+	if pending > 10_000 && c.wa != nil && c.wa.IsConnected() {
+		// Stop accepting an unbounded stream when local storage is unavailable.
+		// WhatsApp can catch the session up after the journal becomes writable.
+		c.wa.Disconnect()
+	}
+}
+
+func (c *Client) reportInboundFailure(detail string, err error) {
+	c.log.Error(detail, "error", err)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		status.Phase = "failed"
+		status.Detail = "Incoming messages could not be saved locally; retrying"
+		status.CompletedAtMS = 0
+	})
+	c.sink(Event{Kind: "problem", Detail: "Incoming messages could not be saved locally. Whatfast will keep retrying."})
+	c.wakeInboundReplay()
+}
+
+func (c *Client) persistInboundMessage(message domain.Message, incrementUnread bool) bool {
+	journalID, err := c.store.JournalInboundMessage(c.ctx, message, incrementUnread)
+	if err != nil {
+		c.retainInboundInMemory(message, incrementUnread)
+		c.reportInboundFailure("journal inbound message", err)
+		return false
+	}
+	entry := store.InboundMessage{JournalID: journalID, Message: message, IncrementUnread: incrementUnread}
+	return c.applyJournaledInbound(entry, false)
+}
+
+func (c *Client) applyJournaledInbound(entry store.InboundMessage, replay bool) bool {
+	if err := c.store.ApplyMessage(c.ctx, entry.Message, entry.IncrementUnread); err != nil {
+		attempts := entry.Attempts + 1
+		retryAt := time.Now().Add(inboundRetryDelay(attempts))
+		if markErr := c.store.FailInboundMessage(c.ctx, entry.JournalID, attempts, retryAt, err); markErr != nil {
+			c.log.Error("record inbound retry", "journal_id", entry.JournalID, "error", markErr)
+		}
+		c.reportInboundFailure("persist inbound message", err)
+		return false
+	}
+	if err := c.store.CompleteInboundMessage(c.ctx, entry.JournalID); err != nil {
+		// The product row is already durable and idempotent. Leaving the journal
+		// row behind deliberately causes a safe replay after restart.
+		c.reportInboundFailure("complete inbound message journal", err)
+		return false
+	}
+	if replay {
+		c.sink(Event{Kind: "message", Message: entry.Message})
+		c.emitChat(entry.Message.ChatJID)
+	}
+	return true
+}
+
+type journalReaction struct {
+	Reaction domain.Reaction
+	Publish  bool
+}
+
+type journalPollVote struct {
+	Vote domain.PollVote
+}
+
+type journalPollSnapshot struct {
+	ChatID, MessageID string
+	Poll              domain.Poll
+	At                time.Time
+}
+
+type journalPollOption struct {
+	ChatID, MessageID, Option string
+}
+
+type journalPin struct {
+	ChatID, MessageID, PinnedBy string
+	At                          time.Time
+	Pinned                      bool
+}
+
+type journalReceipt struct {
+	ChatID     string
+	MessageIDs []string
+	Status     domain.MessageStatus
+	MarkRead   bool
+}
+
+func (c *Client) persistInboundEvent(kind, chatID, entityID string, payload any) bool {
+	journalID, err := c.store.JournalInboundEvent(c.ctx, kind, chatID, entityID, payload)
+	if err != nil {
+		// Unlike full messages, these normalized mutations are small and
+		// idempotent. Disconnecting forces WhatsApp to replay them when even the
+		// durable journal itself is unavailable.
+		c.reportInboundFailure("journal inbound "+kind, err)
+		if c.wa != nil && c.wa.IsConnected() {
+			c.wa.Disconnect()
+		}
+		return false
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		c.reportInboundFailure("encode journaled inbound "+kind, err)
+		return false
+	}
+	return c.applyJournaledInboundEvent(store.InboundEvent{
+		JournalID: journalID, Kind: kind, ChatJID: chatID, EntityID: entityID, Payload: encoded,
+	})
+}
+
+func (c *Client) applyJournaledInboundEvent(entry store.InboundEvent) bool {
+	var applyErr error
+	switch entry.Kind {
+	case "reaction":
+		var payload journalReaction
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var applied bool
+			applied, applyErr = c.store.ApplyReactionIfNewer(c.ctx, payload.Reaction)
+			if applyErr == nil && applied && payload.Publish {
+				c.sink(Event{Kind: "reaction", Reaction: payload.Reaction})
+			}
+		}
+	case "poll_vote":
+		var payload journalPollVote
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.ApplyPollVote(c.ctx, payload.Vote)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "poll_snapshot":
+		var payload journalPollSnapshot
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.ApplyPollSnapshot(c.ctx, payload.ChatID, payload.MessageID, &payload.Poll, payload.At)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "poll_option":
+		var payload journalPollOption
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.AddPollOption(c.ctx, payload.ChatID, payload.MessageID, payload.Option)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "pin":
+		var payload journalPin
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			applyErr = c.store.SetMessagePinned(c.ctx, payload.ChatID, payload.MessageID, payload.PinnedBy, payload.At, payload.Pinned)
+			if applyErr == nil {
+				c.sink(Event{Kind: "pins", ChatJID: payload.ChatID})
+			}
+		}
+	case "receipt":
+		var payload journalReceipt
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			if payload.MarkRead {
+				applyErr = c.store.MarkReadIDs(c.ctx, payload.ChatID, payload.MessageIDs)
+				if applyErr == nil {
+					c.emitChat(payload.ChatID)
+				}
+			} else {
+				for _, messageID := range payload.MessageIDs {
+					if applyErr = c.store.UpdateReceipt(c.ctx, payload.ChatID, messageID, payload.Status); applyErr != nil {
+						break
+					}
+					c.sink(Event{Kind: "receipt", ChatJID: payload.ChatID, MessageID: messageID, Status: payload.Status})
+				}
+			}
+		}
+	default:
+		applyErr = fmt.Errorf("unsupported inbound journal event %q", entry.Kind)
+	}
+	if applyErr != nil {
+		attempts := entry.Attempts + 1
+		retryAt := time.Now().Add(inboundRetryDelay(attempts))
+		if markErr := c.store.FailInboundEvent(c.ctx, entry.JournalID, attempts, retryAt, applyErr); markErr != nil {
+			c.log.Error("record inbound event retry", "journal_id", entry.JournalID, "error", markErr)
+		}
+		c.reportInboundFailure("persist inbound "+entry.Kind, applyErr)
+		return false
+	}
+	if err := c.store.CompleteInboundEvent(c.ctx, entry.JournalID); err != nil {
+		c.reportInboundFailure("complete inbound event journal", err)
+		return false
+	}
+	return true
+}
+
+func (c *Client) replayInboundMessages() {
+	c.inboundMemoryMu.Lock()
+	memory := c.inboundMemory
+	c.inboundMemory = nil
+	c.inboundMemoryMu.Unlock()
+	for i, pending := range memory {
+		journalID, err := c.store.JournalInboundMessage(c.ctx, pending.message, pending.incrementUnread)
+		if err != nil {
+			c.inboundMemoryMu.Lock()
+			c.inboundMemory = append(memory[i:], c.inboundMemory...)
+			c.inboundMemoryMu.Unlock()
+			c.reportInboundFailure("retry inbound journal", err)
+			return
+		}
+		if !c.applyJournaledInbound(store.InboundMessage{JournalID: journalID, Message: pending.message, IncrementUnread: pending.incrementUnread}, true) {
+			return
+		}
+	}
+	entries, err := c.store.ReplayableInboundMessages(c.ctx, time.Now(), 100)
+	if err != nil {
+		c.reportInboundFailure("load inbound retry journal", err)
+		return
+	}
+	for _, entry := range entries {
+		if !c.applyJournaledInbound(entry, true) {
+			return
+		}
+	}
+	eventEntries, err := c.store.ReplayableInboundEvents(c.ctx, time.Now(), 100)
+	if err != nil {
+		c.reportInboundFailure("load inbound event retry journal", err)
+		return
+	}
+	for _, entry := range eventEntries {
+		if !c.applyJournaledInboundEvent(entry) {
+			return
+		}
+	}
+	health, err := c.store.InboundJournalHealth(c.ctx)
+	if err == nil && health.Pending == 0 {
+		current := c.SyncStatus()
+		if current.Phase == "failed" && strings.HasPrefix(current.Detail, "Incoming messages could not be saved") {
+			c.updateSyncStatus(func(status *store.SyncStatus) {
+				status.Phase = "catching_up"
+				status.Detail = "Recovered local message storage; reconciling with WhatsApp"
+			})
+		}
+	}
+	if len(entries) == 100 || len(eventEntries) == 100 {
+		c.wakeInboundReplay()
+	}
+}
+
+func (c *Client) reactionFromEvent(ctx context.Context, evt *events.Message) (domain.Reaction, bool, error) {
+	reactionMessage := evt.Message.GetReactionMessage()
+	encrypted := evt.Message.GetEncReactionMessage() != nil
+	if reactionMessage == nil && encrypted {
+		var err error
+		reactionMessage, err = c.wa.DecryptReaction(ctx, evt)
+		if err != nil {
+			return domain.Reaction{}, true, err
+		}
+	}
+	if reactionMessage == nil {
+		return domain.Reaction{}, false, nil
+	}
+	key := reactionMessage.GetKey()
+	if key == nil || key.GetID() == "" {
+		return domain.Reaction{}, true, fmt.Errorf("reaction target is missing")
+	}
+	timestamp := time.UnixMilli(reactionMessage.GetSenderTimestampMS())
+	if reactionMessage.GetSenderTimestampMS() <= 0 {
+		timestamp = evt.Info.Timestamp
+	}
+	sender := evt.Info.Sender.ToNonAD()
+	if evt.Info.IsFromMe && c.wa != nil {
+		if own, ownErr := types.ParseJID(c.OwnID()); ownErr == nil && !own.IsEmpty() {
+			sender = own.ToNonAD()
+		}
+	}
+	return domain.Reaction{ChatJID: evt.Info.Chat.String(), MessageID: key.GetID(), SenderJID: sender.String(), Emoji: reactionMessage.GetText(), Timestamp: timestamp, FromMe: evt.Info.IsFromMe}, true, nil
+}
+
+func (c *Client) historyAggregateReactions(evt *events.Message) []domain.Reaction {
+	if evt.SourceWebMsg == nil || len(evt.SourceWebMsg.GetReactions()) == 0 {
+		return nil
+	}
+	reactions := make([]domain.Reaction, 0, len(evt.SourceWebMsg.GetReactions()))
+	for _, raw := range evt.SourceWebMsg.GetReactions() {
+		if raw == nil || raw.GetKey() == nil {
+			continue
+		}
+		key := raw.GetKey()
+		var sender string
+		if key.GetFromMe() {
+			sender = c.OwnID()
+		} else if evt.Info.Chat.Server == types.GroupServer {
+			sender = key.GetParticipant()
+		} else {
+			sender = evt.Info.Chat.ToNonAD().String()
+		}
+		jid, err := types.ParseJID(sender)
+		if err != nil {
+			c.log.Warn("skip history reaction with invalid sender", "message_id", evt.Info.ID, "sender", sender, "error", err)
+			continue
+		}
+		timestamp := time.UnixMilli(raw.GetSenderTimestampMS())
+		if raw.GetSenderTimestampMS() <= 0 {
+			timestamp = evt.Info.Timestamp
+		}
+		reactions = append(reactions, domain.Reaction{
+			ChatJID:   evt.Info.Chat.String(),
+			MessageID: string(evt.Info.ID),
+			SenderJID: jid.ToNonAD().String(),
+			Emoji:     raw.GetText(),
+			Timestamp: timestamp,
+			FromMe:    key.GetFromMe(),
+		})
+	}
+	return reactions
+}
+
+func domainMessage(evt *events.Message, chatID, transportJID string) domain.Message {
+	protocol := evt.RawMessage.GetProtocolMessage()
+	if protocol == nil {
+		protocol = evt.Message.GetProtocolMessage()
+	}
+	// Edits arrive as a ProtocolMessage wrapper; the replacement content lives
+	// inside it and would otherwise decode as an empty (unsupported) message.
+	content := evt.Message
+	if evt.IsEdit && protocol.GetEditedMessage() != nil {
+		content = protocol.GetEditedMessage()
+	}
+	decoded := extractMessageContent(content, evt.Info.Type)
+	poll := domainPoll(messagePoll(content))
+	if poll == nil {
+		poll = domainPollSnapshot(messagePollResultSnapshot(content))
+	}
+	contextInfo := messageContextInfo(content)
+	forwardingScore := contextInfo.GetForwardingScore()
+	if contextInfo.GetIsForwarded() && forwardingScore == 0 {
+		forwardingScore = 1
+	}
+	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: contextInfo.GetStanzaID(), ReplyToChatID: contextInfo.GetRemoteJID(), ForwardingScore: forwardingScore, Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location, LinkPreview: decoded.linkPreview, Poll: poll}
+	// Pin events point at the pinned message through their own MessageKey, not
+	// ContextInfo. Preserve that target on the ordinary reply/navigation field
+	// so every desktop can fetch and jump to the message that was pinned.
+	if pin := content.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
+		m.ReplyToID = pin.GetKey().GetID()
+		m.ReplyToChatID = chatID
+	}
+	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
+		m.ID = protocol.GetKey().GetID()
+		m.EditedAt = time.UnixMilli(protocol.GetTimestampMS())
+	}
+	if protocol != nil && protocol.GetType() == waE2E.ProtocolMessage_REVOKE && protocol.GetKey().GetID() != "" {
+		m.ID = protocol.GetKey().GetID()
+		m.Text = "Message deleted"
+		m.Kind = "revoked"
+		m.Revoked = true
+		m.EditedAt = evt.Info.Timestamp
+	}
+	return m
+}
+
+func (c *Client) resolveMessageReplyChat(message *domain.Message) {
+	if message.ReplyToID == "" {
+		message.ReplyToChatID = ""
+		return
+	}
+	if message.ReplyToChatID == "" {
+		message.ReplyToChatID = message.ChatJID
+		return
+	}
+	chatID, _, err := c.resolveConversation(message.ReplyToChatID)
+	if err != nil {
+		c.log.Warn("resolve reply source conversation", "reply_chat_id", message.ReplyToChatID, "message_id", message.ID, "error", err)
+		message.ReplyToChatID = message.ChatJID
+		return
+	}
+	message.ReplyToChatID = chatID
+}
+
+type messageContent struct {
+	kind, text  string
+	image       *domain.Image
+	attachment  *domain.Attachment
+	contacts    []domain.Contact
+	location    *domain.Location
+	linkPreview *domain.LinkPreview
+}
+
+func extractMessageContent(message *waE2E.Message, infoType string) messageContent {
+	var imageInfo *domain.Image
+	var attachment *domain.Attachment
+	var contacts []domain.Contact
+	var location *domain.Location
+	var linkPreview *domain.LinkPreview
+	text := ""
+	kind := "text"
+	if imageMessage := message.GetImageMessage(); imageMessage != nil {
+		kind = "image"
+		text = imageMessage.GetCaption()
+		if text == "" {
+			text = "📷 Photo"
+		}
+		imageInfo = &domain.Image{Caption: imageMessage.GetCaption(), MIMEType: imageMessage.GetMimetype(), DirectPath: imageMessage.GetDirectPath(),
+			MediaKey: imageMessage.GetMediaKey(), FileSHA256: imageMessage.GetFileSHA256(), FileEncSHA256: imageMessage.GetFileEncSHA256(),
+			Width: imageMessage.GetWidth(), Height: imageMessage.GetHeight(), FileSize: imageMessage.GetFileLength(),
+			JPEGThumbnail: append([]byte(nil), imageMessage.GetJPEGThumbnail()...)}
+	} else if sticker := message.GetStickerMessage(); sticker != nil {
+		kind, text = "sticker", "Sticker"
+		imageInfo = &domain.Image{MIMEType: sticker.GetMimetype(), DirectPath: sticker.GetDirectPath(), MediaKey: sticker.GetMediaKey(),
+			FileSHA256: sticker.GetFileSHA256(), FileEncSHA256: sticker.GetFileEncSHA256(), Width: sticker.GetWidth(), Height: sticker.GetHeight(),
+			FileSize: sticker.GetFileLength(), Animated: sticker.GetIsAnimated() || sticker.GetIsLottie()}
+	} else if video := messageVideo(message); video != nil {
+		kind, text = "video", video.GetCaption()
+		if text == "" {
+			text = "🎬 Video"
+		}
+		attachment = &domain.Attachment{Caption: video.GetCaption(), MIMEType: video.GetMimetype(), DirectPath: video.GetDirectPath(), MediaKey: video.GetMediaKey(),
+			FileSHA256: video.GetFileSHA256(), FileEncSHA256: video.GetFileEncSHA256(), Width: video.GetWidth(), Height: video.GetHeight(),
+			FileSize: video.GetFileLength(), DurationSeconds: video.GetSeconds(), Animated: video.GetGifPlayback()}
+	} else if audio := message.GetAudioMessage(); audio != nil {
+		kind = "audio"
+		if audio.GetPTT() {
+			text = "🎤 Voice message"
+		} else {
+			text = "🎵 Audio"
+		}
+		attachment = &domain.Attachment{MIMEType: audio.GetMimetype(), DirectPath: audio.GetDirectPath(), MediaKey: audio.GetMediaKey(),
+			FileSHA256: audio.GetFileSHA256(), FileEncSHA256: audio.GetFileEncSHA256(), FileSize: audio.GetFileLength(),
+			DurationSeconds: audio.GetSeconds(), VoiceNote: audio.GetPTT()}
+	} else if document := messageDocument(message); document != nil {
+		kind, text = "document", document.GetCaption()
+		if text == "" {
+			text = document.GetFileName()
+		}
+		if text == "" {
+			text = document.GetTitle()
+		}
+		if text == "" {
+			text = "📄 Document"
+		}
+		attachment = &domain.Attachment{Caption: document.GetCaption(), MIMEType: document.GetMimetype(), FileName: document.GetFileName(),
+			DirectPath: document.GetDirectPath(), MediaKey: document.GetMediaKey(), FileSHA256: document.GetFileSHA256(),
+			FileEncSHA256: document.GetFileEncSHA256(), FileSize: document.GetFileLength()}
+	} else if contact := message.GetContactMessage(); contact != nil {
+		kind, text = "contact", contact.GetDisplayName()
+		if text == "" {
+			text = "Contact"
+		}
+		contacts = []domain.Contact{{DisplayName: contact.GetDisplayName(), VCard: contact.GetVcard()}}
+	} else if contactArray := message.GetContactsArrayMessage(); contactArray != nil {
+		kind, text = "contacts", contactArray.GetDisplayName()
+		if text == "" {
+			text = fmt.Sprintf("%d contacts", len(contactArray.GetContacts()))
+		}
+		contacts = make([]domain.Contact, 0, len(contactArray.GetContacts()))
+		for _, contact := range contactArray.GetContacts() {
+			if contact != nil {
+				contacts = append(contacts, domain.Contact{DisplayName: contact.GetDisplayName(), VCard: contact.GetVcard()})
+			}
+		}
+	} else if rawLocation := message.GetLocationMessage(); rawLocation != nil {
+		kind, text = "location", rawLocation.GetName()
+		if text == "" {
+			text = rawLocation.GetAddress()
+		}
+		if text == "" {
+			text = "📍 Location"
+		}
+		location = &domain.Location{Latitude: rawLocation.GetDegreesLatitude(), Longitude: rawLocation.GetDegreesLongitude(), Name: rawLocation.GetName(),
+			Address: rawLocation.GetAddress(), URL: rawLocation.GetURL(), Live: rawLocation.GetIsLive()}
+	} else if liveLocation := message.GetLiveLocationMessage(); liveLocation != nil {
+		kind, text = "location", liveLocation.GetCaption()
+		if text == "" {
+			text = "📍 Live location"
+		}
+		location = &domain.Location{Latitude: liveLocation.GetDegreesLatitude(), Longitude: liveLocation.GetDegreesLongitude(), Name: liveLocation.GetCaption(), Live: true}
+	} else if poll := messagePoll(message); poll != nil {
+		kind, text = "poll", pollText(poll)
+	} else if snapshot := messagePollResultSnapshot(message); snapshot != nil {
+		kind, text = "poll", joinNonEmpty(": ", "📊 Poll results", snapshot.GetName())
+	} else if invite := message.GetGroupInviteMessage(); invite != nil {
+		kind = "group_invite"
+		text = joinNonEmpty(": ", "👥 Group invite", invite.GetGroupName())
+		text = joinNonEmpty("\n", text, invite.GetCaption())
+	} else if event := message.GetEventMessage(); event != nil {
+		kind = "event"
+		text = joinNonEmpty(": ", "📅 Event", event.GetName())
+		if event.GetIsCanceled() {
+			text += " (canceled)"
+		}
+		text = joinNonEmpty("\n", text, event.GetDescription())
+	} else if eventInvite := message.GetEventInviteMessage(); eventInvite != nil {
+		kind = "event"
+		text = joinNonEmpty(": ", "📅 Event invite", eventInvite.GetEventTitle())
+		text = joinNonEmpty("\n", text, eventInvite.GetCaption())
+	} else if buttons := message.GetButtonsMessage(); buttons != nil {
+		kind = "interactive"
+		text = firstNonEmpty(buttons.GetContentText(), buttons.GetFooterText(), "Interactive message")
+	} else if buttonsResponse := message.GetButtonsResponseMessage(); buttonsResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(buttonsResponse.GetSelectedDisplayText(), "Button reply")
+	} else if list := message.GetListMessage(); list != nil {
+		kind = "interactive"
+		text = firstNonEmpty(joinNonEmpty("\n", list.GetTitle(), list.GetDescription()), "List message")
+	} else if listResponse := message.GetListResponseMessage(); listResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(listResponse.GetTitle(), "List reply")
+	} else if template := message.GetTemplateMessage(); template != nil {
+		kind = "interactive"
+		hydrated := template.GetHydratedTemplate()
+		text = firstNonEmpty(hydrated.GetHydratedContentText(), hydrated.GetHydratedFooterText(), "Template message")
+	} else if templateReply := message.GetTemplateButtonReplyMessage(); templateReply != nil {
+		kind = "interactive"
+		text = firstNonEmpty(templateReply.GetSelectedDisplayText(), "Button reply")
+	} else if interactive := message.GetInteractiveMessage(); interactive != nil {
+		kind = "interactive"
+		text = firstNonEmpty(joinNonEmpty("\n", interactive.GetHeader().GetTitle(), interactive.GetBody().GetText()), "Interactive message")
+	} else if interactiveResponse := message.GetInteractiveResponseMessage(); interactiveResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(interactiveResponse.GetBody().GetText(), "Interactive reply")
+	} else if product := message.GetProductMessage(); product != nil {
+		kind = "product"
+		text = joinNonEmpty(": ", "🛍️ Product", product.GetProduct().GetTitle())
+		text = joinNonEmpty("\n", text, product.GetBody())
+	} else if order := message.GetOrderMessage(); order != nil {
+		kind = "order"
+		text = joinNonEmpty(": ", "🛒 Order", order.GetOrderTitle())
+		if count := order.GetItemCount(); count > 0 {
+			text += fmt.Sprintf(" (%d items)", count)
+		}
+		text = joinNonEmpty("\n", text, order.GetMessage())
+	} else if invoice := message.GetInvoiceMessage(); invoice != nil {
+		kind, text = "payment", joinNonEmpty(": ", "🧾 Invoice", invoice.GetNote())
+	} else if payment := message.GetSendPaymentMessage(); payment != nil {
+		kind, text = "payment", joinNonEmpty("\n", "💸 Payment", messageInlineText(payment.GetNoteMessage()))
+	} else if request := message.GetRequestPaymentMessage(); request != nil {
+		kind = "payment"
+		text = "💸 Payment request"
+		if request.GetAmount1000() > 0 {
+			text = fmt.Sprintf("%s: %s %.2f", text, request.GetCurrencyCodeIso4217(), float64(request.GetAmount1000())/1000)
+		}
+		text = joinNonEmpty("\n", text, messageInlineText(request.GetNoteMessage()))
+	} else if message.GetDeclinePaymentRequestMessage() != nil {
+		kind, text = "payment", "💸 Payment request declined"
+	} else if message.GetCancelPaymentRequestMessage() != nil {
+		kind, text = "payment", "💸 Payment request cancelled"
+	} else if message.GetPaymentInviteMessage() != nil {
+		kind, text = "payment", "💸 Payment invite"
+	} else if message.GetPaymentReminderMessage() != nil {
+		kind, text = "payment", "💸 Payment reminder"
+	} else if message.GetSplitPaymentMessage() != nil {
+		kind, text = "payment", "💸 Split payment"
+	} else if message.GetSplitPaymentUpdateMessage() != nil {
+		kind, text = "payment", "💸 Split payment update"
+	} else if callLog := message.GetCallLogMesssage(); callLog != nil {
+		kind, text = "call", callLogText(callLog)
+	} else if scheduledCall := message.GetScheduledCallCreationMessage(); scheduledCall != nil {
+		kind, text = "call", joinNonEmpty(": ", "📞 Call scheduled", scheduledCall.GetTitle())
+	} else if scheduledCallEdit := message.GetScheduledCallEditMessage(); scheduledCallEdit != nil {
+		kind, text = "call", "📞 Scheduled call updated"
+	} else if message.GetBcallMessage() != nil {
+		kind, text = "call", "📞 Call"
+	} else if pin := message.GetPinInChatMessage(); pin != nil {
+		kind = "pin"
+		if pin.GetType() == waE2E.PinInChatMessage_UNPIN_FOR_ALL {
+			text = "📌 Unpinned a message"
+		} else {
+			text = "📌 Pinned a message"
+		}
+	} else if keep := message.GetKeepInChatMessage(); keep != nil {
+		kind = "pin"
+		if keep.GetKeepType() == waE2E.KeepType_UNDO_KEEP_FOR_ALL {
+			text = "Removed a message from kept messages"
+		} else {
+			text = "Kept a message in chat"
+		}
+	} else if comment := message.GetCommentMessage(); comment != nil {
+		inner := extractMessageContent(comment.GetMessage(), infoType)
+		inner.kind = "comment"
+		return inner
+	} else if newsletterInvite := message.GetNewsletterAdminInviteMessage(); newsletterInvite != nil {
+		kind = "newsletter"
+		text = joinNonEmpty(": ", "📰 Newsletter admin invite", newsletterInvite.GetNewsletterName())
+		text = joinNonEmpty("\n", text, newsletterInvite.GetCaption())
+	} else if message.GetNewsletterFollowerInviteMessageV2() != nil {
+		kind, text = "newsletter", "📰 Newsletter invite"
+	} else if album := message.GetAlbumMessage(); album != nil {
+		kind, text = "album", albumText(album)
+	} else if pack := message.GetStickerPackMessage(); pack != nil {
+		kind, text = "sticker_pack", joinNonEmpty(": ", "🎨 Sticker pack", pack.GetName())
+	} else if message.GetRequestPhoneNumberMessage() != nil {
+		kind, text = "text", "📱 Requested a phone number"
+	} else if protocolMessage := message.GetProtocolMessage(); protocolMessage != nil && protocolMessage.GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING {
+		kind, text = "ephemeral_setting", ephemeralSettingText(protocolMessage.GetEphemeralExpiration())
+	} else {
+		text = messageInlineText(message)
+		if extended := message.GetExtendedTextMessage(); extended != nil && extended.GetMatchedText() != "" {
+			linkPreview = &domain.LinkPreview{
+				URL:             extended.GetMatchedText(),
+				Title:           extended.GetTitle(),
+				Description:     extended.GetDescription(),
+				JPEGThumbnail:   append([]byte(nil), extended.GetJPEGThumbnail()...),
+				ThumbnailWidth:  extended.GetThumbnailWidth(),
+				ThumbnailHeight: extended.GetThumbnailHeight(),
+			}
+		}
+		if text == "" {
+			kind, text = fallbackMessageContent(message, infoType)
+		}
+	}
+	return messageContent{kind: kind, text: text, image: imageInfo, attachment: attachment, contacts: contacts, location: location, linkPreview: linkPreview}
+}
+
+// messagePoll returns the poll payload regardless of which versioned field
+// WhatsApp used to send it.
+func messagePoll(message *waE2E.Message) *waE2E.PollCreationMessage {
+	for _, poll := range []*waE2E.PollCreationMessage{
+		message.GetPollCreationMessage(), message.GetPollCreationMessageV2(), message.GetPollCreationMessageV3(),
+		message.GetPollCreationMessageV5(), message.GetPollCreationMessageV6(),
+	} {
+		if poll != nil {
+			return poll
+		}
+	}
+	if wrapped := message.GetPollCreationMessageV4().GetMessage(); wrapped != nil {
+		return messagePoll(wrapped)
+	}
+	return nil
+}
+
+func messagePollResultSnapshot(message *waE2E.Message) *waE2E.PollResultSnapshotMessage {
+	if snapshot := message.GetPollResultSnapshotMessage(); snapshot != nil {
+		return snapshot
+	}
+	return message.GetPollResultSnapshotMessageV3()
+}
+
+func pollText(poll *waE2E.PollCreationMessage) string {
+	var b strings.Builder
+	b.WriteString(joinNonEmpty(": ", "📊 Poll", poll.GetName()))
+	for _, option := range poll.GetOptions() {
+		if option.GetOptionName() != "" {
+			b.WriteString("\n• ")
+			b.WriteString(option.GetOptionName())
+		}
+	}
+	return b.String()
+}
+
+func callLogText(callLog *waE2E.CallLogMessage) string {
+	text := "📞 Call"
+	if callLog.GetIsVideo() {
+		text = "📹 Video call"
+	}
+	switch callLog.GetCallOutcome() {
+	case waE2E.CallLogMessage_MISSED:
+		text = "Missed " + strings.ToLower(strings.TrimLeft(text, "📞📹 "))
+	case waE2E.CallLogMessage_REJECTED:
+		text += " (declined)"
+	}
+	if seconds := callLog.GetDurationSecs(); seconds > 0 {
+		text += fmt.Sprintf(" (%s)", (time.Duration(seconds) * time.Second).String())
+	}
+	return text
+}
+
+func albumText(album *waE2E.AlbumMessage) string {
+	total := album.GetExpectedImageCount() + album.GetExpectedVideoCount()
+	if total > 0 {
+		return fmt.Sprintf("🖼️ Album (%d items)", total)
+	}
+	return "🖼️ Album"
+}
+
+func ephemeralSettingText(seconds uint32) string {
+	if seconds == 0 {
+		return "⏳ Disappearing messages turned off"
+	}
+	duration := time.Duration(seconds) * time.Second
+	switch {
+	case duration >= 24*time.Hour:
+		days := int(duration / (24 * time.Hour))
+		if days == 1 {
+			return "⏳ Disappearing messages set to 1 day"
+		}
+		return fmt.Sprintf("⏳ Disappearing messages set to %d days", days)
+	case duration >= time.Hour:
+		return fmt.Sprintf("⏳ Disappearing messages set to %d hours", int(duration/time.Hour))
+	default:
+		return fmt.Sprintf("⏳ Disappearing messages set to %d minutes", int(duration/time.Minute))
+	}
+}
+
+// messageInlineText pulls plain text out of a message without triggering any
+// of the richer content decoding.
+func messageInlineText(message *waE2E.Message) string {
+	if message == nil {
+		return ""
+	}
+	if text := message.GetConversation(); text != "" {
+		return text
+	}
+	return message.GetExtendedTextMessage().GetText()
+}
+
+func joinNonEmpty(separator string, values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, separator)
+}
+
+// linkPattern matches the http(s) links a message body can carry.
+var linkPattern = regexp.MustCompile("(?i)https?://[^\\s<>\"'`]+")
+
+// firstLinkURL returns the first http(s) link of a message body, or an empty
+// string when the body carries none.
+func firstLinkURL(text string) string {
+	match := linkPattern.FindString(text)
+	if match == "" {
+		return ""
+	}
+	return strings.TrimRight(match, ".,;:!?)]}'\"")
+}
+
+// attachLinkPreview resolves the preview of the first link of a text message.
+// WhatsApp only ships a preview when the sending client built one, which is
+// rare, so the preview is resolved here. The fetch runs in the background:
+// the message is delivered and rendered right away, and the card appears once
+// the page answers.
+func (c *Client) attachLinkPreview(message domain.Message) {
+	if c.linkPreviews == nil || message.Kind != "text" || message.LinkPreview != nil {
+		return
+	}
+	rawURL := firstLinkURL(message.Text)
+	if rawURL == "" {
+		return
+	}
+	c.maintenanceWG.Add(1)
+	go func() {
+		defer c.maintenanceWG.Done()
+		preview, found := c.linkPreviews.Resolve(c.clientContext(), rawURL)
+		if !found {
+			return
+		}
+		c.applyLinkPreview(message, preview)
+	}()
+}
+
+// applyLinkPreview stores a resolved preview on an already persisted message
+// and notifies the desktop so the card is rendered.
+func (c *Client) applyLinkPreview(message domain.Message, preview linkpreview.Preview) {
+	ctx, cancel := context.WithTimeout(c.clientContext(), 15*time.Second)
+	defer cancel()
+	stored, err := c.store.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		c.logLinkPreviewWarning("load message for link preview", message, err)
+		return
+	}
+	stored.LinkPreview = linkPreviewFrom(preview)
+	if err = c.store.ApplyMessage(ctx, stored, false); err != nil {
+		c.logLinkPreviewWarning("store link preview", message, err)
+		return
+	}
+	if c.sink != nil {
+		c.sink(Event{Kind: "message", Message: stored})
+	}
+}
+
+// logLinkPreviewWarning reports a failed link preview update.
+func (c *Client) logLinkPreviewWarning(detail string, message domain.Message, err error) {
+	if c.log == nil {
+		return
+	}
+	c.log.Warn(detail, "chat_id", message.ChatJID, "message_id", message.ID, "error", err)
+}
+
+// linkPreviewFrom turns a resolved preview into the card payload the desktop
+// renders. The desktop expects raw JPEG bytes for the card image and no image
+// is fetched here, so the image URL is reported in the description instead of
+// an empty thumbnail.
+func linkPreviewFrom(preview linkpreview.Preview) *domain.LinkPreview {
+	description := preview.Description
+	if preview.ImageURL != "" {
+		description = joinNonEmpty("\n", description, preview.ImageURL)
+	}
+	return &domain.LinkPreview{URL: preview.URL, Title: preview.Title, Description: description}
+}
+
+// clientContext returns the client context, or a background context when the
+// client was built without one.
+func (c *Client) clientContext() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
+
+// fallbackMessageContent derives a human-readable label from whichever payload
+// field is populated, so message types this bridge has no bespoke rendering
+// for still show what they are instead of a generic error.
+func fallbackMessageContent(message *waE2E.Message, infoType string) (string, string) {
+	name := messageContentFieldName(message)
+	if name == "" {
+		kind := infoType
+		if kind == "" {
+			kind = "unknown"
+		}
+		return kind, "Message"
+	}
+	label := humanizeMessageField(name)
+	return strings.ReplaceAll(strings.ToLower(label), " ", "_"), label
+}
+
+// messageContentFieldName returns the proto field name of the first populated
+// content payload, skipping fields that only carry signal/keying data.
+func messageContentFieldName(message *waE2E.Message) string {
+	if message == nil {
+		return ""
+	}
+	name := ""
+	message.ProtoReflect().Range(func(descriptor protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		if descriptor.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		switch descriptor.Name() {
+		case "senderKeyDistributionMessage", "fastRatchetKeySenderKeyDistributionMessage", "messageContextInfo", "deviceSentMessage":
+			return true
+		}
+		name = string(descriptor.Name())
+		return false
+	})
+	return name
+}
+
+// humanizeMessageField turns a proto field name like "pollResultSnapshotMessageV3"
+// into "Poll result snapshot".
+func humanizeMessageField(name string) string {
+	trimmed := strings.TrimRight(name, "0123456789")
+	trimmed = strings.TrimSuffix(trimmed, "V")
+	trimmed = strings.TrimSuffix(trimmed, "Message")
+	if trimmed == "" {
+		trimmed = name
+	}
+	var b strings.Builder
+	for i, r := range trimmed {
+		switch {
+		case i == 0:
+			b.WriteRune(unicode.ToUpper(r))
+		case unicode.IsUpper(r):
+			b.WriteByte(' ')
+			b.WriteRune(unicode.ToLower(r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// passiveMessage reports whether the payload only carries protocol or state
+// signals that WhatsApp itself never renders as a chat bubble, such as poll
+// votes, encrypted reaction envelopes, and app-state sync notifications.
+func passiveMessage(message *waE2E.Message) bool {
+	if message == nil {
+		return true
+	}
+	if protocol := message.GetProtocolMessage(); protocol != nil {
+		switch protocol.GetType() {
+		case waE2E.ProtocolMessage_REVOKE, waE2E.ProtocolMessage_MESSAGE_EDIT, waE2E.ProtocolMessage_EPHEMERAL_SETTING:
+			return false
+		default:
+			return true
+		}
+	}
+	switch {
+	case message.GetPollUpdateMessage() != nil,
+		message.GetPollAddOptionMessage() != nil,
+		message.GetEncReactionMessage() != nil,
+		message.GetEncCommentMessage() != nil,
+		message.GetEncEventResponseMessage() != nil,
+		message.GetStickerSyncRmrMessage() != nil,
+		message.GetSecretEncryptedMessage() != nil:
+		return true
+	}
+	// Messages carrying only key-distribution data have no displayable payload.
+	return messageInlineText(message) == "" && messageContentFieldName(message) == ""
+}
+
+func messageContextInfo(message *waE2E.Message) *waE2E.ContextInfo {
+	if message == nil {
+		return nil
+	}
+	switch {
+	case message.GetExtendedTextMessage() != nil:
+		return message.GetExtendedTextMessage().GetContextInfo()
+	case message.GetImageMessage() != nil:
+		return message.GetImageMessage().GetContextInfo()
+	case message.GetStickerMessage() != nil:
+		return message.GetStickerMessage().GetContextInfo()
+	case messageVideo(message) != nil:
+		return messageVideo(message).GetContextInfo()
+	case message.GetAudioMessage() != nil:
+		return message.GetAudioMessage().GetContextInfo()
+	case messageDocument(message) != nil:
+		return messageDocument(message).GetContextInfo()
+	case message.GetContactMessage() != nil:
+		return message.GetContactMessage().GetContextInfo()
+	case message.GetContactsArrayMessage() != nil:
+		return message.GetContactsArrayMessage().GetContextInfo()
+	case message.GetLocationMessage() != nil:
+		return message.GetLocationMessage().GetContextInfo()
+	case message.GetLiveLocationMessage() != nil:
+		return message.GetLiveLocationMessage().GetContextInfo()
+	case messagePoll(message) != nil:
+		return messagePoll(message).GetContextInfo()
+	case messagePollResultSnapshot(message) != nil:
+		return messagePollResultSnapshot(message).GetContextInfo()
+	case message.GetGroupInviteMessage() != nil:
+		return message.GetGroupInviteMessage().GetContextInfo()
+	case message.GetEventMessage() != nil:
+		return message.GetEventMessage().GetContextInfo()
+	case message.GetEventInviteMessage() != nil:
+		return message.GetEventInviteMessage().GetContextInfo()
+	case message.GetButtonsMessage() != nil:
+		return message.GetButtonsMessage().GetContextInfo()
+	case message.GetButtonsResponseMessage() != nil:
+		return message.GetButtonsResponseMessage().GetContextInfo()
+	case message.GetListMessage() != nil:
+		return message.GetListMessage().GetContextInfo()
+	case message.GetListResponseMessage() != nil:
+		return message.GetListResponseMessage().GetContextInfo()
+	case message.GetTemplateMessage() != nil:
+		return message.GetTemplateMessage().GetContextInfo()
+	case message.GetTemplateButtonReplyMessage() != nil:
+		return message.GetTemplateButtonReplyMessage().GetContextInfo()
+	case message.GetInteractiveMessage() != nil:
+		return message.GetInteractiveMessage().GetContextInfo()
+	case message.GetInteractiveResponseMessage() != nil:
+		return message.GetInteractiveResponseMessage().GetContextInfo()
+	case message.GetProductMessage() != nil:
+		return message.GetProductMessage().GetContextInfo()
+	case message.GetOrderMessage() != nil:
+		return message.GetOrderMessage().GetContextInfo()
+	case message.GetNewsletterAdminInviteMessage() != nil:
+		return message.GetNewsletterAdminInviteMessage().GetContextInfo()
+	case message.GetAlbumMessage() != nil:
+		return message.GetAlbumMessage().GetContextInfo()
+	case message.GetStickerPackMessage() != nil:
+		return message.GetStickerPackMessage().GetContextInfo()
+	default:
+		return nil
+	}
+}
+
+func messageVideo(message *waE2E.Message) *waE2E.VideoMessage {
+	if video := message.GetVideoMessage(); video != nil {
+		return video
+	}
+	return message.GetPtvMessage()
+}
+
+func messageDocument(message *waE2E.Message) *waE2E.DocumentMessage {
+	if document := message.GetDocumentMessage(); document != nil {
+		return document
+	}
+	if wrapped := message.GetDocumentWithCaptionMessage(); wrapped != nil {
+		return wrapped.GetMessage().GetDocumentMessage()
+	}
+	return nil
+}
+
+// reduceChatPresence forwards typing/recording state changes. Nothing is
+// persisted: indicators are transient and expire on the desktop side.
+func (c *Client) reduceChatPresence(evt *events.ChatPresence) {
+	if evt.IsFromMe {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.Chat.String())
+	if err != nil {
+		return
+	}
+	c.sink(Event{
+		Kind:      "typing",
+		ChatJID:   chatID,
+		SenderJID: evt.Sender.ToNonAD().String(),
+		Typing:    evt.State == types.ChatPresenceComposing,
+		Recording: evt.Media == types.ChatPresenceMediaAudio,
+	})
+}
+
+// SetTyping broadcasts the local user's composing state for a chat.
+func (c *Client) SetTyping(ctx context.Context, chatID string, typing bool) error {
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return err
+	}
+	state := types.ChatPresencePaused
+	if typing {
+		state = types.ChatPresenceComposing
+	}
+	return c.wa.SendChatPresence(ctx, jid, state, types.ChatPresenceMediaText)
+}
+
+func (c *Client) emitChat(chatID string) {
+	chat, err := c.store.Chat(c.ctx, chatID)
+	if err == nil {
+		c.sink(Event{Kind: "chat", Chat: chat})
+	}
+}
+
+func (c *Client) reduceArchive(evt *events.Archive) {
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve archived conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	archived := evt.Action.GetArchived()
+	if err = c.store.UpsertChatMetadata(c.ctx, chatID, "", &archived); err != nil {
+		c.log.Error("persist archive state", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// muteForeverMillis marks a chat muted with no expiry. WhatsApp encodes "mute
+// always" as a non-positive MuteEndTimestamp; a far-future instant keeps
+// MutedUntil.After(now) true indefinitely without a magic zero.
+var muteForeverMillis = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC).UnixMilli()
+
+// reduceMute applies a mute/unmute synced from WhatsApp so muted chats no
+// longer raise desktop notifications. Without this the process never learns a
+// chat's mute state — mute lives in the regular_high app-state patch and has
+// no other delivery path — so muted_until stays zero and every chat reads as
+// unmuted. whatsmeow reports MuteEndTimestamp in Unix milliseconds, matching
+// the store column.
+func (c *Client) reduceMute(evt *events.Mute) {
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve muted conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	var mutedUntilMillis int64
+	if evt.Action.GetMuted() {
+		if end := evt.Action.GetMuteEndTimestamp(); end > 0 {
+			mutedUntilMillis = end
+		} else {
+			mutedUntilMillis = muteForeverMillis
+		}
+	}
+	if err = c.store.SetChatMute(c.ctx, chatID, mutedUntilMillis); err != nil {
+		c.log.Error("persist mute state", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// BackfillGroupName fills in a group chat's name on demand for chats that
+// never got one from a live JoinedGroup/GroupInfo event or history sync
+// (e.g. because the add happened while this device wasn't connected). It is
+// safe to call repeatedly for the same JID; the fetch is deduped and runs in
+// the background so it never blocks the caller (typically a chat-list
+// request) — the resolved name arrives shortly after via a "chat" event.
+func (c *Client) BackfillGroupName(chatID, addressJID string) {
+	jid, err := types.ParseJID(addressJID)
+	if err != nil || jid.Server != types.GroupServer {
+		return
+	}
+	key := jid.String()
+	c.groupNameFetchMu.Lock()
+	// Logout changes accepting/generation and installs the fresh client under
+	// this same mutex boundary. Capture all three together so an old client can
+	// never be registered as work for the new account generation.
+	if !c.accepting.Load() || c.wa == nil {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	generation := c.generation.Load()
+	client := c.wa
+	if c.groupNameFetches[key] != nil {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	job := &groupNameFetch{generation: generation, done: make(chan struct{})}
+	c.groupNameFetches[key] = job
+	getGroupInfo := c.getGroupInfoFn
+	c.groupNameFetchMu.Unlock()
+	go func() {
+		var info *types.GroupInfo
+		var infoErr error
+		if getGroupInfo == nil {
+			info, infoErr = client.GetGroupInfo(c.ctx, jid)
+		} else {
+			info, infoErr = getGroupInfo(c.ctx, client, jid)
+		}
+		c.finishGroupNameBackfill(job, chatID, key, info, infoErr)
+	}()
+}
+
+func (c *Client) finishGroupNameBackfill(job *groupNameFetch, chatID, key string, info *types.GroupInfo, infoErr error) {
+	defer close(job.done)
+	c.groupNameFetchMu.Lock()
+	// A new account may already have registered the same group key. Requiring
+	// pointer identity prevents the old result from writing or deleting the new
+	// account's deduplication marker even if generations are accidentally equal.
+	if c.groupNameFetches[key] != job {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	defer func() {
+		if c.groupNameFetches[key] == job {
+			delete(c.groupNameFetches, key)
+		}
+		c.groupNameFetchMu.Unlock()
+	}()
+	if c.generation.Load() != job.generation || !c.accepting.Load() {
+		return
+	}
+	if infoErr != nil {
+		c.log.Warn("backfill group info", "chat_id", chatID, "jid", key, "error", infoErr)
+		return
+	}
+	if info.Name == "" {
+		return
+	}
+	if err := c.store.UpsertChatName(c.ctx, chatID, info.Name); err != nil {
+		c.log.Error("persist backfilled group name", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// reduceJoinedGroup handles being added to (or creating) a group. Without
+// this, a newly joined group's chat row is created with no name the first
+// time a message arrives, and the UI falls back to showing the raw JID.
+func (c *Client) reduceJoinedGroup(evt *events.JoinedGroup) {
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve joined group conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	if err = c.store.UpsertChatName(c.ctx, chatID, evt.Name); err != nil {
+		c.log.Error("persist joined group name", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// reduceGroupInfo keeps the cached group name in sync with rename events.
+func (c *Client) reduceGroupInfo(evt *events.GroupInfo) {
+	if evt.Name == nil || evt.Name.Name == "" {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve group info conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	if err = c.store.UpsertChatName(c.ctx, chatID, evt.Name.Name); err != nil {
+		c.log.Error("persist group name change", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+func (c *Client) reduceReceipt(evt *events.Receipt) {
+	chatID, _, err := c.resolveConversation(evt.Chat.String())
+	if err != nil {
+		c.log.Error("resolve receipt conversation", "chat_id", evt.Chat.String(), "error", err)
+		return
+	}
+	if evt.IsFromMe && (evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf) {
+		ids := make([]string, len(evt.MessageIDs))
+		for i := range evt.MessageIDs {
+			ids[i] = string(evt.MessageIDs[i])
+		}
+		c.persistInboundEvent("receipt", chatID, strings.Join(ids, ","), journalReceipt{
+			ChatID: chatID, MessageIDs: ids, MarkRead: true,
+		})
+		return
+	}
+	status := domain.StatusDelivered
+	if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
+		status = domain.StatusRead
+	}
+	ids := make([]string, len(evt.MessageIDs))
+	for i := range evt.MessageIDs {
+		ids[i] = string(evt.MessageIDs[i])
+	}
+	c.persistInboundEvent("receipt", chatID, strings.Join(ids, ","), journalReceipt{
+		ChatID: chatID, MessageIDs: ids, Status: status,
+	})
+}
+
+func (c *Client) reduceMarkChatAsRead(evt *events.MarkChatAsRead) {
+	if evt.Action == nil || !evt.Action.GetRead() {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve cross-device read marker", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	messageRange := evt.Action.GetMessageRange()
+	var messageID string
+	var rangeTimestamp time.Time
+	if messageRange != nil {
+		if seconds := messageRange.GetLastMessageTimestamp(); seconds > 0 {
+			rangeTimestamp = time.Unix(seconds, 0)
+		}
+		for _, message := range messageRange.GetMessages() {
+			if message.GetKey().GetID() != "" {
+				messageID = message.GetKey().GetID()
+			}
+		}
+	}
+	if err = c.store.MarkReadThroughPosition(c.ctx, chatID, messageID, rangeTimestamp); err != nil {
+		c.log.Error("persist cross-device read marker", "chat_id", chatID, "message_id", messageID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+type historyReductionStats struct {
+	Received uint64
+	Decoded  uint64
+	Stored   uint64
+	Failed   uint64
+}
+
+func (c *Client) reduceHistory(evt *events.HistorySync) historyReductionStats {
+	var chats, messages uint64
+	var stats historyReductionStats
+	historyPersistFailed := false
+	pushNames := make(map[types.JID]string)
+	syncType := evt.Data.GetSyncType()
+	isReactionRepair := syncType == waHistorySync.HistorySync_ON_DEMAND
+	c.historyRequestMu.Lock()
+	pendingHistory := c.historyRequest
+	c.historyRequestMu.Unlock()
+	historyRequestMatched := false
+	contributesToInitialSync := syncType == waHistorySync.HistorySync_INITIAL_BOOTSTRAP ||
+		syncType == waHistorySync.HistorySync_FULL ||
+		syncType == waHistorySync.HistorySync_RECENT
+	terminalInitialHistory := syncType == waHistorySync.HistorySync_FULL ||
+		syncType == waHistorySync.HistorySync_RECENT
+	for _, conversation := range evt.Data.GetConversations() {
+		rawChatID := conversation.GetID()
+		chatID, transportJID, identityErr := c.resolveConversation(rawChatID)
+		if identityErr != nil {
+			c.log.Error("resolve history conversation", "chat_id", rawChatID, "error", identityErr)
+			failed := uint64(len(conversation.GetMessages()))
+			stats.Received += failed
+			stats.Failed += failed
+			historyPersistFailed = true
+			continue
+		}
+		if err := c.store.UpsertChatMetadata(c.ctx, chatID, conversation.GetName(), conversation.Archived); err != nil {
+			c.log.Error("persist history chat metadata", "chat_id", chatID, "error", err)
+			historyPersistFailed = true
+		}
+		chats++
+		jid, err := types.ParseJID(rawChatID)
+		if err != nil {
+			failed := uint64(len(conversation.GetMessages()))
+			stats.Received += failed
+			stats.Failed += failed
+			historyPersistFailed = true
+			c.log.Error("parse history conversation JID", "chat_id", rawChatID, "error", err)
+			continue
+		}
+		batch := make([]domain.Message, 0, len(conversation.GetMessages()))
+		type historyPollVote struct {
+			vote   domain.PollVote
+			hashes [][]byte
+		}
+		type historyPollOption struct{ messageID, name string }
+		type historyPollSnapshot struct {
+			messageID string
+			poll      *domain.Poll
+			at        time.Time
+			fallback  domain.Message
+		}
+		var historyPollVotes []historyPollVote
+		var historyPollOptions []historyPollOption
+		var historyPollSnapshots []historyPollSnapshot
+		unknownHistoryPollOption := false
+		type historyPin struct {
+			messageID string
+			pinnedBy  string
+			at        time.Time
+			pinned    bool
+		}
+		var historyPins []historyPin
+		reactions := make([]domain.Reaction, 0)
+		for _, raw := range conversation.GetMessages() {
+			stats.Received++
+			parsed, err := c.wa.ParseWebMessage(jid, raw.GetMessage())
+			if err != nil {
+				stats.Failed++
+				historyPersistFailed = true
+				c.log.Error("decode history message", "chat_id", chatID, "error", err)
+				continue
+			}
+			stats.Decoded++
+			if parsed.Info.PushName != "" && parsed.Info.PushName != "-" && parsed.Info.PushName != "username" && !parsed.Info.Sender.IsEmpty() {
+				pushNames[parsed.Info.Sender.ToNonAD()] = parsed.Info.PushName
+			}
+			if reaction, ok, reactionErr := c.reactionFromEvent(c.ctx, parsed); ok {
+				if reactionErr == nil {
+					reaction.ChatJID = chatID
+					reactions = append(reactions, reaction)
+				} else {
+					c.log.Error("decode history reaction", "chat_id", chatID, "event_message_id", parsed.Info.ID, "error", reactionErr)
+				}
+				continue
+			}
+			aggregates := c.historyAggregateReactions(parsed)
+			for i := range aggregates {
+				aggregates[i].ChatJID = chatID
+			}
+			reactions = append(reactions, aggregates...)
+			if messagePoll(parsed.Message) != nil {
+				for _, update := range raw.GetMessage().GetPollUpdates() {
+					key := update.GetPollUpdateMessageKey()
+					voter := key.GetParticipant()
+					if voter == "" {
+						if key.GetFromMe() {
+							voter = c.OwnID()
+						} else {
+							voter = parsed.Info.Chat.ToNonAD().String()
+						}
+					}
+					at := time.UnixMilli(update.GetSenderTimestampMS())
+					if update.GetSenderTimestampMS() <= 0 {
+						at = parsed.Info.Timestamp
+					}
+					historyPollVotes = append(historyPollVotes, historyPollVote{
+						vote:   domain.PollVote{ChatJID: chatID, PollMessageID: string(parsed.Info.ID), VoterJID: voter, Timestamp: at, FromMe: key.GetFromMe()},
+						hashes: update.GetVote().GetSelectedOptions(),
+					})
+				}
+			}
+			if add := parsed.Message.GetPollAddOptionMessage(); add != nil {
+				targetID, option := add.GetPollCreationMessageKey().GetID(), strings.TrimSpace(add.GetAddOption().GetOptionName())
+				if targetID == "" || option == "" {
+					unknownHistoryPollOption = true
+				} else {
+					historyPollOptions = append(historyPollOptions, historyPollOption{messageID: targetID, name: option})
+				}
+			}
+			if snapshot := messagePollResultSnapshot(parsed.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+				fallback := domainMessage(parsed, chatID, transportJID)
+				c.resolveMessageReplyChat(&fallback)
+				historyPollSnapshots = append(historyPollSnapshots, historyPollSnapshot{messageID: snapshot.GetContextInfo().GetStanzaID(), poll: domainPollSnapshot(snapshot), at: parsed.Info.Timestamp, fallback: fallback})
+			}
+			if pin := raw.GetMessage().GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+				atMS := pin.GetSenderTimestampMS()
+				if atMS <= 0 {
+					atMS = pin.GetServerTimestampMS()
+				}
+				at := time.UnixMilli(atMS)
+				if atMS <= 0 {
+					at = parsed.Info.Timestamp
+				}
+				historyPins = append(historyPins, historyPin{messageID: pin.GetKey().GetID(), at: at, pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL})
+			}
+			if pin := parsed.Message.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
+				at := time.UnixMilli(pin.GetSenderTimestampMS())
+				if pin.GetSenderTimestampMS() <= 0 {
+					at = parsed.Info.Timestamp
+				}
+				historyPins = append(historyPins, historyPin{messageID: pin.GetKey().GetID(), pinnedBy: parsed.Info.Sender.ToNonAD().String(), at: at, pinned: pin.GetType() == waE2E.PinInChatMessage_PIN_FOR_ALL})
+			}
+			if passiveMessage(parsed.Message) {
+				continue
+			}
+			if snapshot := messagePollResultSnapshot(parsed.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+				// The aggregate belongs to the original poll, not a new timeline
+				// bubble. Apply it after the history batch creates that target.
+				continue
+			}
+			message := domainMessage(parsed, chatID, transportJID)
+			c.resolveMessageReplyChat(&message)
+			batch = append(batch, message)
+		}
+		added, applyErr := c.store.ApplyMessagesCount(c.ctx, batch, false)
+		if applyErr != nil {
+			err = applyErr
+			c.log.Error("persist history batch", "chat_id", chatID, "count", len(batch), "error", err)
+			stats.Failed += uint64(len(batch))
+			historyPersistFailed = true
+			continue
+		}
+		stats.Stored += uint64(len(batch))
+		if isReactionRepair && pendingHistory != nil && chatID == pendingHistory.chatID {
+			historyRequestMatched = true
+			coverage, coverageErr := c.store.HistoryCoverage(c.ctx, chatID)
+			if coverageErr == nil && coverage.State == "requesting" && coverage.LastRequestedAtMS == pendingHistory.requestedAtMS {
+				rawCount := uint32(len(conversation.GetMessages()))
+				coverage.LastReceivedCount = rawCount
+				coverage.LastAddedCount = added
+				coverage.OnDemandMessagesAdded += uint64(added)
+				coverage.RetryAfterMS = 0
+				switch {
+				case rawCount == 0:
+					coverage.State = "exhausted"
+					coverage.Detail = "WhatsApp returned no older messages"
+				case added == 0:
+					coverage.State = "stalled"
+					coverage.Detail = "WhatsApp returned history, but it did not add a usable older message"
+				default:
+					coverage.State = "more_available"
+					coverage.Detail = fmt.Sprintf("Added %d older messages from WhatsApp; more can be requested", added)
+				}
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+			c.clearOlderHistoryRequest(pendingHistory)
+		}
+		for _, option := range historyPollOptions {
+			if _, _, optionErr := c.store.AddPollOption(c.ctx, chatID, option.messageID, option.name); optionErr != nil {
+				c.log.Error("persist history poll option", "chat_id", chatID, "poll_message_id", option.messageID, "error", optionErr)
+				historyPersistFailed = true
+			}
+		}
+		for _, historyVote := range historyPollVotes {
+			poll, pollErr := c.store.Poll(c.ctx, chatID, historyVote.vote.PollMessageID)
+			if pollErr != nil {
+				c.log.Error("load history poll for vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", pollErr)
+				historyPersistFailed = true
+				continue
+			}
+			selected, unknown := pollSelectedNames(poll, historyVote.hashes)
+			if unknown > 0 {
+				unknownHistoryPollOption = true
+				continue
+			}
+			historyVote.vote.SelectedOptions = selected
+			if _, _, voteErr := c.store.ApplyPollVote(c.ctx, historyVote.vote); voteErr != nil {
+				c.log.Error("persist history poll vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", voteErr)
+				historyPersistFailed = true
+			}
+		}
+		for _, snapshot := range historyPollSnapshots {
+			if _, _, snapshotErr := c.store.ApplyPollSnapshot(c.ctx, chatID, snapshot.messageID, snapshot.poll, snapshot.at); errors.Is(snapshotErr, sql.ErrNoRows) {
+				if fallbackErr := c.store.ApplyMessage(c.ctx, snapshot.fallback, false); fallbackErr != nil {
+					c.log.Error("persist standalone history poll snapshot", "chat_id", chatID, "message_id", snapshot.fallback.ID, "error", fallbackErr)
+					historyPersistFailed = true
+				} else {
+					messages++
+				}
+			} else if snapshotErr != nil {
+				c.log.Error("persist history poll snapshot", "chat_id", chatID, "poll_message_id", snapshot.messageID, "error", snapshotErr)
+				historyPersistFailed = true
+			}
+		}
+		if unknownHistoryPollOption {
+			c.sink(Event{Kind: "problem", Detail: "Some poll updates referenced unsupported or unknown options; refresh chat history after all poll options have synced"})
+		}
+		historyPinsChanged := false
+		for _, pin := range historyPins {
+			if pinErr := c.store.SetMessagePinned(c.ctx, chatID, pin.messageID, pin.pinnedBy, pin.at, pin.pinned); pinErr != nil {
+				c.log.Error("persist history pin", "chat_id", chatID, "message_id", pin.messageID, "error", pinErr)
+				historyPersistFailed = true
+			} else {
+				historyPinsChanged = true
+			}
+		}
+		if historyPinsChanged {
+			c.sink(Event{Kind: "pins", ChatJID: chatID})
+		}
+		messages += uint64(len(batch))
+		recovered := len(reactions)
+		if err = c.store.ApplyReactions(c.ctx, reactions); err != nil {
+			c.log.Error("persist history reactions", "chat_id", chatID, "count", len(reactions), "error", err)
+			historyPersistFailed = true
+			recovered = 0
+		}
+		if isReactionRepair {
+			marked, complete, repairErr := c.store.CompleteReactionRepair(c.ctx, chatID, recovered)
+			if repairErr != nil {
+				c.log.Error("update reaction repair", "chat_id", chatID, "error", repairErr)
+			} else if marked {
+				c.sink(Event{Kind: "reaction_repair", ChatJID: chatID, RecoveredReactions: uint32(recovered), RepairComplete: complete})
+			}
+		}
+	}
+	if isReactionRepair && pendingHistory != nil && !historyRequestMatched && len(evt.Data.GetConversations()) == 0 {
+		if c.clearOlderHistoryRequest(pendingHistory) {
+			if coverage, coverageErr := c.store.HistoryCoverage(c.ctx, pendingHistory.chatID); coverageErr == nil {
+				coverage.State = "exhausted"
+				coverage.LastReceivedCount = 0
+				coverage.LastAddedCount = 0
+				coverage.Detail = "WhatsApp returned no older messages"
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+		}
+	}
+	for jid, pushName := range pushNames {
+		if _, _, err := c.wa.Store.Contacts.PutPushName(c.ctx, jid, pushName); err != nil {
+			c.log.Warn("persist history sender push name", "jid", jid, "error", err)
+		}
+	}
+	if len(pushNames) > 0 {
+		c.clearContactCache()
+	}
+	progress := evt.Data.GetProgress()
+	reconciledAt := time.Now()
+	if contributesToInitialSync && terminalInitialHistory && progress >= 100 &&
+		!historyPersistFailed && c.projectionComplete.Load() {
+		if err := c.store.RecordReconciliation(c.ctx, reconciledAt); err != nil {
+			c.log.Error("record completed history reconciliation", "error", err)
+			historyPersistFailed = true
+		}
+	}
+	if contributesToInitialSync {
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			if status.StartedAtMS == 0 {
+				status.StartedAtMS = time.Now().UnixMilli()
+			}
+			status.Phase = "initial_history"
+			status.Detail = "Receiving WhatsApp history"
+			status.ChatsProcessed += chats
+			status.MessagesProcessed += messages
+			status.MessagesReceived += stats.Received
+			status.MessagesDecoded += stats.Decoded
+			status.MessagesFailed += stats.Failed
+			if progress > status.WhatsAppProgress {
+				status.WhatsAppProgress = progress
+			}
+			if historyPersistFailed {
+				status.Phase = "failed"
+				status.Detail = fmt.Sprintf("Some chat history could not be decoded or saved locally (%d of %d messages failed)", stats.Failed, stats.Received)
+				status.CompletedAtMS = 0
+				return
+			}
+			if terminalInitialHistory && progress >= 100 {
+				c.historySyncComplete.Store(true)
+				if c.projectionComplete.Load() {
+					status.Phase = "complete"
+					status.Detail = "Up to date"
+					status.CompletedAtMS = reconciledAt.UnixMilli()
+				} else {
+					status.Phase = "app_state"
+					status.Detail = "Finishing local setup"
+				}
+			}
+		})
+	}
+	c.sink(Event{Kind: "sync", ChatsProcessed: chats, MessagesProcessed: messages, Complete: terminalInitialHistory && progress >= 100 && !historyPersistFailed})
+	return stats
+}
