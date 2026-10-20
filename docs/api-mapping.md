@@ -1,118 +1,133 @@
-# API MAPPING — los 64 comandos del bridge y su destino en Rust
+# API MAPPING - los comandos del bridge y su destino en Rust
 
-> F3 de `repo-migrate`. **Propiedad del lote B-P2** (documento en curso).
-> La lista de abajo es la de partida, verificada contra
-> `tauri/src/lib/bridge.ts` (líneas 438-812) el 20/10/2026. P2 la completa con
-> la firma Rust destino y el tipo de la respuesta.
+> Contrato vivo. Las dos mitades: los **50 RPC** del sidecar (el contrato de
+> `proto/bridge.proto`) y los **56 comandos** que la app web le pedia al
+> nucleo de Tauri. Verificado el 20/10/2026 contra `proto/bridge.proto` y
+> `tauri/src/lib/bridge.ts` del repositorio de origen.
 
-## Por qué esta tabla es el gate de la UI
+## Por que esta tabla es el gate de la UI
 
-La UI nativa tiene que cubrir **64 comandos**. El crate GPUI que ya existe
-(`desktop/`, hoy en `whatfast`) cubre **22**. Faltan 42, que es el 66 % de la
-superficie: ese es el trabajo real de la fase de UI, y por eso el orden de los
-lotes de UI no es "componente por componente" sino "dominio por dominio".
+La UI nativa tiene que cubrir **50 RPC**. El cliente GPUI que ya existe en el
+repositorio de origen (`desktop/`, hoy `whatfast`) pide **22**. Faltan **28**:
+ese es el trabajo real de la fase de interfaz.
 
-## Las tres categorías
+La diferencia con el cliente web no es el protocolo: es el mismo. La
+diferencia es que el cliente web tiene 56 comandos, de los cuales **6 no
+viajan al sidecar** (los locales). El cliente GPUI los resuelve en el
+proceso, en `whatfast-core`.
 
-| Categoría | Qué es | Cómo se porta |
+## Las tres categorias
+
+| Categoria | Que es | Como se porta |
 |---|---|---|
-| **RPC de protocolo** | viajan al sidecar por protobuf | el crate `whatfast-protocol` los expone como funciones Rust async; la UI los llama directo |
-| **Comandos locales** | los resuelve el núcleo (staging, edición de imagen, aperturas, rutas) | funciones Rust del crate `whatfast-core` o del crate de la app |
-| **Efectos de plataforma** | abrir archivos, portapapeles, notificaciones, selector de archivos | crate de plataforma con la implementación por SO |
+| **RPC de protocolo** | viajan al sidecar por protobuf | `whatfast-protocol` los expone como el enum `rpc_request::Request`; la UI los manda por el transporte |
+| **Comandos locales** | los resuelve el proceso (edicion de imagen, recortes, rutas, permisos) | funciones de `whatfast-core` o del crate de la UI |
+| **Efectos de plataforma** | abrir archivos, portapapeles, notificaciones, selector de archivos | la UI los pide directo a GPUI |
 
-## RPC de protocolo (los que ya existen en `proto/bridge.proto`)
+## Los 50 RPC del sidecar
 
-| # | Comando TS | Destino Rust | Nota |
-|---|---|---|---|
-| 1 | `subscribe_backend` | `protocol::subscribe()` → `Receiver<FrontendEvent>` | stream de eventos, orden FIFO |
-| 2 | `hello` | `protocol::hello()` | handshake; falla cerrado |
-| 3 | `get_auth_state` | `protocol::auth_state()` | |
-| 4 | `start_pairing` | `protocol::start_pairing()` | emite el QR por el stream |
-| 5 | `reconnect` | `protocol::reconnect()` | **no cubierto hoy por GPUI** |
-| 6 | `get_sync_status` | `protocol::sync_status()` | **no cubierto** |
-| 7 | `request_older_history` | `protocol::request_older_history()` | **no cubierto** |
-| 8 | `get_chat_history_coverage` | `protocol::history_coverage()` | **no cubierto** |
-| 9 | `get_history_overview` | `protocol::history_overview()` | **no cubierto** |
-| 10 | `get_integrity_status` | `protocol::integrity_status()` | **no cubierto** |
-| 11 | `repair_local_cache` | `protocol::repair_cache()` | **no cubierto** |
-| 12 | `list_chats` | `protocol::list_chats()` | |
-| 13 | `list_messages` | `protocol::list_messages()` | |
-| 14 | `open_message_window` | `protocol::open_message_window()` | |
-| 15 | `list_messages_after` | `protocol::list_messages_after()` | |
-| 16 | `search_local` | `protocol::search_local()` | |
-| 17 | `open_contact` | `protocol::open_contact()` | |
-| 18 | `list_messages_around` | `protocol::list_messages_around()` | |
-| 19 | `send_text` | `protocol::send_text()` | |
-| 20 | `forward_message` | `protocol::forward_message()` | **no cubierto** |
-| 21 | `edit_message` | `protocol::edit_message()` | **no cubierto** |
-| 22 | `delete_message` | `protocol::delete_message()` | **no cubierto** |
-| 23 | `list_statuses` | `protocol::list_statuses()` | **no cubierto** |
-| 24 | `subscribe_newsletter` | `protocol::subscribe_newsletter()` | **no cubierto** |
-| 25 | `list_newsletters` | `protocol::list_newsletters()` | **no cubierto** |
-| 26 | `list_newsletter_messages` | `protocol::list_newsletter_messages()` | **no cubierto** |
-| 27 | `unsubscribe_newsletter` | `protocol::unsubscribe_newsletter()` | **no cubierto** |
-| 28 | `set_chat_pin` | `protocol::set_chat_pin()` | **no cubierto** |
-| 29-30 | `archive_chat` / `unarchive_chat` | `protocol::set_chat_archive()` | **no cubierto** (el RPC real es `set_chat_archive`) |
-| 31-32 | `mute_chat` / `unmute_chat` | `protocol::set_chat_mute()` | **no cubierto** |
-| 33-34 | `block_chat` / `unblock_chat` | `protocol::set_chat_block()` | **no cubierto** |
-| 35 | `list_stickers` | `protocol::list_stickers()` | **no cubierto** |
-| 36 | `send_sticker_from_library` | `protocol::send_sticker_from_library()` | **no cubierto** |
-| 37 | `send_image` | `protocol::send_image()` | |
-| 38 | `send_sticker` | `protocol::send_sticker()` | |
-| 39 | `send_attachment` | `protocol::send_attachment()` | |
-| 40 | `get_message_image` | `protocol::get_message_image()` | |
-| 41 | `get_message_attachment` | `protocol::get_message_attachment()` | **no cubierto** |
-| 42 | `open_media_path` | `platform::open_path()` | efecto de plataforma |
-| 43 | `save_media_as` | `platform::save_as()` | efecto de plataforma |
-| 44 | `mark_read` | `protocol::mark_read()` | |
-| 45 | `get_chat_avatar` | `protocol::chat_avatar()` | |
-| 46 | `send_reaction` | `protocol::send_reaction()` | |
-| 47 | `get_chat_info` | `protocol::chat_info()` | |
-| 48 | `get_participant_avatar` | `protocol::participant_avatar()` | |
-| 49 | `repair_recent_reactions` | `protocol::repair_reactions()` | **no cubierto** |
-| 50 | `set_typing` | `protocol::set_typing()` | |
-| 51 | `create_poll` | `protocol::create_poll()` | **no cubierto** |
-| 52 | `vote_poll` | `protocol::vote_poll()` | **no cubierto** |
-| 53 | `set_message_pin` | `protocol::set_message_pin()` | **no cubierto** |
-| 54 | `list_pinned_messages` | `protocol::list_pinned_messages()` | **no cubierto** |
-| 55 | `logout` | `protocol::logout()` | borra bases y cachés |
-| 56 | `restart_app` | `app::restart()` | efecto de plataforma |
+﻿| # | Campo del proto | Peticion | Estado | Donde vive la logica |
+|---|---|---|---|---|
+| 1 | `hello` | Hello | cubierto | el handshake; `whatfast_protocol::transport::PROTOCOL_VERSION` |
+| 2 | `get_auth_state` | GetAuthState | cubierto | el estado del enlace; `whatfast_model::model::Screen` |
+| 3 | `start_pairing` | StartPairing | cubierto | el QR; `whatfast_model::model::Screen::Pairing` |
+| 4 | `list_chats` | ListChats | cubierto | la lista; `whatfast_model::model::Store::upsert_chat` |
+| 5 | `list_messages` | ListMessages | cubierto | la pagina; `Store::prepend_messages` |
+| 6 | `send_text` | SendText | cubierto | el envio; `whatfast_core::send_idempotency` |
+| 7 | `mark_read` | MarkRead | cubierto | eliado; `Store::mark_selected_chat_read_locally` |
+| 8 | `logout` | Logout | cubierto | desloguear; `Store::clear_account_state` |
+| 9 | `shutdown` | Shutdown | **falta** | apagar |
+| 10 | `get_chat_avatar` | GetChatAvatar | cubierto | el avatar; `whatfast_core::participant_avatar_queue` |
+| 11 | `send_reaction` | SendReaction | cubierto | la reaccion; `whatfast_core::send_idempotency` |
+| 12 | `get_participant_avatar` | GetParticipantAvatar | cubierto | el avatar; `whatfast_core::participant_avatar_queue` |
+| 13 | `repair_recent_reactions` | RepairRecentReactions | cubierto | la reparacion; `whatfast_core::send_idempotency` |
+| 14 | `send_image` | SendImage | cubierto | el envio con medio; `whatfast_model::sticker::prepare` |
+| 15 | `get_message_image` | GetMessageImage | cubierto | la imagen del mensaje; `whatfast_model::model::set_message_image_paths` |
+| 16 | `search_local` | SearchLocal | cubierto | la busqueda; `whatfast_core::spotlight` |
+| 17 | `open_contact` | OpenContact | cubierto | abrir un contacto |
+| 18 | `list_messages_around` | ListMessagesAround | cubierto | el salto a un mensaje; `Store::replace_message_window` |
+| 19 | `send_sticker` | SendSticker | cubierto | el sticker; `whatfast_model::sticker` |
+| 20 | `open_message_window` | OpenMessageWindow | cubierto | el buffer de un chat; `Store::replace_message_window` |
+| 21 | `list_messages_after` | ListMessagesAfter | cubierto | la cola; `Store::append_newer_messages` |
+| 22 | `get_chat_info` | GetChatInfo | cubierto | la ficha; `whatfast_model::model::ChatInfoState` |
+| 23 | `set_typing` | SetTyping | cubierto | el indicador; `whatfast_core::notification_routing` |
+| 24 | `get_message_attachment` | GetMessageAttachment | **falta** | el adjunto |
+| 25 | `send_attachment` | SendAttachment | **falta** | el adjunto |
+| 26 | `list_stickers` | ListStickers | **falta** | la biblioteca de stickers |
+| 27 | `send_sticker_from_library` | SendStickerFromLibrary | **falta** | el sticker de la biblioteca |
+| 28 | `create_poll` | CreatePoll | **falta** | la encuesta |
+| 29 | `vote_poll` | VotePoll | **falta** | el voto |
+| 30 | `set_message_pin` | SetMessagePin | **falta** | fijar un mensaje |
+| 31 | `list_pinned_messages` | ListPinnedMessages | **falta** | los fijados |
+| 32 | `forward_message` | ForwardMessage | **falta** | reenviar |
+| 33 | `edit_message` | EditMessage | **falta** | editar |
+| 34 | `get_sync_status` | GetSyncStatus | **falta** | el progreso; `Store::apply_sync_progress` |
+| 35 | `request_older_history` | RequestOlderHistory | **falta** | pedir historial viejo; `whatfast_core::sync` |
+| 36 | `get_chat_history_coverage` | GetChatHistoryCoverage | **falta** | la cobertura; `whatfast_protocol::fake::fake_history_coverage` |
+| 37 | `get_history_overview` | GetHistoryOverview | **falta** | el resumen del historial |
+| 38 | `reconnect` | Reconnect | **falta** | reconectar |
+| 39 | `get_integrity_status` | GetIntegrityStatus | **falta** | la integridad; `fake::fake_integrity_status` |
+| 40 | `repair_local_cache` | RepairLocalCache | **falta** | reparar la cache local |
+| 41 | `delete_message` | DeleteMessage | **falta** | borrar un mensaje |
+| 42 | `list_statuses` | ListStatuses | **falta** | los estados |
+| 43 | `subscribe_newsletter` | SubscribeNewsletter | **falta** | suscribirse a un newsletter |
+| 44 | `list_newsletters` | ListNewsletters | **falta** | los newsletters |
+| 45 | `list_newsletter_messages` | ListNewsletterMessages | **falta** | los mensajes del newsletter |
+| 46 | `unsubscribe_newsletter` | UnsubscribeNewsletter | **falta** | darse de baja |
+| 47 | `set_chat_pin` | SetChatPin | **falta** | fijar un chat |
+| 48 | `set_chat_archive` | SetChatArchive | **falta** | archivar un chat |
+| 49 | `set_chat_mute` | SetChatMute | **falta** | silenciar un chat |
+| 50 | `set_chat_block` | SetChatBlock | **falta** | bloquear un chat |
 
-## Comandos locales (los resuelve el núcleo, no el sidecar)
+CUBIERTOS: 22
+FALTAN: 28
 
-| # | Comando TS | Destino Rust | Nota |
-|---|---|---|---|
-| 57 | `stage_clipboard_image` | `core::stage_clipboard_image()` | |
-| 58 | `discard_staged_image` | `core::discard_staged_image()` | |
-| 59 | `stage_voice_note` | `core::stage_voice_note()` | |
-| 60 | `stage_outgoing_media` | `core::stage_outgoing_media()` | **la regla de seguridad**: solo rutas de `staged-outgoing` llegan al backend |
-| 61 | `edit_image` | `core::edit_image()` | recorte en píxeles de la imagen ya rotada |
-| 62 | `list_desktop_applications` | `platform::desktop_applications()` | |
-| 63 | `open_external_url` | `platform::open_url()` | |
-| 64 | `reveal_media_path` | `platform::reveal_path()` | |
+**22 cubiertos, 28 para escribir.** El lado del sidecar ya existe (es el mismo
+codigo Go de siempre): lo que falta es la parte de la UI que los pide y lo
+que hace con la respuesta.
 
-## Resumen de cobertura
+### Los 28 que faltan, agrupados por dominio
 
-| | cantidad |
-|---|---|
-| Comandos totales | 64 |
-| Cubiertos por el crate GPUI existente | 22 |
-| RPC de protocolo que **no** cubre hoy | 28 |
-| Comandos locales que **no** cubre hoy | 2 (`stage_outgoing_media`, `edit_image`) |
-| Efectos de plataforma pendientes | 6 |
+| Dominio | RPC | Que hay que escribir |
+|---|---|---|
+| **Sincronizacion e historia** | `get_sync_status`, `request_older_history`, `get_chat_history_coverage`, `get_history_overview` | el progreso de la sincronizacion y el boton de "pedir mas historia" |
+| **Estado y salud** | `get_integrity_status`, `repair_local_cache`, `reconnect` | el aviso de "la cache local esta da?ada" y el reintento |
+| **Medios** | `send_attachment`, `get_message_attachment`, `list_stickers`, `send_sticker_from_library` | la bandeja de stickers y los adjuntos que no son imagen |
+| **Mensajes** | `forward_message`, `edit_message`, `delete_message`, `set_message_pin`, `list_pinned_messages` | el menu de cada mensaje y la lista de fijados |
+| **Encuestas** | `create_poll`, `vote_poll` | el compositor de encuestas y la votacion |
+| **Newsletters** | `subscribe_newsletter`, `list_newsletters`, `list_newsletter_messages`, `unsubscribe_newsletter` | el panel de newsletters |
+| **Estados** | `list_statuses` | la tira de estados |
+| **Ajustes del chat** | `set_chat_pin`, `set_chat_archive`, `set_chat_mute`, `set_chat_block` | las acciones del menu de la ficha del chat |
+| **Cierre** | `shutdown` | apagar el sidecar al salir de la app |
 
-## Reglas de la API en Rust
+## Los 56 comandos del cliente web
 
-1. **Un comando = una función.** Sin `invoke("nombre", args)`: el nombre se
-   compila.
-2. **Respuesta = tipo, no `any`.** El origen devuelve
-   `{ code, message, retryable }` en `BridgeError`; en Rust es
-   `thiserror::Error` con un enum de códigos.
-3. **Los eventos son un `Receiver`, no un `Channel` de callbacks.** El
-   `Channel` de Tauri es FIFO con backpressure; el equivalente natural es
-   `async_channel::Receiver<FrontendEvent>`.
-4. **Los medios son rutas, no blobs.** El origen pasa `imagePath`; en Rust
-   también: la UI no carga bytes en memoria, el backend los sirve desde el
-   perfil.
-5. **Nada de comandos que el renderer pueda usar para leer fuera del perfil.**
-   La lista blanca de rutas se aplica en el crate, no en la UI.
+De los 56, **50 son RPC** (la tabla de arriba, con nombres en camelCase) y
+**6 son locales**:
+
+| Comando local | Que hace | Donde vive en Rust |
+|---|---|---|
+| `openMediaPath` | abrir un archivo con el programa del sistema | la UI (GPUI abre con el shell del sistema) |
+| `saveMediaAs` | guardar un medio en otra carpeta | la UI |
+| `listStatuses` (local) | leer los estados del perfil | `whatfast-core` |
+| `restartApp` | reiniciar la app | la UI |
+| `subscribeBackend` | el stream de eventos | `whatfast_protocol::transport::EventSequence` |
+| `shutdown` | apagar el sidecar | `transport::BackendClient::shutdown` |
+
+Los comandos que el cliente web expone y **el sidecar no tiene** (los de la
+app web, no del protocolo) son los de edicion de imagen: el recorte y la
+rotacion. Esos ya estan portados: `whatfast_core::media_crop`.
+
+## El mapa de los tipos
+
+Los DTOs canonicos viven en `crates/whatfast-core/src/types.rs` y los tipos
+del contrato en `crates/whatfast-protocol`. El detalle de que tipo va donde
+esta en [`type-map.md`](type-map.md).
+
+## Como se verifica esta tabla
+
+`scripts/parity.py` compara los casos del oraculo (los 153 de
+`tauri/tests/`) con los de Rust. La paridad actual es **153/153 (100 %)**:
+el nucleo de dominio esta completo. Lo que esta tabla marca como "falta" es
+la superficie de la **interfaz**, que no tiene caso de prueba en el oraculo
+de la logica: su verificacion es visual, con el backend fake.
