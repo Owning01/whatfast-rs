@@ -39,13 +39,25 @@ scripts/test.cmd        # cargo test --workspace
 scripts/lint.cmd        # cargo clippy --all-targets --locked -- -D warnings
 ```
 
-Los wrappers existen porque el volumen `G:` de esta máquina no tiene
-`sccache` instalado y el toolchain está pineado.
+Los wrappers existen porque el toolchain está pineado y porque todos los
+worktrees de este repo tienen que compilar en el **mismo** sitio: cada
+worktree con su propio `target/` llena el disco con una copia de la
+compilación, y con el stack de Zed eso son 3 GB por worktree.
 
-Si querés que las compilaciones no caigan en el disco del repo, exportá
-`WHATFAST_TARGET_DIR` a una carpeta de caches. Los dos wrappers la respetan, y
-así varios worktrees comparten **un** target en vez de llenar el disco con
-una copia de la compilación cada uno:
+El target compartido se resuelve solo:
+
+1. `CARGO_TARGET_DIR`, si ya está definida.
+2. `WHATFAST_TARGET_DIR`, si está definida.
+3. El `.cache/target` del worktree principal, que se localiza con
+   `git worktree list --porcelain`. No hay que configurar nada.
+
+Además, cuando `sccache` está en el `PATH`, los wrappers lo usan: la cache
+de compilaciones es de toda la máquina, así que el stack de Zed se compila
+**una vez** y el resto de los proyectos la reutilizan. Sin `sccache` el build
+es el mismo, solo que repetido tarda más.
+
+Para que las compilaciones no caigan en el disco del repo, exportá
+`WHATFAST_TARGET_DIR` a una carpeta de caches:
 
 ```sh
 export WHATFAST_TARGET_DIR=/ruta/a/caches/whatfast-target

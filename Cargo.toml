@@ -27,3 +27,13 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# The profile has to live in the root of the workspace: cargo IGNORES the
+# profiles of the members, and the default is the full debug info. On
+# Windows that means the debug data ends up twice: inside the .rlib files
+# and in a .pdb next to them. Measured on this repository: the rlib of a
+# mid-sized crate weighs 62,6 MB with "limited" and 24,4 MB with
+# "line-tables-only", which is the same size as without debug info but keeps
+# the line numbers, so the backtraces still point at a line.
+[profile.dev]
+debug = "line-tables-only"

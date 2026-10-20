@@ -488,3 +488,71 @@ el path se deriva del repositorio y no hace falta configurar nada.
 - `whatfast-ui` tiene un `[profile]` en su `Cargo.toml` y cargo avisa:
   "profiles for the non root package will be ignored". Anotado para el
   lote de UI: el perfil tiene que estar en la raiz del workspace.
+
+## 2026-10-20 - El uso de disco de Rust: de 39,8 GB a 12,9 GB
+
+**Que se cambio**
+
+- **El perfil de desarrollo**. El `[profile.dev]` estaba en
+  `crates/whatfast-ui/Cargo.toml`, y cargo **ignora los perfiles de los
+  miembros del workspace**: se compilaba con el debug completo. Ahora esta
+  en la raiz del workspace, con `debug = "line-tables-only"`.
+  **Medido**: el rlib de `image` pesa 62,6 MB con `limited` y 24,4 MB con
+  `line-tables-only` (igual que sin debug, pero conserva los numeros de
+  linea, asi que los backtraces siguen apuntando a una linea).
+  El target paso de **10,95 GB a 2,64 GB**.
+- **sccache 0.18.0** instalado (binario precompilado, 9,2 MB) en
+  `G:\Dev\cargo\bin`, con la cache en `G:\_build\sccache` y un tope de
+  8 GiB. `RUSTC_WRAPPER=sccache` a nivel de maquina: los nueve proyectos
+  Rust de G: comparten la cache. **Medido**: el stack completo de Zed
+  ocupa **506 MB en la cache** frente a los 2,64 GB del target, y el rebuild
+  paso de 225 s a 100 s (427 aciertos).
+- **Toolchain GNU desinstalado** (1,54 GB): no lo usa ningun proyecto.
+  `rustup` paso de 3,51 a 1,96 GB.
+- **Tarballs del registro de cargo borrados** (0,38 GB): los `.crate` son
+  redundantes con las fuentes ya extraidas en `registry\src`.
+- **Targets de proyectos inactivos borrados** (12,39 GB): el repo viejo
+  congelado (10,46 GB), `Descargas\voicebox` (4,98 GB),
+  `opencode-remote-android` (2,72 GB), `20-vistamd` (1,61 GB),
+  `10-widget-tablero` (2,40 GB) y `Bibliosflutter` (0,30 GB).
+  Los `.exe` de `rust-meow` quedaron porque **la app estaba corriendo**.
+
+**Por que**
+
+El plan de la interfaz necesita GPUI, y el stack de Zed (gpui, wgpu,
+font-kit) es un orden de magnitud mas caro que el resto del proyecto. Con
+un solo target compartido y la info de debug recortada, la iteracion de los
+agentes deja de costar 3 GB por worktree.
+
+**Evidencia**
+
+- Target del repo: 10,95 GB -> **2,64 GB** (-76 %).
+- Cache de sccache: 506 MB para el stack completo.
+- 267 tests en verde, clippy limpio, desde el worktree y sin target local.
+
+**Trampas (cuatro, y dos hicieron perder horas)**
+
+1. **Un worktree tiene su propia copia de los scripts**. El worktree se
+   creo antes del arreglo y seguia con la version vieja: por eso
+   compilaba en el disco local. **Hay que commitear el arreglo antes de
+   crear el worktree**.
+2. **`git rev-parse --git-common-dir` devuelve ruta RELATIVA (`.git`) en el
+   repo principal**, y absoluta en un worktree. La unica forma que sirve
+   para los dos: `git worktree list --porcelain`, que siempre devuelve la
+   ruta absoluta del worktree principal.
+3. **Dentro de `for /f`, el `=` se come**: `--path-format=absolute` se
+   ejecuta como `--path-format absolute` y git falla en silencio.
+4. **Un enlace de directorio colgante rompe a sccache**: la cache de
+   compilaciones daba `Cache write errors: 936` en cada escritura, porque
+   el directorio real habia desaparecido y el enlace apuntaba al vacio.
+   `sccache` **no** es capa de tolerar eso. Los scripts ahora crean los
+   directorios si no existen.
+
+**Pendiente**
+
+- Los targets de los proyectos **activos** (`computer-use2-rs` 5,49 GB,
+  `qwen-image-rs` 0,71 GB, `noblex` 0,18 GB) se dejaron intactos. Con
+  sccache activo se pueden borrar y restaurar en la mitad de tiempo.
+- Los proyectos MCP pinean `1.98.0` en su `rust-toolchain.toml`, que no
+  esta instalado: cuando se compilen, rustup baja ese toolchain aparte
+  (0,56 GB). El `stable` de esta maquina **es** 1.98.0.

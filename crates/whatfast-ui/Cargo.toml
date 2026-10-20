@@ -34,11 +34,3 @@ protoc-bin-vendored = "3.2"
 
 [dev-dependencies]
 tempfile = "3.23"
-
-[profile.dev]
-debug = "limited"
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = "symbols"
