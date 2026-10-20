@@ -20,8 +20,7 @@ use std::{collections::HashMap, fs, io::Read as _, path::Path, time::Instant};
 use whatfast_protocol::ChatParticipant;
 
 use crate::app::{
-    MAX_CAPTION_BYTES, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MAX_UI_SCALE, MIN_UI_SCALE, MentionEntry,
-    TypingIndicator,
+    MAX_CAPTION_BYTES, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MentionEntry, TypingIndicator,
 };
 
 /// Whether a URL may be turned into a clickable link.

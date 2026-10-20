@@ -191,6 +191,9 @@ impl Whatfast {
                             .justify_between()
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_lg()
                                     .font_weight(FontWeight::BOLD)
                                     .child(view_title),
@@ -201,7 +204,11 @@ impl Whatfast {
                                     .child(
                                         Button::new("theme")
                                             .small()
-                                            .label(if dark { "Light" } else { "Dark" })
+                                            .icon(if dark {
+                                                IconName::Sun
+                                            } else {
+                                                IconName::Moon
+                                            })
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.toggle_theme(window, cx);
                                             })),
@@ -209,17 +216,17 @@ impl Whatfast {
                                     .child(
                                         Button::new("archived")
                                             .small()
-                                            .label(if chat_view == ChatView::Archived {
-                                                "Chats"
+                                            .icon(if chat_view == ChatView::Archived {
+                                                IconName::Inbox
                                             } else {
-                                                "Archived"
+                                                IconName::FolderClosed
                                             })
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.toggle_chat_view(window, cx);
                                                 cx.notify();
                                             })),
                                     )
-                                    .child(Button::new("settings").small().label("⚙").on_click(
+                                    .child(Button::new("settings").small().icon(IconName::Settings).on_click(
                                         cx.listener(|this, _, _, cx| {
                                             this.settings_open = !this.settings_open;
                                             this.reaction_details = None;
@@ -355,6 +362,7 @@ impl Whatfast {
                                             div()
                                                 .id(("chat", index))
                                                 .h(px(72. * ui_scale))
+                                                .w_full()
                                                 .px_3()
                                                 .flex()
                                                 .items_center()

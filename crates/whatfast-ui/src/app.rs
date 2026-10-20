@@ -78,9 +78,7 @@ pub(crate) const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 // The scale of the interface belongs to the tokens of the theme: they are
 // re-exported here so that the rest of the crate keeps reading them from
 // the state module, and there is only one definition.
-pub(crate) use crate::tokens::{
-    BASE_MONO_FONT_SIZE, BASE_UI_FONT_SIZE, MAX_UI_SCALE, MIN_UI_SCALE, UI_SCALE_STEP,
-};
+pub(crate) use crate::tokens::{MAX_UI_SCALE, MIN_UI_SCALE, UI_SCALE_STEP};
 /// How many conversations the recency history keeps.
 pub(crate) const MAX_RECENT_CHATS: usize = 10;
 /// How long two wheel events may be apart to be part of the same gesture.
