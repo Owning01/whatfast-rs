@@ -66,17 +66,11 @@
     {
       "modulo": "notification-routing",
       "oracle": 7,
-      "ok": 0,
-      "faltan": [
-        "activation waits for bootstrap and duplicate native deliveries route once",
-        "activation routing pauses across a backend restart until the fresh epoch is ready",
-        "queued activation follows a chat merge and remains ordered",
-        "a chat merge deduplicates a canonical target queued during routing",
-        "invalid activation payloads are ignored",
-        "missing chats and deleted messages have explicit fallback outcomes",
-        "permission denial is cached until the user explicitly retries"
-      ],
-      "en": []
+      "ok": 7,
+      "faltan": [],
+      "en": [
+        "notification_routing.rs"
+      ]
     },
     {
       "modulo": "notifications",
@@ -99,19 +93,11 @@
     {
       "modulo": "participant-avatar-queue",
       "oracle": 9,
-      "ok": 0,
-      "faltan": [
-        "avatar hydration bounds concurrency and deduplicates subscribers",
-        "unsubscribing drops queued work and ignores a late running result",
-        "cancelScope removes only the switched group's subscribers",
-        "queued, running, and backoff work share one hard admission bound",
-        "busy and timeout errors retry with backoff while privacy failures are terminal",
-        "retryable backend avatar failures are retried and never session-cached",
-        "retry classification is restricted to retryable busy and timeout failures",
-        "exhausted transient retries are not session-cached as privacy failures",
-        "terminal privacy failures evict oldest entries at the configured bound"
-      ],
-      "en": []
+      "ok": 9,
+      "faltan": [],
+      "en": [
+        "participant_avatar_queue.rs"
+      ]
     },
     {
       "modulo": "performance",
@@ -158,14 +144,11 @@
     {
       "modulo": "spotlight",
       "oracle": 4,
-      "ok": 0,
-      "faltan": [
-        "empty Spotlight puts frequently opened chats ahead of merely recent ones",
-        "text relevance dominates affinity while frequency breaks equal matches",
-        "aliases, phone numbers, multiple terms, and accents are searchable",
-        "archived chats stay out of instant Spotlight results"
-      ],
-      "en": []
+      "ok": 4,
+      "faltan": [],
+      "en": [
+        "spotlight.rs"
+      ]
     },
     {
       "modulo": "sync",
@@ -191,14 +174,11 @@
     {
       "modulo": "theme",
       "oracle": 4,
-      "ok": 0,
-      "faltan": [
-        "ships dark and light skeuomorphic themes without changing the default",
-        "legacy and invalid theme styles normalize to modern",
-        "clone and export retain the trusted structural style",
-        "theme application exposes appearance and structural style on the root"
-      ],
-      "en": []
+      "ok": 4,
+      "faltan": [],
+      "en": [
+        "theme.rs"
+      ]
     },
     {
       "modulo": "unread",
@@ -258,8 +238,8 @@
     }
   ],
   "total_oracle": 153,
-  "total_ok": 103,
-  "paridad_pct": 67.32,
+  "total_ok": 127,
+  "paridad_pct": 83.01,
   "sobran": [],
   "caracterizacion": [
     "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",
