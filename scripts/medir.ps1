@@ -12,7 +12,10 @@
 
 param(
     [string]$Binario = "dist\whatfast.exe",
-    [int]$EsperaSegundos = 30
+    [int]$EsperaSegundos = 30,
+    # Con el sidecar real: los dos ejecutables de verdad, como en la tabla del
+    # README. Sin el, se usa el backend de demostracion (sin cuenta, sin QR).
+    [switch]$ConSidecar
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +45,8 @@ Write-Output ("  {0,-46} {1,10:N0} bytes" -f "TOTAL", $total)
 Write-Output ""
 Write-Output "=== arranque ==="
 $reloj = [Diagnostics.Stopwatch]::StartNew()
-$proceso = Start-Process -FilePath $ejecutable -ArgumentList "--fake-backend" -PassThru
+$argumentos = if($ConSidecar) { @("--stdio") } else { @("--fake-backend") }
+$proceso = Start-Process -FilePath $ejecutable -ArgumentList $argumentos -PassThru
 $ventana = $null
 while($reloj.Elapsed.TotalSeconds -lt 30) {
     Start-Sleep -Milliseconds 50

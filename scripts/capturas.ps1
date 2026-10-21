@@ -39,7 +39,10 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 }
 "@
 
@@ -50,20 +53,30 @@ function Rect([IntPtr]$handle) {
 }
 
 function Capturar([IntPtr]$handle, [string]$nombre) {
+    # la ventana tiene que estar arriba: si no, la captura sale con lo que
+    # haya encima
+    [Ventana]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 700
     $rect = Rect $handle
-    # The rectangle of the window is in logical pixels: on a scaled screen the
-    # picture has to be taken with the pixels of the device, or the capture
-    # comes out cut.
+    # The rectangle of the window is in logical pixels and includes the frame:
+    # the picture is taken of the client area (what the app draws) and with
+    # the pixels of the device, or the capture comes out cut.
     $escala = [Ventana]::GetDpiForWindow($handle) / 96.0
-    $ancho = [int](($rect.Right - $rect.Left) * $escala)
-    $alto = [int](($rect.Bottom - $rect.Top) * $escala)
+    $cliente = New-Object Ventana+RECT
+    [Ventana]::GetClientRect($handle, [ref]$cliente) | Out-Null
+    $esquina = New-Object Ventana+POINT
+    [Ventana]::ClientToScreen($handle, [ref]$esquina) | Out-Null
+    $origenX = $esquina.X
+    $origenY = $esquina.Y
+    $ancho = [int](($cliente.Right - $cliente.Left) * $escala)
+    $alto = [int](($cliente.Bottom - $cliente.Top) * $escala)
     if($ancho -le 0 -or $alto -le 0) {
         Write-Warning "la ventana $nombre no tiene tamano"
         return
     }
     $bitmap = New-Object System.Drawing.Bitmap $ancho, $alto
     $graficos = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graficos.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+    $graficos.CopyFromScreen($origenX, $origenY, 0, 0, $bitmap.Size)
     $ruta = Join-Path $destino $nombre
     $bitmap.Save($ruta, [System.Drawing.Imaging.ImageFormat]::Png)
     $graficos.Dispose()
@@ -71,9 +84,21 @@ function Capturar([IntPtr]$handle, [string]$nombre) {
     Write-Output ("  {0,-44} {1}x{2}" -f $nombre, $ancho, $alto)
 }
 
+function Origen([IntPtr]$handle) {
+    $cliente = New-Object Ventana+RECT
+    [Ventana]::GetClientRect($handle, [ref]$cliente) | Out-Null
+    $esquina = New-Object Ventana+POINT
+    [Ventana]::ClientToScreen($handle, [ref]$esquina) | Out-Null
+    $escala = [Ventana]::GetDpiForWindow($handle) / 96.0
+    return @($esquina.X, $esquina.Y, $escala)
+}
+
 function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
-    $rect = Rect $handle
-    [Ventana]::SetCursorPos($rect.Left + $dx, $rect.Top + $dy) | Out-Null
+    # sin esto el clic se lo queda la ventana que esta arriba
+    [Ventana]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 400
+    $origen = Origen $handle
+    [Ventana]::SetCursorPos($origen[0] + [int]($dx * $origen[2]), $origen[1] + [int]($dy * $origen[2])) | Out-Null
     Start-Sleep -Milliseconds 250
     [Ventana]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
     [Ventana]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
@@ -81,8 +106,8 @@ function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
 }
 
 function Rueda([IntPtr]$handle, [int]$dx, [int]$dy, [int]$pasos) {
-    $rect = Rect $handle
-    [Ventana]::SetCursorPos($rect.Left + $dx, $rect.Top + $dy) | Out-Null
+    $origen = Origen $handle
+    [Ventana]::SetCursorPos($origen[0] + [int]($dx * $origen[2]), $origen[1] + [int]($dy * $origen[2])) | Out-Null
     for($i = 0; $i -lt $pasos; $i++) {
         [Ventana]::mouse_event(0x0800, 0, 0, 120, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 120

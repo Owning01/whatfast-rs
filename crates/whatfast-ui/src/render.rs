@@ -1074,10 +1074,51 @@ impl Whatfast {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .bg(conversation_background)
                     .on_scroll_wheel(cx.listener(|this, event, window, cx| {
                         this.handle_smooth_scroll_input(ScrollSurface::Messages, event, window, cx);
                     }))
+                    // The buttons that jump through the history float over
+                    // the list of the messages, the same way the web client
+                    // draws them.
+                    .when(has_older, |list| {
+                        list.child(
+                            div()
+                                .absolute()
+                                .top_2()
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(Button::new("older").label("Load older messages").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.load_older_messages();
+                                        cx.notify();
+                                    }),
+                                )),
+                        )
+                    })
+                    .when(has_newer, |list| {
+                        list.child(
+                            div()
+                                .absolute()
+                                .bottom_2()
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    Button::new("jump-latest")
+                                        .primary()
+                                        .label("Jump to latest messages")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.refresh_latest();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
                     .child(
                         v_virtual_list(
                             cx.entity().clone(),
@@ -1140,45 +1181,6 @@ impl Whatfast {
                         .gap_2(),
                     ),
             )
-            .when(has_older, |column| {
-                // The button floats over the list, the same way the web client
-                // draws it: the composer always stays visible.
-                column.child(
-                    div()
-                        .absolute()
-                        .top_2()
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .child(Button::new("older").label("Load older messages").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.load_older_messages();
-                                cx.notify();
-                            }),
-                        )),
-                )
-            })
-            .when(has_newer, |column| {
-                column.child(
-                    div()
-                        .absolute()
-                        .bottom_2()
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .child(
-                            Button::new("jump-latest")
-                                .primary()
-                                .label("Jump to latest messages")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.refresh_latest();
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
             .when(!connected, |column| {
                 column.child(
                     div()
@@ -1200,7 +1202,7 @@ impl Whatfast {
                 column.child(
                     div()
                         .absolute()
-                        .bottom(px(52. * self.ui_scale))
+                        .bottom(px(56. * self.ui_scale))
                         .left_0()
                         .right_0()
                         .h(px(24. * self.ui_scale))
@@ -1219,7 +1221,7 @@ impl Whatfast {
                 column.child(
                     div()
                         .absolute()
-                        .bottom(px(52. * self.ui_scale))
+                        .bottom(px(56. * self.ui_scale))
                         .left_0()
                         .right_0()
                         .child(
@@ -1264,7 +1266,7 @@ impl Whatfast {
                     // The composer has a fixed height and never shrinks: the
                     // list of the messages is the one that gives room.
                     .flex_shrink_0()
-                    .h(px(52. * self.ui_scale))
+                    .h(px(56. * self.ui_scale))
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -2156,7 +2158,7 @@ impl Whatfast {
                     .overflow_hidden()
                     .child(
                         h_flex()
-                            .h(px(52. * self.ui_scale))
+                            .h(px(56. * self.ui_scale))
                             .px_4()
                             .items_center()
                             .justify_between()

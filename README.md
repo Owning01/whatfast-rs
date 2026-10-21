@@ -58,14 +58,16 @@ dentro del repositorio.
 
 ### Lista de chats
 
-Chats, grupos, no leídos, fijados y el contador de sincronización por chat.
+La columna de iconos de la izquierda, la tira de estados, el buscador y la
+lista de chats (10.000 simulados, virtualizada).
 
 ![Lista de chats](docs/screenshots/01-lista-de-chats.png)
 
 ### Conversación
 
-Burbujas con altura variable, respuestas, reacciones, acuses de lectura,
-preview de links y la marca de la salida.
+El strip de las conversaciones abiertas arriba, las burbujas con altura
+variable, respuestas, reacciones, acuses de lectura, preview de links y el
+menú de cada mensaje.
 
 ![Conversación](docs/screenshots/02-conversacion.png)
 
@@ -87,23 +89,25 @@ celdas quedan sin medir y se explican por estructura.
 | | **Whatfast (nativo)** | **Whatfast (webview)** | **WhatsApp Web** | **App de Windows** |
 |---|---|---|---|---|
 | Motor de render | **GPUI (Rust), ninguno** | WebView2 del sistema | el de tu navegador | Chromium propio (Electron) |
-| Descarga para instalar | **33,2 MB** (10,6 la app + 22,6 el sidecar) | 33,1 MB | 0 (es una página) | trae su propio Chromium |
+| Descarga para instalar | **36,1 MB** (12,4 la app + 23,7 el sidecar) | 33,1 MB | 0 (es una página) | trae su propio Chromium |
 | JS que baja el cliente | **0 KB** | 411 KB (127 KB con gzip) | **5.948 KB** solo la pantalla de login | — |
-| Ventana visible | 0,70 s | **0,25 s** | — | — |
-| UI lista (lista de chats) | ~1,1 s | 1,16 s | — | — |
-| RAM del código propio (interfaz + sidecar) | **60,5 MB + 31,4 MB = 91,9 MB** | 25,6 MB + 31,8 MB = 57,4 MB | 79 MB de heap JS en la sola pantalla de login | — |
+| Ventana visible | 0,84 s | **0,25 s** | — | — |
+| UI lista (lista de chats) | ~1,0 s | 1,16 s | — | — |
+| RAM del código propio (interfaz + sidecar) | **60,7 MB + 31,6 MB = 92,3 MB** | 25,6 MB + 31,8 MB = 57,4 MB | 79 MB de heap JS en la sola pantalla de login | — |
 | RAM del motor de render | **0** (no hay) | 366,8 MB (WebView2, **compartido con Windows**) | el navegador ya abierto: **612,7 MB** medidos con Brave y 6 pestañas | — |
-| RAM total en reposo | **91,9 MB** | **432 MB** | el del navegador + la pestaña | — |
+| RAM total en reposo | **92,3 MB** | **432 MB** | el del navegador + la pestaña | — |
 | Base de datos | SQLite local, en tu disco | SQLite local | en el navegador | local, pero no tuya |
 | Credenciales en el proceso del render | nunca | nunca | sí | sí |
 
 Cómo se midió, para que puedas repetirlo:
 
 - **Whatfast**: `dist\whatfast.exe` lanzado con el sidecar real
-  (`--stdio`), 20 s después se suma el working set del árbol de procesos
-  (interfaz + `whatfast-backend`). Mediana de 3 corridas. La ventana se cuenta
-  desde `Start-Process` hasta que aparece el handle. La captura del código
-  propio es el binario de release.
+  (`scripts\medir.ps1 -ConSidecar`), 20 s después se suma el working set del
+  árbol de procesos (interfaz + `whatfast-backend`), sin las consolas
+  heredadas. Mediana de 3 corridas. La ventana se cuenta desde `Start-Process`
+  hasta que aparece el handle; la lista de chats, con
+  `scripts\medir-lista.ps1`. La captura del código propio es el binario de
+  release.
 - **La lista de chats**: se capturan los píxeles de la ventana cada 80 ms
   desde el arranque y se toma el primer cambio grande de la imagen.
 - **El cliente anterior**: las cifras están en el README de
@@ -120,15 +124,15 @@ Explorador o desde un instalador no hay consola y no aparecen.
 1. **No te descarga un segundo navegador.** La app no usa WebView2 ni
    Chromium: dibuja con GPUI, que es el motor de Zed. La app oficial de
    Windows, en cambio, trae su propio Chromium en el instalador.
-2. **La RAM total bajó de 432 MB a 91,9 MB.** El 85 % de los 432 MB del
+2. **La RAM total bajó de 432 MB a 92,3 MB.** El 85 % de los 432 MB del
    cliente anterior era el WebView2: 366,8 MB. Sin webview, esa fila es
-   cero. Los 91,9 MB que quedan son la interfaz (60,5 MB) y el sidecar
-   (31,4 MB), que son los mismos que ya usaba el cliente anterior.
+   cero. Los 92,3 MB que quedan son la interfaz (60,7 MB) y el sidecar
+   (31,6 MB), que son los mismos que ya usaba el cliente anterior.
 3. **No necesita el navegador abierto.** WhatsApp Web es una pestaña más: si
    tenés 40 pestañas, la de WhatsApp se lleva su parte de RAM y de CPU.
 4. **Cero JavaScript.** La pantalla de login de WhatsApp Web ya baja 5,8 MB
    de JavaScript; la app oficial viene con un motor entero adentro. Acá no
-   baja nada: la UI son 10,6 MB de binario nativo.
+   baja nada: la UI son 12,4 MB de binario nativo.
 5. **El historial es tuyo y es local.** SQLite en tu disco, con control de
    acceso y borrado explícito al desloguear.
 6. **El render nunca ve tus credenciales.** El token del dispositivo y las
@@ -142,10 +146,11 @@ Explorador o desde un instalador no hay consola y no aparecen.
 
 ## Dónde todavía pierde
 
-- **La ventana aparece 0,20 s más tarde** que en el cliente con webview
-  (0,70 s contra 0,25 s). El costo es la inicialización de la plataforma de
+- **La ventana aparece 0,59 s más tarde** que en el cliente con webview
+  (0,84 s contra 0,25 s). El costo es la inicialización de la plataforma de
   GPUI, no el código: la plataforma tarda 244 ms y abrir la ventana 246 ms;
-  el tema y `gpui_component` tardan 8 ms juntos.
+  el tema y `gpui_component` tardan 8 ms juntos. Los 0,5 s de la meta están
+  por debajo del piso de la plataforma.
 - **Sin notificaciones del sistema.** El cliente web avisa con un toast del
   sistema operativo cuando llega un mensaje de un chat silenciado. La regla
   de cuándo avisar ya está portada y probada (`whatfast-core`), pero falta
@@ -222,8 +227,9 @@ compilación cada uno, y usan `sccache` cuando está disponible.
 | Los tests | `scripts\test.cmd` |
 | El lint | `scripts\lint.cmd` |
 | La paridad con el cliente anterior | `python scripts\parity.py` |
+| La paridad funcional con el cliente web | `python scripts\funcionalidad.py` |
 | El mapa de dependencias | `python scripts\dependency-map.py` |
-| Las medidas de arranque y RAM | `powershell -File scripts\medir.ps1` |
+| Las medidas de arranque y RAM | `powershell -File scripts\medir.ps1 -ConSidecar` |
 | Las capturas | `powershell -File scripts\capturas.ps1` |
 
 ---
