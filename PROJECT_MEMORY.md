@@ -693,3 +693,39 @@ agentes deja de costar 3 GB por worktree.
   De estos, la barra de titulo, las tabs, el sidebar, el avatar, el dialogo,
   el menu y los ajustes **ya existen en `gpui_component`**: la tanda 2 es
   mas cableado que dibujo.
+
+## 2026-10-20 ? Tanda 2 cerrada: los 50 RPC y los 21 componentes
+
+- **Los 28 RPC que faltaban**, de punta a punta (la peticion, el estado del
+  store y la accion que la dispara), en el lote `r1`: 25 tests nuevos, el
+  store con 11 campos y 30 metodos nuevos (`apply_sync_status`,
+  `set_history_coverage`, `set_pinned_messages`, `set_sticker_packs`,
+  `set_statuses`, `set_newsletters`, `apply_poll_vote`, `revoke_message`...).
+  La interfaz ahora pide **50 de 50** RPC (lo cuenta `scripts/funcionalidad.py`).
+- **Los componentes que faltaban**, en cuatro lotes: `r2` (los 34 iconos del
+  cliente web y el editor de imagen con recorte libre y rotacion),
+  `r3` (la columna de iconos de 56 px y el strip de pesta?as con arrastre y
+  teclado), `r4` (los cuatro paneles: newsletters, estados, miembros y
+  bandeja de stickers) y `r5` (el menu del mensaje, el reenvio, el
+  formulario de encuesta y el clip de adjuntos). La app cubre **21 de 21**
+  componentes del cliente web.
+- **El editor de imagen esta completo**: el agente entrego el recorte y la
+  rotacion, pero el plan no se aplicaba a ningun archivo. Se escribio
+  `apply_edit` (el crate `image` rota, recorta y guarda) y el app manda el
+  archivo editado.
+- **El cerrojo de instancia unica** (`instance.rs`): dos instancias serian
+  dos sidecars con la misma sesion del dispositivo, y el servidor podria
+  invalidarla. Un archivo de bloqueo con el PID, liberado al salir, con la
+  comprobacion de que el proceso sigue vivo.
+- **Defecto encontrado y corregido del script de capturas**: las capturas
+  salian recortadas porque el rectangulo de la ventana esta en pixeles
+  logicos y la pantalla del 125 % pide los fisicos. Con `GetDpiForWindow` la
+  captura sale entera: se veia que el compositor de la conversccion nunca
+  habia estado en la foto (no era un defecto del layout).
+- **El backend de demostracion** devolvia un chat vacio al fijar, archivar,
+  silenciar o bloquear: el titulo y el avatar se perdian. Ahora devuelve el
+  chat entero del fixture con la bandera cambiada.
+- **El workflow de release** de Linux no tenia las dependencias del sistema
+  que pide el stack de GPUI, y el instalador de Windows (NSIS) no existia.
+- **Estado**: 438 tests en verde, clippy limpio, paridad 153/153,
+  50/50 RPC y 21/21 componentes.

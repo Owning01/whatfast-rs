@@ -35,6 +35,12 @@ el protocolo de dispositivos vinculados.
   anterior portados uno por uno.
 - **Sidecar en Go** (`whatsmeow`) como único dueño de la conexión, el
   historial, los medios y las bases de datos.
+- **Paridad con el cliente web**: pide los **50 RPC** del sidecar y tiene los
+  **21 componentes** de la app web (la columna de iconos, el strip de pestañas,
+  el panel de newsletters, la tira de estados, el panel de miembros, la
+  bandeja de stickers, el editor de imagen, el menú del mensaje, el reenvío,
+  las encuestas y el clip de adjuntos). Lo comprueba
+  `python scripts\funcionalidad.py`.
 
 La interfaz nunca ve tus credenciales: el QR, el token del dispositivo y las
 bases de datos viven en el sidecar, y la interfaz habla con él por RPC
@@ -138,22 +144,27 @@ Explorador o desde un instalador no hay consola y no aparecen.
 
 - **La ventana aparece 0,20 s más tarde** que en el cliente con webview
   (0,70 s contra 0,25 s). El costo es la inicialización de la plataforma de
-  GPUI (la base de datos de fuentes del sistema), no el código: con y sin
-  sidecar, y con y sin aplicar el tema, la diferencia es de 0,1 s.
-- **Faltan 28 de los 50 RPC del sidecar** en la interfaz: los de
-  sincronización e historia, los de medios que no son imagen, el reenvío, la
-  edición y el borrado de mensajes, las encuestas, los newsletters, los
-  estados y las acciones del chat (fijar, archivar, silenciar, bloquear).
-  El sidecar los implementa: lo que falta es la parte de la interfaz.
-- **Faltan 11 componentes** que tiene el cliente web: la barra de título
-  con sus controles, el strip de tabs, el panel de miembros, la lista de
-  participantes, el panel de newsletters, la tira de estados, la bandeja de
-  stickers y el editor de imagen (recorte libre y rotación).
+  GPUI, no el código: la plataforma tarda 244 ms y abrir la ventana 246 ms;
+  el tema y `gpui_component` tardan 8 ms juntos.
+- **Sin notificaciones del sistema.** El cliente web avisa con un toast del
+  sistema operativo cuando llega un mensaje de un chat silenciado. La regla
+  de cuándo avisar ya está portada y probada (`whatfast-core`), pero falta
+  la llamada al sistema: hoy la app no avisa nada con la ventana detrás.
+- **Los ajustes son mínimos.** La app tiene la escala de la interfaz y el
+  tema; el cliente web tiene además la densidad, el Enter que envía, las
+  notificaciones, el idioma, la carpeta de las descargas, la vista partida,
+  el ahorro de batería y los temas propios.
+- **La interfaz está en inglés.** El cliente web trae el diccionario en
+  inglés y en español; la app nativa solo tiene inglés (que es el idioma
+  por defecto del cliente web también).
 - **Sin llamadas.** El protocolo de dispositivos vinculados no expone
   señalización de VoIP: la app te avisa en vez de fingir una llamada.
 - **El historial viejo hay que pedirlo.** WhatsApp no da un total de por
   vida, así que la app no puede prometer un porcentaje: te dice cuántos
   mensajes tiene guardados y te da el botón para pedir más.
+- **Los estados se quedan en memoria.** El protocolo de un dispositivo
+  vinculado no tiene RPC de estado propio: el cliente web también los
+  guarda en memoria.
 - **No es un reemplazo de la app oficial.** Es un cliente de escritorio más
   chico, más rápido y con los datos en tu disco.
 

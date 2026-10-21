@@ -39,7 +39,8 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts/test.cmd`, `scripts/lint.cmd` | Wrappers de cargo: target compartido, `sccache` y el override de `rustc-wrapper`. |
 | `scripts/build.cmd` | El build de distribución: el binario de Rust y el sidecar en `dist\`. |
 | `scripts/medir.ps1` | Mide el arranque y la RAM del árbol de procesos. |
-| `scripts/capturas.ps1` | Captura la ventana para el README. |
+| `scripts/capturas.ps1` | Captura la ventana para el README. Mide la escala de la pantalla: sin eso la captura sale recortada. |
+| `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
 | `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. |
 | `.github/workflows/release.yml` | El paquete de Windows y de Linux. |
 
@@ -62,6 +63,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts\lint.cmd` | `cargo clippy --all-targets --locked -- -D warnings` |
 | `python scripts\dependency-map.py` | Regenera el inventario F1. |
 | `python scripts\parity.py` | Corre el juez de paridad F2 (sale con 1 si algo falta). |
+| `python scripts\funcionalidad.py` | La puerta de "igual que el cliente web": 50/50 RPC y 21/21 componentes. |
 
 ## Baseline y meta
 
