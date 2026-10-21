@@ -34,6 +34,7 @@ use gpui_component::Root;
 mod app;
 mod helpers;
 mod icons;
+mod instance;
 mod media_editor;
 mod members;
 mod message_actions;
@@ -50,6 +51,12 @@ mod tokens;
 use app::Whatfast;
 
 fn main() {
+    // One instance only: two sidecars with the same device session would
+    // confuse the server and could invalidate the session of the phone.
+    let Some(_lock) = instance::InstanceLock::acquire(&whatfast_model::paths::data_dir()) else {
+        eprintln!("Whatfast is already running");
+        std::process::exit(1);
+    };
     // The source of the assets is the one of `gpui_component` plus the icons
     // of Whatfast: without it the icons of the app are not painted.
     gpui_platform::application()
