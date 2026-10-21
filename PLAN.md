@@ -171,10 +171,11 @@ dueno) y el estado es este:
 
 | Lote | Worktree | Rama | Archivos que posee | Que hace |
 |---|---|---|---|---|
-| **r1** | `wf/r1` | `mig/r1` | `crates/whatfast-model/src/model.rs`, `crates/whatfast-ui/src/{rpc.rs,app.rs}` | Los **28 RPC** que faltaban: la peticion, el estado del store y la accion que la dispara |
-| **r2** | `wf/r2` | `mig/r2` | `crates/whatfast-ui/src/{icons.rs,media_editor.rs}` | El juego de iconos del cliente web y el editor de imagen (recorte + rotacion) |
-| **r3** | `wf/r3` | `mig/r3` | `crates/whatfast-ui/src/{navrail.rs,tabs.rs}` | La columna de iconos y el strip de pestañas |
-| **r4** | `wf/r4` | `mig/r4` | `crates/whatfast-ui/src/{newsletters.rs,statuses.rs,members.rs,stickers.rs}` | Los cuatro paneles que dependen del estado nuevo del store (arranca cuando r1 aterrice) |
+| **r1** | `wf/r1` | `mig/r1` | `crates/whatfast-model/src/model.rs`, `crates/whatfast-ui/src/{rpc.rs,app.rs}` | Los **28 RPC** que faltaban: la peticion, el estado del store y la accion que la dispara. **Cerrado**: 50/50 RPC |
+| **r2** | `wf/r2` | `mig/r2` | `crates/whatfast-ui/src/{icons.rs,media_editor.rs}` | El juego de iconos del cliente web y el editor de imagen (recorte + rotacion). **Cerrado** |
+| **r3** | `wf/r3` | `mig/r3` | `crates/whatfast-ui/src/{navrail.rs,tabs.rs}` | La columna de iconos y el strip de pestañas. **Cerrado** |
+| **r4** | `wf/r4` | `mig/r4` | `crates/whatfast-ui/src/{newsletters.rs,statuses.rs,members.rs,stickers.rs}` | Los cuatro paneles que dependen del estado nuevo del store. **Cerrado** |
+| **r5** | `wf/r5` | `mig/r5` | `crates/whatfast-ui/src/message_actions.rs` | El menu del mensaje, el reenvio, la encuesta y el clip de adjuntos. **Cerrado** |
 
 **El orquestador** integra: `crates/whatfast-ui/src/main.rs` (los `mod` y la
 entrada), los campos nuevos del `struct Whatfast`, el layout de `render.rs`
