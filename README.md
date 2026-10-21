@@ -37,7 +37,7 @@ el protocolo de dispositivos vinculados.
   historial, los medios y las bases de datos.
 - **Paridad con el cliente web**: pide los **50 RPC** del sidecar y tiene los
   **21 componentes** de la app web (la columna de iconos, el strip de pestañas,
-  el panel de newsletters, la tira de estados, el panel de miembros, la
+  el panel de newsletters, la vista de los estados, el panel de miembros, la
   bandeja de stickers, el editor de imagen, el menú del mensaje, el reenvío,
   las encuestas y el clip de adjuntos). Lo comprueba
   `python scripts\funcionalidad.py`.
@@ -78,6 +78,13 @@ La imagen la genera el backend de demostración y la dibuja la interfaz
 nativa, sin pasar por un webview.
 
 ![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png)
+
+### Referencias visuales
+
+En [`docs/referencia/`](docs/referencia/README.md) están las capturas de
+**WhatsApp Desktop** que mandaste, con el índice de lo que muestra cada una
+y el estado de cada vista. Son la referencia de cómo tiene que verse la app:
+cada cambio de la interfaz se compara contra ellas.
 
 ---
 
