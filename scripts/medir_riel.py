@@ -59,21 +59,29 @@ def main() -> None:
             f"x {columnas.min() + X_INICIO:3d}-{columnas.max() + X_INICIO:3d}"
         )
 
-    # El boton de los estados es el tercero del grupo de arriba. El borde de
-    # la ventana y los botones de abajo (la privacidad y los ajustes) se
-    # descartan.
+    # Los botones de la columna, en el orden en que se dibujan. El borde de
+    # la ventana y el separador se descartan: no son iconos.
     iconos = [
         franja
         for franja in franjas
-        if len(franja) >= 12 and franja[0] > 8 and franja[-1] < alto // 2
+        if len(franja) >= 12 and franja[0] > 8 and franja[-1] < alto - 8
     ]
-    if len(iconos) >= 3:
-        franja = iconos[2]
+    posiciones = []
+    for franja in iconos:
         columnas = np.flatnonzero(
             (diferencia[franja[0] : franja[-1] + 1] > 40).any(axis=0) & columnas_vivas
         )
+        if columnas.size == 0:
+            continue
+        # El clic va al centro del glifo: el boton es mas ancho que el icono
+        # y el punto de la foto es el del icono.
         x = int((columnas.min() + columnas.max()) // 2) + X_INICIO
-        print(f"posicion {x} {(franja[0] + franja[-1]) // 2}")
+        y = (franja[0] + franja[-1]) // 2
+        posiciones.append(f"{x},{y}")
+    print("posiciones " + " ".join(posiciones))
+    if len(posiciones) > 2:
+        partes = posiciones[2].split(",")
+        print(f"posicion {partes[0]} {partes[1]}")
     else:
         print("posicion 0 0")
 

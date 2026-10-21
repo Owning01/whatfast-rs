@@ -495,7 +495,7 @@ impl Whatfast {
                                                     gpui::Hsla::from(rgb(DARK_GREEN))
                                                 }
                                             } else {
-                                                gpui::Hsla::from(cx.theme().muted_foreground)
+                                                cx.theme().muted_foreground
                                             })
                                             .child(one_line(&preview)),
                                     )

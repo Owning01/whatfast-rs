@@ -759,3 +759,30 @@ agentes deja de costar 3 GB por worktree.
   administrador) y crea los dos accesos directos con el logo. Es la forma
   de probar la app en esta maquina sin depender del instalador de NSIS,
   que solo se compila en el runner de GitHub.
+
+### Lo que se agrego despues de esa entrada
+
+- **Los estados, los canales y los archivados son destinos del riel**: cada
+  uno con su columna y su panel a la derecha, como en la referencia. El boton
+  de los estados abre la vista con "My status" y la seccion "RECENT"; el de
+  los canales, la lista con buscador, la hora a la derecha y los botones
+  "Follow" y "New local channel"; el de los archivados, la explicacion de
+  arriba y la lista.
+- **El compositor de estado de texto** quedo en el panel de la vista de los
+  estados, con los botones "Text status" y "Photo and video" de la
+  referencia: el primero abre el compositor y el segundo elige la foto.
+- **La fila de chat** quedo con la hora a la derecha del titulo, el
+  prefijo "You:" y los indicadores de silencio, favorito y pin.
+- **La captura de las pantallas** la hace `scripts/captura-frontal.ps1`:
+  trae la ventana al frente (con el truco de ALT, la unica forma de que
+  Windows deje robar el foco), la deja en la esquina y mide el boton del
+  riel sobre una foto de prueba (`scripts/medir_riel.py`).
+
+**Evidencia**: `cargo test --workspace` en verde, `cargo clippy
+--all-targets --locked -- -D warnings` limpio, `python
+scripts/funcionalidad.py` con 50/50 RPC y 21/21 componentes, `python
+scripts/parity.py` con 153/153 casos del oraculo.
+
+**Pendiente**: la foto de la vista de estados y la de la de canales: el clic
+del guion no llega a los botones del riel (el de las filas de chat si), asi
+que hay que hacerlas a mano.

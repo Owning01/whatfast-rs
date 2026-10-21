@@ -45,9 +45,10 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts/instalar.ps1` | Instala la app en `%LOCALAPPDATA%\Programs\Whatfast` y deja los accesos directos con el logo. |
 | `installer.nsi` | El instalador de Windows: deja el logo en los accesos directos y en el archivo de instalación. |
 | `scripts/capturas.ps1` | Captura la ventana para el README. Mide la escala de la pantalla: sin eso la captura sale recortada. |
-| `scripts/captura-estados.ps1` | Captura la vista de los estados: mide el botón del riel sobre una foto de prueba y comprueba con un detector de píxeles que la vista se abrió. |
-| `scripts/medir_riel.py` | Mide en una captura dónde está el botón del riel (los tres de arriba). Los píxeles que difieren del fondo en todas las filas son el separador: no cuentan. |
+| `scripts/captura-frontal.ps1` | Captura la ventana con la app en primer plano: la trae al frente con el truco de ALT, la deja en la esquina y puede pulsar los destinos del riel y las filas de chat. |
+| `scripts/medir_riel.py` | Mide en una captura dónde está cada botón del riel (los que se apartan del fondo). Devuelve la línea `posiciones` con el centro de cada uno. |
 | `scripts/detectar-estados.py` | Dice si la vista de los estados está abierta en una captura (la cabecera "Chats" no está). |
+| `scripts/ventana-abierta.ps1` | Trae la ventana de la app al frente y dice dónde está, en píxeles de la pantalla. |
 | `docs/referencia/` | Las capturas de WhatsApp Desktop que mandaste, con el índice de lo que muestra cada una y el estado de cada vista. |
 | `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
 | `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. |
