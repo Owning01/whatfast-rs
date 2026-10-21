@@ -64,6 +64,7 @@ use crate::text::{
     encode_mentions, format_typing_label, mention_display_name, mention_token_start,
     normalized_ui_scale, validate_image_message, validate_text_message,
 };
+use crate::tokens;
 
 // The actions the application answers to.
 //
@@ -1843,6 +1844,10 @@ impl Whatfast {
             {
                 self.store.set_chat_avatar(&chat_id, avatar.avatar_path);
                 self.avatar_retries.remove(&chat_id);
+                // El avatar es una foto local: si el backend vuelve a mandar
+                // el chat sin ella, la app la pide de nuevo (el origen hace
+                // lo mismo cuando el camino del avatar viene vacio).
+                self.avatar_attempted.remove(&chat_id);
             }
             (
                 PendingRequest::ParticipantAvatar { participant_id },
@@ -3006,12 +3011,21 @@ impl Whatfast {
     }
 
     pub(crate) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mode = if cx.theme().is_dark() {
+        let dark = cx.theme().is_dark();
+        let mode = if dark {
             ThemeMode::Light
         } else {
             ThemeMode::Dark
         };
         Theme::change(mode, Some(window), cx);
+        // La paleta de WhatsApp va despues del modo: el boton del tema
+        // cambia entre el oscuro y el claro de la misma paleta.
+        let appearance = if dark {
+            whatfast_core::theme::ThemeAppearance::Light
+        } else {
+            whatfast_core::theme::ThemeAppearance::Dark
+        };
+        tokens::apply_theme(&tokens::app_theme(appearance), self.ui_scale, cx);
         apply_theme_scale(self.ui_scale, window, cx);
         cx.notify();
     }

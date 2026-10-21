@@ -407,6 +407,24 @@ static BUILTIN_THEMES: LazyLock<Vec<Theme>> = LazyLock::new(|| {
                 ],
             ),
         },
+        // Los dos temas de WhatsApp: la paleta se midio sobre las capturas
+        // de la referencia (`docs/referencia/01-whatsapp-chats.png`).
+        Theme {
+            id: "whatsapp-dark".to_string(),
+            name: "WhatsApp Dark".to_string(),
+            appearance: ThemeAppearance::Dark,
+            visual_style: ThemeVisualStyle::Modern,
+            builtin: Some(true),
+            tokens: whatsapp_dark(),
+        },
+        Theme {
+            id: "whatsapp-light".to_string(),
+            name: "WhatsApp Light".to_string(),
+            appearance: ThemeAppearance::Light,
+            visual_style: ThemeVisualStyle::Modern,
+            builtin: Some(true),
+            tokens: whatsapp_light(),
+        },
     ]
 });
 
@@ -869,6 +887,83 @@ fn classic_messages() -> ThemeTokens {
         shadow_sm: "0 1px 2px rgba(35, 48, 65, 0.28)".to_string(),
         shadow_md: "0 5px 16px rgba(35, 48, 65, 0.30)".to_string(),
         shadow_lg: "0 18px 48px rgba(35, 48, 65, 0.38)".to_string(),
+    }
+}
+
+/// The dark palette of WhatsApp.
+///
+/// The values come from the reference screenshots of WhatsApp Desktop
+/// (`docs/referencia/01-whatsapp-chats.png`): the column of chats is
+/// `#161717`, the column of icons is `#161717` a shade lighter, the search
+/// field is `#2e2f2f` and the green of the new chat button is `#21c063`.
+fn whatsapp_dark() -> ThemeTokens {
+    ThemeTokens {
+        bg_app: "#161717".to_string(),
+        bg_panel: "#1d1f1f".to_string(),
+        bg_elevated: "#2e2f2f".to_string(),
+        bg_hover: "#232425".to_string(),
+        bg_active: "#2a2b2c".to_string(),
+        bg_input: "#2e2f2f".to_string(),
+        bg_overlay: "rgba(0, 0, 0, 0.72)".to_string(),
+        border: "#2e2f2f".to_string(),
+        border_strong: "#3d3e3f".to_string(),
+        border_focus: "#21c063".to_string(),
+        fg: "#fafafa".to_string(),
+        fg_muted: "#a2a2a2".to_string(),
+        fg_subtle: "#7a7a7a".to_string(),
+        fg_inverted: "#0b141a".to_string(),
+        accent: "#21c063".to_string(),
+        accent_hover: "#2ed072".to_string(),
+        accent_fg: "#0b141a".to_string(),
+        accent_soft: "rgba(33, 192, 99, 0.22)".to_string(),
+        bubble_in_bg: "#242626".to_string(),
+        bubble_in_fg: "#fafafa".to_string(),
+        bubble_out_bg: "#144d37".to_string(),
+        bubble_out_fg: "#e9edef".to_string(),
+        quote_bar: "#21c063".to_string(),
+        success: "#21c063".to_string(),
+        warning: "#f7b955".to_string(),
+        danger: "#ff6166".to_string(),
+        info: "#53bdeb".to_string(),
+        shadow_sm: "0 1px 2px rgba(0, 0, 0, 0.5)".to_string(),
+        shadow_md: "0 4px 16px rgba(0, 0, 0, 0.55)".to_string(),
+        shadow_lg: "0 16px 48px rgba(0, 0, 0, 0.65)".to_string(),
+    }
+}
+
+/// The light palette of WhatsApp.
+fn whatsapp_light() -> ThemeTokens {
+    ThemeTokens {
+        bg_app: "#ffffff".to_string(),
+        bg_panel: "#f0f2f5".to_string(),
+        bg_elevated: "#ffffff".to_string(),
+        bg_hover: "#f0f2f5".to_string(),
+        bg_active: "#e9edef".to_string(),
+        bg_input: "#f0f2f5".to_string(),
+        bg_overlay: "rgba(11, 20, 26, 0.4)".to_string(),
+        border: "#e9edef".to_string(),
+        border_strong: "#d1d7db".to_string(),
+        border_focus: "#00a884".to_string(),
+        fg: "#111b21".to_string(),
+        fg_muted: "#667781".to_string(),
+        fg_subtle: "#8696a0".to_string(),
+        fg_inverted: "#ffffff".to_string(),
+        accent: "#00a884".to_string(),
+        accent_hover: "#06cf9c".to_string(),
+        accent_fg: "#ffffff".to_string(),
+        accent_soft: "rgba(0, 168, 132, 0.16)".to_string(),
+        bubble_in_bg: "#ffffff".to_string(),
+        bubble_in_fg: "#111b21".to_string(),
+        bubble_out_bg: "#d9fdd3".to_string(),
+        bubble_out_fg: "#111b21".to_string(),
+        quote_bar: "#00a884".to_string(),
+        success: "#00a884".to_string(),
+        warning: "#b8860b".to_string(),
+        danger: "#d32f2f".to_string(),
+        info: "#027eb5".to_string(),
+        shadow_sm: "0 1px 2px rgba(11, 20, 26, 0.13)".to_string(),
+        shadow_md: "0 2px 10px rgba(11, 20, 26, 0.13)".to_string(),
+        shadow_lg: "0 12px 40px rgba(11, 20, 26, 0.16)".to_string(),
     }
 }
 

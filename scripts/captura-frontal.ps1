@@ -13,6 +13,9 @@
 param(
     [string]$Salida = "docs\screenshots\actual",
     [string]$Binario = "dist\whatfast.exe",
+    # Los avatares se piden de a cuatro: hacen falta unos segundos para que
+    # las filas visibles tengan su foto.
+    [int]$EsperaSegundos = 14,
     # Los destinos del riel a pulsar, en el orden en que se pulsan. Cada uno
     # es el numero de icono: 1 chats, 2 busqueda, 3 estados, 4 canales.
     [string]$Destinos = "",

@@ -81,7 +81,11 @@ fn main() {
             let scale = whatfast_model::settings::load_ui_scale()
                 .map(tokens::normalized_ui_scale)
                 .unwrap_or(tokens::DEFAULT_UI_SCALE);
-            tokens::apply_theme(&whatfast_core::theme::default_theme(), scale, cx);
+            tokens::apply_theme(
+                &tokens::app_theme(whatfast_core::theme::ThemeAppearance::Dark),
+                scale,
+                cx,
+            );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
                 window_min_size: Some(size(px(480.), px(560.))),

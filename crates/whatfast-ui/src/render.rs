@@ -48,8 +48,9 @@ use crate::app::{
     MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, UI_SCALE_STEP, Whatfast,
 };
 use crate::helpers::{
-    avatar_element, connection_label, format_disappearing_timer, format_epoch_date, identity_hue,
-    image_render_size, message_preview, message_status, one_line, qr_canvas,
+    avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
+    format_epoch_date, identity_hue, image_render_size, message_preview, message_status, one_line,
+    qr_canvas,
 };
 use crate::rpc::PendingRequest;
 use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, split_url_token};
@@ -204,9 +205,12 @@ impl Whatfast {
                     .border_color(if selected { accent } else { border })
                     .text_xs()
                     .cursor_pointer()
+                    // El chip activo de la referencia lleva el verde del
+                    // tema de fondo y el texto del mismo verde.
                     .when(selected, |chip| {
-                        chip.bg(accent.opacity(0.16)).text_color(accent)
+                        chip.bg(cx.theme().selection).text_color(accent)
                     })
+                    .when(!selected, |chip| chip.text_color(cx.theme().foreground))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_chat_filter(filter, window, cx);
                         cx.notify();
@@ -220,8 +224,8 @@ impl Whatfast {
         let scale = self.ui_scale;
         v_flex()
             .h_full()
-            .w(px(340. * scale))
-            .min_w(px(280. * scale))
+            .w(px(384. * scale))
+            .min_w(px(300. * scale))
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -257,8 +261,8 @@ impl Whatfast {
         let scale = self.ui_scale;
         v_flex()
             .h_full()
-            .w(px(340. * scale))
-            .min_w(px(280. * scale))
+            .w(px(384. * scale))
+            .min_w(px(300. * scale))
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -342,8 +346,8 @@ impl Whatfast {
         let list_id = "archived-chat-list";
         v_flex()
             .h_full()
-            .w(px(340. * scale))
-            .min_w(px(280. * scale))
+            .w(px(384. * scale))
+            .min_w(px(300. * scale))
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -392,16 +396,10 @@ impl Whatfast {
     ) -> Vec<gpui::Stateful<gpui::Div>> {
         let ui_scale = self.ui_scale;
         let dark = cx.theme().is_dark();
-        let selected_background = if dark {
-            gpui::Hsla::from(rgb(0x173a35))
-        } else {
-            gpui::Hsla::from(rgb(0xe7f5ef))
-        };
-        let hover_background = if dark {
-            gpui::Hsla::from(rgb(0x152f2c))
-        } else {
-            gpui::Hsla::from(rgb(0xeff5f2))
-        };
+        // La fila elegida y la que tiene el cursor por encima usan los
+        // colores del tema: asi respetan la paleta de la referencia.
+        let selected_background = cx.theme().secondary;
+        let hover_background = cx.theme().muted;
         range
             .map(|index| {
                 let Some(chat) = visible
@@ -420,7 +418,13 @@ impl Whatfast {
                         .child("Loading more chats…");
                 };
                 let selected = self.store.selected_chat_id.as_deref() == Some(chat.id.as_str());
-                let avatar = avatar_element(&chat.title, &chat.avatar_path, px(42. * ui_scale), cx);
+                let avatar = avatar_element_of(
+                    &chat.title,
+                    &chat.avatar_path,
+                    px(49. * ui_scale),
+                    chat.kind() == proto::ChatKind::Group,
+                    cx,
+                );
                 let typing_preview =
                     self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
                 let row_typing = typing_preview.is_some();
@@ -551,8 +555,6 @@ impl Whatfast {
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let ui_scale = self.ui_scale;
         let total = self.store.total_chats;
-        let logout_pending = self.rpc.logout_pending();
-        let dark = cx.theme().is_dark();
         let chat_filter = self.store.chat_filter();
         let visible_chat_ids = self.store.chat_ids(chat_filter);
         let search_active = self.search_query.trim().chars().count() >= 2;
@@ -571,8 +573,8 @@ impl Whatfast {
         let visible_for_list = visible_chat_ids.clone();
         v_flex()
             .h_full()
-            .w(px(340. * ui_scale))
-            .min_w(px(280. * ui_scale))
+            .w(px(384. * ui_scale))
+            .min_w(px(300. * ui_scale))
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -591,21 +593,13 @@ impl Whatfast {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_lg()
+                                    .text_size(px(24. * ui_scale))
                                     .font_weight(FontWeight::BOLD)
                                     .child("Chats"),
                             )
                             .child(
                                 h_flex()
                                     .gap_1()
-                                    .child(
-                                        Button::new("theme")
-                                            .small()
-                                            .icon(if dark { IconName::Sun } else { IconName::Moon })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.toggle_theme(window, cx);
-                                            })),
-                                    )
                                     .child(
                                         Button::new("settings")
                                             .small()
@@ -617,65 +611,52 @@ impl Whatfast {
                                                 cx.notify();
                                             })),
                                     )
-                                    .child(
-                                        Button::new("logout")
-                                            .small()
-                                            .label(if logout_pending {
-                                                "Clearing…"
-                                            } else if self.confirming_logout {
-                                                "Confirm"
-                                            } else {
-                                                "Log out"
-                                            })
-                                            .disabled(logout_pending)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                if this.confirming_logout {
-                                                    this.request_logout();
-                                                } else {
-                                                    this.confirming_logout = true;
-                                                }
-                                                cx.notify();
-                                            })),
-                                    )
-                                    // The green button starts a new chat: it
-                                    // focuses the search of the column, the
-                                    // same way the reference does.
-                                    .child(
-                                        Button::new("new-chat")
-                                            .small()
-                                            .icon(IconName::Plus)
-                                            .tooltip("New chat")
+                                    // El boton verde abre un chat nuevo: le
+                                    // da el foco al buscador, como en la
+                                    // referencia.
+                                    .child({
+                                        let accent_hover = cx.theme().primary_hover;
+                                        div()
+                                            .id("new-chat")
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .size(px(36. * ui_scale))
+                                            .rounded_full()
+                                            .bg(cx.theme().accent)
+                                            .text_color(cx.theme().accent_foreground)
+                                            .cursor_pointer()
+                                            .hover(move |style| style.bg(accent_hover))
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.focus_search(window, cx);
-                                            })),
-                                    ),
+                                            }))
+                                            .child(
+                                                Icon::new(IconName::Plus)
+                                                    .with_size(px(20. * ui_scale)),
+                                            )
+                                    }),
                             ),
                     )
                     .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(local_status),
+                        // El buscador de la referencia lleva la lupa dentro y
+                        // es una pastilla con el fondo un poco mas claro que
+                        // el de la columna.
+                        div().pt_1().child(
+                            Input::new(&self.search_input)
+                                .w_full()
+                                .h(px(38. * ui_scale))
+                                .rounded_full()
+                                .bg(cx.theme().input)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .prefix(
+                                    Icon::new(IconName::Search)
+                                        .with_size(px(17. * ui_scale))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        ),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(3.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .bg(cx.theme().secondary)
-                            .when(self.store.sync_active, |track| {
-                                track.flex().justify_center().child(
-                                    div().h_full().w(px(72.)).rounded_full().bg(rgb(0x25d366)),
-                                )
-                            })
-                            .when(self.store.sync_complete, |track| {
-                                track
-                                    .child(div().h_full().w_full().rounded_full().bg(rgb(0x25d366)))
-                            }),
-                    )
-                    .child(div().pt_1().child(Input::new(&self.search_input).w_full()))
                     // The row of filters sits under the search, the same way
                     // the web client draws it.
                     .child(self.render_chat_filters(cx)),
@@ -702,8 +683,11 @@ impl Whatfast {
                                         && let Some(chat_id) = range.clone().find_map(|index| {
                                             visible_for_list.get(index).and_then(|chat_id| {
                                                 this.store.chat(chat_id).and_then(|chat| {
+                                                    // port: the origin asks for the
+                                                    // avatar of every chat it
+                                                    // draws (`tauri/src/components/
+                                                    // Sidebar.tsx`).
                                                     (chat.avatar_path.is_empty()
-                                                        && chat.kind() != proto::ChatKind::Other
                                                         && !this
                                                             .avatar_attempted
                                                             .contains(&chat.id))
@@ -748,6 +732,46 @@ impl Whatfast {
                     .when(search_active, |list| {
                         list.child(self.render_search_results(cx))
                     }),
+            )
+            // El pie de la columna lleva el estado de la sincronizacion, como
+            // la franja del cliente web y como la referencia (que no la
+            // muestra arriba del todo).
+            .child(
+                v_flex()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .px_3()
+                            .pt_2()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(local_status),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(3.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(cx.theme().secondary)
+                            .when(self.store.sync_active, |track| {
+                                track.flex().justify_center().child(
+                                    div()
+                                        .h_full()
+                                        .w(px(72.))
+                                        .rounded_full()
+                                        .bg(cx.theme().accent),
+                                )
+                            })
+                            .when(self.store.sync_complete, |track| {
+                                track.child(
+                                    div().h_full().w_full().rounded_full().bg(cx.theme().accent),
+                                )
+                            }),
+                    ),
             )
     }
 
@@ -901,16 +925,8 @@ impl Whatfast {
         row: SearchResultRow,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let selected_background = if cx.theme().is_dark() {
-            rgb(0x173f35)
-        } else {
-            rgb(0xd9fdd3)
-        };
-        let hover_background = if cx.theme().is_dark() {
-            rgb(0x202c33)
-        } else {
-            rgb(0xf0f2f5)
-        };
+        let selected_background = cx.theme().secondary;
+        let hover_background = cx.theme().muted;
         match row {
             SearchResultRow::Header { title, count } => Some(
                 h_flex()
@@ -1203,7 +1219,9 @@ impl Whatfast {
         let has_older = self.store.has_older_messages;
         let has_newer = self.store.has_newer_messages || self.store.newer_activity;
         let dark = cx.theme().is_dark();
-        let conversation_background = if dark { rgb(0x0d1715) } else { rgb(0xf4f0e8) };
+        // El fondo de la conversacion es el del tema: en la referencia es el
+        // mismo gris de la columna de chats.
+        let conversation_background = cx.theme().background;
         let connection_detail = if self.store.connection_detail.is_empty() {
             connection_label(self.store.connection).to_string()
         } else {
@@ -1322,6 +1340,17 @@ impl Whatfast {
                                             .child(identity_line),
                                     ),
                             ),
+                    )
+                    // El buscador de la conversacion, a la derecha de la
+                    // cabecera, como en la referencia.
+                    .child(
+                        Button::new("search-in-chat")
+                            .small()
+                            .icon(IconName::Search)
+                            .tooltip("Search in chat")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.focus_search(window, cx);
+                            })),
                     ),
             )
             .child(
@@ -1909,6 +1938,8 @@ impl Whatfast {
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let scale_percent = (self.ui_scale * 100.0).round() as u32;
+        let logout_pending = self.rpc.logout_pending();
+        let dark = cx.theme().is_dark();
         div()
             .absolute()
             .inset_0()
@@ -2004,6 +2035,67 @@ impl Whatfast {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Saved automatically for future launches."),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .mt_2()
+                                    .child(
+                                        div().font_weight(FontWeight::SEMIBOLD).child("Appearance"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("The dark and the light palette of WhatsApp."),
+                                    )
+                                    .child(
+                                        Button::new("theme")
+                                            .small()
+                                            .icon(if dark { IconName::Sun } else { IconName::Moon })
+                                            .label(if dark {
+                                                "Use the light theme"
+                                            } else {
+                                                "Use the dark theme"
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_theme(window, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .mt_2()
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Account"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                "Sign out of this device and clear the local data.",
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("logout")
+                                            .small()
+                                            .label(if logout_pending {
+                                                "Clearing…"
+                                            } else if self.confirming_logout {
+                                                "Confirm"
+                                            } else {
+                                                "Log out"
+                                            })
+                                            .disabled(logout_pending)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if this.confirming_logout {
+                                                    this.request_logout();
+                                                } else {
+                                                    this.confirming_logout = true;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     ),
             )

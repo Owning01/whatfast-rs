@@ -80,7 +80,21 @@ pub(crate) fn identity_hue(key: &str) -> f32 {
 /// have one, otherwise tinted initials, otherwise a person glyph. Replaces
 /// the stock component so contactless senders no longer show off-centre
 /// initials.
+///
+/// port: the `Avatar` of the origin (`tauri/src/components/Avatar.tsx`): a
+/// group without a photo draws the glyph of the people, not the initials.
 pub(crate) fn avatar_element(name: &str, avatar_path: &str, size: Pixels, cx: &App) -> gpui::Div {
+    avatar_element_of(name, avatar_path, size, false, cx)
+}
+
+/// The avatar of a conversation or of a participant.
+pub(crate) fn avatar_element_of(
+    name: &str,
+    avatar_path: &str,
+    size: Pixels,
+    group: bool,
+    cx: &App,
+) -> gpui::Div {
     let base = div()
         .flex_shrink_0()
         .size(size)
@@ -95,6 +109,13 @@ pub(crate) fn avatar_element(name: &str, avatar_path: &str, size: Pixels, cx: &A
                 .size(size)
                 .rounded_full()
                 .object_fit(ObjectFit::Cover),
+        );
+    }
+    if group {
+        return base.bg(cx.theme().secondary).child(
+            Icon::new(IconName::User)
+                .with_size(size * 0.48)
+                .text_color(cx.theme().muted_foreground),
         );
     }
     match avatar_initials(name) {

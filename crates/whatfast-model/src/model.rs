@@ -306,8 +306,16 @@ impl Store {
         false
     }
 
-    pub fn upsert_chat(&mut self, chat: whatfast_protocol::Chat) {
+    pub fn upsert_chat(&mut self, mut chat: whatfast_protocol::Chat) {
         let old_index = self.chat_index.remove(&chat.id);
+        // El avatar es una foto local: un evento que vuelve a mandar el chat
+        // sin el camino no borra la que ya se tiene.
+        if chat.avatar_path.is_empty()
+            && let Some(index) = old_index
+            && let Some(existing) = self.chats.get(index)
+        {
+            chat.avatar_path = existing.avatar_path.clone();
+        }
         if let Some(index) = old_index {
             self.chats.remove(index);
         }
@@ -583,7 +591,16 @@ impl Store {
             .drain(..)
             .map(|chat| (chat.id.clone(), chat))
             .collect();
-        by_id.extend(chats.into_iter().map(|chat| (chat.id.clone(), chat)));
+        // El avatar es una foto local: el backend nunca manda el camino, asi
+        // que la pagina nueva no borra la que ya se tiene.
+        for mut chat in chats {
+            if chat.avatar_path.is_empty()
+                && let Some(existing) = by_id.get(&chat.id)
+            {
+                chat.avatar_path = existing.avatar_path.clone();
+            }
+            by_id.insert(chat.id.clone(), chat);
+        }
         self.chats = by_id.into_values().collect();
         self.chats.sort_by(compare_chats);
         self.reindex_chats();
@@ -1360,6 +1377,41 @@ mod tests {
         assert_eq!(
             store.chat_ids(ChatFilter::Archived).as_slice(),
             ["archived"]
+        );
+    }
+
+    #[test]
+    fn the_photo_of_the_avatar_survives_the_arrival_of_the_chat() {
+        let mut store = Store::default();
+        let mut chat = whatfast_protocol::Chat {
+            id: "chat".into(),
+            title: "Chat".into(),
+            ..Default::default()
+        };
+        chat.avatar_path = "C:/media/avatar.png".into();
+        store.upsert_chat(chat.clone());
+        assert_eq!(
+            store.chat("chat").map(|chat| chat.avatar_path.clone()),
+            Some("C:/media/avatar.png".to_string())
+        );
+
+        // El backend vuelve a mandar el chat sin el camino del avatar: la
+        // foto local no se borra.
+        let mut again = chat.clone();
+        again.avatar_path = String::new();
+        store.upsert_chat(again);
+        assert_eq!(
+            store.chat("chat").map(|chat| chat.avatar_path.clone()),
+            Some("C:/media/avatar.png".to_string())
+        );
+
+        // Y tampoco se borra cuando llega una pagina nueva de la lista.
+        let mut page = chat.clone();
+        page.avatar_path = String::new();
+        store.replace_chat_page("", vec![page], 1, String::new());
+        assert_eq!(
+            store.chat("chat").map(|chat| chat.avatar_path.clone()),
+            Some("C:/media/avatar.png".to_string())
         );
     }
 

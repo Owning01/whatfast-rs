@@ -515,9 +515,11 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::GetChatAvatar(request)) => {
+                let seed = chat_seed(&request.chat_id);
+                let picture = ensure_fake_avatar(&profile_dir, seed);
                 rpc_response::Result::GetChatAvatar(crate::GetChatAvatarResponse {
                     chat_id: request.chat_id,
-                    avatar_path: String::new(),
+                    avatar_path: picture.to_string_lossy().into_owned(),
                 })
             }
             Some(rpc_request::Request::GetParticipantAvatar(request)) => {
@@ -1230,6 +1232,70 @@ pub fn ensure_fake_image(profile_dir: &Path, seed: usize) -> PathBuf {
         let _ = restrict_permissions(&path);
     }
     path
+}
+
+/// The picture of the avatar of a conversation.
+///
+/// The reference draws a photo in the row of every conversation, so the
+/// backend of the demonstration gives one to each chat: a square picture
+/// with a gradient of its own, the same way the pictures of the messages
+/// are made.
+pub fn ensure_fake_avatar(profile_dir: &Path, seed: usize) -> PathBuf {
+    let media_dir = profile_dir.join("media");
+    let path = media_dir.join(format!("fake-avatar-{seed}.png"));
+    if path.exists() {
+        return path;
+    }
+    if ensure_media_dir(&media_dir).is_err() {
+        return path;
+    }
+    let (width, height) = (128_u32, 128_u32);
+    let pixels = fake_avatar_pixels(seed, width, height);
+    let png = png::encode_rgb(width, height, &pixels);
+    if std::fs::write(&path, png).is_ok() {
+        let _ = restrict_permissions(&path);
+    }
+    path
+}
+
+/// The number that decides the picture of a conversation.
+fn chat_seed(chat_id: &str) -> usize {
+    chat_id
+        .strip_prefix("chat-")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            chat_id.bytes().fold(0usize, |total, byte| {
+                total.wrapping_mul(31).wrapping_add(byte as usize)
+            })
+        })
+}
+
+/// The pixels of the picture of the avatar: a gradient with a spot of light.
+fn fake_avatar_pixels(seed: usize, width: u32, height: u32) -> Vec<u8> {
+    let base = [
+        (seed as u8).wrapping_mul(53).wrapping_add(64),
+        (seed as u8).wrapping_mul(29).wrapping_add(92),
+        (seed as u8).wrapping_mul(71).wrapping_add(48),
+    ];
+    let center_x = 0.3 + ((seed % 7) as f32) * 0.06;
+    let center_y = 0.35 + ((seed % 5) as f32) * 0.07;
+    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for y in 0..height {
+        let fy = y as f32 / height as f32;
+        for x in 0..width {
+            let fx = x as f32 / width as f32;
+            // El degradado va del color de base al oscuro en una diagonal.
+            let f = ((fx + fy) / 2.0).min(1.0);
+            // Y una mancha clara, como una foto con luz.
+            let dx = fx - center_x;
+            let dy = fy - center_y;
+            let light = (1.0 - (dx * dx + dy * dy) * 5.0).max(0.0);
+            pixels.push(((base[0] as f32) * (1.0 - f) + 24.0 * f + 60.0 * light).min(255.0) as u8);
+            pixels.push(((base[1] as f32) * (1.0 - f) + 30.0 * f + 52.0 * light).min(255.0) as u8);
+            pixels.push(((base[2] as f32) * (1.0 - f) + 38.0 * f + 44.0 * light).min(255.0) as u8);
+        }
+    }
+    pixels
 }
 
 /// The pixels of the picture of a seed: the gradient of the origin.

@@ -24,12 +24,30 @@ tiene que verse la app, y se revisan una por una mientras se trabaja.
 
 | Vista | Estado |
 |---|---|
-| Chats (`01`) | La barra quedó con el título "Chats", el buscador "Search or start a new chat", la fila de filtros, la hora a la derecha de cada fila, el prefijo "You:" y los indicadores de silencio, favorito y pin. |
+| Chats (`01`) | La barra quedó con el título "Chats", el botón verde de nuevo chat, el buscador en pastilla con la lupa dentro, la fila de filtros con el chip activo en verde, la hora a la derecha de cada fila, el prefijo "You:" y los indicadores de silencio, favorito y pin. Cada fila lleva su foto. La paleta es la de la referencia. |
 | Estados (`02`) | Tiene su propio destino en el riel: "My status", la sección "RECENT" y el panel "Share status" con los botones "Text status" y "Photo and video". |
 | Canales (`05`) | Tiene su propio destino en el riel: el buscador, la lista de canales con la hora a la derecha y los botones "Follow" y "New local channel". |
 | Archivados (`03`) | Tiene su propio destino en el riel, con la explicación de arriba y la lista. |
-| Perfil (`04`) | El panel de ajustes del riel. |
+| Perfil (`04`) | El panel de ajustes del riel, con la escala, el tema y la salida. |
 | Llamadas (`06`) | Todavía no: el ladocar no tiene RPC de llamadas. |
+
+## Los colores de la referencia
+
+Se midieron sobre `01-whatsapp-chats.png` y son los del tema `whatsapp-dark`
+del núcleo:
+
+| Color | Valor | Dónde |
+|---|---|---|
+| Fondo de la columna de chats | `#161717` | La columna y el área de la conversación |
+| Fondo de la columna de iconos | `#1d1f1f` | El riel de la izquierda |
+| Campo del buscador | `#2e2f2f` | La pastilla del buscador |
+| Borde de los chips | `#2e2f2f` | La fila de filtros |
+| Verde de acento | `#21c063` | El botón de nuevo chat y el chip activo |
+| Verde del chip activo (fondo) | `#103429` | El chip activo |
+| Texto | `#fafafa` | Los títulos |
+| Texto atenuado | `#a2a2a2` | Las horas y los previews |
+| Burbuja de entrada | `#242626` | Los mensajes recibidos |
+| Burbuja de salida | `#144d37` | Los mensajes enviados |
 
 ## Reglas que salen de las capturas
 

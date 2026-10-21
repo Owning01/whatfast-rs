@@ -97,19 +97,22 @@ impl NavAction {
     /// for them.
     pub(crate) fn icon(self) -> Icon {
         match self {
-            NavAction::Chats => IconName::Folder.into(),
+            // port: the oracle draws a `MessageCircle` for the chats and a
+            // `ShieldCheck` for the privacy. El set propio de Whatfast trae
+            // la burbuja del chat y el escudo, que son los mismos dibujos.
+            NavAction::Chats => WhatfastIcon::Chat.into(),
             NavAction::Search => IconName::Search.into(),
             // The states are a circle of dashes, the same glyph the reference
             // draws in its column of icons.
             NavAction::States => IconName::LoaderCircle.into(),
-            // The channels are a globe, the way the reference draws the
-            // broadcast of the world.
-            NavAction::Channels => IconName::Globe.into(),
+            // The channels are a bubble of messages, the glyph of the
+            // reference.
+            NavAction::Channels => WhatfastIcon::Messages.into(),
             // The archived conversations go into a box: the set of Whatfast
             // has the archive, the one of gpui_component no.
             NavAction::Archived => WhatfastIcon::Archive.into(),
-            NavAction::Privacy => IconName::Eye.into(),
-            NavAction::Settings => IconName::Settings.into(),
+            NavAction::Privacy => WhatfastIcon::Shield.into(),
+            NavAction::Settings => WhatfastIcon::Settings.into(),
         }
     }
 
@@ -394,8 +397,6 @@ impl NavRail {
         let foreground = theme.foreground;
         let muted = theme.muted_foreground;
         let hover = theme.muted;
-        let accent = theme.accent;
-        let accent_soft = theme.selection;
         let radius = theme.radius;
 
         let action = button.action;
@@ -411,7 +412,11 @@ impl NavRail {
             .justify_center()
             .rounded(radius)
             .cursor_pointer()
-            .when(active, |this| this.bg(accent_soft).text_color(accent))
+            // El boton activo de la referencia es un cuadro gris claro con
+            // el glifo claro: no lleva el color de acento.
+            .when(active, |this| {
+                this.bg(cx.theme().muted).text_color(foreground)
+            })
             .when(!active, |this| this.text_color(muted))
             .when(enabled && !active, |this| {
                 this.hover(|style| style.bg(hover).text_color(foreground))

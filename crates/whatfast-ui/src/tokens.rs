@@ -746,6 +746,24 @@ pub(crate) fn apply_theme(theme: &Theme, scale: f32, cx: &mut gpui::App) {
     global.mono_font_size = fonts.mono_font_size;
 }
 
+/// The theme the app paints with.
+///
+/// The app wears the palette of WhatsApp: the colors come from the
+/// reference screenshots of WhatsApp Desktop
+/// (`docs/referencia/01-whatsapp-chats.png`). The catalog of the core keeps
+/// the themes of the web client, so this is only the choice of the app.
+pub(crate) fn app_theme(appearance: ThemeAppearance) -> Theme {
+    let id = match appearance {
+        ThemeAppearance::Dark => "whatsapp-dark",
+        ThemeAppearance::Light => "whatsapp-light",
+    };
+    whatfast_core::theme::builtin_themes()
+        .iter()
+        .find(|theme| theme.id == id)
+        .cloned()
+        .unwrap_or_else(whatfast_core::theme::default_theme)
+}
+
 /// Applies an interface scale to the fonts of the application.
 ///
 /// port: `apply_theme_scale` of the origin: the base font size (16px) and the

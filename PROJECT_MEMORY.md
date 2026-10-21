@@ -786,3 +786,27 @@ scripts/parity.py` con 153/153 casos del oraculo.
 **Pendiente**: la foto de la vista de estados y la de la de canales: el clic
 del guion no llega a los botones del riel (el de las filas de chat si), asi
 que hay que hacerlas a mano.
+
+### La paleta, los iconos y las fotos, como en la referencia
+
+- **La app se pinta con la paleta de WhatsApp**: los dos temas nuevos del
+  catalogo del nucleo (`whatsapp-dark` y `whatsapp-light`) con los colores
+  medidos sobre `docs/referencia/01-whatsapp-chats.png` (la columna de
+  chats `#161717`, la de los iconos `#1d1f1f`, el buscador `#2e2f2f`, el
+  verde `#21c063`). El catalogo del cliente web sigue intacto: el tema por
+  defecto del nucleo sigue siendo `vercel-dark` y la app elige el suyo.
+- **Los iconos del riel** son los de la referencia: la burbuja del chat, la
+  lupa, el circulo punteado de los estados, la burbuja de los canales, la
+  caja de los archivados, el escudo y el engranaje. El boton activo es un
+  cuadro gris claro, no del color de acento.
+- **La cabecera de los chats** lleva el boton verde redondo de nuevo chat,
+  el buscador en pastilla con la lupa dentro y el estado de la
+  sincronizacion al pie de la columna (como la franja del cliente web).
+- **Cada conversacion tiene su foto**: el backend de demostracion
+  genera un avatar cuadrado por chat (`ensure_fake_avatar`) y la app lo
+  pide para todas las filas visibles, como hace el origen.
+- **El avatar no se borra** cuando el backend vuelve a mandar el chat sin
+  el camino de la foto: el modelo lo conserva, como ya hacia con las
+  imagenes de los mensajes.
+- **El boton del tema y el de la salida** se fueron al panel de ajustes, y
+  la cabecera de la conversacion lleva el buscador, como la referencia.
