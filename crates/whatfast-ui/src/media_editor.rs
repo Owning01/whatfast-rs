@@ -1,4 +1,4 @@
-//! The image editor: a free crop with handles and a quarter turn rotation.
+﻿//! The image editor: a free crop with handles and a quarter turn rotation.
 //!
 //! port: taken from the origin's `tauri/src/components/MediaEditor.tsx`. The
 //! geometry of the crop is not here: it comes from
@@ -7,6 +7,11 @@
 //! The picture is shown already rotated and the rectangle of the crop lives
 //! in the pixels of the rotated picture, which is exactly the space the core
 //! crops in.
+
+// The editor is a piece of the interface that the application wires in its
+// own batch: until then, nothing opens it and the compiler would call every
+// item of the editor dead.
+#![allow(dead_code)]
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -20,7 +25,9 @@ use gpui::{
     Pixels, Point, Render, Styled as _, StyledImage as _, Window, canvas, div, img, px, rgba,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, button::{Button, ButtonVariants as _}, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
 };
 
 use whatfast_core::media_crop::{self, CropRect, EditPlan, PixelSize, Rotation};
@@ -83,6 +90,39 @@ pub(crate) struct MediaEdit {
     /// The rotation and the crop. The crop is in the pixels of the rotated
     /// picture: that is the space the core crops in.
     pub(crate) plan: EditPlan,
+}
+
+/// Applies a plan of edit to a picture and writes the result.
+///
+/// The rotation comes first and the crop is taken in the pixels of the
+/// rotated picture, which is the space the plan speaks about.
+///
+/// port: the web client applies the crop in the backend (a Tauri command,
+/// `edit_image_blocking`). The native client has no such command in the
+/// protocol, so the pixels are worked here.
+pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> Result<(), String> {
+    let picture = image::ImageReader::open(source)
+        .map_err(|error| format!("the picture could not be opened: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| format!("the format of the picture is unknown: {error}"))?
+        .decode()
+        .map_err(|error| format!("the picture could not be decoded: {error}"))?;
+    let rotated = match plan.rotation {
+        Rotation::Deg0 => picture,
+        Rotation::Deg90 => picture.rotate90(),
+        Rotation::Deg180 => picture.rotate180(),
+        Rotation::Deg270 => picture.rotate270(),
+    };
+    let x = plan.crop.x.round().clamp(0.0, rotated.width() as f64) as u32;
+    let y = plan.crop.y.round().clamp(0.0, rotated.height() as f64) as u32;
+    let width = (plan.crop.width.round().max(1.0) as u32)
+        .min(rotated.width().saturating_sub(x));
+    let height = (plan.crop.height.round().max(1.0) as u32)
+        .min(rotated.height().saturating_sub(y));
+    let cropped = image::imageops::crop_imm(&rotated, x, y, width, height).to_image();
+    cropped
+        .save(destination)
+        .map_err(|error| format!("the picture could not be saved: {error}"))
 }
 
 /// The events of the editor.
@@ -150,7 +190,7 @@ impl MediaEditor {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "photo".to_string());
-        let editor = Self {
+        let mut editor = Self {
             path: path.to_path_buf(),
             file_name,
             natural: PixelSize {
@@ -167,7 +207,6 @@ impl MediaEditor {
             rendered_rotation: None,
             surface: Rc::new(Cell::new(None)),
         };
-        let mut editor = editor;
         editor.load(cx);
         editor
     }
@@ -193,8 +232,21 @@ impl MediaEditor {
     }
 
     /// The crop, in the pixels of the rotated picture.
+    ///
+    /// When the user did not crop anything, this is the whole picture.
     pub(crate) fn crop(&self) -> CropRect {
-        self.crop_rect()
+        match self.crop {
+            Some(crop) => crop,
+            None => {
+                let size = self.rotated_size();
+                CropRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.width,
+                    height: size.height,
+                }
+            }
+        }
     }
 
     /// Turns the picture a quarter turn to the left.
@@ -220,13 +272,13 @@ impl MediaEditor {
 
     /// Applies the edit and hands the plan to the one that opened the editor.
     pub(crate) fn apply(&mut self, cx: &mut Context<Self>) {
-        if self.working {
+        if self.is_working() {
             return;
         }
         match self.plan() {
             Ok(plan) => {
                 let edit = MediaEdit {
-                    path: self.path.clone(),
+                    path: self.path().to_path_buf(),
                     plan,
                 };
                 cx.emit(MediaEditorEvent::Applied(edit));
@@ -245,19 +297,17 @@ impl MediaEditor {
         if natural.width <= 0.0 || natural.height <= 0.0 {
             return Err(MediaEditError::NoPicture);
         }
-        let rotated = media_crop::rotated_size(natural, self.rotation)
+        let rotation = self.rotation();
+        let rotated = media_crop::rotated_size(natural, rotation)
             .map_err(|error| MediaEditError::Geometry(error.message))?;
         // The editor keeps the crop in the pixels of the rotated picture, the
         // space the core crops in, and `plan_edit` takes the crop in the
         // pixels of the original picture: the rectangle travels back through
         // the inverse of the rotation.
-        let source_crop = media_crop::crop_in_rotated_space(
-            self.crop_rect(),
-            rotated,
-            inverse_rotation(self.rotation),
-        )
-        .map_err(|error| MediaEditError::Geometry(error.message))?;
-        media_crop::plan_edit(natural, source_crop, self.rotation)
+        let source_crop =
+            media_crop::crop_in_rotated_space(self.crop(), rotated, inverse_rotation(rotation))
+                .map_err(|error| MediaEditError::Geometry(error.message))?;
+        media_crop::plan_edit(natural, source_crop, rotation)
             .map_err(|error| MediaEditError::Geometry(error.message))
     }
 
@@ -270,7 +320,7 @@ impl MediaEditor {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.working = true;
         self.error = None;
-        let path = self.path.clone();
+        let path = self.path().to_path_buf();
         cx.spawn(async move |this, cx| {
             let loaded = smol::unblock(move || load_picture(&path)).await;
             this.update(cx, |this, cx| {
@@ -293,15 +343,11 @@ impl MediaEditor {
 
     /// Turns the picture a quarter turn and carries the crop with it.
     fn rotate(&mut self, steps: u32, cx: &mut Context<Self>) {
-        let current = self.rotation;
+        let current = self.rotation();
         let next = media_crop::parse_rotation(current.degrees() as f64 + steps as f64);
         if let Some(crop) = self.crop {
             let frame = self.rotated_size();
-            // The crop travels with the picture: a quarter turn maps the
-            // rectangle of the current frame onto the rectangle of the next
-            // one.
-            self.crop = media_crop::crop_in_rotated_space(crop, frame, steps_of(steps))
-                .ok();
+            self.crop = carried_crop(crop, frame, steps);
         }
         self.rotation = next;
         cx.notify();
@@ -309,7 +355,7 @@ impl MediaEditor {
 
     /// The size of the picture after the rotation.
     fn rotated_size(&self) -> PixelSize {
-        match media_crop::rotated_size(self.natural, self.rotation) {
+        match media_crop::rotated_size(self.natural, self.rotation()) {
             Ok(size) => size,
             Err(_) => PixelSize {
                 width: 0.0,
@@ -344,22 +390,6 @@ impl MediaEditor {
         )
     }
 
-    /// The crop in the pixels of the rotated picture.
-    fn crop_rect(&self) -> CropRect {
-        match self.crop {
-            Some(crop) => crop,
-            None => {
-                let size = self.rotated_size();
-                CropRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: size.width,
-                    height: size.height,
-                }
-            }
-        }
-    }
-
     /// The smallest crop the user can leave behind, in the pixels of the
     /// rotated picture.
     fn min_edge(&self) -> f64 {
@@ -382,8 +412,8 @@ impl MediaEditor {
             return None;
         }
         Some((
-            (position.x - bounds.origin.x).as_f32() as f64 / scale_x,
-            (position.y - bounds.origin.y).as_f32() as f64 / scale_y,
+            f32::from(position.x - bounds.origin.x) as f64 / scale_x,
+            f32::from(position.y - bounds.origin.y) as f64 / scale_y,
         ))
     }
 
@@ -392,7 +422,7 @@ impl MediaEditor {
         let Some((x, y)) = self.picture_point(position) else {
             return;
         };
-        let crop = self.crop_rect();
+        let crop = self.crop();
         let mode = self.handle_under(x, y, crop);
         self.drag = Some(DragState {
             mode,
@@ -434,9 +464,10 @@ impl MediaEditor {
             DragMode::Move => {
                 let width = start.width.min(frame.width);
                 let height = start.height.min(frame.height);
-                let x = (start.x + (point_x - drag.origin_x)).clamp(0.0, (frame.width - width).max(0.0));
-                let y =
-                    (start.y + (point_y - drag.origin_y)).clamp(0.0, (frame.height - height).max(0.0));
+                let x = (start.x + (point_x - drag.origin_x))
+                    .clamp(0.0, (frame.width - width).max(0.0));
+                let y = (start.y + (point_y - drag.origin_y))
+                    .clamp(0.0, (frame.height - height).max(0.0));
                 CropRect {
                     x,
                     y,
@@ -531,7 +562,7 @@ impl MediaEditor {
         }
         let frame = self.rotated_size();
         let min_edge = self.min_edge();
-        let current = self.crop_rect();
+        let current = self.crop();
         let width = current.width.max(min_edge).min(frame.width);
         let height = current.height.max(min_edge).min(frame.height);
         self.crop = Some(CropRect {
@@ -543,36 +574,37 @@ impl MediaEditor {
     }
 
     /// The handle that is under the point, if there is one.
+    ///
+    /// The closest handle wins, so a small crop is not grabbed by the handle
+    /// of an edge that happens to be near the point.
     fn handle_under(&self, x: f64, y: f64, crop: CropRect) -> DragMode {
         let radius = self.handle_radius();
         let right = crop.x + crop.width;
         let bottom = crop.y + crop.height;
         let middle_x = crop.x + crop.width / 2.0;
         let middle_y = crop.y + crop.height / 2.0;
-        let near = |value: f64, target: f64| (value - target).abs() <= radius;
-        if near(x, crop.x) && near(y, crop.y) {
-            return DragMode::NorthWest;
+        let handles = [
+            (DragMode::NorthWest, crop.x, crop.y),
+            (DragMode::North, middle_x, crop.y),
+            (DragMode::NorthEast, right, crop.y),
+            (DragMode::East, right, middle_y),
+            (DragMode::SouthEast, right, bottom),
+            (DragMode::South, middle_x, bottom),
+            (DragMode::SouthWest, crop.x, bottom),
+            (DragMode::West, crop.x, middle_y),
+        ];
+        let mut closest: Option<(DragMode, f64)> = None;
+        for (mode, handle_x, handle_y) in handles {
+            let distance = (x - handle_x).hypot(y - handle_y);
+            if distance > radius {
+                continue;
+            }
+            if closest.is_none_or(|(_, best)| distance < best) {
+                closest = Some((mode, distance));
+            }
         }
-        if near(x, right) && near(y, crop.y) {
-            return DragMode::NorthEast;
-        }
-        if near(x, crop.x) && near(y, bottom) {
-            return DragMode::SouthWest;
-        }
-        if near(x, right) && near(y, bottom) {
-            return DragMode::SouthEast;
-        }
-        if near(x, middle_x) && near(y, crop.y) {
-            return DragMode::North;
-        }
-        if near(x, middle_x) && near(y, bottom) {
-            return DragMode::South;
-        }
-        if near(x, crop.x) && near(y, middle_y) {
-            return DragMode::West;
-        }
-        if near(x, right) && near(y, middle_y) {
-            return DragMode::East;
+        if let Some((mode, _)) = closest {
+            return mode;
         }
         if x >= crop.x && x <= right && y >= crop.y && y <= bottom {
             return DragMode::Move;
@@ -582,14 +614,14 @@ impl MediaEditor {
 
     /// The preview, already rotated, ready to be painted.
     fn rendered_preview(&mut self) -> Option<Arc<gpui::RenderImage>> {
-        if self.rendered_rotation == Some(self.rotation) {
+        if self.rendered_rotation == Some(self.rotation()) {
             return self.rendered.clone();
         }
         let preview = self.preview.as_ref()?;
-        let rotated = rotate_picture(preview, self.rotation);
+        let rotated = rotate_picture(preview, self.rotation());
         let rendered = Arc::new(to_render_image(&rotated));
         self.rendered = Some(rendered.clone());
-        self.rendered_rotation = Some(self.rotation);
+        self.rendered_rotation = Some(self.rotation());
         Some(rendered)
     }
 
@@ -599,8 +631,8 @@ impl MediaEditor {
         let border = cx.theme().border;
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
-        let file_name = self.file_name.clone();
-        let working = self.working;
+        let file_name = self.file_name().to_string();
+        let working = self.is_working();
         let error = self.error.clone();
 
         div()
@@ -701,7 +733,7 @@ impl MediaEditor {
                             .child(
                                 Button::new("media-editor-send")
                                     .label(if working { "Preparing." } else { "Send" })
-                                    .loading(working)
+                                    .disabled(working)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if !this.working {
                                             this.apply(cx);
@@ -725,11 +757,11 @@ impl MediaEditor {
     fn surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let frame = self.rotated_size();
         let (scale_x, scale_y) = self.window_per_picture();
-        let crop = self.crop_rect();
+        let crop = self.crop();
         let primary = cx.theme().primary;
-        let surface = Rc::clone(&self.surface);
+        let surface_bounds = Rc::clone(&self.surface);
         let rendered = self.rendered_preview();
-        let working = self.working;
+        let working = self.is_working();
         let error = self.error.is_some();
 
         let mut handles = Vec::new();
@@ -747,12 +779,11 @@ impl MediaEditor {
                     .top(px((y * scale_y - edge / 2.0) as f32))
                     .size(px(edge as f32))
                     .rounded_sm()
-                    .bg(primary)
-                    .into_any_element(),
+                    .bg(primary),
             );
         }
 
-        div()
+        let mut surface = div()
             .relative()
             .w(px(frame.width as f32))
             .h(px(frame.height as f32))
@@ -778,7 +809,7 @@ impl MediaEditor {
             .child(
                 canvas(
                     move |bounds, _window, _cx| {
-                        surface.set(Some(bounds));
+                        surface_bounds.set(Some(bounds));
                     },
                     |_bounds, _value, _window, _cx| {},
                 )
@@ -813,8 +844,11 @@ impl MediaEditor {
                     .h(px((crop.height * scale_y) as f32))
                     .border_2()
                     .border_color(primary),
-            )
-            .children(handles)
+            );
+        for handle in handles {
+            surface = surface.child(handle);
+        }
+        surface
     }
 }
 
@@ -855,7 +889,9 @@ fn top_edge(bottom: f64, point_y: f64, min_edge: f64) -> (f64, f64) {
 
 /// The bottom edge of the crop, moved to the point of the mouse.
 fn bottom_edge(start: CropRect, point_y: f64, min_edge: f64, frame_height: f64) -> f64 {
-    (point_y - start.y).max(min_edge).min(frame_height - start.y)
+    (point_y - start.y)
+        .max(min_edge)
+        .min(frame_height - start.y)
 }
 
 /// The quarter turn that undoes a rotation.
@@ -871,6 +907,14 @@ fn inverse_rotation(rotation: Rotation) -> Rotation {
 /// The quarter turn of a number of degrees.
 fn steps_of(steps: u32) -> Rotation {
     media_crop::parse_rotation(steps as f64)
+}
+
+/// The crop, carried by the picture when it turns a quarter turn.
+///
+/// A quarter turn maps the rectangle of the current frame onto the rectangle
+/// of the next one, so the crop stays over the same part of the picture.
+fn carried_crop(crop: CropRect, frame: PixelSize, steps: u32) -> Option<CropRect> {
+    media_crop::crop_in_rotated_space(crop, frame, steps_of(steps)).ok()
 }
 
 /// The picture, loaded and reduced to the size of the preview.
@@ -950,7 +994,13 @@ mod tests {
 
     #[test]
     fn the_scale_of_the_preview_keeps_the_longest_edge() {
-        assert_eq!(preview_scale(PixelSize { width: 0.0, height: 0.0 }), 0.0);
+        assert_eq!(
+            preview_scale(PixelSize {
+                width: 0.0,
+                height: 0.0
+            }),
+            0.0
+        );
         assert_eq!(
             preview_scale(PixelSize {
                 width: 100.0,
@@ -981,7 +1031,7 @@ mod tests {
             height: 100.0,
         });
         assert_eq!(
-            editor.crop_rect(),
+            editor.crop(),
             CropRect {
                 x: 0.0,
                 y: 0.0,
@@ -991,7 +1041,7 @@ mod tests {
         );
         editor.rotation = Rotation::Deg90;
         assert_eq!(
-            editor.crop_rect(),
+            editor.crop(),
             CropRect {
                 x: 0.0,
                 y: 0.0,
@@ -1074,7 +1124,9 @@ mod tests {
     fn the_inverse_of_a_rotation_undoes_it() {
         for rotation in Rotation::ANGLES {
             let inverse = inverse_rotation(rotation);
-            assert_ne!(inverse, rotation, "a quarter turn is not its own inverse");
+            if rotation != Rotation::Deg0 && rotation != Rotation::Deg180 {
+                assert_ne!(inverse, rotation, "a quarter turn is not its own inverse");
+            }
             let size = PixelSize {
                 width: 200.0,
                 height: 100.0,
@@ -1130,5 +1182,165 @@ mod tests {
             None => panic!("the picture has no bytes"),
         };
         assert_eq!(bytes, &[3, 2, 1, 4]);
+    }
+
+    /// An editor of a picture of 200x100 pixels, with the surface of the
+    /// preview in the same place, so a point of the mouse is a point of the
+    /// picture.
+    fn editor_with_surface() -> MediaEditor {
+        let editor = editor(PixelSize {
+            width: 200.0,
+            height: 100.0,
+        });
+        editor.surface.set(Some(Bounds {
+            origin: gpui::point(px(0.), px(0.)),
+            size: gpui::size(px(200.), px(100.)),
+        }));
+        editor
+    }
+
+    #[test]
+    fn the_drag_of_the_top_left_corner_moves_the_two_edges() {
+        let mut editor = editor_with_surface();
+        editor.begin_drag(gpui::point(px(0.), px(0.)));
+        editor.move_drag(gpui::point(px(50.), px(40.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 50.0,
+                y: 40.0,
+                width: 150.0,
+                height: 60.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_of_the_bottom_right_corner_moves_the_two_edges() {
+        let mut editor = editor_with_surface();
+        editor.begin_drag(gpui::point(px(200.), px(100.)));
+        editor.move_drag(gpui::point(px(150.), px(80.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 0.0,
+                y: 0.0,
+                width: 150.0,
+                height: 80.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_leaves_a_crop_of_at_least_the_smallest_one() {
+        let mut editor = editor_with_surface();
+        editor.begin_drag(gpui::point(px(0.), px(0.)));
+        editor.move_drag(gpui::point(px(190.), px(90.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 176.0,
+                y: 76.0,
+                width: 24.0,
+                height: 24.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_of_the_middle_of_the_crop_moves_the_whole_crop() {
+        let mut editor = editor_with_surface();
+        editor.crop = Some(CropRect {
+            x: 20.0,
+            y: 20.0,
+            width: 50.0,
+            height: 30.0,
+        });
+        editor.begin_drag(gpui::point(px(40.), px(30.)));
+        editor.move_drag(gpui::point(px(60.), px(50.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 40.0,
+                y: 40.0,
+                width: 50.0,
+                height: 30.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_of_the_crop_never_leaves_the_picture() {
+        let mut editor = editor_with_surface();
+        editor.crop = Some(CropRect {
+            x: 20.0,
+            y: 20.0,
+            width: 50.0,
+            height: 30.0,
+        });
+        editor.begin_drag(gpui::point(px(40.), px(30.)));
+        editor.move_drag(gpui::point(px(1000.), px(1000.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 150.0,
+                y: 70.0,
+                width: 50.0,
+                height: 30.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_outside_of_the_crop_starts_a_new_one() {
+        let mut editor = editor_with_surface();
+        editor.crop = Some(CropRect {
+            x: 20.0,
+            y: 20.0,
+            width: 50.0,
+            height: 30.0,
+        });
+        editor.begin_drag(gpui::point(px(120.), px(80.)));
+        editor.move_drag(gpui::point(px(150.), px(90.)));
+        assert_eq!(
+            editor.crop(),
+            CropRect {
+                x: 120.0,
+                y: 80.0,
+                width: 30.0,
+                height: 10.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_crop_travels_with_the_picture() {
+        // The crop is the left half of the picture: a quarter turn to the
+        // right leaves it over the same part of the picture.
+        let crop = CropRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let frame = PixelSize {
+            width: 200.0,
+            height: 100.0,
+        };
+        let carried = match carried_crop(crop, frame, 90) {
+            Some(carried) => carried,
+            None => panic!("the crop was not carried"),
+        };
+        // The frame after the quarter turn is 100x200 and the left half of the
+        // picture is the top half of it.
+        assert_eq!(
+            carried,
+            CropRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0
+            }
+        );
     }
 }

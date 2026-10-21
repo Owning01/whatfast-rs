@@ -44,10 +44,13 @@ use whatfast_protocol::{
     MessageSearchResult, RpcResponse, backend_event, rpc_request, rpc_response,
 };
 
+use crate::media_editor::{MediaEditor, MediaEditorEvent};
+use crate::navrail::{LinkState, NavAction, NavRail};
 use crate::rpc::{
     BridgeMessage, OutgoingAttachment, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY,
     RpcClient, RpcIncoming, TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
 };
+use crate::tabs::{TabAction, TabEntry, TabStrip};
 use crate::text::{
     encode_mentions, format_typing_label, mention_display_name, mention_token_start,
     normalized_ui_scale, validate_image_message, validate_text_message,
@@ -571,6 +574,12 @@ pub(crate) struct Whatfast {
     pub(crate) selected_newsletter: Option<String>,
     /// When the statuses of the profile were read the last time.
     pub(crate) last_status_refresh: Instant,
+    /// The column of icons at the left of the window.
+    pub(crate) nav_rail: Entity<NavRail>,
+    /// The strip of the open chats.
+    pub(crate) tab_strip: Entity<TabStrip>,
+    /// The editor of a picture, when it is open.
+    pub(crate) media_editor: Option<Entity<MediaEditor>>,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -603,6 +612,27 @@ impl Whatfast {
         // the app root from the start so shortcuts work before (and after) any
         // text input holds focus.
         focus_handle.focus(window, cx);
+        // The column of icons and the strip of tabs report what the user
+        // pressed; the app answers them. The weak entity of the app is what
+        // the handlers use to get back to the state.
+        let shell_view = cx.entity();
+        let rail_view = shell_view.clone();
+        let nav_rail = cx.new(|_| {
+            NavRail::new(ui_scale).on_action(move |action, window, cx| {
+                rail_view.update(cx, |this, cx| {
+                    this.on_nav_action(action, window, cx);
+                    cx.notify();
+                });
+            })
+        });
+        let tab_strip = cx.new(|cx| {
+            TabStrip::new(cx, "whatfast", ui_scale).on_action(move |action, window, cx| {
+                shell_view.update(cx, |this, cx| {
+                    this.on_tab_action(action, window, cx);
+                    cx.notify();
+                });
+            })
+        });
         let _subscriptions = vec![
             cx.subscribe_in(&composer, window, {
                 let composer = composer.clone();
@@ -744,6 +774,9 @@ impl Whatfast {
             newsletters_loading: false,
             selected_newsletter: None,
             last_status_refresh: Instant::now(),
+            nav_rail,
+            tab_strip,
+            media_editor: None,
             _subscriptions,
         };
         if let Some(error) = startup_error {
@@ -3175,6 +3208,8 @@ impl Whatfast {
             input.set_value(draft.text, window, cx);
             input.focus(window, cx);
         });
+        // The strip of the open chats follows the recency history.
+        self.sync_shell(cx);
     }
 
     pub(crate) fn load_selected_chat(&mut self, chat_id: String) {
@@ -3443,8 +3478,12 @@ impl Whatfast {
         let view = cx.entity();
         cx.spawn_in(window, async move |_, window| {
             let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            // The picture opens in the editor, the same way the web client
+            // does: the user crops and rotates it before it is sent.
             window
-                .update(|window, cx| view.update(cx, |this, cx| this.send_image(path, window, cx)))
+                .update(|window, cx| {
+                    view.update(cx, |this, cx| this.open_media_editor(path, window, cx))
+                })
                 .ok()
         })
         .detach();
@@ -4151,6 +4190,167 @@ impl Whatfast {
             window,
             cx,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The shell: the column of icons and the strip of the open chats
+    // -----------------------------------------------------------------------
+
+    /// Answers a button of the column of icons.
+    pub(crate) fn on_nav_action(
+        &mut self,
+        action: NavAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            NavAction::Chats => {
+                self.chat_view = ChatView::Inbox;
+                self.settings_open = false;
+            }
+            NavAction::Search => {
+                self.settings_open = false;
+                self.focus_search(window, cx);
+            }
+            NavAction::Privacy | NavAction::Settings => {
+                self.settings_open = true;
+            }
+        }
+        self.sync_shell(cx);
+    }
+
+    /// Answers a gesture of the strip of the open chats.
+    pub(crate) fn on_tab_action(
+        &mut self,
+        action: TabAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            TabAction::Select { chat_id } => {
+                self.open_chat(chat_id, window, cx);
+            }
+            TabAction::Close { chat_id, .. } => {
+                self.recent_chat_ids.retain(|id| id != &chat_id);
+            }
+            TabAction::Reorder { chat_id, index, .. } => {
+                self.move_recent_chat(&chat_id, index);
+            }
+            // The native client has one pane: there is nowhere to move a tab to.
+            TabAction::MoveToPane { .. } => {}
+            TabAction::Add => {
+                self.focus_search(window, cx);
+            }
+            TabAction::Unhandled | TabAction::Handled | TabAction::Boundary { .. } => {}
+        }
+        self.sync_shell(cx);
+    }
+
+    /// Moves a chat of the recency history to another place.
+    fn move_recent_chat(&mut self, chat_id: &str, index: usize) {
+        let Some(from) = self.recent_chat_ids.iter().position(|id| id == chat_id) else {
+            return;
+        };
+        let chat_id = self.recent_chat_ids.remove(from);
+        let index = index.min(self.recent_chat_ids.len());
+        self.recent_chat_ids.insert(index, chat_id);
+    }
+
+    /// Keeps the column of icons and the strip of tabs in sync with the state
+    /// of the app.
+    pub(crate) fn sync_shell(&mut self, cx: &mut Context<Self>) {
+        let link = match self.store.screen {
+            Screen::Pairing => LinkState::Pairing,
+            _ => LinkState::Linked,
+        };
+        let settings_open = self.settings_open;
+        self.nav_rail.update(cx, |rail, _| {
+            rail.set_link(link);
+            rail.set_sidebar_open(true);
+            rail.set_settings_open(settings_open);
+        });
+        let entries: Vec<TabEntry> = self
+            .recent_chat_ids
+            .iter()
+            .filter_map(|chat_id| self.store.chat(chat_id))
+            .map(TabEntry::from_chat)
+            .collect();
+        let selected = self.store.selected_chat_id.clone().unwrap_or_default();
+        let active = if entries.iter().any(|entry| entry.chat_id == selected) {
+            selected
+        } else {
+            String::new()
+        };
+        self.tab_strip.update(cx, |strip, _| {
+            strip.set_tabs(entries, active);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // The editor of a picture
+    // -----------------------------------------------------------------------
+
+    /// Opens the editor of a picture over the conversation.
+    pub(crate) fn open_media_editor(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.media_editor.is_some() {
+            return;
+        }
+        let editor = cx.new(|cx| MediaEditor::new(&path, cx));
+        let subscription = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
+            match event {
+                MediaEditorEvent::Applied(edit) => {
+                    this.media_editor = None;
+                    this.send_edited_picture(edit.clone(), window, cx);
+                }
+                MediaEditorEvent::Cancelled => {
+                    this.media_editor = None;
+                }
+            }
+            cx.notify();
+        });
+        self._subscriptions.push(subscription);
+        self.media_editor = Some(editor);
+        self.sync_shell(cx);
+    }
+
+    /// Writes the picture the user edited and sends it.
+    fn send_edited_picture(
+        &mut self,
+        edit: crate::media_editor::MediaEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.selected_chat_id.is_none() {
+            return;
+        }
+        let source = edit.path.clone();
+        let plan = edit.plan;
+        let extension = source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("png")
+            .to_owned();
+        let destination = whatfast_model::paths::data_dir()
+            .join("edited")
+            .join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+        let parent = destination
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let prepared = std::fs::create_dir_all(parent)
+            .map_err(|error| error.to_string())
+            .and_then(|()| crate::media_editor::apply_edit(&source, &plan, &destination));
+        match prepared {
+            Ok(()) => self.send_image(destination, window, cx),
+            Err(error) => {
+                self.store.toast_error = Some(error);
+            }
+        }
     }
 }
 

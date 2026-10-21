@@ -128,6 +128,9 @@ impl Whatfast {
         let show_conversation = !compact || selected.is_some();
         h_flex()
             .size_full()
+            // The column of icons is the left edge of the window: it is the
+            // navigation of the web client, the same way.
+            .child(self.nav_rail.clone())
             .when(show_sidebar, |root| root.child(self.render_sidebar(cx)))
             .when(show_conversation, |root| {
                 root.child(self.render_conversation(compact, window, cx))
@@ -989,6 +992,9 @@ impl Whatfast {
             .flex_1()
             .h_full()
             .min_w_0()
+            // The strip of the open chats sits above the header of the
+            // conversation, the same way the web client draws it.
+            .child(self.tab_strip.clone())
             .child(
                 h_flex()
                     .h(px(64. * self.ui_scale))
@@ -3037,6 +3043,9 @@ impl Render for Whatfast {
             })
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))
+            })
+            .when_some(self.media_editor.clone(), |root, editor| {
+                root.child(editor)
             })
     }
 }

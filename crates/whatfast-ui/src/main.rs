@@ -30,7 +30,6 @@
 
 use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
-use gpui_component_assets::Assets;
 
 mod app;
 mod helpers;
@@ -46,7 +45,11 @@ mod tokens;
 use app::Whatfast;
 
 fn main() {
-    gpui_platform::application().with_assets(Assets).run(|cx| {
+    // The source of the assets is the one of `gpui_component` plus the icons
+    // of Whatfast: without it the icons of the app are not painted.
+    gpui_platform::application()
+        .with_assets(crate::icons::WhatfastAssets::new())
+        .run(|cx| {
         gpui_component::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),

@@ -1,4 +1,4 @@
-//! The icon set of Whatfast, ported from the web client.
+﻿//! The icon set of Whatfast, ported from the web client.
 //!
 //! port: the origin draws its icons with `tauri/src/components/ThemeIcon.tsx`:
 //! a `ThemeIconName` and the path of every glyph. The native client keeps the
@@ -20,13 +20,18 @@
 //! so the source of the assets has to build the document of the icon when
 //! the renderer asks for it: that is what [`WhatfastAssets`] does.
 
+// The set of icons is a piece of the interface that the application wires in
+// its own batch: until then, nothing uses it and the compiler would call
+// every icon dead.
+#![allow(dead_code)]
+
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 use gpui_component::{IconName, IconNamed};
 
 /// The shapes of one glyph of the web client.
-pub struct Glyph {
+struct Glyph {
     /// The path of the glyph: every shape of it, joined.
     path: &'static str,
     /// The opaque shapes.
@@ -47,21 +52,31 @@ const ARCHIVE: Glyph = Glyph {
 
 const ATTACH: Glyph = Glyph {
     path: "M7.2 12.9 14 6.1a3 3 0 0 1 4.2 4.2l-8.5 8.5a5 5 0 0 1-7.1-7.1l8.1-8.1 1.5 1.5-8.1 8.1a2.9 2.9 0 0 0 4.1 4.1l8.5-8.5a.9.9 0 1 0-1.3-1.3l-6.8 6.8a1 1 0 0 0 1.4 1.4l5.1-5.1 1.5 1.5-5.1 5.1a3.1 3.1 0 0 1-4.3-4.3z",
-    main: &["M7.2 12.9 14 6.1a3 3 0 0 1 4.2 4.2l-8.5 8.5a5 5 0 0 1-7.1-7.1l8.1-8.1 1.5 1.5-8.1 8.1a2.9 2.9 0 0 0 4.1 4.1l8.5-8.5a.9.9 0 1 0-1.3-1.3l-6.8 6.8a1 1 0 0 0 1.4 1.4l5.1-5.1 1.5 1.5-5.1 5.1a3.1 3.1 0 0 1-4.3-4.3z"],
+    main: &[
+        "M7.2 12.9 14 6.1a3 3 0 0 1 4.2 4.2l-8.5 8.5a5 5 0 0 1-7.1-7.1l8.1-8.1 1.5 1.5-8.1 8.1a2.9 2.9 0 0 0 4.1 4.1l8.5-8.5a.9.9 0 1 0-1.3-1.3l-6.8 6.8a1 1 0 0 0 1.4 1.4l5.1-5.1 1.5 1.5-5.1 5.1a3.1 3.1 0 0 1-4.3-4.3z",
+    ],
     cutout: &[],
     overlay: &[],
 };
 
 const BELL: Glyph = Glyph {
     path: "M4 17h16l-2-2.7V9a6 6 0 0 0-12 0v5.3z M9 19h6a3 3 0 0 1-6 0z M8 8.5A4.2 4.2 0 0 1 12 5c1.5 0 2.8.7 3.6 1.7A5 5 0 0 0 8 8.5z",
-    main: &["M4 17h16l-2-2.7V9a6 6 0 0 0-12 0v5.3z", "M9 19h6a3 3 0 0 1-6 0z"],
+    main: &[
+        "M4 17h16l-2-2.7V9a6 6 0 0 0-12 0v5.3z",
+        "M9 19h6a3 3 0 0 1-6 0z",
+    ],
     cutout: &[],
-    overlay: &[("M8 8.5A4.2 4.2 0 0 1 12 5c1.5 0 2.8.7 3.6 1.7A5 5 0 0 0 8 8.5z", 0.38)],
+    overlay: &[(
+        "M8 8.5A4.2 4.2 0 0 1 12 5c1.5 0 2.8.7 3.6 1.7A5 5 0 0 0 8 8.5z",
+        0.38,
+    )],
 };
 
 const CHAT: Glyph = Glyph {
     path: "M3 5.8C3 3.7 5 2 7.4 2h9.2C19 2 21 3.7 21 5.8v7.4c0 2.1-2 3.8-4.4 3.8H11l-5.7 4.2.9-4.5C4.3 16.2 3 14.9 3 13.2z M6.8 5h10.4c.7 0 1.3.4 1.6.9H5.2c.3-.5.9-.9 1.6-.9z",
-    main: &["M3 5.8C3 3.7 5 2 7.4 2h9.2C19 2 21 3.7 21 5.8v7.4c0 2.1-2 3.8-4.4 3.8H11l-5.7 4.2.9-4.5C4.3 16.2 3 14.9 3 13.2z"],
+    main: &[
+        "M3 5.8C3 3.7 5 2 7.4 2h9.2C19 2 21 3.7 21 5.8v7.4c0 2.1-2 3.8-4.4 3.8H11l-5.7 4.2.9-4.5C4.3 16.2 3 14.9 3 13.2z",
+    ],
     cutout: &[],
     overlay: &[("M6.8 5h10.4c.7 0 1.3.4 1.6.9H5.2c.3-.5.9-.9 1.6-.9z", 0.38)],
 };
@@ -84,7 +99,10 @@ const CLOCK: Glyph = Glyph {
     path: "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z M11 5h2v6.2l4.3 2.5-1 1.8-5.3-3.1z M5.5 8A8.2 8.2 0 0 1 12 4c2.6 0 4.9 1.2 6.4 3A9 9 0 0 0 5.5 8z",
     main: &["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z"],
     cutout: &["M11 5h2v6.2l4.3 2.5-1 1.8-5.3-3.1z"],
-    overlay: &[("M5.5 8A8.2 8.2 0 0 1 12 4c2.6 0 4.9 1.2 6.4 3A9 9 0 0 0 5.5 8z", 0.38)],
+    overlay: &[(
+        "M5.5 8A8.2 8.2 0 0 1 12 4c2.6 0 4.9 1.2 6.4 3A9 9 0 0 0 5.5 8z",
+        0.38,
+    )],
 };
 
 const CLOSE: Glyph = Glyph {
@@ -99,7 +117,10 @@ const COPY: Glyph = Glyph {
     main: &["M9 2h11a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-11a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2z"],
     cutout: &[],
     overlay: &[
-        ("M4 7h11a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-11a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2z", 0.72),
+        (
+            "M4 7h11a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-11a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2z",
+            0.72,
+        ),
         ("M9 4h11v1H9zM4 9h11v1H4z", 0.38),
     ],
 };
@@ -144,9 +165,14 @@ const MAXIMIZE: Glyph = Glyph {
 
 const MESSAGES: Glyph = Glyph {
     path: "M2.5 5.5A3.5 3.5 0 0 1 6 2h8a3.5 3.5 0 0 1 3.5 3.5v5A3.5 3.5 0 0 1 14 14H9l-4.6 3.2.8-3.6a3.5 3.5 0 0 1-2.7-3.4z M9 16h6.3l3.8 2.7-.7-3a3.2 3.2 0 0 0 3.1-3.2V9A3.5 3.5 0 0 0 18 5.5v5A4.5 4.5 0 0 1 13.5 15H9z",
-    main: &["M2.5 5.5A3.5 3.5 0 0 1 6 2h8a3.5 3.5 0 0 1 3.5 3.5v5A3.5 3.5 0 0 1 14 14H9l-4.6 3.2.8-3.6a3.5 3.5 0 0 1-2.7-3.4z"],
+    main: &[
+        "M2.5 5.5A3.5 3.5 0 0 1 6 2h8a3.5 3.5 0 0 1 3.5 3.5v5A3.5 3.5 0 0 1 14 14H9l-4.6 3.2.8-3.6a3.5 3.5 0 0 1-2.7-3.4z",
+    ],
     cutout: &[],
-    overlay: &[("M9 16h6.3l3.8 2.7-.7-3a3.2 3.2 0 0 0 3.1-3.2V9A3.5 3.5 0 0 0 18 5.5v5A4.5 4.5 0 0 1 13.5 15H9z", 0.72)],
+    overlay: &[(
+        "M9 16h6.3l3.8 2.7-.7-3a3.2 3.2 0 0 0 3.1-3.2V9A3.5 3.5 0 0 0 18 5.5v5A4.5 4.5 0 0 1 13.5 15H9z",
+        0.72,
+    )],
 };
 
 const MIC: Glyph = Glyph {
@@ -169,14 +195,18 @@ const MINIMIZE: Glyph = Glyph {
 
 const NEW_CHAT: Glyph = Glyph {
     path: "M2 5.5A3.5 3.5 0 0 1 5.5 2h9A3.5 3.5 0 0 1 18 5.5v6a3.5 3.5 0 0 1-3.5 3.5H9l-4.8 3.4.8-3.8a3.5 3.5 0 0 1-3-3.5z M18.5 14v-3h2v3h3v2h-3v3h-2v-3h-3v-2z",
-    main: &["M2 5.5A3.5 3.5 0 0 1 5.5 2h9A3.5 3.5 0 0 1 18 5.5v6a3.5 3.5 0 0 1-3.5 3.5H9l-4.8 3.4.8-3.8a3.5 3.5 0 0 1-3-3.5z"],
+    main: &[
+        "M2 5.5A3.5 3.5 0 0 1 5.5 2h9A3.5 3.5 0 0 1 18 5.5v6a3.5 3.5 0 0 1-3.5 3.5H9l-4.8 3.4.8-3.8a3.5 3.5 0 0 1-3-3.5z",
+    ],
     cutout: &["M18.5 14v-3h2v3h3v2h-3v3h-2v-3h-3v-2z"],
     overlay: &[],
 };
 
 const PALETTE: Glyph = Glyph {
     path: "M12 2C6.2 2 2 5.8 2 10.7 2 15.2 5.5 18 9.2 18h1.1c1 0 1.5.9 1 1.7-.8 1.4.3 2.4 1.9 2.3 5-.5 8.8-4.5 8.8-9.7C22 6.5 17.8 2 12 2z M5.7 9.2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z M9 6.4a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z M13.5 6.8a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z M16.3 10.5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z",
-    main: &["M12 2C6.2 2 2 5.8 2 10.7 2 15.2 5.5 18 9.2 18h1.1c1 0 1.5.9 1 1.7-.8 1.4.3 2.4 1.9 2.3 5-.5 8.8-4.5 8.8-9.7C22 6.5 17.8 2 12 2z"],
+    main: &[
+        "M12 2C6.2 2 2 5.8 2 10.7 2 15.2 5.5 18 9.2 18h1.1c1 0 1.5.9 1 1.7-.8 1.4.3 2.4 1.9 2.3 5-.5 8.8-4.5 8.8-9.7C22 6.5 17.8 2 12 2z",
+    ],
     cutout: &[
         "M5.7 9.2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z",
         "M9 6.4a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z",
@@ -195,7 +225,9 @@ const PIN: Glyph = Glyph {
 
 const POLL: Glyph = Glyph {
     path: "M5.5 3h13a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z M7 7h2v8H7zm4 3h2v5h-2zm4-5h2v10h-2zm-8 11h10v2H7z",
-    main: &["M5.5 3h13a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z"],
+    main: &[
+        "M5.5 3h13a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z",
+    ],
     cutout: &["M7 7h2v8H7zm4 3h2v5h-2zm4-5h2v10h-2zm-8 11h10v2H7z"],
     overlay: &[],
 };
@@ -225,7 +257,10 @@ const SEARCH: Glyph = Glyph {
         "m14.8 14.1 1.5-1.5 5.2 5.2a1.1 1.1 0 0 1 0 1.6l-.6.6a1.1 1.1 0 0 1-1.6 0z",
     ],
     cutout: &["M6 10.2a4.2 4.2 0 1 0 8.4 0a4.2 4.2 0 1 0 -8.4 0z"],
-    overlay: &[("M6.5 8.8A4.4 4.4 0 0 1 10.4 6c1.2 0 2.3.5 3.1 1.2a5 5 0 0 0-7 1.6z", 0.38)],
+    overlay: &[(
+        "M6.5 8.8A4.4 4.4 0 0 1 10.4 6c1.2 0 2.3.5 3.1 1.2a5 5 0 0 0-7 1.6z",
+        0.38,
+    )],
 };
 
 const SEND: Glyph = Glyph {
@@ -237,7 +272,9 @@ const SEND: Glyph = Glyph {
 
 const SETTINGS: Glyph = Glyph {
     path: "m10.2 1.5-.7 2.3-1.6.7-2.2-1.1-2.3 2.3 1.1 2.2-.7 1.6-2.3.7v3.3l2.3.7.7 1.6L3.4 18l2.3 2.3 2.2-1.1 1.6.7.7 2.3h3.3l.7-2.3 1.6-.7 2.2 1.1 2.3-2.3-1.1-2.2.7-1.6 2.3-.7v-3.3l-2.3-.7-.7-1.6 1.1-2.2L18 3.4l-2.2 1.1-1.6-.7-.7-2.3z M8.4 11.8a3.4 3.4 0 1 0 6.8 0a3.4 3.4 0 1 0 -6.8 0z M10.5 3h2l.4 1.5h-2.8z",
-    main: &["m10.2 1.5-.7 2.3-1.6.7-2.2-1.1-2.3 2.3 1.1 2.2-.7 1.6-2.3.7v3.3l2.3.7.7 1.6L3.4 18l2.3 2.3 2.2-1.1 1.6.7.7 2.3h3.3l.7-2.3 1.6-.7 2.2 1.1 2.3-2.3-1.1-2.2.7-1.6 2.3-.7v-3.3l-2.3-.7-.7-1.6 1.1-2.2L18 3.4l-2.2 1.1-1.6-.7-.7-2.3z"],
+    main: &[
+        "m10.2 1.5-.7 2.3-1.6.7-2.2-1.1-2.3 2.3 1.1 2.2-.7 1.6-2.3.7v3.3l2.3.7.7 1.6L3.4 18l2.3 2.3 2.2-1.1 1.6.7.7 2.3h3.3l.7-2.3 1.6-.7 2.2 1.1 2.3-2.3-1.1-2.2.7-1.6 2.3-.7v-3.3l-2.3-.7-.7-1.6 1.1-2.2L18 3.4l-2.2 1.1-1.6-.7-.7-2.3z",
+    ],
     cutout: &["M8.4 11.8a3.4 3.4 0 1 0 6.8 0a3.4 3.4 0 1 0 -6.8 0z"],
     overlay: &[("M10.5 3h2l.4 1.5h-2.8z", 0.38)],
 };
@@ -246,12 +283,17 @@ const SHIELD: Glyph = Glyph {
     path: "M12 1.8 21 5v6.2c0 5.2-3.7 9.4-9 11-5.3-1.6-9-5.8-9-11V5z m8.4 11.6 2.1 2.1 4.9-5 1.4 1.5-6.3 6.3L7 13z M12 4 5.4 6.3v4.8c0 .5 0 1 .2 1.5C6.2 8.6 8.6 6 12 4z",
     main: &["M12 1.8 21 5v6.2c0 5.2-3.7 9.4-9 11-5.3-1.6-9-5.8-9-11V5z"],
     cutout: &["m8.4 11.6 2.1 2.1 4.9-5 1.4 1.5-6.3 6.3L7 13z"],
-    overlay: &[("M12 4 5.4 6.3v4.8c0 .5 0 1 .2 1.5C6.2 8.6 8.6 6 12 4z", 0.38)],
+    overlay: &[(
+        "M12 4 5.4 6.3v4.8c0 .5 0 1 .2 1.5C6.2 8.6 8.6 6 12 4z",
+        0.38,
+    )],
 };
 
 const SIDEBAR: Glyph = Glyph {
     path: "M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z M8 5h2v14H8z M4 5h3v1H4zm8 0h8v1h-8z",
-    main: &["M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z"],
+    main: &[
+        "M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z",
+    ],
     cutout: &["M8 5h2v14H8z"],
     overlay: &[("M4 5h3v1H4zm8 0h8v1h-8z", 0.38)],
 };
@@ -264,12 +306,17 @@ const SMILE: Glyph = Glyph {
         "M14.4 9.2a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0z",
         "M6.6 13.2h10.8c-.6 3.1-2.5 5-5.4 5s-4.8-1.9-5.4-5z",
     ],
-    overlay: &[("M5.5 7.4A8.5 8.5 0 0 1 12 4c2.5 0 4.8 1.1 6.3 2.8A9.1 9.1 0 0 0 5.5 7.4z", 0.38)],
+    overlay: &[(
+        "M5.5 7.4A8.5 8.5 0 0 1 12 4c2.5 0 4.8 1.1 6.3 2.8A9.1 9.1 0 0 0 5.5 7.4z",
+        0.38,
+    )],
 };
 
 const SPLIT: Glyph = Glyph {
     path: "M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z M11 4h2v16h-2z M4 5h6v1H4zm10 0h6v1h-6z",
-    main: &["M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z"],
+    main: &[
+        "M4.5 3h15a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-15a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z",
+    ],
     cutout: &["M11 4h2v16h-2z"],
     overlay: &[("M4 5h6v1H4zm10 0h6v1h-6z", 0.38)],
 };
@@ -601,62 +648,103 @@ mod tests {
     }
 
     /// True when the path is a valid path of SVG: it starts with a move, every
-    /// command is known and has all its arguments, and it ends with a
-    /// command that closes the path.
+    /// command is known and has all its arguments, and the last command is
+    /// not cut in the middle.
     fn is_valid_path(path: &str) -> bool {
         let path = path.trim();
         if path.is_empty() {
             return false;
         }
-        let mut command = None;
+        let mut command: Option<char> = None;
         let mut numbers = 0usize;
-        let mut closed = false;
-        for piece in path.split(|character: char| {
-            character.is_ascii_alphabetic() || character.is_ascii_digit()
-                || matches!(character, '.' | '-' | '+' | 'e' | 'E')
-        }) {
-            if piece.is_empty() {
-                continue;
-            }
-            if piece.chars().next().is_some_and(|first| first.is_ascii_alphabetic()) {
-                if let Some(previous) = command {
-                    let expected = arguments(previous).unwrap_or(0);
-                    if numbers % expected != 0 {
-                        return false;
-                    }
-                    closed = matches!(previous, 'Z' | 'z');
-                }
-                let first = piece.chars().next().unwrap_or(' ');
-                if arguments(first).is_none() {
+        let mut number = String::new();
+        for character in path.chars() {
+            if character.is_ascii_alphabetic() && !is_exponent(character, &number) {
+                if !flush_number(&mut number, &mut numbers) {
                     return false;
                 }
-                command = Some(first);
+                let Some(previous) = command else {
+                    // The path has to start with a move.
+                    if !matches!(character, 'M' | 'm') {
+                        return false;
+                    }
+                    command = Some(character);
+                    continue;
+                };
+                if !has_all_the_arguments(previous, numbers) {
+                    return false;
+                }
+                if arguments(character).is_none() {
+                    return false;
+                }
+                command = Some(character);
                 numbers = 0;
                 continue;
             }
-            let value: f64 = match piece.parse() {
-                Ok(value) => value,
-                Err(_) => return false,
-            };
-            if !value.is_finite() {
-                return false;
+            if character.is_ascii_digit() || matches!(character, '.' | '-' | '+') {
+                // port: the SVG ends a number when it finds a second point or
+                // the sign of the next one, so `.9.9` is two numbers.
+                let ends_the_number = match character {
+                    '.' => number.contains('.'),
+                    '-' | '+' => {
+                        !number.is_empty() && !number.ends_with('e') && !number.ends_with('E')
+                    }
+                    _ => false,
+                };
+                if ends_the_number && !flush_number(&mut number, &mut numbers) {
+                    return false;
+                }
+                number.push(character);
+                continue;
             }
-            numbers += 1;
+            if character.is_whitespace() || character == ',' {
+                if !flush_number(&mut number, &mut numbers) {
+                    return false;
+                }
+                continue;
+            }
+            return false;
+        }
+        if !flush_number(&mut number, &mut numbers) {
+            return false;
         }
         let Some(last) = command else {
             return false;
         };
-        let expected = arguments(last).unwrap_or(0);
-        if numbers % expected != 0 {
+        has_all_the_arguments(last, numbers)
+    }
+
+    /// True when the command has all of its arguments.
+    fn has_all_the_arguments(command: char, numbers: usize) -> bool {
+        let expected = arguments(command).unwrap_or(0);
+        expected == 0 || numbers % expected == 0
+    }
+
+    /// True when the letter is the exponent of the number that is being read.
+    fn is_exponent(character: char, number: &str) -> bool {
+        matches!(character, 'e' | 'E')
+            && !number.is_empty()
+            && number
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_ascii_digit() || last == '.')
+    }
+
+    /// Reads the number that was being read. False when it is not a number.
+    fn flush_number(number: &mut String, numbers: &mut usize) -> bool {
+        if number.is_empty() {
+            return true;
+        }
+        let value: f64 = match number.parse() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        if !value.is_finite() {
             return false;
         }
-        // The path has to start with a move and to end with a command that
-        // leaves the point of the path on a shape.
-        let starts_with_move = path
-            .chars()
-            .next()
-            .is_some_and(|first| matches!(first, 'M' | 'm'));
-        starts_with_move && closed
+        *numbers += 1;
+        number.clear();
+        true
     }
 
     #[test]
@@ -820,8 +908,16 @@ mod tests {
     fn the_document_of_the_icon_has_the_shapes_and_the_holes() {
         for icon in WhatfastIcon::ALL {
             let document = icon.svg_document();
-            assert!(document.starts_with("<svg "), "the document of {} is not an SVG", icon.name());
-            assert!(document.ends_with("</svg>"), "the document of {} is not closed", icon.name());
+            assert!(
+                document.starts_with("<svg "),
+                "the document of {} is not an SVG",
+                icon.name()
+            );
+            assert!(
+                document.ends_with("</svg>"),
+                "the document of {} is not closed",
+                icon.name()
+            );
             assert!(
                 document.contains(r#"viewBox="0 0 24 24""#),
                 "the document of {} has no view box",
@@ -875,9 +971,9 @@ mod tests {
 
     #[test]
     fn the_icon_of_the_theme_follows_the_appearance() {
-        // `IconName` is generated and does not implement `PartialEq`, so the
-        // variants are matched instead of compared.
-        assert!(matches!(theme_toggle_icon(true), IconName::Sun));
-        assert!(matches!(theme_toggle_icon(false), IconName::Moon));
+        // The `IconName` of the component has no `PartialEq`, so the path of
+        // the icon is the thing that is compared.
+        assert_eq!(theme_toggle_icon(true).path().as_str(), "icons/sun.svg");
+        assert_eq!(theme_toggle_icon(false).path().as_str(), "icons/moon.svg");
     }
 }
