@@ -298,8 +298,13 @@ impl NavRail {
             NavButton {
                 action: NavAction::Chats,
                 // port: the button of the oracle is active when the chat list
-                // is not collapsed.
-                active: self.sidebar_open && !self.states_open,
+                // is not collapsed. Los estados, los canales y los archivados
+                // son vistas propias: el boton de los chats no queda activo
+                // mientras cualquiera de ellas esta en frente.
+                active: self.sidebar_open
+                    && !self.states_open
+                    && !self.channels_open
+                    && !self.archived_open,
                 enabled: self.link == LinkState::Linked,
             },
             NavButton {
