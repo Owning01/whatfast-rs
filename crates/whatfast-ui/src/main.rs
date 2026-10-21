@@ -18,15 +18,23 @@
 //! - `render`: the drawing of every panel
 //! - `helpers`: the free functions used by the drawing
 //! - `icons`: the icon set of the web client
+//! - `instance`: the lock that keeps a single instance of the app
 //! - `media_editor`: the crop and the rotation of a picture
+//! - `members`: the panel of the members of a group
+//! - `message_actions`: the menu of a message, the forward, the poll and
+//!   the clip of the composer
 //! - `navrail`: the column of icons at the left
-//! - `tabs`: the strip of open chats
-//! - `icons`: the icon set of the web client
-//! - `media_editor`: the crop and the rotation of a picture
-//! - `navrail`: the column of icons at the left
+//! - `newsletters`: the panel of the channels
+//! - `statuses`: the strip of the states of the contacts
+//! - `stickers`: the tray of the stickers
 //! - `tabs`: the strip of open chats
 //! - `text`: the pure helpers of the text of a message
 //! - `tokens`: the theme tokens and the scale of the interface
+
+// Whatfast is a window, not a console program: with the `windows` subsystem
+// the executable does not open a black terminal behind the interface when it
+// is started from the desktop, from the Start menu or from the installer.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
@@ -54,7 +62,7 @@ fn main() {
     // One instance only: two sidecars with the same device session would
     // confuse the server and could invalidate the session of the phone.
     let Some(_lock) = instance::InstanceLock::acquire(&whatfast_model::paths::data_dir()) else {
-        eprintln!("Whatfast is already running");
+        warn("Whatfast is already running.");
         std::process::exit(1);
     };
     // The source of the assets is the one of `gpui_component` plus the icons
@@ -81,6 +89,9 @@ fn main() {
             };
             cx.spawn(async move |cx| {
                 let opened = cx.open_window(options, |window, cx| {
+                    // The title is what the taskbar and Alt-Tab show: without
+                    // it the window of the app has no name in the system.
+                    window.set_window_title("Whatfast");
                     let app = cx.new(|cx| Whatfast::new(window, cx));
                     // Fallback for when focus is lost or points at an unmounted
                     // element: in that state the root div is off the dispatch path
@@ -101,10 +112,37 @@ fn main() {
                 if opened.is_err() {
                     // There is no window to show the error in, so the process has
                     // to say it in the only place that is left.
-                    eprintln!("Whatfast: no se pudo abrir la ventana");
+                    warn("Whatfast could not open its window.");
                     std::process::exit(1);
                 }
             })
             .detach();
         });
+}
+
+/// Says a message that happens before there is a window to show it in.
+///
+/// The executable of Windows has no console (`windows_subsystem`), so the
+/// message goes in a dialog of the system.
+fn warn(message: &str) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
+        let titulo: Vec<u16> = "Whatfast".encode_utf16().chain(Some(0)).collect();
+        let texto: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: the two strings are vectors of `u16` that end in a zero, so
+        // the call reads them as the `PCWSTR` that Windows expects.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                texto.as_ptr(),
+                titulo.as_ptr(),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{message}");
+    }
 }

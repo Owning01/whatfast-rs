@@ -77,25 +77,35 @@ fn read_owner(path: &Path) -> Option<u32> {
 }
 
 /// Whether a process is still running.
+#[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
-    #[cfg(windows)]
-    {
-        // Without a dependency: the list of the tasks of the system answers
-        // if the process is there. It only runs when the lock exists, that
-        // is, when another instance could be running.
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .map(|output| {
-                let text = String::from_utf8_lossy(&output.stdout);
-                text.contains(&format!("{pid}")) && !text.contains("INFO: No tasks")
-            })
-            .unwrap_or(false)
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the handle that the call returns is checked and closed right
+    // away, and the code of the exit is only read while the handle is open.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // A process that is there but that can not be opened is still
+            // running: the system protects it, or it belongs to another
+            // user. It only counts as gone when it does not exist.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut codigo = 0u32;
+        let leido = GetExitCodeProcess(handle, &mut codigo) != 0;
+        CloseHandle(handle);
+        leido && codigo == STILL_ACTIVE as u32
     }
-    #[cfg(unix)]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
+}
+
+/// Whether a process is still running.
+#[cfg(unix)]
+fn is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 #[cfg(test)]

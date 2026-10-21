@@ -34,6 +34,15 @@ qrcode = { version = "0.14", default-features = false }
 smol = "2"
 uuid = { version = "1.18", features = ["v4"] }
 
+# The dialog of the system for the messages that happen before there is a
+# window, and the check of the process that holds the lock of the instance:
+# the app is a `windows_subsystem`, so it has no console.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3.23"
