@@ -729,3 +729,12 @@ agentes deja de costar 3 GB por worktree.
   que pide el stack de GPUI, y el instalador de Windows (NSIS) no existia.
 - **Estado**: 438 tests en verde, clippy limpio, paridad 153/153,
   50/50 RPC y 21/21 componentes.
+- **Publicado**: la etiqueta `v0.1.0-beta.1` disparo el workflow de release y
+  salio con tres artefactos: `whatfast-setup.exe` (el instalador NSIS de
+  Windows), `whatfast-windows.zip` y `whatfast-linux.tar.gz`. Los dos jobs
+  (Windows y Linux) compilaron el stack de GPUI en el runner: el de Linux
+  tambien, con las dependencias del sistema que pidio el workflow.
+- **El CI de GitHub** corre el formateo, el clippy, los tests y el juez de
+  paridad en los dos sistemas. La primera corrida fallo por el formateo (los
+  agentes formatearon archivo por archivo con `rustfmt` y no con
+  `cargo fmt`): se corrigio con `cargo fmt --all` y quedo limpio.
