@@ -36,7 +36,8 @@ use smol::Timer;
 use uuid::Uuid;
 use whatfast_model::{
     emoji_picker::{EmojiCategory, filtered as filter_emojis},
-    model::{CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
+    favorites,
+    model::{CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
     settings, sticker,
 };
 use whatfast_protocol::{
@@ -535,7 +536,6 @@ pub(crate) struct Whatfast {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
     pub(crate) ui_scale: f32,
-    pub(crate) chat_view: ChatView,
     pub(crate) chat_scroll: UniformListScrollHandle,
     pub(crate) chat_smooth_scroll: SmoothScrollState,
     pub(crate) message_scroll: VirtualListScrollHandle,
@@ -580,6 +580,17 @@ pub(crate) struct Whatfast {
     pub(crate) newsletters_loading: bool,
     /// The newsletter whose posts are open.
     pub(crate) selected_newsletter: Option<String>,
+    /// Whether the view of the states is in front of the column of chats.
+    ///
+    /// The states are not conversations: they have their own view, the same
+    /// way the reference draws them.
+    pub(crate) states_open: bool,
+    /// Whether the view of the channels is in front of the column of chats.
+    ///
+    /// The channels are not conversations either: they have their own view.
+    pub(crate) channels_open: bool,
+    /// Whether the view of the archived conversations is in front.
+    pub(crate) archived_open: bool,
     /// When the statuses of the profile were read the last time.
     pub(crate) last_status_refresh: Instant,
     /// The column of icons at the left of the window.
@@ -630,7 +641,9 @@ impl Whatfast {
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search contacts, groups, messages")
+                // port: the placeholder of the origin
+                // (`tauri/src/lib/i18n.ts`, `sidebar.searchPlaceholder`).
+                .placeholder("Search or start a new chat")
                 .clean_on_escape()
         });
         let focus_handle = cx.focus_handle();
@@ -777,7 +790,6 @@ impl Whatfast {
             focus_handle,
             settings_open: false,
             ui_scale,
-            chat_view: ChatView::Inbox,
             chat_scroll: UniformListScrollHandle::new(),
             chat_smooth_scroll: SmoothScrollState::default(),
             message_scroll: VirtualListScrollHandle::new(),
@@ -809,6 +821,9 @@ impl Whatfast {
             sticker_library_loading: false,
             newsletters_loading: false,
             selected_newsletter: None,
+            states_open: false,
+            channels_open: false,
+            archived_open: false,
             last_status_refresh: Instant::now(),
             nav_rail,
             tab_strip,
@@ -829,6 +844,10 @@ impl Whatfast {
             this.store.fatal_error = Some(format!("Could not start the local backend: {error}"));
             return this;
         }
+        // The favorites belong to the profile, not to the account: they come
+        // from the file of the profile and not from the sidecar.
+        this.store
+            .set_favorite_chat_ids(favorites::load_favorites());
         this.request(
             rpc_request::Request::Hello(whatfast_protocol::HelloRequest {
                 desktop_version: env!("CARGO_PKG_VERSION").into(),
@@ -1289,11 +1308,7 @@ impl Whatfast {
                 self.clear_search(window, cx);
                 self.message_generation = self.message_generation.wrapping_add(1);
                 self.store.select_chat(chat_id.clone());
-                self.chat_view = if self.store.chat(&chat_id).is_some_and(|chat| chat.archived) {
-                    ChatView::Archived
-                } else {
-                    ChatView::Inbox
-                };
+                self.show_chat_in_the_column(&chat_id);
                 record_recent_chat(&mut self.recent_chat_ids, &chat_id);
                 let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
                 self.replying_to_message_id = draft.reply_to_message_id;
@@ -3020,11 +3035,21 @@ impl Whatfast {
         self.set_ui_scale(self.ui_scale + delta, window, cx);
     }
 
-    pub(crate) fn toggle_chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.chat_view = match self.chat_view {
-            ChatView::Inbox => ChatView::Archived,
-            ChatView::Archived => ChatView::Inbox,
-        };
+    /// Changes the filter of the column of chats.
+    ///
+    /// port: `setFilter` of the origin (`tauri/src/state/app.ts`): the filter
+    /// is part of the state of the sidebar, and the channels are asked for
+    /// when the filter of the channels is picked.
+    pub(crate) fn set_chat_filter(
+        &mut self,
+        filter: ChatFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.chat_filter() == filter {
+            return;
+        }
+        self.store.set_chat_filter(filter);
         self.message_generation = self.message_generation.wrapping_add(1);
         self.store.selected_chat_id = None;
         self.emoji_target = None;
@@ -3046,6 +3071,39 @@ impl Whatfast {
         }
     }
 
+    /// Marks a conversation as a favorite, or takes the mark away.
+    ///
+    /// port: `toggleFavorite` of the origin (`tauri/src/state/app.ts`): the
+    /// mark belongs to the profile, so it is written to the file of the
+    /// profile and not to the sidecar.
+    pub(crate) fn toggle_favorite(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.store.toggle_favorite(&chat_id);
+        if let Err(error) = favorites::save_favorites(self.store.favorite_chat_ids()) {
+            self.store.toast_error = Some(format!("Could not save the favorites: {error}"));
+        }
+        cx.notify();
+    }
+
+    /// Leaves the column in the filter that shows the conversation.
+    ///
+    /// An archived conversation only shows up under the filter of the
+    /// archived, so the column moves there when the user opens one.
+    fn show_chat_in_the_column(&mut self, chat_id: &str) {
+        let filter = if self.store.chat(chat_id).is_some_and(|chat| chat.archived) {
+            ChatFilter::Archived
+        } else {
+            ChatFilter::All
+        };
+        if self.store.chat_filter() != filter {
+            self.store.set_chat_filter(filter);
+        }
+        // An archived conversation only shows in the view of the archived: the
+        // column moves there so the user sees where the chat is.
+        self.archived_open = filter == ChatFilter::Archived;
+        self.states_open = false;
+        self.channels_open = false;
+    }
+
     pub(crate) fn recent_chat_candidates(&self) -> Vec<String> {
         let mut candidates = self
             .recent_chat_ids
@@ -3057,7 +3115,7 @@ impl Whatfast {
         // visible chat list (already recency-ordered) until enough history has
         // accumulated to cycle.
         if candidates.len() < 2 {
-            for chat_id in self.store.chat_ids(self.chat_view).iter() {
+            for chat_id in self.store.chat_ids(self.store.chat_filter()).iter() {
                 if !candidates.contains(chat_id) {
                     candidates.push(chat_id.clone());
                 }
@@ -3240,11 +3298,7 @@ impl Whatfast {
         if self.store.chat(&chat_id).is_none() {
             return;
         }
-        self.chat_view = if self.store.chat(&chat_id).is_some_and(|chat| chat.archived) {
-            ChatView::Archived
-        } else {
-            ChatView::Inbox
-        };
+        self.show_chat_in_the_column(&chat_id);
         record_recent_chat(&mut self.recent_chat_ids, &chat_id);
         self.load_selected_chat(chat_id.clone());
         let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
@@ -3419,7 +3473,7 @@ impl Whatfast {
         self.recent_chat_ids.clear();
         self.chat_switcher = None;
         self.chat_info = None;
-        self.chat_view = ChatView::Inbox;
+        self.store.set_chat_filter(ChatFilter::All);
         self.request(
             rpc_request::Request::StartPairing(whatfast_protocol::StartPairingRequest {}),
             PendingRequest::Pairing,
@@ -4250,12 +4304,42 @@ impl Whatfast {
     ) {
         match action {
             NavAction::Chats => {
-                self.chat_view = ChatView::Inbox;
+                self.store.set_chat_filter(ChatFilter::All);
+                self.states_open = false;
+                self.channels_open = false;
+                self.archived_open = false;
                 self.settings_open = false;
             }
             NavAction::Search => {
+                self.states_open = false;
+                self.channels_open = false;
+                self.archived_open = false;
                 self.settings_open = false;
                 self.focus_search(window, cx);
+            }
+            NavAction::States => {
+                // The states are their own view: they are not conversations.
+                self.states_open = true;
+                self.channels_open = false;
+                self.archived_open = false;
+                self.settings_open = false;
+                self.load_statuses();
+            }
+            NavAction::Channels => {
+                // The channels are their own view too.
+                self.states_open = false;
+                self.channels_open = true;
+                self.archived_open = false;
+                self.settings_open = false;
+                self.load_newsletters();
+            }
+            NavAction::Archived => {
+                // The archived conversations are their own view.
+                self.states_open = false;
+                self.channels_open = false;
+                self.archived_open = true;
+                self.settings_open = false;
+                self.store.set_chat_filter(ChatFilter::Archived);
             }
             NavAction::Privacy | NavAction::Settings => {
                 self.settings_open = true;
@@ -4309,10 +4393,16 @@ impl Whatfast {
             _ => LinkState::Linked,
         };
         let settings_open = self.settings_open;
+        let states_open = self.states_open;
+        let channels_open = self.channels_open;
+        let archived_open = self.archived_open;
         self.nav_rail.update(cx, |rail, _| {
             rail.set_link(link);
             rail.set_sidebar_open(true);
             rail.set_settings_open(settings_open);
+            rail.set_states_open(states_open);
+            rail.set_channels_open(channels_open);
+            rail.set_archived_open(archived_open);
         });
         let entries: Vec<TabEntry> = self
             .recent_chat_ids
@@ -4475,7 +4565,7 @@ impl Whatfast {
         });
         let chats: Vec<Chat> = self
             .store
-            .chat_ids(ChatView::Inbox)
+            .chat_ids(ChatFilter::All)
             .iter()
             .filter_map(|chat_id| self.store.chat(chat_id).cloned())
             .collect();

@@ -10,3 +10,10 @@
 
 /dist/
 /backend/bin/
+
+# El cache de los guiones de Python.
+__pycache__/
+*.pyc
+
+# Las capturas del trabajo en curso: las definitivas van en docs/screenshots.
+docs/screenshots/actual/

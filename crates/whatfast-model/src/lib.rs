@@ -11,6 +11,7 @@
 //! the contract the bridge speaks.
 
 pub mod emoji_picker;
+pub mod favorites;
 pub mod model;
 pub mod paths;
 pub mod settings;

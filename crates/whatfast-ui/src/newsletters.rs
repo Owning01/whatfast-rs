@@ -92,11 +92,11 @@ pub(crate) fn selected_newsletter<'a>(
 /// port: the origin writes "Channel", with " ┬À muted" when the channel is
 /// muted.
 pub(crate) fn channel_subtitle(newsletter: &Newsletter) -> String {
+    let mut subtitle = format!("Channel · {}", message_time(newsletter.subscribed_at_ms));
     if newsletter.muted {
-        "Channel ┬À muted".to_string()
-    } else {
-        "Channel".to_string()
+        subtitle.push_str(" · muted");
     }
+    subtitle
 }
 
 /// The jid of a channel that was created locally.
@@ -135,6 +135,8 @@ pub(crate) struct NewsletterPanel {
     name_input: Entity<InputState>,
     /// The description of the channel the user wants to create.
     description_input: Entity<InputState>,
+    /// The search of the list of channels.
+    search_input: Entity<InputState>,
     /// The subscriptions of the inputs.
     _subscriptions: Vec<Subscription>,
 }
@@ -156,6 +158,11 @@ impl NewsletterPanel {
         let description_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Description (optional)")
+                .clean_on_escape()
+        });
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search channels")
                 .clean_on_escape()
         });
 
@@ -183,8 +190,19 @@ impl NewsletterPanel {
             invite_input,
             name_input,
             description_input,
+            search_input,
             _subscriptions: vec![invite_subscription, create_subscription],
         }
+    }
+
+    /// The text of the search of the list of channels.
+    pub(crate) fn search_query(&self, cx: &mut Context<Whatfast>) -> String {
+        self.search_input.read(cx).value().to_string()
+    }
+
+    /// The input of the search of the list of channels.
+    pub(crate) fn search_input(&self) -> &Entity<InputState> {
+        &self.search_input
     }
 
     /// Whether the dialog to follow a channel is open.
@@ -195,6 +213,11 @@ impl NewsletterPanel {
     /// Whether the dialog to create a local channel is open.
     pub(crate) fn create_open(&self) -> bool {
         self.state.borrow().create_open
+    }
+
+    /// Opens the dialog to create a local channel.
+    pub(crate) fn open_create(&self) {
+        self.state.borrow_mut().create_open = true;
     }
 
     /// Draws the panel of the newsletters.
@@ -240,12 +263,21 @@ impl NewsletterPanel {
         let scale = app.ui_scale;
         let newsletters = app.store.newsletters();
         let selected = app.selected_newsletter.clone();
+        // The search of the list keeps the channels whose name has the text.
+        let query = self.search_query(cx).trim().to_lowercase();
+        let visible: Vec<Newsletter> = newsletters
+            .iter()
+            .filter(|newsletter| {
+                query.is_empty() || newsletter.name.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
         v_flex()
             .id("newsletter-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .children(newsletters.iter().enumerate().map(|(index, newsletter)| {
+            .children(visible.iter().enumerate().map(|(index, newsletter)| {
                 let active = selected.as_deref() == Some(newsletter.jid.as_str());
                 let jid = newsletter.jid.clone();
                 let badge = self.state.borrow().local.contains_key(&jid);
@@ -280,10 +312,23 @@ impl NewsletterPanel {
                                             .gap(px(6.))
                                             .child(
                                                 div()
+                                                    .flex_1()
+                                                    .min_w_0()
                                                     .text_sm()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .truncate()
                                                     .child(newsletter.name.clone()),
+                                            )
+                                            // The time of the subscription goes
+                                            // at the right of the name.
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(message_time(
+                                                        newsletter.subscribed_at_ms,
+                                                    )),
                                             )
                                             .when(badge, |row| {
                                                 row.child(
@@ -307,6 +352,44 @@ impl NewsletterPanel {
                             ),
                     )
             }))
+    }
+
+    /// The row of the buttons that follows the list of channels.
+    ///
+    /// The reference draws a button to follow a channel and another one to
+    /// create a local one, at the foot of the list.
+    pub(crate) fn render_list_footer(&self, cx: &mut Context<Whatfast>) -> gpui::Div {
+        let state = self.state.clone();
+        let create_state = self.state.clone();
+        h_flex()
+            .flex_none()
+            .gap(px(8.))
+            .justify_center()
+            .p(px(10.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("newsletter-follow")
+                    .primary()
+                    .small()
+                    .icon(Icon::new(IconName::Plus))
+                    .label("Follow")
+                    .on_click(cx.listener(move |_app, _, _, cx| {
+                        state.borrow_mut().subscribe_open = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("newsletter-create")
+                    .secondary()
+                    .small()
+                    .icon(Icon::new(IconName::Plus))
+                    .label("New local channel")
+                    .on_click(cx.listener(move |_app, _, _, cx| {
+                        create_state.borrow_mut().create_open = true;
+                        cx.notify();
+                    })),
+            )
     }
 
     /// The header of the panel: the channel that is open.

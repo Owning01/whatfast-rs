@@ -35,13 +35,14 @@ use gpui_component::{
 };
 use smol::Timer;
 
-use whatfast_core::message_format::{DateLocale, LocalTimestamp, format_time};
+use whatfast_core::message_format::{DateLocale, LocalTimestamp, format_day, format_time};
 use whatfast_model::model::message_text;
 use whatfast_protocol::{
     ImageContent, Message, MessageStatus, StatusGroup, TextContent, message::Content,
 };
 
 use crate::app::Whatfast;
+use crate::icons::WhatfastIcon;
 use crate::tokens::parse_color;
 
 /// How long a status stays open before the viewer moves to the next one.
@@ -96,6 +97,11 @@ pub(crate) struct StatusStripState {
     pub(crate) generation: u64,
     /// Whether the statuses were already asked for.
     pub(crate) requested: bool,
+    /// Whether the composer of a text status is open in the panel.
+    ///
+    /// The reference draws two buttons, one for the text and one for the
+    /// photo: the composer of the text only shows when the first is pressed.
+    pub(crate) text_composer_open: bool,
 }
 
 impl StatusStripState {
@@ -280,6 +286,21 @@ fn message_time(timestamp_ms: i64) -> String {
     format_time(LocalTimestamp::new(timestamp_ms, 0), DateLocale::EnUs)
 }
 
+/// The time of a status, the way the reference writes it in the list.
+///
+/// port: the reference writes the day and the hour, the same way the origin
+/// writes the day of a message (`formatDay` and `formatTime`).
+fn status_time(timestamp_ms: i64, now_ms: i64) -> String {
+    let value = LocalTimestamp::new(timestamp_ms, 0);
+    let now = LocalTimestamp::new(now_ms, 0);
+    let day = format_day(value, now, DateLocale::EnUs);
+    let hour = format_time(value, DateLocale::EnUs);
+    if day == "Today" {
+        return format!("Today at {hour}");
+    }
+    format!("{day} at {hour}")
+}
+
 /// The strip of the statuses of the contacts.
 pub(crate) struct StatusStrip {
     /// The state of the strip.
@@ -324,30 +345,198 @@ impl StatusStrip {
         self.state.borrow().viewer
     }
 
-    /// Draws the strip of the statuses and the form of the text status.
-    pub(crate) fn render(&self, app: &Whatfast, cx: &mut Context<Whatfast>) -> gpui::Div {
+    /// Asks the user for a photo and publishes it as a status.
+    pub(crate) fn publish_photo_status(&self, window: &mut Window, cx: &mut Context<Whatfast>) {
+        choose_photo_status(&self.state, window, cx);
+    }
+
+    /// Opens or closes the composer of a text status.
+    pub(crate) fn toggle_text_composer(&self) {
+        let mut state = self.state.borrow_mut();
+        state.text_composer_open = !state.text_composer_open;
+    }
+
+    /// Draws the panel of the states that sits next to the list.
+    ///
+    /// The reference draws the title, the explanation of what a status is and
+    /// two buttons: one for the text and one for the photo.
+    pub(crate) fn render_panel(
+        &self,
+        app: &Whatfast,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let muted = cx.theme().muted_foreground;
+        let text_open = self.state.borrow().text_composer_open;
+        let mut panel = v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .child("Share status"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Share photos, videos and text that disappear after 24 hours."),
+            )
+            .child(
+                h_flex()
+                    .gap_4()
+                    .child(
+                        Button::new("status-text")
+                            .secondary()
+                            .rounded_full()
+                            .icon(WhatfastIcon::Edit)
+                            .label("Text status")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.status_strip.toggle_text_composer();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("status-photo")
+                            .secondary()
+                            .rounded_full()
+                            .icon(IconName::GalleryVerticalEnd)
+                            .label("Photo and video")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.status_strip.publish_photo_status(window, cx);
+                            })),
+                    ),
+            );
+        if text_open {
+            panel = panel.child(self.render_form(app, cx));
+        }
+        panel.id("status-panel")
+    }
+
+    /// Draws the view of the states.
+    ///
+    /// The states are not conversations: they have their own view, the same
+    /// way the reference draws them, with the state of the user on top and the
+    /// list of the contacts below.
+    pub(crate) fn render_view(
+        &self,
+        app: &Whatfast,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
         let scale = app.ui_scale;
         self.ensure_loaded(app, cx);
         let groups = app.store.statuses();
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
 
-        let mut strip = h_flex()
-            .id("status-strip")
-            .flex_none()
-            .gap(px(RING_GAP * scale))
-            .px(px(12. * scale))
-            .py(px(8. * scale))
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .overflow_x_scroll();
-        strip = strip.child(self.render_own_ring(scale, cx));
-        for (index, group) in groups.iter().enumerate() {
-            strip = strip.child(self.render_ring(group, index, scale, cx));
+        let mut list = v_flex()
+            .id("status-view")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(
+                v_flex()
+                    .id("status-my-status")
+                    .w_full()
+                    .gap(px(4.))
+                    .px(px(16. * scale))
+                    .py(px(12. * scale))
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        h_flex()
+                            .gap(px(12. * scale))
+                            .items_center()
+                            .child(self.render_own_ring(scale, cx))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("My status"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child("Click to add a status update"),
+                                    ),
+                            ),
+                    ),
+            );
+
+        if !groups.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(16. * scale))
+                    .pt(px(14. * scale))
+                    .pb(px(6. * scale))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child("RECENT"),
+            );
+            for (index, group) in groups.iter().enumerate() {
+                list = list.child(self.render_status_row(group, index, scale, cx));
+            }
         }
 
-        v_flex()
-            .flex_none()
-            .child(strip)
-            .child(self.render_form(app, cx))
+        list
+    }
+
+    /// The row of one contact in the view of the states.
+    fn render_status_row(
+        &self,
+        group: &StatusGroup,
+        index: usize,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let muted = cx.theme().muted_foreground;
+        let state = self.state.clone();
+        let label = sender_label(group);
+        let time = group
+            .messages
+            .first()
+            .map(|message| status_time(message.timestamp_ms, now_ms()))
+            .unwrap_or_default();
+        let hover = cx.theme().muted;
+        div()
+            .id(ElementId::named_usize("status-row", index))
+            .w_full()
+            .gap(px(12. * scale))
+            .px(px(16. * scale))
+            .py(px(8. * scale))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .child(self.render_ring(group, index, scale, cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(label),
+                    )
+                    .child(div().text_xs().text_color(muted).child(time)),
+            )
+            .on_click(cx.listener(move |_app, _, _, cx| {
+                open_viewer(&state, index, cx);
+            }))
     }
 
     /// The ring of the status of the user.

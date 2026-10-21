@@ -58,8 +58,9 @@ dentro del repositorio.
 
 ### Lista de chats
 
-La columna de iconos de la izquierda, la tira de estados, el buscador y la
-lista de chats (10.000 simulados, virtualizada).
+La columna de iconos de la izquierda, el buscador con la fila de filtros
+debajo, y la lista de chats (10.000 simulados, virtualizada). Los estados y
+los canales no son chats: tienen su propio destino en la columna de iconos.
 
 ![Lista de chats](docs/screenshots/01-lista-de-chats.png)
 

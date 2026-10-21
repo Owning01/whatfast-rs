@@ -31,8 +31,8 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `docs/parity.json` | Resultado del juez, generado por `scripts/parity.py`. |
 | `crates/whatfast-core/` | Lógica pura. 25 módulos declarados en `src/lib.rs`. |
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte (`transport.rs`) + backend de demostración (`fake.rs`). |
-| `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `sticker`, `emoji_picker`. Cero GPUI en su árbol de dependencias. |
-| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
+| `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `favorites`, `sticker`, `emoji_picker`. Cero GPUI en su árbol de dependencias. |
+| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
 | `backend/` | El sidecar en Go (módulo `github.com/Owning01/whatfast/backend`). |
 | `proto/bridge.proto` | Copia del contrato v21 del origen. |
 | `assets/icons/` | Los iconos de Whatfast (los mismos del cliente de Tauri). |
@@ -45,6 +45,10 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts/instalar.ps1` | Instala la app en `%LOCALAPPDATA%\Programs\Whatfast` y deja los accesos directos con el logo. |
 | `installer.nsi` | El instalador de Windows: deja el logo en los accesos directos y en el archivo de instalación. |
 | `scripts/capturas.ps1` | Captura la ventana para el README. Mide la escala de la pantalla: sin eso la captura sale recortada. |
+| `scripts/captura-estados.ps1` | Captura la vista de los estados: mide el botón del riel sobre una foto de prueba y comprueba con un detector de píxeles que la vista se abrió. |
+| `scripts/medir_riel.py` | Mide en una captura dónde está el botón del riel (los tres de arriba). Los píxeles que difieren del fondo en todas las filas son el separador: no cuentan. |
+| `scripts/detectar-estados.py` | Dice si la vista de los estados está abierta en una captura (la cabecera "Chats" no está). |
+| `docs/referencia/` | Las capturas de WhatsApp Desktop que mandaste, con el índice de lo que muestra cada una y el estado de cada vista. |
 | `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
 | `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. |
 | `.github/workflows/release.yml` | El paquete de Windows y de Linux. |
@@ -99,6 +103,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | B-U2b | el dibujo (`render.rs`, `helpers.rs`) | cerrado | 3.270 l. |
 | B-U3 | los tokens del tema (`tokens.rs`) | cerrado | 21/21 |
 | B-U4..U8 | los 11 componentes que faltan y los 28 RPC pendientes | pendiente (F4+) | — |
+| B-U9 | la barra de chats como en la referencia: `ChatFilter`, conversaciones ocultas, favoritos locales, estados y canales en su propia vista | cerrado | 153/153 |
 
 **Paridad del oráculo: 153/153 (100 %) + 45 tests de caracterización.
 288 tests en verde en el workspace; clippy limpio.**

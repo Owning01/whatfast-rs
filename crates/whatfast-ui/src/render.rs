@@ -16,13 +16,13 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Focusable as _, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels, Render, ScrollStrategy,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img,
-    point, px, rgb, rgba, size, uniform_list,
+    Context, ElementId, Focusable as _, FontWeight, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels, Render,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Window, div, img, point, px, rgb, rgba, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Colorize as _, Disableable as _, IconName, Sizable as _,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
@@ -34,10 +34,12 @@ use qrcode::QrCode;
 // the same names, at the root of the crate.
 use whatfast_protocol as proto;
 
+use crate::icons::WhatfastIcon;
+
 use whatfast_model::emoji_picker::EmojiCategory;
 use whatfast_model::geom;
 use whatfast_model::model::{
-    ChatView, Screen, image_row_path, image_viewer_path, message_text, reaction_counts,
+    ChatFilter, Screen, image_row_path, image_viewer_path, message_text, reaction_counts,
     reaction_sender_detail, reaction_sender_name,
 };
 
@@ -126,17 +128,42 @@ impl Whatfast {
         let compact = window.viewport_size().width < px(800. * self.ui_scale);
         let show_sidebar = !compact || selected.is_none();
         let show_conversation = !compact || selected.is_some();
+        let states_open = self.states_open;
+        let channels_open = self.channels_open;
+        let archived_open = self.archived_open;
         h_flex()
             .size_full()
             // The column of icons is the left edge of the window: it is the
             // navigation of the web client, the same way.
             .child(self.nav_rail.clone())
-            .when(show_sidebar, |root| root.child(self.render_sidebar(cx)))
+            .when(show_sidebar, |root| {
+                if states_open {
+                    // The states are their own view: they take the place of
+                    // the column of chats.
+                    root.child(self.render_states(cx))
+                } else if channels_open {
+                    // The channels are their own view too.
+                    root.child(self.render_channels(cx))
+                } else if archived_open {
+                    // The archived conversations are their own view.
+                    root.child(self.render_archived(cx))
+                } else {
+                    root.child(self.render_sidebar(cx))
+                }
+            })
             .when(show_conversation, |root| {
                 if self.selected_newsletter.is_some() {
                     // A channel is open: its posts take the place of the
                     // conversation.
                     root.child(self.newsletter_panel.render(self, cx))
+                } else if states_open {
+                    // The view of the states is open: the panel of the
+                    // composer sits next to the list of the states.
+                    root.child(self.status_strip.render_panel(self, cx))
+                } else if channels_open {
+                    // The view of the channels is open: the panel of the
+                    // discovery sits next to the list of the channels.
+                    root.child(self.render_channels_panel(cx))
                 } else {
                     root.child(self.render_conversation(compact, window, cx))
                         // The panel of the members is docked next to the
@@ -146,44 +173,401 @@ impl Whatfast {
             })
     }
 
+    /// The row of filters of the column of chats.
+    ///
+    /// port: the `.chat-filters` row of the origin
+    /// (`tauri/src/styles.css`): the chips scroll sideways, the active one
+    /// wears the accent of the theme.
+    fn render_chat_filters(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let active = self.store.chat_filter();
+        let accent = cx.theme().accent;
+        let border = cx.theme().border;
+        h_flex()
+            .id("chat-filters")
+            .flex_none()
+            .gap(px(6.))
+            .px(px(12.))
+            .pt(px(2.))
+            .pb(px(8.))
+            .overflow_x_scroll()
+            .children(ChatFilter::ALL.into_iter().map(|filter| {
+                let selected = filter == active;
+                div()
+                    .id(ElementId::Name(
+                        format!("chat-filter-{}", filter.label()).into(),
+                    ))
+                    .flex_none()
+                    .px(px(11.))
+                    .py(px(5.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if selected { accent } else { border })
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(selected, |chip| {
+                        chip.bg(accent.opacity(0.16)).text_color(accent)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_chat_filter(filter, window, cx);
+                        cx.notify();
+                    }))
+                    .child(filter.label())
+            }))
+    }
+
+    /// The view of the states, the column that replaces the chats.
+    fn render_states(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale = self.ui_scale;
+        v_flex()
+            .h_full()
+            .w(px(340. * scale))
+            .min_w(px(280. * scale))
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(
+                v_flex().flex_none().px_3().py_2().gap_1().child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .child("States"),
+                        )
+                        .child(
+                            Button::new("new-status")
+                                .small()
+                                .icon(IconName::Plus)
+                                .tooltip("New status")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.status_strip.publish_photo_status(window, cx);
+                                })),
+                        ),
+                ),
+            )
+            .child(self.status_strip.render_view(self, cx))
+    }
+
+    /// The view of the channels, the column that replaces the chats.
+    fn render_channels(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale = self.ui_scale;
+        v_flex()
+            .h_full()
+            .w(px(340. * scale))
+            .min_w(px(280. * scale))
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(
+                v_flex().flex_none().px_3().py_2().gap_1().child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .child("Channels"),
+                        )
+                        .child(
+                            Button::new("new-channel")
+                                .small()
+                                .icon(IconName::Plus)
+                                .tooltip("New channel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.newsletter_panel.open_create();
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .pt_1()
+                    .child(Input::new(self.newsletter_panel.search_input()).w_full()),
+            )
+            .child(self.newsletter_panel.render_list(self, cx))
+            .child(self.newsletter_panel.render_list_footer(cx))
+    }
+
+    /// The panel that sits next to the list of channels.
+    ///
+    /// The reference draws it with the title and the explanation of what a
+    /// channel is.
+    fn render_channels_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .child("Discover channels"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Entertainment, news, sports, lifestyle, people and much more."),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("Follow the channels you like."),
+            )
+    }
+
+    /// The view of the archived conversations, the column that replaces the
+    /// chats.
+    ///
+    /// The reference explains at the top that the archived conversations stay
+    /// archived when they receive a message.
+    fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale = self.ui_scale;
+        let muted = cx.theme().muted_foreground;
+        let visible_chat_ids = self.store.chat_ids(ChatFilter::Archived);
+        let visible_for_list = visible_chat_ids.clone();
+        let list_id = "archived-chat-list";
+        v_flex()
+            .h_full()
+            .w(px(340. * scale))
+            .min_w(px(280. * scale))
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(
+                v_flex()
+                    .flex_none()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .child("Archived"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("When they receive new messages, these chats stay archived."),
+                    ),
+            )
+            .child(
+                div().relative().flex_1().min_h_0().child(
+                    uniform_list(
+                        list_id,
+                        visible_for_list.len(),
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            this.render_chat_row(&visible_for_list, range, cx)
+                        }),
+                    )
+                    .h_full()
+                    .track_scroll(&self.chat_scroll),
+                ),
+            )
+    }
+
+    /// One row of the list of conversations.
+    ///
+    /// The same row is drawn by the column of chats and by the view of the
+    /// archived conversations.
+    fn render_chat_row(
+        &mut self,
+        visible: &[String],
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::Stateful<gpui::Div>> {
+        let ui_scale = self.ui_scale;
+        let dark = cx.theme().is_dark();
+        let selected_background = if dark {
+            gpui::Hsla::from(rgb(0x173a35))
+        } else {
+            gpui::Hsla::from(rgb(0xe7f5ef))
+        };
+        let hover_background = if dark {
+            gpui::Hsla::from(rgb(0x152f2c))
+        } else {
+            gpui::Hsla::from(rgb(0xeff5f2))
+        };
+        range
+            .map(|index| {
+                let Some(chat) = visible
+                    .get(index)
+                    .and_then(|id| self.store.chat(id))
+                    .cloned()
+                else {
+                    return div()
+                        .id(("loading-chat", index))
+                        .h(px(72.))
+                        .px_4()
+                        .flex()
+                        .items_center()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading more chats…");
+                };
+                let selected = self.store.selected_chat_id.as_deref() == Some(chat.id.as_str());
+                let avatar = avatar_element(&chat.title, &chat.avatar_path, px(42. * ui_scale), cx);
+                let typing_preview =
+                    self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
+                let row_typing = typing_preview.is_some();
+                let preview = typing_preview.unwrap_or_else(|| chat_subtitle(&chat));
+                // Whether the conversation is a favorite of the profile: the
+                // star of the row.
+                let is_favorite = self.store.is_favorite(&chat.id);
+                // The time of the last message goes at the right of the title,
+                // the same way the reference draws it.
+                let chat_time = chat_time_label(chat.last_message_timestamp_ms, now_ms());
+                div()
+                    .id(ElementId::named_usize("chat-row", index))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .gap_3()
+                    .items_center()
+                    .rounded_md()
+                    .bg(if selected {
+                        selected_background
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(move |style| style.bg(hover_background))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_chat(chat.id.clone(), window, cx);
+                        cx.notify();
+                    }))
+                    .child(avatar)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(one_line(&chat.title)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(chat_time),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(if row_typing {
+                                                if dark {
+                                                    gpui::Hsla::from(rgb(0x25d366))
+                                                } else {
+                                                    gpui::Hsla::from(rgb(DARK_GREEN))
+                                                }
+                                            } else {
+                                                gpui::Hsla::from(cx.theme().muted_foreground)
+                                            })
+                                            .child(one_line(&preview)),
+                                    )
+                                    // port: the flags of the row of the origin
+                                    // (`tauri/src/components/Sidebar.tsx`, the
+                                    // `chat-flags` block): the silence, the
+                                    // favorite and the pin of the conversation.
+                                    .when(chat.muted, |line| {
+                                        line.child(
+                                            Icon::new(WhatfastIcon::Bell)
+                                                .with_size(px(14. * ui_scale))
+                                                .text_color(cx.theme().muted_foreground),
+                                        )
+                                    })
+                                    .when(is_favorite, |line| {
+                                        line.child(
+                                            Icon::new(IconName::StarFill)
+                                                .with_size(px(13. * ui_scale))
+                                                .text_color(cx.theme().accent),
+                                        )
+                                    })
+                                    .when(chat.pinned, |line| {
+                                        line.child(
+                                            Icon::new(WhatfastIcon::Pin)
+                                                .with_size(px(14. * ui_scale))
+                                                .text_color(cx.theme().accent),
+                                        )
+                                    })
+                                    .when(chat.unread_count > 0, |line| {
+                                        line.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .min_w(px(18.))
+                                                .h(px(18.))
+                                                .px_1()
+                                                .rounded_full()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .bg(rgb(0x25d366))
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x0b141a))
+                                                .child(chat.unread_count.to_string()),
+                                        )
+                                    }),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let ui_scale = self.ui_scale;
         let total = self.store.total_chats;
         let logout_pending = self.rpc.logout_pending();
         let dark = cx.theme().is_dark();
-        let chat_view = self.chat_view;
-        let visible_chat_ids = self.store.chat_ids(chat_view);
+        let chat_filter = self.store.chat_filter();
+        let visible_chat_ids = self.store.chat_ids(chat_filter);
         let search_active = self.search_query.trim().chars().count() >= 2;
         let visible_count = visible_chat_ids.len();
         let has_more = !self.store.next_chat_cursor.is_empty();
         let virtual_count = visible_count + usize::from(has_more);
-        let list_id = if chat_view == ChatView::Archived {
-            "archived-chat-list"
-        } else {
-            "inbox-chat-list"
-        };
-        let view_title = if chat_view == ChatView::Archived {
-            "Archived"
-        } else {
-            "Whatfast"
-        };
+        let list_id = "inbox-chat-list";
         let local_status = if self.store.sync_active {
             format!(
                 "{} chats · scanned {} chats · {} messages",
                 total, self.store.sync_chats, self.store.sync_messages
             )
-        } else if chat_view == ChatView::Archived {
-            format!(
-                "{}{} archived · {} chats",
-                visible_count,
-                if has_more { "+" } else { "" },
-                total
-            )
         } else {
             format!("{} chats", total)
         };
-        let selected_background = if dark { rgb(0x173a35) } else { rgb(0xe7f5ef) };
-        let hover_background = if dark { rgb(0x152f2c) } else { rgb(0xeff5f2) };
         let visible_for_list = visible_chat_ids.clone();
         v_flex()
             .h_full()
@@ -209,7 +593,7 @@ impl Whatfast {
                                     .truncate()
                                     .text_lg()
                                     .font_weight(FontWeight::BOLD)
-                                    .child(view_title),
+                                    .child("Chats"),
                             )
                             .child(
                                 h_flex()
@@ -217,36 +601,22 @@ impl Whatfast {
                                     .child(
                                         Button::new("theme")
                                             .small()
-                                            .icon(if dark {
-                                                IconName::Sun
-                                            } else {
-                                                IconName::Moon
-                                            })
+                                            .icon(if dark { IconName::Sun } else { IconName::Moon })
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.toggle_theme(window, cx);
                                             })),
                                     )
                                     .child(
-                                        Button::new("archived")
+                                        Button::new("settings")
                                             .small()
-                                            .icon(if chat_view == ChatView::Archived {
-                                                IconName::Inbox
-                                            } else {
-                                                IconName::FolderClosed
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.toggle_chat_view(window, cx);
+                                            .icon(IconName::Settings)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settings_open = !this.settings_open;
+                                                this.reaction_details = None;
+                                                this.image_viewer = None;
                                                 cx.notify();
                                             })),
                                     )
-                                    .child(Button::new("settings").small().icon(IconName::Settings).on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.settings_open = !this.settings_open;
-                                            this.reaction_details = None;
-                                            this.image_viewer = None;
-                                            cx.notify();
-                                        }),
-                                    ))
                                     .child(
                                         Button::new("logout")
                                             .small()
@@ -265,6 +635,18 @@ impl Whatfast {
                                                     this.confirming_logout = true;
                                                 }
                                                 cx.notify();
+                                            })),
+                                    )
+                                    // The green button starts a new chat: it
+                                    // focuses the search of the column, the
+                                    // same way the reference does.
+                                    .child(
+                                        Button::new("new-chat")
+                                            .small()
+                                            .icon(IconName::Plus)
+                                            .tooltip("New chat")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.focus_search(window, cx);
                                             })),
                                     ),
                             ),
@@ -293,10 +675,10 @@ impl Whatfast {
                                     .child(div().h_full().w_full().rounded_full().bg(rgb(0x25d366)))
                             }),
                     )
-                    // The strip of the states of the contacts sits above the
-                    // search, the same way the web client draws it.
-                    .child(self.status_strip.render(self, cx))
-                    .child(div().pt_1().child(Input::new(&self.search_input).w_full())),
+                    .child(div().pt_1().child(Input::new(&self.search_input).w_full()))
+                    // The row of filters sits under the search, the same way
+                    // the web client draws it.
+                    .child(self.render_chat_filters(cx)),
             )
             .child(
                 div()
@@ -332,131 +714,7 @@ impl Whatfast {
                                     {
                                         this.load_avatar(chat_id);
                                     }
-                                    range
-                                        .map(|index| {
-                                            let Some(chat) = visible_for_list
-                                                .get(index)
-                                                .and_then(|id| this.store.chat(id))
-                                                .cloned()
-                                            else {
-                                                return div()
-                                                    .id(("loading-chat", index))
-                                                    .h(px(72.))
-                                                    .px_4()
-                                                    .flex()
-                                                    .items_center()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Loading more chats…");
-                                            };
-                                            let selected = this.store.selected_chat_id.as_deref()
-                                                == Some(chat.id.as_str());
-                                            let avatar = avatar_element(
-                                                &chat.title,
-                                                &chat.avatar_path,
-                                                px(42. * ui_scale),
-                                                cx,
-                                            );
-                                            let typing_preview = this.typing_label(
-                                                &chat.id,
-                                                chat.kind() == proto::ChatKind::Group,
-                                            );
-                                            let row_typing = typing_preview.is_some();
-                                            let preview = typing_preview.unwrap_or_else(|| {
-                                                if chat.phone_number.is_empty() {
-                                                    chat.last_message_preview.clone()
-                                                } else if chat.last_message_preview.is_empty() {
-                                                    chat.phone_number.clone()
-                                                } else {
-                                                    format!(
-                                                        "{} · {}",
-                                                        chat.phone_number,
-                                                        chat.last_message_preview
-                                                    )
-                                                }
-                                            });
-                                            div()
-                                                .id(("chat", index))
-                                                .h(px(72. * ui_scale))
-                                                .w_full()
-                                                .px_3()
-                                                .flex()
-                                                .items_center()
-                                                .gap_3()
-                                                .overflow_hidden()
-                                                .when(selected, |row| row.bg(selected_background))
-                                                .hover(move |style| style.bg(hover_background))
-                                                .on_click(cx.listener(move |this, _, window, cx| {
-                                                    this.open_chat(chat.id.clone(), window, cx);
-                                                    cx.notify();
-                                                }))
-                                                .child(avatar)
-                                                .child(
-                                                    v_flex()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .gap_1()
-                                                        .child(
-                                                            h_flex()
-                                                                .w_full()
-                                                                .items_center()
-                                                                .gap_2()
-                                                                .child(
-                                                                    div()
-                                                                        .flex_1()
-                                                                        .min_w_0()
-                                                                        .truncate()
-                                                                        .font_weight(
-                                                                            FontWeight::SEMIBOLD,
-                                                                        )
-                                                                        .child(one_line(&chat.title)),
-                                                                )
-                                                                .when(chat.unread_count > 0, |line| {
-                                                                    line.child(
-                                                                        div()
-                                                                            .flex_shrink_0()
-                                                                            .min_w(px(18.))
-                                                                            .h(px(18.))
-                                                                            .px_1()
-                                                                            .rounded_full()
-                                                                            .flex()
-                                                                            .items_center()
-                                                                            .justify_center()
-                                                                            .bg(rgb(0x25d366))
-                                                                            .text_xs()
-                                                                            .font_weight(
-                                                                                FontWeight::SEMIBOLD,
-                                                                            )
-                                                                            .text_color(rgb(0x0b141a))
-                                                                            .child(
-                                                                                chat.unread_count
-                                                                                    .to_string(),
-                                                                            ),
-                                                                    )
-                                                                }),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .w_full()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .text_sm()
-                                                                .text_color(if row_typing {
-                                                                    if dark {
-                                                                        gpui::Hsla::from(rgb(0x25d366))
-                                                                    } else {
-                                                                        gpui::Hsla::from(rgb(
-                                                                            DARK_GREEN,
-                                                                        ))
-                                                                    }
-                                                                } else {
-                                                                    cx.theme().muted_foreground
-                                                                })
-                                                                .child(one_line(&preview)),
-                                                        ),
-                                                )
-                                        })
-                                        .collect::<Vec<_>>()
+                                    this.render_chat_row(&visible_for_list, range, cx)
                                 }),
                             )
                             .h_full()
@@ -484,11 +742,7 @@ impl Whatfast {
                                 .px_4()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if chat_view == ChatView::Archived {
-                                    "No archived chats"
-                                } else {
-                                    "No chats yet"
-                                }),
+                                .child(empty_label(chat_filter)),
                         )
                     })
                     .when(search_active, |list| {
@@ -2065,6 +2319,30 @@ impl Whatfast {
                         .child(flag)
                 })));
             }
+            // The favorite is a mark of the profile: the button toggles it and
+            // the column of the chats shows the conversations that carry it.
+            if let Some(chat) = chat.as_ref() {
+                let is_favorite = self.store.is_favorite(&chat.id);
+                let chat_id = chat.id.clone();
+                body = body.child(
+                    Button::new("chat-favorite")
+                        .small()
+                        .icon(if is_favorite {
+                            IconName::StarFill
+                        } else {
+                            IconName::Star
+                        })
+                        .label(if is_favorite {
+                            "Remove from favorites"
+                        } else {
+                            "Add to favorites"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_favorite(chat_id.clone(), cx);
+                            cx.notify();
+                        })),
+                );
+            }
             if !info.address.is_empty() {
                 body = body.child(section("WhatsApp address", info.address.clone()));
             }
@@ -3151,4 +3429,58 @@ impl Render for Whatfast {
                 )
             })
     }
+}
+
+/// The message the column shows when the filter keeps no conversation.
+///
+/// port: `emptyLabel` of the origin (`tauri/src/components/Sidebar.tsx`).
+fn empty_label(filter: ChatFilter) -> &'static str {
+    match filter {
+        ChatFilter::All => "No conversations yet",
+        ChatFilter::Unread => "No unread conversations",
+        ChatFilter::Favorites => "No favorite chats yet",
+        ChatFilter::Groups => "No groups",
+        ChatFilter::Archived => "No archived conversations",
+    }
+}
+
+/// The current instant, in milliseconds of the epoch.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// The time of the last message of a conversation, the way the reference
+/// writes it at the right of the title.
+///
+/// port: `formatChatTime` of the origin (`tauri/src/lib/format.ts`): the
+/// hour of the day, "Yesterday", the day of the week, or the short date.
+fn chat_time_label(timestamp_ms: i64, now_ms: i64) -> String {
+    whatfast_core::message_format::format_chat_time(
+        whatfast_core::message_format::LocalTimestamp::new(timestamp_ms, 0),
+        whatfast_core::message_format::LocalTimestamp::new(now_ms, 0),
+        whatfast_core::message_format::DateLocale::EnUs,
+    )
+}
+
+/// The line under the title of a conversation.
+///
+/// port: `chatSubtitle` of the origin (`tauri/src/lib/format.ts`): the
+/// preview of the last message, the phone number when there is no preview,
+/// and the mark of the messages the user sent.
+fn chat_subtitle(chat: &proto::Chat) -> String {
+    let preview = if !chat.last_message_preview.is_empty() {
+        chat.last_message_preview.clone()
+    } else if !chat.phone_number.is_empty() {
+        chat.phone_number.clone()
+    } else {
+        "No messages yet".to_string()
+    };
+    if !chat.last_message_from_me || chat.last_message_preview.is_empty() {
+        return preview;
+    }
+    format!("You: {preview}")
 }

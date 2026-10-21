@@ -16,17 +16,75 @@ pub const CHAT_PAGE_SIZE: u32 = 100;
 pub const MESSAGE_PAGE_SIZE: u32 = 50;
 pub const MAX_ACTIVE_MESSAGES: usize = 2_000;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ChatView {
+/// The filters of the column of chats.
+///
+/// port: the `ChatFilter` type of the origin (`tauri/src/state/app.ts`):
+/// `all`, `unread`, `favorites`, `groups`, `archived` and `channels`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ChatFilter {
+    /// Every conversation that is not archived.
     #[default]
-    Inbox,
+    All,
+    /// The conversations with messages that were not read.
+    Unread,
+    /// The conversations marked as favorites.
+    Favorites,
+    /// The group conversations.
+    Groups,
+    /// The archived conversations.
+    ///
+    /// The archived conversations have their own destination in the column of
+    /// icons, so this filter is not one of the chips of the column of chats.
     Archived,
 }
 
-impl ChatView {
-    fn includes(self, chat: &whatfast_protocol::Chat) -> bool {
-        chat.archived == matches!(self, Self::Archived)
+impl ChatFilter {
+    /// Every filter, in the order the column draws them.
+    ///
+    /// The archived conversations are not in this list: they have their own
+    /// destination in the column of icons, the same way the reference draws
+    /// them.
+    pub const ALL: [Self; 4] = [Self::All, Self::Unread, Self::Favorites, Self::Groups];
+
+    /// The label of the filter, in the language of the client.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unread => "Unread",
+            Self::Favorites => "Favorites",
+            Self::Groups => "Groups",
+            Self::Archived => "Archived",
+        }
     }
+
+    /// Whether the filter keeps one conversation.
+    ///
+    /// port: the filter of `filteredChats` of the origin: the archived
+    /// conversations only appear under the filter of the archived, and the
+    /// rest of the filters leave them out.
+    pub fn includes(self, chat: &whatfast_protocol::Chat) -> bool {
+        if is_hidden_conversation(chat) {
+            return false;
+        }
+        match self {
+            Self::Archived => chat.archived,
+            Self::All => !chat.archived,
+            Self::Unread => !chat.archived && chat.unread_count > 0,
+            Self::Groups => !chat.archived && chat.kind() == whatfast_protocol::ChatKind::Group,
+            Self::Favorites => false,
+        }
+    }
+}
+
+/// Whether the conversation is one of the special ones that the column of
+/// chats does not show.
+///
+/// port: `isHiddenConversation` of the origin (`tauri/src/state/app.ts`): the
+/// broadcast of the states and the channels of the newsletters are not
+/// conversations with a person, so they live in their own view.
+pub fn is_hidden_conversation(chat: &whatfast_protocol::Chat) -> bool {
+    let transport = chat.transport_jid.as_str();
+    transport == "status@broadcast" || transport.ends_with("@newsletter")
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -86,8 +144,18 @@ pub struct Store {
     /// The posts of each newsletter.
     pub newsletter_messages: HashMap<String, Vec<whatfast_protocol::Message>>,
     chat_index: HashMap<String, usize>,
-    inbox_chat_ids: Rc<Vec<String>>,
-    archived_chat_ids: Rc<Vec<String>>,
+    /// The filter of the column of chats.
+    chat_filter: ChatFilter,
+    /// The ids of the conversations the filter keeps, in the order of the
+    /// column. The list is rebuilt when the chats or the filter change, so
+    /// drawing the column does not allocate.
+    visible_chat_ids: Rc<Vec<String>>,
+    /// The conversations the user marked as favorites.
+    ///
+    /// port: the origin keeps them in the local storage of the browser
+    /// (`tauri/src/state/app.ts`, the key `whatfast-favorites`): the linked
+    /// device has no RPC for them, so they belong to the profile.
+    favorite_chat_ids: HashSet<String>,
     message_index: HashMap<String, usize>,
     reply_metadata: HashMap<String, ReplyMetadata>,
     message_sizes: Rc<Vec<Size<Pixels>>>,
@@ -122,11 +190,72 @@ impl Store {
             .and_then(|index| self.chats.get(*index))
     }
 
-    pub fn chat_ids(&self, view: ChatView) -> Rc<Vec<String>> {
-        match view {
-            ChatView::Inbox => self.inbox_chat_ids.clone(),
-            ChatView::Archived => self.archived_chat_ids.clone(),
+    /// The ids of the conversations that the filter keeps, in the order of
+    /// the column.
+    ///
+    /// port: `filteredChats` of the origin (`tauri/src/state/app.ts`): the
+    /// states and the channels are not conversations, so they never show up
+    /// in the list, and the archived ones only show up under their filter.
+    pub fn chat_ids(&self, filter: ChatFilter) -> Rc<Vec<String>> {
+        if filter == self.chat_filter {
+            return self.visible_chat_ids.clone();
         }
+        Rc::new(
+            self.chats
+                .iter()
+                .filter(|chat| self.filter_keeps(filter, chat))
+                .map(|chat| chat.id.clone())
+                .collect(),
+        )
+    }
+
+    /// Whether one filter keeps one conversation.
+    fn filter_keeps(&self, filter: ChatFilter, chat: &whatfast_protocol::Chat) -> bool {
+        match filter {
+            ChatFilter::Favorites => !chat.archived && self.favorite_chat_ids.contains(&chat.id),
+            other => other.includes(chat),
+        }
+    }
+
+    /// The filter of the column of chats.
+    pub fn chat_filter(&self) -> ChatFilter {
+        self.chat_filter
+    }
+
+    /// Changes the filter of the column of chats.
+    pub fn set_chat_filter(&mut self, filter: ChatFilter) {
+        if self.chat_filter == filter {
+            return;
+        }
+        self.chat_filter = filter;
+        self.rebuild_chat_ids();
+    }
+
+    /// Whether the conversation is one of the favorites.
+    pub fn is_favorite(&self, chat_id: &str) -> bool {
+        self.favorite_chat_ids.contains(chat_id)
+    }
+
+    /// Marks a conversation as a favorite, or takes the mark away.
+    ///
+    /// Returns whether the conversation is a favorite after the change.
+    pub fn toggle_favorite(&mut self, chat_id: &str) -> bool {
+        if !self.favorite_chat_ids.remove(chat_id) {
+            self.favorite_chat_ids.insert(chat_id.to_owned());
+        }
+        self.rebuild_chat_ids();
+        self.favorite_chat_ids.contains(chat_id)
+    }
+
+    /// Replaces the set of favorites, for the profile that loaded it.
+    pub fn set_favorite_chat_ids(&mut self, favorites: HashSet<String>) {
+        self.favorite_chat_ids = favorites;
+        self.rebuild_chat_ids();
+    }
+
+    /// The set of conversations marked as favorites.
+    pub fn favorite_chat_ids(&self) -> &HashSet<String> {
+        &self.favorite_chat_ids
     }
 
     pub fn apply_sync_progress(&mut self, chats: u64, messages: u64, complete: bool) {
@@ -807,17 +936,19 @@ impl Store {
     }
 
     fn rebuild_chat_ids(&mut self) {
-        let mut inbox = Vec::with_capacity(self.chats.len());
-        let mut archived = Vec::new();
+        let filter = self.chat_filter;
+        let favorites = &self.favorite_chat_ids;
+        let mut visible = Vec::with_capacity(self.chats.len());
         for chat in &self.chats {
-            if ChatView::Archived.includes(chat) {
-                archived.push(chat.id.clone());
-            } else {
-                inbox.push(chat.id.clone());
+            let keeps = match filter {
+                ChatFilter::Favorites => !chat.archived && favorites.contains(&chat.id),
+                other => other.includes(chat),
+            };
+            if keeps {
+                visible.push(chat.id.clone());
             }
         }
-        self.inbox_chat_ids = Rc::new(inbox);
-        self.archived_chat_ids = Rc::new(archived);
+        self.visible_chat_ids = Rc::new(visible);
         #[cfg(test)]
         {
             self.chat_id_rebuilds += 1;
@@ -1211,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_views_keep_archived_conversations_out_of_the_inbox() {
+    fn the_filters_keep_the_archived_conversations_apart() {
         let mut store = Store::default();
         store.upsert_chat(whatfast_protocol::Chat {
             id: "inbox".into(),
@@ -1225,8 +1356,100 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(store.chat_ids(ChatView::Inbox).as_slice(), ["inbox"]);
-        assert_eq!(store.chat_ids(ChatView::Archived).as_slice(), ["archived"]);
+        assert_eq!(store.chat_ids(ChatFilter::All).as_slice(), ["inbox"]);
+        assert_eq!(
+            store.chat_ids(ChatFilter::Archived).as_slice(),
+            ["archived"]
+        );
+    }
+
+    #[test]
+    fn the_states_and_the_channels_never_show_up_as_chats() {
+        let mut store = Store::default();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "chat".into(),
+            title: "Chat".into(),
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "status@broadcast".into(),
+            title: "status@broadcast".into(),
+            transport_jid: "status@broadcast".into(),
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "channel".into(),
+            title: "Channel".into(),
+            transport_jid: "12345@newsletter".into(),
+            ..Default::default()
+        });
+
+        assert_eq!(store.chat_ids(ChatFilter::All).as_slice(), ["chat"]);
+        assert_eq!(
+            store.chat_ids(ChatFilter::Archived).as_slice(),
+            [] as [String; 0]
+        );
+        assert!(is_hidden_conversation(&whatfast_protocol::Chat {
+            transport_jid: "status@broadcast".into(),
+            ..Default::default()
+        }));
+        assert!(is_hidden_conversation(&whatfast_protocol::Chat {
+            transport_jid: "12345@newsletter".into(),
+            ..Default::default()
+        }));
+        assert!(!is_hidden_conversation(&whatfast_protocol::Chat {
+            transport_jid: "12345@s.whatsapp.net".into(),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn the_favorite_filter_keeps_the_conversations_the_user_marked() {
+        let mut store = Store::default();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "one".into(),
+            title: "One".into(),
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "two".into(),
+            title: "Two".into(),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            store.chat_ids(ChatFilter::Favorites).as_slice(),
+            [] as [String; 0]
+        );
+        assert!(store.toggle_favorite("one"));
+        assert!(store.is_favorite("one"));
+        assert_eq!(store.chat_ids(ChatFilter::Favorites).as_slice(), ["one"]);
+        assert!(!store.toggle_favorite("one"));
+        assert!(!store.is_favorite("one"));
+        assert_eq!(
+            store.chat_ids(ChatFilter::Favorites).as_slice(),
+            [] as [String; 0]
+        );
+    }
+
+    #[test]
+    fn the_unread_and_the_group_filters_pick_their_own_conversations() {
+        let mut store = Store::default();
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "unread".into(),
+            title: "Unread".into(),
+            unread_count: 3,
+            ..Default::default()
+        });
+        store.upsert_chat(whatfast_protocol::Chat {
+            id: "group".into(),
+            title: "Group".into(),
+            kind: whatfast_protocol::ChatKind::Group as i32,
+            ..Default::default()
+        });
+
+        assert_eq!(store.chat_ids(ChatFilter::Unread).as_slice(), ["unread"]);
+        assert_eq!(store.chat_ids(ChatFilter::Groups).as_slice(), ["group"]);
     }
 
     #[test]
@@ -1241,11 +1464,11 @@ mod tests {
             })
             .collect();
         store.replace_chat_page("", chats, 1_000, String::new());
-        let original = store.chat_ids(ChatView::Inbox);
+        let original = store.chat_ids(ChatFilter::All);
         let rebuilds = store.chat_id_rebuilds;
 
         for _ in 0..100 {
-            black_box(store.chat_ids(ChatView::Inbox));
+            black_box(store.chat_ids(ChatFilter::All));
         }
 
         // port: the origin counted the allocations of the global allocator,
@@ -1253,12 +1476,12 @@ mod tests {
         // observed through the rebuild counter: reading the ids must not
         // rebuild them.
         assert_eq!(store.chat_id_rebuilds, rebuilds);
-        assert!(Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+        assert!(Rc::ptr_eq(&original, &store.chat_ids(ChatFilter::All)));
 
         let uncached = store
             .chats
             .iter()
-            .filter(|chat| ChatView::Inbox.includes(chat))
+            .filter(|chat| ChatFilter::All.includes(chat))
             .map(|chat| chat.id.clone())
             .collect::<Vec<_>>();
         assert_eq!(uncached, original.as_slice());
@@ -1267,7 +1490,7 @@ mod tests {
             id: "new-chat".into(),
             ..Default::default()
         });
-        assert!(!Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+        assert!(!Rc::ptr_eq(&original, &store.chat_ids(ChatFilter::All)));
         assert!(store.chat_id_rebuilds > rebuilds);
     }
 
@@ -2069,12 +2292,15 @@ mod tests {
         store.replace_chat_page("", vec![chat("inbox"), chat("archived")], 2, String::new());
 
         assert!(store.set_chat_archived("archived", true));
-        assert_eq!(store.chat_ids(ChatView::Inbox).as_slice(), ["inbox"]);
-        assert_eq!(store.chat_ids(ChatView::Archived).as_slice(), ["archived"]);
+        assert_eq!(store.chat_ids(ChatFilter::All).as_slice(), ["inbox"]);
+        assert_eq!(
+            store.chat_ids(ChatFilter::Archived).as_slice(),
+            ["archived"]
+        );
 
         assert!(store.set_chat_archived("archived", false));
         assert_eq!(
-            store.chat_ids(ChatView::Inbox).as_slice(),
+            store.chat_ids(ChatFilter::All).as_slice(),
             ["archived", "inbox"]
         );
         assert!(!store.set_chat_archived("missing", true));
