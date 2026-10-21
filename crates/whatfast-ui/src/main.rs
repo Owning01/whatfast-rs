@@ -17,6 +17,14 @@
 //! - `rpc`: the lifecycle of the requests towards the sidecar
 //! - `render`: the drawing of every panel
 //! - `helpers`: the free functions used by the drawing
+//! - `icons`: the icon set of the web client
+//! - `media_editor`: the crop and the rotation of a picture
+//! - `navrail`: the column of icons at the left
+//! - `tabs`: the strip of open chats
+//! - `icons`: the icon set of the web client
+//! - `media_editor`: the crop and the rotation of a picture
+//! - `navrail`: the column of icons at the left
+//! - `tabs`: the strip of open chats
 //! - `text`: the pure helpers of the text of a message
 //! - `tokens`: the theme tokens and the scale of the interface
 
@@ -26,8 +34,12 @@ use gpui_component_assets::Assets;
 
 mod app;
 mod helpers;
+mod icons;
+mod media_editor;
+mod navrail;
 mod render;
 mod rpc;
+mod tabs;
 mod text;
 mod tokens;
 
