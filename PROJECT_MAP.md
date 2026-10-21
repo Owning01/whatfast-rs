@@ -39,6 +39,11 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts/test.cmd`, `scripts/lint.cmd` | Wrappers de cargo: target compartido, `sccache` y el override de `rustc-wrapper`. |
 | `scripts/build.cmd` | El build de distribución: el binario de Rust y el sidecar en `dist\`. |
 | `scripts/medir.ps1` | Mide el arranque y la RAM del árbol de procesos. |
+| `assets/icons/` | El logo de Whatfast: `icon.png` (512x512, el maestro) y los PNG y el `.ico` que salen de él. |
+| `crates/whatfast-ui/build.rs` | Incrusta el `.ico` en el ejecutable de Windows (el Explorador, la barra de tareas y el alt-tab lo muestran). |
+| `scripts/iconos.py` | Regenera el juego de iconos desde el logo maestro. |
+| `scripts/instalar.ps1` | Instala la app en `%LOCALAPPDATA%\Programs\Whatfast` y deja los accesos directos con el logo. |
+| `installer.nsi` | El instalador de Windows: deja el logo en los accesos directos y en el archivo de instalación. |
 | `scripts/capturas.ps1` | Captura la ventana para el README. Mide la escala de la pantalla: sin eso la captura sale recortada. |
 | `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
 | `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. |

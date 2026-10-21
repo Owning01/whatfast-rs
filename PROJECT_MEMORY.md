@@ -738,3 +738,24 @@ agentes deja de costar 3 GB por worktree.
   paridad en los dos sistemas. La primera corrida fallo por el formateo (los
   agentes formatearon archivo por archivo con `rustfmt` y no con
   `cargo fmt`): se corrigio con `cargo fmt --all` y quedo limpio.
+
+## 2026-10-21 ? El logo de la app y el acceso directo en el escritorio
+
+- **El logo ya estaba**: `assets/icons/icon.png` (512x512, la burbuja verde
+  con las lineas de velocidad del cliente web). Lo que faltaba era??
+  llevar a donde Windows lo mira.
+- **El `.ico` ahora tiene los diez tamanos** (de 16 a 256) y lo regenera
+  `scripts/iconos.py` desde el logo maestro. El que habia venia del cliente
+  web con seis tamanos y el de 32 era el que se veia en la barra.
+- **El ejecutable lleva el icono incrustado**: un `build.rs` en
+  `crates/whatfast-ui` compila el recurso con `embed-resource` (que ya
+  estaba en el lock como dependencia de transitive) y `rc.exe` del SDK de
+  Windows. Sin esto, el Explorador, la barra de tareas y el alt-tab
+  mostraban el icono generico.
+- **El instalador de Windows** (NSIS) deja el logo en los accesos directos
+  del escritorio y del menu Inicio, y en el archivo `whatfast-setup.exe`.
+- **`scripts/instalar.ps1`** instala la app en
+  `%LOCALAPPDATA%\Programs\Whatfast` (por usuario, sin permisos de
+  administrador) y crea los dos accesos directos con el logo. Es la forma
+  de probar la app en esta maquina sin depender del instalador de NSIS,
+  que solo se compila en el runner de GitHub.

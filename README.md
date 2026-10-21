@@ -209,6 +209,34 @@ dist\whatfast.exe --fake-backend
 El backend real es el sidecar en Go: el binario tiene que estar al lado del
 ejecutable de la interfaz, o en la variable `WHATFAST_BACKEND`.
 
+### Instalar en esta máquina
+
+El script copia los dos ejecutables en la carpeta de programas del usuario,
+deja el logo de Whatfast en el acceso directo del escritorio y arma el del
+menú Inicio:
+
+```sh
+powershell -ExecutionPolicy Bypass -File scripts\instalar.ps1
+```
+
+Para desinstalar: borrar `%LOCALAPPDATA%\Programs\Whatfast` y los dos
+accesos directos.
+
+### El logo
+
+El logo es el mismo del cliente web (la burbuja verde con las líneas de
+velocidad) y vive en `assets\icons\icon.png`. De ahí salen los PNG y el
+`.ico` de Windows con los diez tamaños que la barra de tareas y el
+Explorador piden:
+
+```sh
+python scripts\iconos.py
+```
+
+El ejecutable de Windows lo lleva incrustado (el `build.rs` de
+`whatfast-ui` compila el recurso), así que el Explorador, la barra de
+tareas y el alt-tab muestran el logo sin hacer nada más.
+
 ### El toolchain
 
 - Rust estable (el `rust-toolchain.toml` lo fija).
@@ -231,6 +259,8 @@ compilación cada uno, y usan `sccache` cuando está disponible.
 | El mapa de dependencias | `python scripts\dependency-map.py` |
 | Las medidas de arranque y RAM | `powershell -File scripts\medir.ps1 -ConSidecar` |
 | Las capturas | `powershell -File scripts\capturas.ps1` |
+| El logo y el `.ico` | `python scripts\iconos.py` |
+| Instalar con los accesos directos | `powershell -File scripts\instalar.ps1` |
 
 ---
 

@@ -6,7 +6,7 @@ El juez **es el repo de origen**, `Owning01/whatfast`, congelado. No se
 modifica ni un test. Los agentes de migración nunca lo editan: si un test
 del origen está mal, se anota y se arregla en un PR aparte, después.
 
-## Los cuatro物权
+## Los cuatro jueces
 
 | Pieza | Ubicación | Qué fija |
 |---|---|---|

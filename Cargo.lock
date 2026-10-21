@@ -7701,6 +7701,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "embed-resource",
  "emojis",
  "gpui",
  "gpui-component",

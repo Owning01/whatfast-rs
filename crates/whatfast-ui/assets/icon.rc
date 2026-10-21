@@ -1,0 +1,6 @@
+// El recurso de Windows de Whatfast: el icono que el Explorador, la barra
+// de tareas y el alt-tab muestran.
+//
+// El camino del .ico es relativo a la carpeta del crate (donde corre el
+// script de compilacion).
+1 ICON "assets/icon.ico"
