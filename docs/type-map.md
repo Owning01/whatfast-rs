@@ -1,8 +1,8 @@
 # TYPE MAP — par TypeScript/SolidJS → Rust
 
-> F3 de `repo-migrate`. Plantilla general en
-> `C:\Users\perca\.agents\backupo\repo-migrate\references\type-map.md`,
-> instanciada para este par. **Firma pendiente del humano.**
+> F3 de `repo-migrate`. Plantilla general en el repositorio de la
+> migración (`references/type-map.md`), instanciada para este par.
+> **Firma pendiente del humano.**
 
 ## Los 5 ejes (resueltos, con el detalle en `RULEBOOK.md` §1)
 
