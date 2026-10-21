@@ -133,7 +133,21 @@ impl Whatfast {
             .child(self.nav_rail.clone())
             .when(show_sidebar, |root| root.child(self.render_sidebar(cx)))
             .when(show_conversation, |root| {
-                root.child(self.render_conversation(compact, window, cx))
+                if self.selected_newsletter.is_some() {
+                    // A channel is open: its posts take the place of the
+                    // conversation.
+                    root.child(self.newsletter_panel.render(self, cx))
+                } else {
+                    root.child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_conversation(compact, window, cx))
+                            // The panel of the members is docked next to the
+                            // conversation of a group.
+                            .child(self.member_panel.render(self, cx)),
+                    )
+                }
             })
     }
 
@@ -283,6 +297,9 @@ impl Whatfast {
                                     .child(div().h_full().w_full().rounded_full().bg(rgb(0x25d366)))
                             }),
                     )
+                    // The strip of the states of the contacts sits above the
+                    // search, the same way the web client draws it.
+                    .child(self.status_strip.render(self, cx))
                     .child(div().pt_1().child(Input::new(&self.search_input).w_full())),
             )
             .child(
@@ -1229,6 +1246,17 @@ impl Whatfast {
                                         cx.notify();
                                     })),
                             )
+                            .child(self.attachment_bar.clone())
+                            .child(
+                                Button::new("create-poll")
+                                    .small()
+                                    .label("Poll")
+                                    .disabled(!connected)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_poll_composer(window, cx);
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 Button::new("send-image")
                                     .label("📷")
@@ -1245,6 +1273,16 @@ impl Whatfast {
                                     } else {
                                         "Sticker"
                                     })
+                                    .disabled(!connected || self.sticker_preparing)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_sticker_tray(cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("make-sticker")
+                                    .small()
+                                    .label("Make a sticker")
                                     .disabled(!connected || self.sticker_preparing)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_sticker(window, cx)
@@ -2403,6 +2441,7 @@ impl Whatfast {
         let body_message_id = message.id.clone();
         let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
         let reply_action_message_id = message_id.clone();
+        let more_action_message_id = message_id.clone();
         let message_image_chat_id = chat_id.clone();
         let message_image_id = message_id.clone();
         let image_failure = self
@@ -2779,8 +2818,23 @@ impl Whatfast {
                                         );
                                         cx.notify();
                                     })),
-                            ),
-                    ),
+                            )
+                            .child(
+                                // The menu of the message: reply, forward,
+                                // edit, delete and pin.
+                                Button::new(("more-message", index))
+                                    .ghost()
+                                    .small()
+                                    .label("…")
+                                    .tooltip("More")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_message_menu(
+                                            more_action_message_id.clone(),
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    })),
+                            ),                    ),
             )
     }
 
@@ -3046,6 +3100,25 @@ impl Render for Whatfast {
             })
             .when_some(self.media_editor.clone(), |root, editor| {
                 root.child(editor)
+            })
+            .when_some(self.message_menu.clone(), |root, menu| {
+                root.child(menu)
+            })
+            .when_some(self.forward_picker.clone(), |root, picker| {
+                root.child(picker)
+            })
+            .when_some(self.poll_composer.clone(), |root, composer| {
+                root.child(composer)
+            })
+            .when(self.sticker_tray_open, |root| {
+                // The tray of the stickers opens over the composer.
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom(px(76. * self.ui_scale))
+                        .left(px(404. * self.ui_scale))
+                        .child(self.sticker_tray.render(self, cx)),
+                )
             })
     }
 }

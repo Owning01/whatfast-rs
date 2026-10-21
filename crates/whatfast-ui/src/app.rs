@@ -45,11 +45,19 @@ use whatfast_protocol::{
 };
 
 use crate::media_editor::{MediaEditor, MediaEditorEvent};
+use crate::members::MemberPanel;
+use crate::message_actions::{
+    AttachmentAction, AttachmentBar, ForwardAction, ForwardPicker, MessageAction, MessageMenu,
+    PollAction, PollComposer,
+};
 use crate::navrail::{LinkState, NavAction, NavRail};
+use crate::newsletters::NewsletterPanel;
 use crate::rpc::{
     BridgeMessage, OutgoingAttachment, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY,
     RpcClient, RpcIncoming, TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
 };
+use crate::statuses::StatusStrip;
+use crate::stickers::StickerTray;
 use crate::tabs::{TabAction, TabEntry, TabStrip};
 use crate::text::{
     encode_mentions, format_typing_label, mention_display_name, mention_token_start,
@@ -580,6 +588,24 @@ pub(crate) struct Whatfast {
     pub(crate) tab_strip: Entity<TabStrip>,
     /// The editor of a picture, when it is open.
     pub(crate) media_editor: Option<Entity<MediaEditor>>,
+    /// The panel of the newsletters.
+    pub(crate) newsletter_panel: NewsletterPanel,
+    /// The strip of the states of the contacts.
+    pub(crate) status_strip: StatusStrip,
+    /// The panel of the members of a group.
+    pub(crate) member_panel: MemberPanel,
+    /// The tray of the stickers.
+    pub(crate) sticker_tray: StickerTray,
+    /// Whether the tray of the stickers is open.
+    pub(crate) sticker_tray_open: bool,
+    /// The menu of a message, when it is open.
+    pub(crate) message_menu: Option<Entity<MessageMenu>>,
+    /// The dialog to forward a message.
+    pub(crate) forward_picker: Option<Entity<ForwardPicker>>,
+    /// The form of a poll.
+    pub(crate) poll_composer: Option<Entity<PollComposer>>,
+    /// The button of the clip of the composer.
+    pub(crate) attachment_bar: Entity<AttachmentBar>,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -625,10 +651,20 @@ impl Whatfast {
                 });
             })
         });
+        let tab_view = shell_view.clone();
         let tab_strip = cx.new(|cx| {
             TabStrip::new(cx, "whatfast", ui_scale).on_action(move |action, window, cx| {
-                shell_view.update(cx, |this, cx| {
+                tab_view.update(cx, |this, cx| {
                     this.on_tab_action(action, window, cx);
+                    cx.notify();
+                });
+            })
+        });
+        let attachment_view = shell_view.clone();
+        let attachment_bar = cx.new(|_| {
+            AttachmentBar::new(ui_scale).on_action(move |action, window, cx| {
+                attachment_view.update(cx, |this, cx| {
+                    this.on_attachment_action(action, window, cx);
                     cx.notify();
                 });
             })
@@ -777,6 +813,15 @@ impl Whatfast {
             nav_rail,
             tab_strip,
             media_editor: None,
+            newsletter_panel: NewsletterPanel::new(window, cx),
+            status_strip: StatusStrip::new(window, cx),
+            member_panel: MemberPanel::default(),
+            sticker_tray: StickerTray::default(),
+            sticker_tray_open: false,
+            message_menu: None,
+            forward_picker: None,
+            poll_composer: None,
+            attachment_bar,
             _subscriptions,
         };
         if let Some(error) = startup_error {
@@ -4351,6 +4396,195 @@ impl Whatfast {
                 self.store.toast_error = Some(error);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The actions on the messages
+    // -----------------------------------------------------------------------
+
+    /// Opens the menu of a message.
+    pub(crate) fn open_message_menu(&mut self, message_id: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let Some(message) = self.store.message(&message_id).cloned() else {
+            return;
+        };
+        let pinned = self.store.message_is_pinned(&chat_id, &message_id);
+        let scale = self.ui_scale;
+        let view = cx.entity();
+        let menu = cx.new(|_| {
+            MessageMenu::new(chat_id, &message, pinned, now_ms(), scale).on_action(
+                move |action, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.on_message_action(action, window, cx);
+                        cx.notify();
+                    });
+                },
+            )
+        });
+        self.message_menu = Some(menu);
+    }
+
+    /// Answers an action of the menu of a message.
+    fn on_message_action(
+        &mut self,
+        action: MessageAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.message_menu.clone() else {
+            return;
+        };
+        let chat_id = menu.read(cx).chat_id().to_owned();
+        let message_id = menu.read(cx).message_id().to_owned();
+        let text = menu.read(cx).text().to_owned();
+        self.message_menu = None;
+        match action {
+            MessageAction::Reply => self.start_reply(message_id),
+            MessageAction::Forward => self.open_forward_picker(chat_id, message_id, window, cx),
+            MessageAction::Edit => self.start_edit(message_id, window, cx),
+            MessageAction::Delete => self.delete_message(message_id, false),
+            MessageAction::DeleteForEveryone => self.delete_message(message_id, true),
+            MessageAction::Copy => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            MessageAction::Pin => self.set_message_pin(message_id, true),
+            MessageAction::Unpin => self.set_message_pin(message_id, false),
+        }
+    }
+
+    /// Opens the dialog to send a message to another conversation.
+    pub(crate) fn open_forward_picker(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.entity();
+        let picker = cx.new(|cx| {
+            ForwardPicker::new(chat_id, message_id, window, cx).on_action(
+                move |action, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.on_forward_action(action, window, cx);
+                        cx.notify();
+                    });
+                },
+            )
+        });
+        let chats: Vec<Chat> = self
+            .store
+            .chat_ids(ChatView::Inbox)
+            .iter()
+            .filter_map(|chat_id| self.store.chat(chat_id).cloned())
+            .collect();
+        picker.update(cx, |picker, _| {
+            picker.set_chats(chats);
+        });
+        self.forward_picker = Some(picker);
+    }
+
+    /// Answers the dialog of the forward.
+    fn on_forward_action(
+        &mut self,
+        action: ForwardAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.forward_picker.clone() else {
+            return;
+        };
+        let source_chat_id = picker.read(cx).source_chat_id().to_owned();
+        let message_id = picker.read(cx).message_id().to_owned();
+        self.forward_picker = None;
+        match action {
+            ForwardAction::Forward(targets) => {
+                for target in targets {
+                    self.forward_message(
+                        source_chat_id.clone(),
+                        message_id.clone(),
+                        target,
+                    );
+                }
+            }
+            ForwardAction::Cancel => {}
+        }
+        let _ = window;
+    }
+
+    /// Opens the form of a poll.
+    pub(crate) fn open_poll_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.selected_chat_id.is_none() {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        }
+        let view = cx.entity();
+        let composer = cx.new(|cx| {
+            PollComposer::new(window, cx).on_action(move |action, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.on_poll_action(action, window, cx);
+                    cx.notify();
+                });
+            })
+        });
+        self.poll_composer = Some(composer);
+    }
+
+    /// Answers the form of the poll.
+    fn on_poll_action(
+        &mut self,
+        action: PollAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.poll_composer = None;
+        match action {
+            PollAction::Create {
+                question,
+                options,
+                selectable_options_count,
+            } => {
+                self.create_poll(question, options, selectable_options_count);
+            }
+            PollAction::Cancel => {}
+        }
+        let _ = (window, cx);
+    }
+
+    /// Answers the button of the clip.
+    fn on_attachment_action(
+        &mut self,
+        action: AttachmentAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            AttachmentAction::Send { path, kind } => {
+                self.send_attachment(path, kind, String::new(), false);
+            }
+            AttachmentAction::Open { path } => {
+                let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+                cx.open_url(&url);
+            }
+            AttachmentAction::Saved { path } => {
+                self.store.toast_error = None;
+                let _ = path;
+            }
+            AttachmentAction::SaveFailed { message } => {
+                self.store.toast_error = Some(message);
+            }
+        }
+        let _ = window;
+    }
+
+    /// Opens or closes the tray of the stickers.
+    pub(crate) fn toggle_sticker_tray(&mut self, cx: &mut Context<Self>) {
+        self.sticker_tray_open = !self.sticker_tray_open;
+        if self.sticker_tray_open {
+            self.load_stickers();
+        }
+        cx.notify();
     }
 }
 
