@@ -2864,13 +2864,11 @@ impl Whatfast {
                                     .label("…")
                                     .tooltip("More")
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_message_menu(
-                                            more_action_message_id.clone(),
-                                            cx,
-                                        );
+                                        this.open_message_menu(more_action_message_id.clone(), cx);
                                         cx.notify();
                                     })),
-                            ),                    ),
+                            ),
+                    ),
             )
     }
 
@@ -3134,12 +3132,8 @@ impl Render for Whatfast {
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))
             })
-            .when_some(self.media_editor.clone(), |root, editor| {
-                root.child(editor)
-            })
-            .when_some(self.message_menu.clone(), |root, menu| {
-                root.child(menu)
-            })
+            .when_some(self.media_editor.clone(), |root, editor| root.child(editor))
+            .when_some(self.message_menu.clone(), |root, menu| root.child(menu))
             .when_some(self.forward_picker.clone(), |root, picker| {
                 root.child(picker)
             })

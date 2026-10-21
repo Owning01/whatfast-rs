@@ -18,10 +18,10 @@
 
 use whatfast_core::message_format::{
     AttachmentContent, ChatKind, ContactContent, ContactsContent, DateLocale, ImageContent,
-    LocalTimestamp, LocationContent, MessageContent, PollContent, TextContent,
-    UnsupportedContent, chat_subtitle, chat_subtitle_with_prefix, connection_label, day_key,
-    format_bytes, format_chat_time, format_countdown, format_day, format_duration, format_time,
-    hue_for, initials, message_text, safe_http_url,
+    LocalTimestamp, LocationContent, MessageContent, PollContent, TextContent, UnsupportedContent,
+    chat_subtitle, chat_subtitle_with_prefix, connection_label, day_key, format_bytes,
+    format_chat_time, format_countdown, format_day, format_duration, format_time, hue_for,
+    initials, message_text, safe_http_url,
 };
 // The projections the formatters work on. The canonical `Chat` and `Message`
 // live in `whatfast_core::types`; these are the lighter shapes the captured

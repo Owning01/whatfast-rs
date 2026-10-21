@@ -4501,11 +4501,7 @@ impl Whatfast {
         match action {
             ForwardAction::Forward(targets) => {
                 for target in targets {
-                    self.forward_message(
-                        source_chat_id.clone(),
-                        message_id.clone(),
-                        target,
-                    );
+                    self.forward_message(source_chat_id.clone(), message_id.clone(), target);
                 }
             }
             ForwardAction::Cancel => {}
@@ -4532,12 +4528,7 @@ impl Whatfast {
     }
 
     /// Answers the form of the poll.
-    fn on_poll_action(
-        &mut self,
-        action: PollAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_poll_action(&mut self, action: PollAction, window: &mut Window, cx: &mut Context<Self>) {
         self.poll_composer = None;
         match action {
             PollAction::Create {

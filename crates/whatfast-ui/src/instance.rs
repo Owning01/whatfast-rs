@@ -111,10 +111,7 @@ mod tests {
             let lock = InstanceLock::acquire(&profile).expect("the lock is free");
             assert!(lock.path().exists());
         }
-        assert!(
-            !profile.join(LOCK_FILE).exists(),
-            "the lock is released"
-        );
+        assert!(!profile.join(LOCK_FILE).exists(), "the lock is released");
     }
 
     /// Another instance that is running keeps the app from starting.

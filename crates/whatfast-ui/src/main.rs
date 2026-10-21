@@ -62,49 +62,49 @@ fn main() {
     gpui_platform::application()
         .with_assets(crate::icons::WhatfastAssets::new())
         .run(|cx| {
-        gpui_component::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
-            KeyBinding::new("ctrl-shift-tab", app::CycleRecentChatReverse, None),
-        ]);
-        // The theme of Whatfast goes over the one of `gpui_component`: the
-        // mode comes first, because `Theme::change` rewrites every color from
-        // the configuration of the mode.
-        let scale = whatfast_model::settings::load_ui_scale()
-            .map(tokens::normalized_ui_scale)
-            .unwrap_or(tokens::DEFAULT_UI_SCALE);
-        tokens::apply_theme(&whatfast_core::theme::default_theme(), scale, cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
-            window_min_size: Some(size(px(480.), px(560.))),
-            ..Default::default()
-        };
-        cx.spawn(async move |cx| {
-            let opened = cx.open_window(options, |window, cx| {
-                let app = cx.new(|cx| Whatfast::new(window, cx));
-                // Fallback for when focus is lost or points at an unmounted
-                // element: in that state the root div is off the dispatch path
-                // and its on_action handlers never run, so also handle the
-                // switcher actions globally. When the root handlers do run
-                // they stop propagation, which keeps these from firing twice.
-                let window_handle = window.window_handle();
-                let weak = app.downgrade();
-                cx.on_action(move |_: &app::CycleRecentChat, cx| {
-                    Whatfast::cycle_recent_chat_from_global(&weak, window_handle, false, cx);
+            gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
+                KeyBinding::new("ctrl-shift-tab", app::CycleRecentChatReverse, None),
+            ]);
+            // The theme of Whatfast goes over the one of `gpui_component`: the
+            // mode comes first, because `Theme::change` rewrites every color from
+            // the configuration of the mode.
+            let scale = whatfast_model::settings::load_ui_scale()
+                .map(tokens::normalized_ui_scale)
+                .unwrap_or(tokens::DEFAULT_UI_SCALE);
+            tokens::apply_theme(&whatfast_core::theme::default_theme(), scale, cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+                window_min_size: Some(size(px(480.), px(560.))),
+                ..Default::default()
+            };
+            cx.spawn(async move |cx| {
+                let opened = cx.open_window(options, |window, cx| {
+                    let app = cx.new(|cx| Whatfast::new(window, cx));
+                    // Fallback for when focus is lost or points at an unmounted
+                    // element: in that state the root div is off the dispatch path
+                    // and its on_action handlers never run, so also handle the
+                    // switcher actions globally. When the root handlers do run
+                    // they stop propagation, which keeps these from firing twice.
+                    let window_handle = window.window_handle();
+                    let weak = app.downgrade();
+                    cx.on_action(move |_: &app::CycleRecentChat, cx| {
+                        Whatfast::cycle_recent_chat_from_global(&weak, window_handle, false, cx);
+                    });
+                    let weak = app.downgrade();
+                    cx.on_action(move |_: &app::CycleRecentChatReverse, cx| {
+                        Whatfast::cycle_recent_chat_from_global(&weak, window_handle, true, cx);
+                    });
+                    cx.new(|cx| Root::new(app, window, cx))
                 });
-                let weak = app.downgrade();
-                cx.on_action(move |_: &app::CycleRecentChatReverse, cx| {
-                    Whatfast::cycle_recent_chat_from_global(&weak, window_handle, true, cx);
-                });
-                cx.new(|cx| Root::new(app, window, cx))
-            });
-            if opened.is_err() {
-                // There is no window to show the error in, so the process has
-                // to say it in the only place that is left.
-                eprintln!("Whatfast: no se pudo abrir la ventana");
-                std::process::exit(1);
-            }
-        })
-        .detach();
-    });
+                if opened.is_err() {
+                    // There is no window to show the error in, so the process has
+                    // to say it in the only place that is left.
+                    eprintln!("Whatfast: no se pudo abrir la ventana");
+                    std::process::exit(1);
+                }
+            })
+            .detach();
+        });
 }

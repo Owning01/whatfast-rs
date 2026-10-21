@@ -1,4 +1,4 @@
-﻿//! The image editor: a free crop with handles and a quarter turn rotation.
+//! The image editor: a free crop with handles and a quarter turn rotation.
 //!
 //! port: taken from the origin's `tauri/src/components/MediaEditor.tsx`. The
 //! geometry of the crop is not here: it comes from
@@ -115,10 +115,8 @@ pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> 
     };
     let x = plan.crop.x.round().clamp(0.0, rotated.width() as f64) as u32;
     let y = plan.crop.y.round().clamp(0.0, rotated.height() as f64) as u32;
-    let width = (plan.crop.width.round().max(1.0) as u32)
-        .min(rotated.width().saturating_sub(x));
-    let height = (plan.crop.height.round().max(1.0) as u32)
-        .min(rotated.height().saturating_sub(y));
+    let width = (plan.crop.width.round().max(1.0) as u32).min(rotated.width().saturating_sub(x));
+    let height = (plan.crop.height.round().max(1.0) as u32).min(rotated.height().saturating_sub(y));
     let cropped = image::imageops::crop_imm(&rotated, x, y, width, height).to_image();
     cropped
         .save(destination)
