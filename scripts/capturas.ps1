@@ -15,8 +15,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $raiz = Split-Path -Parent $PSScriptRoot
-$ejecutable = Join-Path $raiz $Binario
-$destino = Join-Path $raiz $Salida
+$ejecutable = if([System.IO.Path]::IsPathRooted($Binario)) { $Binario } else { Join-Path $raiz $Binario }
+$destino = if([System.IO.Path]::IsPathRooted($Salida)) { $Salida } else { Join-Path $raiz $Salida }
 
 if(-not (Test-Path $ejecutable)) {
     Write-Error "No existe $ejecutable. Corré scripts\build.cmd primero."
@@ -38,6 +38,7 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
@@ -50,8 +51,12 @@ function Rect([IntPtr]$handle) {
 
 function Capturar([IntPtr]$handle, [string]$nombre) {
     $rect = Rect $handle
-    $ancho = $rect.Right - $rect.Left
-    $alto = $rect.Bottom - $rect.Top
+    # The rectangle of the window is in logical pixels: on a scaled screen the
+    # picture has to be taken with the pixels of the device, or the capture
+    # comes out cut.
+    $escala = [Ventana]::GetDpiForWindow($handle) / 96.0
+    $ancho = [int](($rect.Right - $rect.Left) * $escala)
+    $alto = [int](($rect.Bottom - $rect.Top) * $escala)
     if($ancho -le 0 -or $alto -le 0) {
         Write-Warning "la ventana $nombre no tiene tamano"
         return
@@ -111,7 +116,7 @@ Write-Output "=== capturas ==="
 Capturar $handle "01-lista-de-chats.png"
 
 # una conversacion
-Clic $handle 150 258
+Clic $handle 150 286
 Start-Sleep -Seconds 2
 Capturar $handle "02-conversacion.png"
 

@@ -138,15 +138,10 @@ impl Whatfast {
                     // conversation.
                     root.child(self.newsletter_panel.render(self, cx))
                 } else {
-                    root.child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.render_conversation(compact, window, cx))
-                            // The panel of the members is docked next to the
-                            // conversation of a group.
-                            .child(self.member_panel.render(self, cx)),
-                    )
+                    root.child(self.render_conversation(compact, window, cx))
+                        // The panel of the members is docked next to the
+                        // conversation of a group.
+                        .child(self.member_panel.render(self, cx))
                 }
             })
     }
@@ -198,7 +193,8 @@ impl Whatfast {
             .border_color(cx.theme().border)
             .child(
                 v_flex()
-                    .h(px(132. * ui_scale))
+                    // The header grows with its content: the strip of the
+                    // states is a part of it.
                     .px_3()
                     .py_2()
                     .gap_1()
@@ -1009,6 +1005,7 @@ impl Whatfast {
             .flex_1()
             .h_full()
             .min_w_0()
+            .relative()
             // The strip of the open chats sits above the header of the
             // conversation, the same way the web client draws it.
             .child(self.tab_strip.clone())
@@ -1144,22 +1141,42 @@ impl Whatfast {
                     ),
             )
             .when(has_older, |column| {
-                column.child(Button::new("older").label("Load older messages").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.load_older_messages();
-                        cx.notify();
-                    }),
-                ))
+                // The button floats over the list, the same way the web client
+                // draws it: the composer always stays visible.
+                column.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(Button::new("older").label("Load older messages").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.load_older_messages();
+                                cx.notify();
+                            }),
+                        )),
+                )
             })
             .when(has_newer, |column| {
                 column.child(
-                    Button::new("jump-latest")
-                        .primary()
-                        .label("Jump to latest messages")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.refresh_latest();
-                            cx.notify();
-                        })),
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            Button::new("jump-latest")
+                                .primary()
+                                .label("Jump to latest messages")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_latest();
+                                    cx.notify();
+                                })),
+                        ),
                 )
             })
             .when(!connected, |column| {
@@ -1177,27 +1194,35 @@ impl Whatfast {
             .when(self.mention_popup_visible(), |column| {
                 column.child(self.render_mention_picker(cx))
             })
-            .child(
-                v_flex()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .when_some(composer_typing_line, |composer, typing| {
-                        composer.child(
-                            div()
-                                .h(px(24. * self.ui_scale))
-                                .px_4()
-                                .pt_1()
-                                .text_xs()
-                                .text_color(if dark {
-                                    gpui::Hsla::from(rgb(0x25d366))
-                                } else {
-                                    gpui::Hsla::from(rgb(DARK_GREEN))
-                                })
-                                .child(typing),
-                        )
-                    })
-                    .when_some(reply_context, |composer, (sender, preview)| {
-                        composer.child(
+            // The line that says who is writing and the bar of the answer
+            // float above the composer.
+            .when_some(composer_typing_line, |column, typing| {
+                column.child(
+                    div()
+                        .absolute()
+                        .bottom(px(52. * self.ui_scale))
+                        .left_0()
+                        .right_0()
+                        .h(px(24. * self.ui_scale))
+                        .px_4()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(if dark {
+                            gpui::Hsla::from(rgb(0x25d366))
+                        } else {
+                            gpui::Hsla::from(rgb(DARK_GREEN))
+                        })
+                        .child(typing),
+                )
+            })
+            .when_some(reply_context, |column, (sender, preview)| {
+                column.child(
+                    div()
+                        .absolute()
+                        .bottom(px(52. * self.ui_scale))
+                        .left_0()
+                        .right_0()
+                        .child(
                             h_flex()
                                 .mx_3()
                                 .mt_2()
@@ -1231,8 +1256,17 @@ impl Whatfast {
                                         cx.notify();
                                     }),
                                 )),
-                        )
-                    })
+                        ),
+                )
+            })
+            .child(
+                v_flex()
+                    // The composer has a fixed height and never shrinks: the
+                    // list of the messages is the one that gives room.
+                    .flex_shrink_0()
+                    .h(px(52. * self.ui_scale))
+                    .border_t_1()
+                    .border_color(cx.theme().border)
                     .child(
                         h_flex()
                             .p_3()

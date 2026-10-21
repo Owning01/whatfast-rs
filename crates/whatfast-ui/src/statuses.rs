@@ -1,4 +1,4 @@
-//! The strip of the statuses of the contacts, and the viewer of one status.
+﻿//! The strip of the statuses of the contacts, and the viewer of one status.
 //!
 //! port: taken from the origin's `tauri/src/components/StatusStrip.tsx`. The
 //! lengths come from the stylesheet of the origin (`tauri/src/styles.css`,
@@ -296,7 +296,7 @@ impl StatusStrip {
         let state = Rc::new(RefCell::new(StatusStripState::new()));
         let text_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Write a text status…")
+                .placeholder("Write a text statusÔÇª")
                 .clean_on_escape()
         });
         let colors = state.clone();

@@ -1,4 +1,4 @@
-//! The tray of the library of stickers.
+﻿//! The tray of the library of stickers.
 //!
 //! port: taken from the origin's `tauri/src/components/StickerTray.tsx`. The
 //! lengths come from the stylesheet of the origin
@@ -263,7 +263,14 @@ impl StickerTray {
                         }
                         state.borrow_mut().sending = sticker_id.clone();
                         app.send_sticker_from_library(sticker_id.clone());
-                        state.borrow_mut().sending.clear();
+                        // port: the origin waits for the answer of the backend
+                        // before it lets the user send another sticker. The
+                        // request of the client does not wait, so the cell
+                        // is released at the end of the turn.
+                        let released = state.clone();
+                        cx.defer(move |_cx| {
+                            released.borrow_mut().sending.clear();
+                        });
                         cx.notify();
                     }))
             }))

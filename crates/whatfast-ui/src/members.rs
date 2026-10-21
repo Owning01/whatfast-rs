@@ -1,4 +1,4 @@
-//! The panel of the members of a group, and the roster of its participants.
+﻿//! The panel of the members of a group, and the roster of its participants.
 //!
 //! port: taken from the origin's `tauri/src/components/MemberPanel.tsx`,
 //! `ParticipantList.tsx` and `ParticipantRow.tsx`. The lengths come from the
@@ -56,6 +56,11 @@ pub(crate) struct MemberPanelState {
     list: gpui::ListState,
     /// How many rows the roster had the last time it was drawn.
     rows: usize,
+    /// The rows of the roster, the group they belong to and the number of
+    /// members they had when they were built.
+    rows_cache: Option<(String, usize, Rc<Vec<ParticipantRosterRow>>)>,
+    /// Whether the avatars of the roster were already asked for.
+    avatars_warmed: bool,
 }
 
 impl Default for MemberPanelState {
@@ -65,6 +70,8 @@ impl Default for MemberPanelState {
             requested: None,
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(0.)),
             rows: 0,
+            rows_cache: None,
+            avatars_warmed: false,
         }
     }
 }
@@ -176,12 +183,9 @@ impl MemberPanel {
         let chat_id = chat.id.clone();
         self.ensure_roster(&chat_id, cx);
 
-        let participants = app
-            .mention_directories
-            .get(&chat_id)
-            .cloned()
-            .unwrap_or_default();
-        let ready = app.mention_directories.contains_key(&chat_id);
+        let participants = app.mention_directories.get(&chat_id);
+        let ready = participants.is_some();
+        let participants = participants.map(Vec::as_slice).unwrap_or(&[]);
         let participant_count = app
             .chat_info
             .as_ref()
@@ -190,9 +194,12 @@ impl MemberPanel {
             .map(|info| info.participant_count)
             .unwrap_or(0);
         let count = member_count(participant_count, participants.len());
+        if ready {
+            self.warm_avatars(participants, cx);
+        }
 
         let body: gpui::AnyElement = if ready {
-            self.render_roster(app, &participants, cx)
+            self.render_roster(app, &chat_id, participants, cx)
                 .into_any_element()
         } else {
             v_flex()
@@ -204,7 +211,7 @@ impl MemberPanel {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Loading members…"),
+                        .child("Loading membersÔÇª"),
                 )
                 .into_any_element()
         };
@@ -245,14 +252,12 @@ impl MemberPanel {
     fn render_roster(
         &self,
         app: &Whatfast,
+        chat_id: &str,
         participants: &[ChatParticipant],
         cx: &mut Context<Whatfast>,
     ) -> gpui::List {
         let scale = app.ui_scale;
-        let rows = Rc::new(participant_roster_rows(
-            &core_participants(participants),
-            true,
-        ));
+        let rows = self.roster_rows(chat_id, participants);
         {
             let mut state = self.state.borrow_mut();
             if state.rows != rows.len() {
@@ -286,6 +291,37 @@ impl MemberPanel {
         })
     }
 
+    /// The rows of the roster, built again only when the group changes.
+    ///
+    /// port: the origin keeps the rows of the roster in a memo, because a
+    /// group can have thousands of members and the panel is drawn on every
+    /// frame. The cache here is keyed by the group and by the number of
+    /// members, the same signal the origin uses to know that the roster
+    /// changed.
+    fn roster_rows(
+        &self,
+        chat_id: &str,
+        participants: &[ChatParticipant],
+    ) -> Rc<Vec<ParticipantRosterRow>> {
+        let mut state = self.state.borrow_mut();
+        let cached = state
+            .rows_cache
+            .as_ref()
+            .filter(|(cached_chat, cached_count, _)| {
+                cached_chat == chat_id && *cached_count == participants.len()
+            })
+            .map(|(_, _, rows)| rows.clone());
+        if let Some(rows) = cached {
+            return rows;
+        }
+        let rows = Rc::new(participant_roster_rows(
+            &core_participants(participants),
+            true,
+        ));
+        state.rows_cache = Some((chat_id.to_string(), participants.len(), rows.clone()));
+        rows
+    }
+
     /// Asks for the roster of the group when it is not there yet.
     fn ensure_roster(&self, chat_id: &str, cx: &mut Context<Whatfast>) {
         {
@@ -299,6 +335,40 @@ impl MemberPanel {
         cx.spawn(async move |weak, cx| {
             weak.update(cx, |app, cx| {
                 app.ensure_mention_directory(chat_id.clone());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for the avatars of the first members of the roster.
+    ///
+    /// port: the origin asks for the avatar of every row that it mounts, and
+    /// its queue keeps the number of downloads that are in flight small. The
+    /// client of the native app has the same budget in its RPC layer, so the
+    /// panel asks for the first members of the roster and lets the queue of
+    /// the application do the rest.
+    fn warm_avatars(&self, participants: &[ChatParticipant], cx: &mut Context<Whatfast>) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.avatars_warmed {
+                return;
+            }
+            state.avatars_warmed = true;
+        }
+        let pending: Vec<String> = participants
+            .iter()
+            .take(AVATAR_WARMUP)
+            .map(|participant| participant.participant_id.clone())
+            .collect();
+        cx.spawn(async move |weak, cx| {
+            weak.update(cx, |app, cx| {
+                for participant_id in pending {
+                    if app.store.participant_avatar_path(&participant_id).is_none() {
+                        app.load_participant_avatar(participant_id);
+                    }
+                }
                 cx.notify();
             })
             .ok();

@@ -1,4 +1,4 @@
-//! The panel of the newsletters: the channels the account is subscribed to and
+﻿//! The panel of the newsletters: the channels the account is subscribed to and
 //! the posts of the open one.
 //!
 //! port: taken from the origin's `tauri/src/components/NewsletterPanel.tsx`
@@ -89,11 +89,11 @@ pub(crate) fn selected_newsletter<'a>(
 
 /// The label of the channel under its name.
 ///
-/// port: the origin writes "Channel", with " · muted" when the channel is
+/// port: the origin writes "Channel", with " ┬À muted" when the channel is
 /// muted.
 pub(crate) fn channel_subtitle(newsletter: &Newsletter) -> String {
     if newsletter.muted {
-        "Channel · muted".to_string()
+        "Channel ┬À muted".to_string()
     } else {
         "Channel".to_string()
     }
@@ -465,7 +465,7 @@ impl NewsletterPanel {
                 .justify_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("Loading channel posts…");
+                .child("Loading channel postsÔÇª");
         }
         if posts.is_empty() {
             return v_flex()
@@ -761,7 +761,8 @@ fn create_local_channel(
         .local
         .insert(jid.clone(), description.trim().to_string());
     state.borrow_mut().create_open = false;
-    app.select_newsletter(jid);
+    // port: the origin does not open the channel it creates: a local channel
+    // has no posts, and there is no RPC that could ask for them.
     cx.notify();
 }
 
@@ -860,7 +861,7 @@ mod tests {
     #[test]
     fn a_muted_channel_says_that_it_is_muted() {
         let channel = newsletter("news@newsletter", "Whatfast News", true);
-        assert_eq!(channel_subtitle(&channel), "Channel · muted");
+        assert_eq!(channel_subtitle(&channel), "Channel ┬À muted");
         let channel = newsletter("news@newsletter", "Whatfast News", false);
         assert_eq!(channel_subtitle(&channel), "Channel");
     }
