@@ -8,6 +8,10 @@ on:
       tag:
         description: "La etiqueta del release (v0.1.0)"
         required: true
+      omitir_macos:
+        description: "No compilar macOS en esta corrida"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -19,13 +23,15 @@ jobs:
     name: windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache-dependency-path: backend/go.sum
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             . -> target
@@ -52,13 +58,25 @@ jobs:
           & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
           if(-not (Test-Path whatfast-setup.exe)) { throw "el instalador no salio" }
           Get-Item whatfast-setup.exe | ForEach-Object { "whatfast-setup.exe {0:N0} bytes" -f $_.Length }
+      - name: las sumas de verificacion
+        shell: pwsh
+        run: |
+          # Sin firma de codigo, la suma es lo unico que deja comprobar que el
+          # archivo que se bajo es el que se publico.
+          foreach ($archivo in @("whatfast-windows.zip", "whatfast-setup.exe")) {
+            $hash = (Get-FileHash $archivo -Algorithm SHA256).Hash.ToLower()
+            "$hash  $archivo" | Set-Content -Encoding ascii "$archivo.sha256"
+            Get-Content "$archivo.sha256"
+          }
       - name: publicar
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             whatfast-windows.zip
+            whatfast-windows.zip.sha256
             whatfast-setup.exe
+            whatfast-setup.exe.sha256
           body: |
             Whatfast, cliente de escritorio de WhatsApp.
 
@@ -93,27 +111,20 @@ jobs:
 
             ## macOS
 
-            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
-            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El de Intel sale de una compilacion cruzada en el runner de
-            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
-            la que fallo. El paquete va sin firmar: la primera vez hay que
-            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
-
-            ```
-            xattr -dr com.apple.quarantine Whatfast.app
-            ```
+            Esta version no trae paquete de macOS.
   linux:
     name: linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache-dependency-path: backend/go.sum
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             . -> target
@@ -164,7 +175,7 @@ jobs:
           tar -tzf whatfast-linux.tar.gz
           du -h whatfast-linux.tar.gz
       - name: publicar
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
@@ -204,19 +215,13 @@ jobs:
 
             ## macOS
 
-            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
-            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El de Intel sale de una compilacion cruzada en el runner de
-            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
-            la que fallo. El paquete va sin firmar: la primera vez hay que
-            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
-
-            ```
-            xattr -dr com.apple.quarantine Whatfast.app
-            ```
+            Esta version no trae paquete de macOS.
   macos:
     name: macos (${{ matrix.arch }})
     runs-on: macos-latest
+    # Se puede saltear al lanzar el release a mano: la firma ad hoc y el
+    # paquete de Intel no siempre son lo que se quiere publicar.
+    if: ${{ github.event.inputs.omitir_macos != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -235,15 +240,17 @@ jobs:
             tolerante: true
     continue-on-error: ${{ matrix.tolerante }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache-dependency-path: backend/go.sum
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             . -> target
@@ -295,7 +302,7 @@ jobs:
           shasum -a 256 "whatfast-macos-${{ matrix.arch }}.zip" > "whatfast-macos-${{ matrix.arch }}.zip.sha256"
           ls -l "whatfast-macos-${{ matrix.arch }}.zip"
       - name: publicar
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
@@ -335,13 +342,4 @@ jobs:
 
             ## macOS
 
-            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
-            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El de Intel sale de una compilacion cruzada en el runner de
-            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
-            la que fallo. El paquete va sin firmar: la primera vez hay que
-            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
-
-            ```
-            xattr -dr com.apple.quarantine Whatfast.app
-            ```
+            Esta version no trae paquete de macOS.

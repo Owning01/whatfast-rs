@@ -1,0 +1,12 @@
+#!/bin/sh
+# Corre antes de cada commit. Se activa una vez por copia del repositorio:
+#
+#     git config core.hooksPath .githooks
+#
+# Revisa solo lo que se esta por commitear. Si encuentra algo con pinta de
+# clave, corta el commit.
+python scripts/chequear-secretos.py --staged || {
+    echo ""
+    echo "Commit cancelado: saca el secreto del archivo y volve a intentar."
+    exit 1
+}

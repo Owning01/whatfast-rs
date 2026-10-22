@@ -20,3 +20,31 @@ docs/screenshots/actual/
 # Las capturas de trabajo de los agentes, fuera del repositorio.
 capturas/
 
+# Secretos y material de firma: nunca van al repositorio. El repo es publico.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.asc
+id_rsa
+id_ed25519
+
+# Lo que deja el CLI de Firebase.
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+
+# Basura del sistema operativo.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Restos de trabajo de los agentes: no van al repositorio.
+.taste-skill/
+scratch_*
+

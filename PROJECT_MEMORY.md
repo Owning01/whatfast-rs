@@ -999,3 +999,54 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   `browser.evaluate`: 15 botones y columna de 520 px con 799 px de contenido.
 - **Trampa**: `web/` sigue fuera del indice de git. No se commiteo porque no
   hay un pedido explicito; si la pagina se publica, hay que agregarla.
+
+## 2026-10-22 - La pagina se recorre haciendo clic sobre la captura
+
+- **El visor**: `web/index.html` ya no tiene la columna de 15 botones ni la
+  barra de RAM/FPS/JS. Queda la captura sola dentro del marco y, encima,
+  zonas transparentes (`button.hotspot`) en porcentajes del lienzo
+  1475x950: riel, filas de chats, chevron de filtros, cabecera, clip, emoji,
+  boton de tema y cerrar. El clic cambia la imagen (`render(id)`), con
+  `VIEWS` de 13 vistas y `RAIL` compartido.
+- **Por que**: el pedido fue que se vea solo la captura y que se navegue como
+  en la app, no con una lista tecnica al costado.
+- **Lo que no se alcanza**: `03-mensaje-con-foto.png` no tiene entrada
+  realista en el recorrido y queda solo en el README. `07-menu-contextual.png`
+  se abre con el boton derecho sobre una fila.
+- **Para el usuario no programador**: hero en lenguaje llano, nav de tres
+  enlaces (Recorrido, Ventajas, Descargar), comparacion de rendimiento,
+  comandos y arquitectura plegados en `<details id="detalles-tecnicos">`
+  (con JS para que el enlace del pie lo abra), tildes del riel y pie
+  reescritos. El chip "Recorrido interactivo" del marco se saco; los
+  `flow-tag` de los diagramas pasaron de globito a texto de color.
+
+## 2026-10-22 - Blindaje de seguridad y publicacion del sitio
+
+- **Secretos**: `.gitignore` ahora cubre `.env*`, claves y material de firma.
+  El escaneo de los 220 archivos versionados y de los 141 commits no encontro
+  nada. El repositorio es publico y GitHub quedo con escaneo de secretos,
+  proteccion de push, alertas de dependencias y reporte privado de
+  vulnerabilidades activados; los patrones propios y la validacion de vigencia
+  no los habilita el plan.
+- **Antes de commitear**: `scripts/chequear-secretos.py` corre en
+  `.githooks/pre-commit` (se activa con `git config core.hooksPath .githooks`).
+  Probado con una clave AWS falsa: la detecta y corta el commit.
+- **CI**: las cinco acciones quedaron fijadas a un commit en vez de una
+  etiqueta, y `checkout` ya no deja el token en el runner
+  (`persist-credentials: false`). Windows publica `whatfast-windows.zip.sha256`
+  y `whatfast-setup.exe.sha256`. El release acepta `omitir_macos`.
+- **SSRF**: el link preview bloquea loopback, privadas, link-local y CGNAT con
+  `BlockPrivateNetworks`, activa en `client.go`. Los tests de `httptest`
+  (127.0.0.1) inyectan un resolvedor sin bloqueo.
+- **Sitio**: `web/` se publica con `firebase deploy --only hosting`
+  (`https://what-fast.web.app`). La CSP usa el hash del `<script>` inline: si
+  cambia el script, hay que recalcularlo en `firebase.json`. Verificado en el
+  navegador: cero errores de consola y el visor cambia de vista al hacer clic.
+- **Trampa de coordenadas**: la cabecera de la conversacion arranca en 38.5%
+  del ancho (no en 27%) y el panel de info en 67%; medido sobre captura a
+  1440 px con los rectangulos pintados. El boton Volver va en la linea del
+  pie, no arriba de la imagen, porque tapaba el icono de chats del riel.
+- **Verificado**: tour completo (estados, canales, archivados, ajustes, tema
+  claro, filtros, grupos, conversacion, adjuntos, emojis, info de grupo,
+  info de contacto, volver, boton derecho) con `browser.evaluate`; consola
+  sin mensajes; sin desborde horizontal a 1380 px y a 390 px.

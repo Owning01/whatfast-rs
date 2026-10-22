@@ -293,7 +293,7 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		container.Close()
 		return nil, err
 	}
-	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), inboundRetryWake: make(chan struct{}, 1), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch), linkPreviews: linkpreview.New(linkpreview.Options{})}
+	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), inboundRetryWake: make(chan struct{}, 1), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch), linkPreviews: linkpreview.New(linkpreview.Options{BlockPrivateNetworks: true})}
 	if syncStatus, syncErr := productStore.SyncStatus(ctx); syncErr != nil {
 		c.log.Warn("load persisted sync status", "error", syncErr)
 	} else {

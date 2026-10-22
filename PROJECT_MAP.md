@@ -54,8 +54,11 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `docs/referencia/` | Las capturas de WhatsApp Desktop que mandaste, con el índice de lo que muestra cada una y el estado de cada vista. |
 | `docs/plataformas.md` | La guía de instalación de las tres plataformas: los paquetes, las dependencias del sistema y cómo compilar cada una. |
 | `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
-| `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. |
-| `.github/workflows/release.yml` | Los paquetes de las tres plataformas: el `.zip` y el instalador de Windows, el `.tar.gz` de Linux con el `.desktop` y los iconos, y el `Whatfast.app` de macOS (arm64 y x64). |
+| `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. Las acciones van fijadas a un commit. |
+| `.github/workflows/release.yml` | Los paquetes de las tres plataformas: el `.zip` y el instalador de Windows (con su `sha256`), el `.tar.gz` de Linux con el `.desktop` y los iconos, y el `Whatfast.app` de macOS (arm64 y x64). Al lanzarlo a mano, `omitir_macos` deja la corrida en Windows y Linux. |
+| `web/` + `firebase.json` + `.firebaserc` | El sitio publicado en `https://what-fast.web.app` (proyecto de Firebase `what-fast`). `firebase.json` lleva los encabezados de seguridad y la CSP; la CSP depende del hash del `<script>` de `web/index.html`. |
+| `SECURITY.md` | Cómo reportar un problema de seguridad y qué datos guarda la app. |
+| `.githooks/pre-commit` + `scripts/chequear-secretos.py` | Cortan el commit si aparece una clave. Se activan con `git config core.hooksPath .githooks`. El repositorio es público. |
 
 ## Reglas de trabajo de esta máquina
 

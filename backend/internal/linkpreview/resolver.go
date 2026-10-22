@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -70,6 +71,10 @@ type Options struct {
 	MaxEntries int
 	// MaxBody bounds the number of bytes read from a response body.
 	MaxBody int64
+	// BlockPrivateNetworks refuses loopback, private and link-local addresses.
+	// A link that arrives in a chat message must not make the app touch the
+	// machine it runs on or the network behind it.
+	BlockPrivateNetworks bool
 	// Now overrides the clock, which keeps the cache deterministic in tests.
 	Now func() time.Time
 }
@@ -121,8 +126,15 @@ func New(opts Options) *Resolver {
 	}
 	client := opts.HTTPClient
 	if client == nil {
+		transport := &http.Transport{}
+		if opts.BlockPrivateNetworks {
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialPublic(ctx, network, address, timeout)
+			}
+		}
 		client = &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= maxRedirects {
 					return fmt.Errorf("too many redirects")
@@ -248,6 +260,56 @@ func normalizeURL(rawURL string) (string, bool) {
 		return "", false
 	}
 	return parsed.String(), true
+}
+
+// carrierGradeNAT is the 100.64.0.0/10 block: not private by RFC 1918, but
+// still not the public internet.
+var carrierGradeNAT = func() *net.IPNet {
+	_, block, _ := net.ParseCIDR("100.64.0.0/10")
+	return block
+}()
+
+// dialPublic connects only to public addresses. It resolves the name first,
+// refuses the request when any answer is private, and then dials the addresses
+// it already checked: resolving twice would let the second answer point
+// somewhere else.
+func dialPublic(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	answers, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, answer := range answers {
+		if !isPublic(answer.IP) {
+			return nil, fmt.Errorf("linkpreview: %s no es una direccion publica", host)
+		}
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	var lastErr error
+	for _, answer := range answers {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(answer.IP.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("linkpreview: %s no resolvio a ninguna direccion", host)
+	}
+	return nil, lastErr
+}
+
+// isPublic reports whether ip belongs to the public internet.
+func isPublic(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	return !carrierGradeNAT.Contains(ip)
 }
 
 var (

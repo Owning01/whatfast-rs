@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Owning01/whatfast/backend/internal/domain"
+	"github.com/Owning01/whatfast/backend/internal/linkpreview"
 	"github.com/Owning01/whatfast/backend/internal/store"
 )
 
@@ -51,6 +52,10 @@ func TestAttachLinkPreviewStoresTheResolvedPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+
+	// El servidor de prueba vive en 127.0.0.1 y el cliente real bloquea las
+	// direcciones privadas: se le da un resolvedor sin ese bloqueo.
+	client.linkPreviews = linkpreview.New(linkpreview.Options{})
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/html")
