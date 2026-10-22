@@ -487,6 +487,10 @@ impl Whatfast {
     /// The view of the channels, the column that replaces the chats.
     fn render_channels(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let scale = self.ui_scale;
+        // El borde del boton del canal nuevo: en la referencia es un anillo
+        // gris, no el relleno verde del boton de la columna de los chats.
+        let ring = cx.theme().muted_foreground.opacity(0.55);
+        let hover = cx.theme().muted;
         v_flex()
             .h_full()
             .w(px(384. * scale))
@@ -494,56 +498,66 @@ impl Whatfast {
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
-                v_flex().flex_none().px_3().py_2().gap_1().child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(24. * scale))
-                                .font_weight(FontWeight::BOLD)
-                                .child("Channels"),
-                        )
-                        .child(
-                            // El boton verde del canal nuevo, como el de la
-                            // columna de los chats.
-                            div()
-                                .id("new-channel")
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(36. * scale))
+                v_flex()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(24. * scale))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("Channels"),
+                            )
+                            .child(
+                                // El boton de crear un canal: la referencia lo
+                                // dibuja con el borde y no con el relleno
+                                // verde del boton de la columna de los chats.
+                                div()
+                                    .id("new-channel")
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22. * scale))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(ring)
+                                    .text_color(cx.theme().foreground)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(hover))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.newsletter_panel.open_create();
+                                        cx.notify();
+                                    }))
+                                    .child(Icon::new(IconName::Plus).with_size(px(12. * scale))),
+                            ),
+                    )
+                    // El buscador va con el titulo: en la referencia los dos
+                    // arrancan en la misma columna.
+                    .child(
+                        div().pt_1().child(
+                            Input::new(self.newsletter_panel.search_input())
+                                .w_full()
+                                .h(px(38. * scale))
                                 .rounded_full()
-                                .bg(cx.theme().accent)
-                                .text_color(cx.theme().accent_foreground)
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.newsletter_panel.open_create();
-                                    cx.notify();
-                                }))
-                                .child(Icon::new(IconName::Plus).with_size(px(20. * scale))),
+                                .bg(cx.theme().input)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .prefix(
+                                    Icon::new(IconName::Search)
+                                        .with_size(px(17. * scale))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
                         ),
-                ),
-            )
-            .child(
-                div().pt_1().child(
-                    Input::new(self.newsletter_panel.search_input())
-                        .w_full()
-                        .h(px(38. * scale))
-                        .rounded_full()
-                        .bg(cx.theme().input)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .prefix(
-                            Icon::new(IconName::Search)
-                                .with_size(px(17. * scale))
-                                .text_color(cx.theme().muted_foreground),
-                        ),
-                ),
+                    ),
             )
             .child(self.newsletter_panel.render_list(self, cx))
             .child(self.newsletter_panel.render_list_footer(cx))
@@ -551,35 +565,154 @@ impl Whatfast {
 
     /// The panel that sits next to the list of channels.
     ///
-    /// The reference draws it with the title and the explanation of what a
-    /// channel is.
+    /// The reference draws the bubble of the brand at the top, the big title
+    /// of the discovery and the phrase that explains what a channel is.
     fn render_channels_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale = self.ui_scale;
         let muted = cx.theme().muted_foreground;
         v_flex()
             .flex_1()
             .min_h_0()
             .items_center()
             .justify_center()
-            .gap_3()
             .p_4()
+            // El dibujo de la burbuja va arriba del todo.
             .child(
                 div()
-                    .text_xl()
-                    .font_weight(FontWeight::BOLD)
+                    .mb(px(26. * scale))
+                    .child(self.channels_bubble(64. * scale, cx)),
+            )
+            .child(
+                div()
+                    .mb(px(10. * scale))
+                    .text_size(px(30. * scale))
+                    .text_color(cx.theme().foreground)
+                    .text_center()
                     .child("Discover channels"),
             )
             .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Entertainment, news, sports, lifestyle, people and much more."),
+                v_flex()
+                    .items_center()
+                    .gap(px(2. * scale))
+                    .child(
+                        div()
+                            .text_size(px(15. * scale))
+                            .text_color(muted)
+                            .text_center()
+                            .child("Entertainment, news, sports, lifestyle, people and much more."),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15. * scale))
+                            .text_color(muted)
+                            .text_center()
+                            .child("Follow the channels you like."),
+                    ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Follow the channels you like."),
+    }
+
+    /// The bubble of the discovery of the channels.
+    ///
+    /// The reference draws a big bubble with the eyes of the brand: a circle
+    /// with a point at the bottom left, two arcs and a dot inside. The
+    /// drawing is a canvas: the body is one path, so the gray of the bubble
+    /// does not pile up where the shapes meet, and the eyes are holes of the
+    /// color of the panel.
+    fn channels_bubble(&self, diameter: f32, cx: &mut Context<Self>) -> gpui::Div {
+        // El cuerpo de la burbuja es un gris apagado y los ojos son el fondo
+        // del panel: el dibujo es un agujero, no una mancha.
+        let body_color = cx.theme().muted_foreground.opacity(0.33);
+        let hole = cx.theme().background;
+        div().size(px(diameter)).child(
+            canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _| {
+                    let side = bounds.size.width.to_f64() as f32;
+                    let origin_x = bounds.origin.x.to_f64() as f32;
+                    let origin_y = bounds.origin.y.to_f64() as f32;
+                    let radius = side * 0.42;
+                    let center_x = origin_x + side * 0.56;
+                    let center_y = origin_y + side * 0.44;
+
+                    // El cuerpo: el circulo de la burbuja y, pegada a el,
+                    // la punta de abajo a la izquierda. Es un solo camino
+                    // para que el gris no se junte dos veces.
+                    let mut body_path = gpui::PathBuilder::default();
+                    body_path.move_to(point(
+                        px(center_x - radius * 0.94),
+                        px(center_y + radius * 0.34),
+                    ));
+                    // El arco largo del circulo: desde la punta de la
+                    // izquierda, por arriba, por la derecha y por abajo,
+                    // hasta el notch de la punta.
+                    body_path.arc_to(
+                        point(px(radius), px(radius)),
+                        px(0.),
+                        true,
+                        true,
+                        point(px(center_x - radius * 0.34), px(center_y + radius * 0.94)),
+                    );
+                    // La punta: la arista de adentro y la de afuera.
+                    body_path.cubic_bezier_to(
+                        point(px(center_x - radius * 0.92), px(center_y + radius * 1.03)),
+                        point(px(center_x - radius * 0.62), px(center_y + radius * 1.02)),
+                        point(px(center_x - radius * 0.74), px(center_y + radius * 1.02)),
+                    );
+                    body_path.cubic_bezier_to(
+                        point(px(center_x - radius * 0.94), px(center_y + radius * 0.34)),
+                        point(px(center_x - radius * 1.02), px(center_y + radius * 0.85)),
+                        point(px(center_x - radius * 1.00), px(center_y + radius * 0.55)),
+                    );
+                    body_path.close();
+                    if let Ok(path) = body_path.build() {
+                        window.paint_path(path, body_color);
+                    }
+
+                    // Los dos ojos: un arco a cada lado del punto.
+                    for side in [-1., 1.] {
+                        let mut eye = gpui::PathBuilder::stroke(px(radius * 0.17));
+                        eye.move_to(point(
+                            px(center_x + side * radius * 0.53),
+                            px(center_y - radius * 0.36),
+                        ));
+                        eye.cubic_bezier_to(
+                            point(
+                                px(center_x + side * radius * 0.53),
+                                px(center_y + radius * 0.36),
+                            ),
+                            point(
+                                px(center_x + side * radius * 0.70),
+                                px(center_y - radius * 0.13),
+                            ),
+                            point(
+                                px(center_x + side * radius * 0.70),
+                                px(center_y + radius * 0.13),
+                            ),
+                        );
+                        if let Ok(path) = eye.build() {
+                            window.paint_path(path, hole);
+                        }
+                    }
+
+                    // El punto del medio.
+                    window.paint_quad(gpui::PaintQuad {
+                        bounds: gpui::Bounds {
+                            origin: point(
+                                px(center_x - radius * 0.15),
+                                px(center_y - radius * 0.15),
+                            ),
+                            size: size(px(radius * 0.30), px(radius * 0.30)),
+                        },
+                        corner_radii: gpui::Corners::all(px(radius * 0.15)),
+                        background: hole.into(),
+                        border_widths: gpui::Edges::default(),
+                        border_color: gpui::transparent_black(),
+                        border_style: gpui::BorderStyle::default(),
+                    });
+                },
             )
+            .size_full(),
+        )
     }
 
     /// The view of the archived conversations, the column that replaces the

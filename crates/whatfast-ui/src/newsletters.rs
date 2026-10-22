@@ -1,4 +1,4 @@
-﻿//! The panel of the newsletters: the channels the account is subscribed to and
+//! The panel of the newsletters: the channels the account is subscribed to and
 //! the posts of the open one.
 //!
 //! port: taken from the origin's `tauri/src/components/NewsletterPanel.tsx`
@@ -40,10 +40,23 @@ use whatfast_model::model::message_text;
 use whatfast_protocol::{Message, Newsletter, message::Content};
 
 use crate::app::Whatfast;
-use crate::helpers::avatar_element;
+use crate::helpers::{avatar_element, one_line};
 
 /// The side of the avatar of the header, in pixels, before the scale.
 pub(crate) const HEADER_AVATAR_SIZE: f32 = 41.0;
+
+/// The channels that the client suggests to follow.
+///
+/// port: the reference draws, under the list of the channels that the account
+/// follows, a section with the channels that can be followed. The protocol
+/// has no RPC that asks for the suggestions, so the client draws this fixed
+/// list: the name of the channel and the number of followers.
+const SUGGESTED_CHANNELS: [(&str, &str); 4] = [
+    ("Whatfast Sports", "42K followers"),
+    ("Whatfast Tech", "2M followers"),
+    ("Whatfast Music", "234M followers"),
+    ("Whatfast Cinema", "1M followers"),
+];
 
 /// The state of the panel of the newsletters.
 #[derive(Default)]
@@ -101,6 +114,21 @@ pub(crate) fn channel_subtitle(newsletter: &Newsletter) -> String {
     } else {
         "Channel".to_string()
     }
+}
+
+/// The line under the name of a channel.
+///
+/// port: the reference draws the preview of the last post of the channel. The
+/// client only has the posts of the channel that is open, so the other ones
+/// show the label of the channel.
+fn channel_preview(app: &Whatfast, newsletter: &Newsletter) -> String {
+    app.store
+        .newsletter_messages(&newsletter.jid)
+        .iter()
+        .max_by_key(|post| post.timestamp_ms)
+        .map(|post| one_line(message_text(post)))
+        .filter(|preview| !preview.is_empty())
+        .unwrap_or_else(|| channel_subtitle(newsletter))
 }
 
 /// The jid of a channel that was created locally.
@@ -276,6 +304,7 @@ impl NewsletterPanel {
             })
             .cloned()
             .collect();
+        let hover = cx.theme().muted;
         v_flex()
             .id("newsletter-list")
             .flex_1()
@@ -285,77 +314,185 @@ impl NewsletterPanel {
                 let active = selected.as_deref() == Some(newsletter.jid.as_str());
                 let jid = newsletter.jid.clone();
                 let badge = self.state.borrow().local.contains_key(&jid);
-                v_flex()
+                let preview = channel_preview(app, newsletter);
+                // La hora de la suscripcion va a la derecha de la fila, y no
+                // pegada al nombre, como la dibuja la referencia.
+                let time = message_time(newsletter.subscribed_at_ms);
+                h_flex()
                     .id(ElementId::named_usize("newsletter-row", index))
                     .w_full()
-                    .gap(px(10.))
-                    .px(px(14.))
-                    .py(px(8.))
+                    .gap(px(12. * scale))
+                    .px(px(12. * scale))
+                    .py(px(8. * scale))
                     .items_center()
+                    .rounded_md()
                     .bg(if active {
                         cx.theme().accent.opacity(0.12)
                     } else {
                         gpui::transparent_black()
                     })
+                    .hover(move |style| style.bg(hover))
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.select_newsletter(jid.clone());
                         cx.notify();
                     }))
+                    .child(avatar_element(&newsletter.name, "", px(48. * scale), cx))
                     .child(
-                        h_flex()
-                            .gap(px(10.))
+                        // El texto del canal: el nombre con la hora a la
+                        // derecha de la fila y el preview abajo.
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(avatar_element(&newsletter.name, "", px(38. * scale), cx))
+                            .gap(px(2. * scale))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap(px(8. * scale))
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(newsletter.name.clone()),
+                                    )
+                                    .when(badge, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .px(px(6.))
+                                                .py(px(3.))
+                                                .rounded_sm()
+                                                .bg(cx.theme().accent.opacity(0.12))
+                                                .text_color(cx.theme().accent)
+                                                .text_xs()
+                                                .child("local"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(time),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(preview),
+                            ),
+                    )
+            }))
+            // La seccion de los canales que se pueden seguir, bajo la lista.
+            .child(self.render_suggestions(app, cx))
+    }
+
+    /// The section of the channels that the account can follow.
+    ///
+    /// port: the reference draws a title and, under it, a row per channel
+    /// with its logo, its name with the green tick of the verified ones, the
+    /// number of followers and the green button to follow it. The protocol
+    /// has no RPC that asks for the suggestions, so the client draws a fixed
+    /// list.
+    fn render_suggestions(
+        &self,
+        app: &Whatfast,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let scale = app.ui_scale;
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let accent_foreground = cx.theme().accent_foreground;
+        v_flex()
+            .id("newsletter-suggestions")
+            .flex_none()
+            .px(px(12. * scale))
+            .pt(px(18. * scale))
+            .pb(px(6. * scale))
+            .gap(px(12. * scale))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child("Search channels to follow"),
+            )
+            .children(
+                SUGGESTED_CHANNELS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, followers))| {
+                        let state = self.state.clone();
+                        h_flex()
+                            .id(ElementId::named_usize("newsletter-suggestion-row", index))
+                            .w_full()
+                            .gap(px(12. * scale))
+                            .py(px(6. * scale))
+                            .items_center()
+                            .child(avatar_element(name, "", px(48. * scale), cx))
                             .child(
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
+                                    .gap(px(2. * scale))
                                     .child(
                                         h_flex()
-                                            .gap(px(6.))
+                                            .gap(px(6. * scale))
+                                            .items_center()
                                             .child(
                                                 div()
-                                                    .flex_1()
                                                     .min_w_0()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
                                                     .truncate()
-                                                    .child(newsletter.name.clone()),
+                                                    .child((*name).to_string()),
                                             )
-                                            // The time of the subscription goes
-                                            // at the right of the name.
+                                            // El tilde verde del canal verificado.
                                             .child(
                                                 div()
-                                                    .flex_shrink_0()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(message_time(
-                                                        newsletter.subscribed_at_ms,
-                                                    )),
-                                            )
-                                            .when(badge, |row| {
-                                                row.child(
-                                                    div()
-                                                        .px(px(6.))
-                                                        .py(px(3.))
-                                                        .rounded_sm()
-                                                        .bg(cx.theme().accent.opacity(0.12))
-                                                        .text_color(cx.theme().accent)
-                                                        .text_xs()
-                                                        .child("local"),
-                                                )
-                                            }),
+                                                    .flex_none()
+                                                    .size(px(16. * scale))
+                                                    .rounded_full()
+                                                    .bg(accent)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(
+                                                        Icon::new(IconName::Check)
+                                                            .with_size(px(11. * scale))
+                                                            .text_color(accent_foreground),
+                                                    ),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(channel_subtitle(newsletter)),
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(muted)
+                                            .child((*followers).to_string()),
                                     ),
-                            ),
-                    )
-            }))
+                            )
+                            // El boton verde de seguir, a la derecha de la fila.
+                            .child(
+                                Button::new(ElementId::named_usize(
+                                    "newsletter-suggestion-follow",
+                                    index,
+                                ))
+                                .primary()
+                                .rounded(px(9999.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .label("Follow")
+                                .on_click(cx.listener(
+                                    move |_app, _, _, cx| {
+                                        state.borrow_mut().subscribe_open = true;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                    }),
+            )
     }
 
     /// The row of the buttons that follows the list of channels.
