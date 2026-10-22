@@ -243,6 +243,7 @@
       font-size: 1rem;
       font-weight: 500;
       padding: 14px 26px;
+      box-shadow: inset 0 0 0 1px var(--border-medium);
       border-radius: var(--radius-full);
       display: inline-flex;
       align-items: center;
@@ -1017,6 +1018,20 @@
       .cta-heading {
         font-size: 1.65rem;
         line-height: 1.2;
+      }
+      .hero-requirements {
+        flex-direction: column;
+        gap: 4px;
+        text-align: center;
+      }
+      .hero-requirements span:nth-child(even) {
+        display: none;
+      }
+      .hero-cta-group .btn-primary,
+      .hero-cta-group .btn-secondary {
+        min-height: 52px;
+        flex: 0 0 auto;
+        white-space: nowrap;
       }
     }
   </style>
