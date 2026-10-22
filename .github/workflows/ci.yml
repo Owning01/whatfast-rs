@@ -33,20 +33,39 @@ jobs:
       - name: el juez de paridad
         run: python scripts/parity.py
 
-  # The interface: GPUI, the stack of Zed. It only builds where the stack
-  # builds, and it takes a while, so it is a separate job.
+  # The interface: GPUI, the stack of Zed. It takes a while, so it is a
+  # separate job, and it runs on the three systems so a change that only
+  # breaks Linux or macOS shows up here and not in the release.
   interface:
-    name: interfaz nativa
-    runs-on: windows-latest
+    name: interfaz nativa (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: las dependencias del sistema que pide el stack de GPUI
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential cmake clang lld pkg-config \
+            libfontconfig-dev libfreetype6-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libssl-dev libvulkan1 libglib2.0-dev libzstd-dev \
+            xvfb
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
+        if: matrix.os != 'ubuntu-latest'
         run: cargo test --workspace --locked
+      - name: test (sin pantalla, con el X virtual)
+        if: matrix.os == 'ubuntu-latest'
+        run: xvfb-run --auto-servernum cargo test --workspace --locked

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  El Info.plist del paquete de macOS (Whatfast.app/Contents/Info.plist).
+
+  El texto __VERSION__ lo reemplaza el job "macos" de
+  .github/workflows/release.yml con la version de Cargo.toml antes de empacar.
+  Si se cambia a mano, dejar el marcador: el numero vive en un solo lado.
+
+  CFBundleExecutable y CFBundleIconFile apuntan a lo que arma el workflow:
+    Contents/MacOS/whatfast        la interfaz (GPUI)
+    Contents/MacOS/whatfast-backend el sidecar en Go
+    Contents/Resources/icon.icns   el icono
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>es</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Whatfast</string>
+
+    <key>CFBundleName</key>
+    <string>Whatfast</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>io.github.owning01.whatfast</string>
+
+    <key>CFBundleExecutable</key>
+    <string>whatfast</string>
+
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleSignature</key>
+    <string>????</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.social-networking</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- La interfaz tiene barra de menu y ventana propia: no es un agente. -->
+    <key>LSUIElement</key>
+    <false/>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT OR Apache-2.0</string>
+</dict>
+</plist>

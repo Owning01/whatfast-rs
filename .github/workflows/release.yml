@@ -12,6 +12,8 @@ on:
 permissions:
   contents: write
 
+# Los tres paquetes salen con el mismo texto: cada job crea o actualiza el
+# mismo release, y el body se reescribe igual, asi que no importa cual gane.
 jobs:
   windows:
     name: windows
@@ -60,20 +62,49 @@ jobs:
           body: |
             Whatfast, cliente de escritorio de WhatsApp.
 
-            El paquete trae los dos ejecutables: `whatfast.exe` (la interfaz
-            nativa) y `whatfast-backend.exe` (el sidecar que habla con
+            ## Windows
+
+            `whatfast-windows.zip` trae los dos ejecutables: `whatfast.exe` (la
+            interfaz nativa) y `whatfast-backend.exe` (el sidecar que habla con
             WhatsApp). Los dos tienen que estar en la misma carpeta.
 
             `whatfast-setup.exe` es el instalador: deja todo en Archivos de
             programa y arma los accesos directos.
 
+            ## Linux
+
+            `whatfast-linux.tar.gz`. Se descomprime en cualquier carpeta y se
+            corre `./whatfast`; `whatfast` y `whatfast-backend` van juntos.
+            Para instalarlo en el sistema, desde la carpeta descomprimida:
+
+            ```
+            sudo install -Dm755 whatfast whatfast-backend -t /usr/local/bin
+            sudo install -Dm644 share/applications/whatfast.desktop -t /usr/share/applications
+            sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
+            ```
+
+            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
+            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+
+            ```
+            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            ```
+
+            ## macOS
+
+            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
+            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
+
+            ```
+            xattr -dr com.apple.quarantine Whatfast.app
+            ```
   linux:
     name: linux
     runs-on: ubuntu-latest
-    # The Windows package is the one that is tested. The Linux build is an
-    # attempt: if the GPUI stack does not compile there, the Windows release
-    # must not be blocked by it.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -81,6 +112,10 @@ jobs:
         with:
           go-version: "1.25"
           cache-dependency-path: backend/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
       - name: las dependencias del sistema que pide el stack de GPUI
         run: |
           sudo apt-get update
@@ -92,19 +127,214 @@ jobs:
       - name: el sidecar en Go
         run: |
           cd backend
-          go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
           cd ..
       - name: la interfaz en release
         run: cargo build --release -p whatfast-ui
       - name: armar el paquete
         run: |
-          mkdir -p dist/icons
-          cp target/release/whatfast-ui dist/whatfast
-          cp backend/bin/whatfast-backend dist/
-          cp assets/icons/32x32.png assets/icons/128x128.png assets/icons/128x128@2x.png assets/icons/icon.png dist/icons/
+          set -euo pipefail
+          mkdir -p dist
+          install -m755 target/release/whatfast-ui dist/whatfast
+          install -m755 backend/bin/whatfast-backend dist/whatfast-backend
+
+          # La entrada de escritorio y los iconos, en el arbol que espera
+          # freedesktop: share/applications y share/icons/hicolor/<tamano>/apps.
+          install -Dm644 assets/linux/whatfast.desktop dist/share/applications/whatfast.desktop
+          install -Dm644 assets/icons/32x32.png           dist/share/icons/hicolor/32x32/apps/whatfast.png
+          install -Dm644 assets/icons/64x64.png           dist/share/icons/hicolor/64x64/apps/whatfast.png
+          install -Dm644 assets/icons/128x128.png         dist/share/icons/hicolor/128x128/apps/whatfast.png
+          install -Dm644 assets/icons/128x128@2x.png      dist/share/icons/hicolor/256x256/apps/whatfast.png
+          install -Dm644 assets/icons/icon.png            dist/share/icons/hicolor/512x512/apps/whatfast.png
+
+          # La carpeta icons/ plana se mantiene: es la que traia el paquete y
+          # la que buscan las versiones anteriores desde su propia carpeta.
+          install -Dm644 assets/icons/32x32.png      dist/icons/32x32.png
+          install -Dm644 assets/icons/128x128.png    dist/icons/128x128.png
+          install -Dm644 assets/icons/128x128@2x.png dist/icons/128x128@2x.png
+          install -Dm644 assets/icons/icon.png       dist/icons/icon.png
+
           tar -czf whatfast-linux.tar.gz -C dist .
+          sha256sum whatfast-linux.tar.gz > whatfast-linux.tar.gz.sha256
+          tar -tzf whatfast-linux.tar.gz
+          du -h whatfast-linux.tar.gz
       - name: publicar
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: whatfast-linux.tar.gz
+          files: |
+            whatfast-linux.tar.gz
+            whatfast-linux.tar.gz.sha256
+          body: |
+            Whatfast, cliente de escritorio de WhatsApp.
+
+            ## Windows
+
+            `whatfast-windows.zip` trae los dos ejecutables: `whatfast.exe` (la
+            interfaz nativa) y `whatfast-backend.exe` (el sidecar que habla con
+            WhatsApp). Los dos tienen que estar en la misma carpeta.
+
+            `whatfast-setup.exe` es el instalador: deja todo en Archivos de
+            programa y arma los accesos directos.
+
+            ## Linux
+
+            `whatfast-linux.tar.gz`. Se descomprime en cualquier carpeta y se
+            corre `./whatfast`; `whatfast` y `whatfast-backend` van juntos.
+            Para instalarlo en el sistema, desde la carpeta descomprimida:
+
+            ```
+            sudo install -Dm755 whatfast whatfast-backend -t /usr/local/bin
+            sudo install -Dm644 share/applications/whatfast.desktop -t /usr/share/applications
+            sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
+            ```
+
+            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
+            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+
+            ```
+            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            ```
+
+            ## macOS
+
+            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
+            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
+
+            ```
+            xattr -dr com.apple.quarantine Whatfast.app
+            ```
+  macos:
+    name: macos (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub ya no tiene runners Intel (macos-13 se retiro en diciembre
+          # de 2025 y los "large" son pagos): el paquete de x86_64 sale de una
+          # compilacion cruzada en el runner de arm64. Es la unica via, y por
+          # eso no frena el release: si falla, el de arm64 sale igual.
+          - target: aarch64-apple-darwin
+            arch: arm64
+            goarch: arm64
+            tolerante: false
+          - target: x86_64-apple-darwin
+            arch: x64
+            goarch: amd64
+            tolerante: true
+    continue-on-error: ${{ matrix.tolerante }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: backend/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          key: ${{ matrix.target }}
+      - name: el sidecar en Go
+        run: |
+          set -euo pipefail
+          cd backend
+          CGO_ENABLED=0 GOOS=darwin GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
+      - name: la interfaz en release
+        run: cargo build --release -p whatfast-ui --target ${{ matrix.target }}
+      - name: armar el Whatfast.app
+        run: |
+          set -euo pipefail
+          # La version vive en Cargo.toml ([workspace.package]): el plist y el
+          # bundle no la repiten a mano.
+          version="$(awk '/^\[workspace.package\]/{encontrado=1;next} /^\[/{encontrado=0} encontrado && /^version *=/{gsub(/[",]/,"");print $3}' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "FALLO: no pude leer la version de Cargo.toml" >&2
+            exit 1
+          fi
+
+          rm -rf dist
+          app="dist/Whatfast.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+          install -m755 "target/${{ matrix.target }}/release/whatfast-ui" "$app/Contents/MacOS/whatfast"
+          install -m755 backend/bin/whatfast-backend "$app/Contents/MacOS/whatfast-backend"
+          install -m644 assets/icons/icon.icns "$app/Contents/Resources/icon.icns"
+
+          sed "s/__VERSION__/$version/g" assets/macos/Info.plist > "$app/Contents/Info.plist"
+          chmod 644 "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+
+          find "$app" -print
+      - name: la firma ad hoc
+        run: |
+          set -euo pipefail
+          # Sin firma, macOS no deja arrancar un binario de arm64. La firma ad
+          # hoc no es una firma de desarrollador: alcanza para ejecutar, no
+          # para pasar Gatekeeper, y por eso el release lo aclara.
+          codesign --force --deep --sign - "dist/Whatfast.app"
+          codesign --verify --verbose=2 "dist/Whatfast.app"
+      - name: comprimir
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "dist/Whatfast.app" "whatfast-macos-${{ matrix.arch }}.zip"
+          shasum -a 256 "whatfast-macos-${{ matrix.arch }}.zip" > "whatfast-macos-${{ matrix.arch }}.zip.sha256"
+          ls -l "whatfast-macos-${{ matrix.arch }}.zip"
+      - name: publicar
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            whatfast-macos-${{ matrix.arch }}.zip
+            whatfast-macos-${{ matrix.arch }}.zip.sha256
+          body: |
+            Whatfast, cliente de escritorio de WhatsApp.
+
+            ## Windows
+
+            `whatfast-windows.zip` trae los dos ejecutables: `whatfast.exe` (la
+            interfaz nativa) y `whatfast-backend.exe` (el sidecar que habla con
+            WhatsApp). Los dos tienen que estar en la misma carpeta.
+
+            `whatfast-setup.exe` es el instalador: deja todo en Archivos de
+            programa y arma los accesos directos.
+
+            ## Linux
+
+            `whatfast-linux.tar.gz`. Se descomprime en cualquier carpeta y se
+            corre `./whatfast`; `whatfast` y `whatfast-backend` van juntos.
+            Para instalarlo en el sistema, desde la carpeta descomprimida:
+
+            ```
+            sudo install -Dm755 whatfast whatfast-backend -t /usr/local/bin
+            sudo install -Dm644 share/applications/whatfast.desktop -t /usr/share/applications
+            sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
+            ```
+
+            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
+            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+
+            ```
+            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            ```
+
+            ## macOS
+
+            `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
+            (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
+
+            ```
+            xattr -dr com.apple.quarantine Whatfast.app
+            ```

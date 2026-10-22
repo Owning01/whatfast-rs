@@ -1,0 +1,17 @@
+# Los finales de linea, por tipo de archivo.
+#
+# Los guiones de Unix (sh) tienen que viajar con LF: un CRLF al final de la
+# primera linea rompe el "#!/usr/bin/env bash" con "/usr/bin/env: 'bash\r'".
+# Los .cmd de Windows son lo contrario: cmd.exe se come mal un .cmd con LF.
+* text=auto
+
+/.gitattributes text eol=lf
+*.sh text eol=lf
+*.desktop text eol=lf
+*.plist text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.nsi text eol=crlf
