@@ -79,6 +79,18 @@ nativa, sin pasar por un webview.
 
 ![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png)
 
+### Las vistas que no son chats
+
+Los estados, los canales y los archivados son vistas propias, con su
+columna y su panel. Se llegan con el teclado (`Ctrl+Shift+S`, `Ctrl+Shift+N`
+y `Ctrl+Shift+H`) o con la columna de iconos de la izquierda.
+
+![Estados](docs/screenshots/04-estados.png)
+
+![Canales](docs/screenshots/05-canales.png)
+
+![Archivados](docs/screenshots/06-archivados.png)
+
 ### Referencias visuales
 
 En [`docs/referencia/`](docs/referencia/README.md) están las capturas de

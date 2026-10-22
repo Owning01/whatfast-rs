@@ -72,7 +72,20 @@ use crate::tokens;
 // here because the global handler of the chat switcher is a method of
 // `Whatfast`. **They must not be declared twice**: GPUI panics when two
 // actions share a name. The user interface imports them from this module.
-actions!(whatfast, [CycleRecentChat, CycleRecentChatReverse]);
+//
+// The three destinations that are not conversations (the states, the
+// channels and the archived ones) also answer to the keyboard: they are
+// views of their own, and the column of icons is not the only way in.
+actions!(
+    whatfast,
+    [
+        CycleRecentChat,
+        CycleRecentChatReverse,
+        ToggleStates,
+        ToggleChannels,
+        ToggleArchived
+    ]
+);
 
 /// The colour of the accent of the light theme.
 pub(crate) const DARK_GREEN: u32 = 0x075e54;
@@ -4360,6 +4373,24 @@ impl Whatfast {
             }
         }
         self.sync_shell(cx);
+    }
+
+    /// Opens the view of the states.
+    ///
+    /// The states are their own view: the keyboard reaches them the same way
+    /// the column of icons does.
+    pub(crate) fn open_states(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_nav_action(NavAction::States, window, cx);
+    }
+
+    /// Opens the view of the channels.
+    pub(crate) fn open_channels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_nav_action(NavAction::Channels, window, cx);
+    }
+
+    /// Opens the view of the archived conversations.
+    pub(crate) fn open_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_nav_action(NavAction::Archived, window, cx);
     }
 
     /// Answers a gesture of the strip of the open chats.

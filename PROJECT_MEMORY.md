@@ -810,3 +810,12 @@ que hay que hacerlas a mano.
   imagenes de los mensajes.
 - **El boton del tema y el de la salida** se fueron al panel de ajustes, y
   la cabecera de la conversacion lleva el buscador, como la referencia.
+
+### Los atajos de teclado de las vistas nuevas
+
+- **Los estados, los canales y los archivados** responden al teclado:
+  `Ctrl+Shift+S`, `Ctrl+Shift+N` y `Ctrl+Shift+H`. Son vistas propias y la
+  columna de iconos no es la unica puerta de entrada.
+- **`scripts/captura-estados.ps1`** abre una de esas vistas con el atajo y
+  saca la foto: el riel no toma los clics sinteticos (los de las filas de la
+  lista si), asi que el guion usa el teclado.

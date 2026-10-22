@@ -45,7 +45,8 @@ use whatfast_model::model::{
 
 use crate::app::{
     CycleRecentChat, CycleRecentChatReverse, DARK_GREEN, EMOJI_COLUMNS, EmojiTarget, MAX_UI_SCALE,
-    MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, UI_SCALE_STEP, Whatfast,
+    MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, ToggleArchived, ToggleChannels,
+    ToggleStates, UI_SCALE_STEP, Whatfast,
 };
 use crate::helpers::{
     avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
@@ -238,18 +239,28 @@ impl Whatfast {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_lg()
+                                .text_size(px(24. * scale))
                                 .font_weight(FontWeight::BOLD)
                                 .child("States"),
                         )
                         .child(
-                            Button::new("new-status")
-                                .small()
-                                .icon(IconName::Plus)
-                                .tooltip("New status")
+                            // El boton verde del estado nuevo, como el de la
+                            // columna de los chats.
+                            div()
+                                .id("new-status")
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(36. * scale))
+                                .rounded_full()
+                                .bg(cx.theme().accent)
+                                .text_color(cx.theme().accent_foreground)
+                                .cursor_pointer()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.status_strip.publish_photo_status(window, cx);
-                                })),
+                                }))
+                                .child(Icon::new(IconName::Plus).with_size(px(20. * scale))),
                         ),
                 ),
             )
@@ -275,26 +286,47 @@ impl Whatfast {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_lg()
+                                .text_size(px(24. * scale))
                                 .font_weight(FontWeight::BOLD)
                                 .child("Channels"),
                         )
                         .child(
-                            Button::new("new-channel")
-                                .small()
-                                .icon(IconName::Plus)
-                                .tooltip("New channel")
+                            // El boton verde del canal nuevo, como el de la
+                            // columna de los chats.
+                            div()
+                                .id("new-channel")
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(36. * scale))
+                                .rounded_full()
+                                .bg(cx.theme().accent)
+                                .text_color(cx.theme().accent_foreground)
+                                .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.newsletter_panel.open_create();
                                     cx.notify();
-                                })),
+                                }))
+                                .child(Icon::new(IconName::Plus).with_size(px(20. * scale))),
                         ),
                 ),
             )
             .child(
-                div()
-                    .pt_1()
-                    .child(Input::new(self.newsletter_panel.search_input()).w_full()),
+                div().pt_1().child(
+                    Input::new(self.newsletter_panel.search_input())
+                        .w_full()
+                        .h(px(38. * scale))
+                        .rounded_full()
+                        .bg(cx.theme().input)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .prefix(
+                            Icon::new(IconName::Search)
+                                .with_size(px(17. * scale))
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                ),
             )
             .child(self.newsletter_panel.render_list(self, cx))
             .child(self.newsletter_panel.render_list_footer(cx))
@@ -358,7 +390,7 @@ impl Whatfast {
                     .py_2()
                     .child(
                         div()
-                            .text_lg()
+                            .text_size(px(24. * scale))
                             .font_weight(FontWeight::BOLD)
                             .child("Archived"),
                     )
@@ -3374,6 +3406,21 @@ impl Render for Whatfast {
             }))
             .on_action(cx.listener(|this, _: &CycleRecentChatReverse, window, cx| {
                 this.cycle_recent_chat(true, window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleStates, window, cx| {
+                this.open_states(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleChannels, window, cx| {
+                this.open_channels(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleArchived, window, cx| {
+                this.open_archived(window, cx);
                 cx.stop_propagation();
                 cx.notify();
             }))

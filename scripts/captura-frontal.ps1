@@ -53,6 +53,7 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
@@ -96,8 +97,19 @@ function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
     [Ventana]::SetForegroundWindow($handle) | Out-Null
     Start-Sleep -Milliseconds 400
     $origen = Origen $handle
-    [Ventana]::SetCursorPos($origen[0] + $dx, $origen[1] + $dy) | Out-Null
-    Start-Sleep -Milliseconds 250
+    $destinoX = $origen[0] + $dx
+    $destinoY = $origen[1] + $dy
+    # Un movimiento con las coordenadas absolutas: es el unico que le llega a
+    # la ventana como movimiento del puntero, y sin el la interfaz no sabe
+    # donde esta el cursor cuando llega el clic.
+    [Ventana]::SetCursorPos($destinoX, $destinoY) | Out-Null
+    Start-Sleep -Milliseconds 150
+    $ancho = [Ventana]::GetSystemMetrics(0)
+    $alto = [Ventana]::GetSystemMetrics(1)
+    $normalX = [int]($destinoX * 65535 / $ancho)
+    $normalY = [int]($destinoY * 65535 / $alto)
+    [Ventana]::mouse_event(0x8001, $normalX, $normalY, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
     [Ventana]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
     [Ventana]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 900

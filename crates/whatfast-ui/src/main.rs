@@ -74,6 +74,11 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
                 KeyBinding::new("ctrl-shift-tab", app::CycleRecentChatReverse, None),
+                // Las tres vistas que no son conversaciones: los estados, los
+                // canales y los archivados.
+                KeyBinding::new("ctrl-shift-s", app::ToggleStates, None),
+                KeyBinding::new("ctrl-shift-n", app::ToggleChannels, None),
+                KeyBinding::new("ctrl-shift-h", app::ToggleArchived, None),
             ]);
             // The theme of Whatfast goes over the one of `gpui_component`: the
             // mode comes first, because `Theme::change` rewrites every color from

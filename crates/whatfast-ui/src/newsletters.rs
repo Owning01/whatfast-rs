@@ -91,12 +91,16 @@ pub(crate) fn selected_newsletter<'a>(
 ///
 /// port: the origin writes "Channel", with " ┬À muted" when the channel is
 /// muted.
+/// The line under the name of a channel.
+///
+/// port: the `newsletter-row` of the origin: the name, the hour of the
+/// subscription at the right, and the preview below.
 pub(crate) fn channel_subtitle(newsletter: &Newsletter) -> String {
-    let mut subtitle = format!("Channel · {}", message_time(newsletter.subscribed_at_ms));
     if newsletter.muted {
-        subtitle.push_str(" · muted");
+        "Channel · muted".to_string()
+    } else {
+        "Channel".to_string()
     }
-    subtitle
 }
 
 /// The jid of a channel that was created locally.
