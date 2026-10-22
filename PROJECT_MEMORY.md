@@ -898,3 +898,27 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   prueba de los adjuntos, se queda con el foco y hace fallar todas las
   capturas ("la ventana de la app no queda en primer plano"). Se cierra
   matando el proceso `OpenWith`.
+
+## 2026-10-22 - El puerto a Linux y macOS de la interfaz
+
+- **Que**: `whatfast-ui` compila para Linux (check, clippy, build con enlace
+  y 185 tests de la interfaz) y para macOS (`cargo check --target
+  x86_64-apple-darwin`), sin cambios en Windows.
+- **Por que**: la meta es que la interfaz no sea solo de Windows.
+- **Como**: `is_alive` de unix usa `libc::kill(pid, 0)` en vez de `/proc`
+  (macOS no tiene `/proc`: el lock se veia vencido siempre y el arranque no
+  era de una sola instancia); `build.rs` decide por `CARGO_CFG_TARGET_OS` y
+  no por `#[cfg(windows)]` (en compilacion cruzada el host no es el destino);
+  `libc` como dependencia solo de unix.
+- **Evidencia**: WSL archlinux nativo: `cargo check`, `clippy --all-targets
+  -D warnings`, `cargo build` (ELF x86-64) y `cargo test --workspace` (20
+  suites ok, `-p whatfast-ui` 185 ok). Windows: build, clippy -D warnings y
+  34 suites ok; el icono sigue incrustado (`rc.exe` -> `icon.lib`).
+- **Trampa**: cruzar desde Windows no sirve: `psm` pide
+  `x86_64-linux-gnu-gcc`; y `media` y los shaders de `gpui_macos` solo se
+  generan con host macOS (`xcrun`). Hace falta un runner nativo.
+- **Trampa**: `yeslogic-fontconfig-sys` exige `fontconfig.pc`: sin
+  `libfontconfig-dev` (`fontconfig` en Arch) el build de Linux muere antes
+  de compilar la interfaz.
+- **Pendiente**: el enlace de macOS no se pudo verificar (esta maquina no tiene
+  SDK de Apple); lo cubre el CI en un runner macOS.

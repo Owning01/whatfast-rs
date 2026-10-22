@@ -7708,6 +7708,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "libc",
  "qrcode",
  "smol",
  "tempfile",

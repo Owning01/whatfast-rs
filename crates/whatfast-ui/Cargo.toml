@@ -44,5 +44,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# The lock of the single instance asks the system whether the process that
+# wrote it is still there. `/proc` only exists on Linux, and macOS has no such
+# directory, so the question goes through `kill(pid, 0)`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.23"
