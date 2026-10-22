@@ -16,15 +16,16 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, Context, ElementId, Entity, FontWeight, InteractiveElement as _, ObjectFit,
-    ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Window, div, img, px, rgba,
+    AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla,
+    InteractiveElement as _, ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, canvas,
+    div, img, point, px, quad, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -62,6 +63,57 @@ pub(crate) const PROGRESS_HEIGHT: f32 = 3.0;
 /// The side of the buttons that move between the statuses, in pixels, before
 /// the scale.
 pub(crate) const NAV_SIZE: f32 = 48.0;
+/// The side of the big drawing of the panel of the states, in pixels, before
+/// the scale.
+///
+/// The reference draws the circle of dashes of the states at the top of the
+/// panel, above the title.
+pub(crate) const PANEL_GLYPH_SIZE: f32 = 52.0;
+/// The width of the line of the circle of the big drawing, in pixels, before
+/// the scale.
+pub(crate) const PANEL_GLYPH_STROKE: f32 = 5.0;
+/// How many degrees covers one of the three arcs of the big drawing.
+///
+/// The reference does not draw a closed circle: it draws three arcs of about
+/// a hundred degrees, with the opening of the first one at the top.
+pub(crate) const PANEL_GLYPH_ARC_DEGREES: f32 = 87.0;
+/// How many degrees covers one of the three openings between the arcs of the
+/// big drawing.
+pub(crate) const PANEL_GLYPH_GAP_DEGREES: f32 = 33.0;
+/// Where the first arc of the big drawing starts, in degrees, measured from
+/// the top and turning to the right.
+pub(crate) const PANEL_GLYPH_FIRST_ARC_DEGREES: f32 = 16.5;
+/// The side of the solid circle in the middle of the big drawing, in pixels,
+/// before the scale.
+pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
+/// The side of the title of the panel, in pixels, before the scale.
+///
+/// The reference writes the title big: it is the biggest text of the panel.
+pub(crate) const PANEL_TITLE_SIZE: f32 = 30.0;
+/// The width of the round buttons of the panel, in pixels, before the scale.
+pub(crate) const PANEL_BUTTON_WIDTH: f32 = 57.0;
+/// The height of the round buttons of the panel, in pixels, before the scale.
+pub(crate) const PANEL_BUTTON_HEIGHT: f32 = 48.0;
+/// The radius of the corners of the round buttons of the panel, in pixels,
+/// before the scale.
+pub(crate) const PANEL_BUTTON_RADIUS: f32 = 16.0;
+/// The space between the two round buttons of the panel, in pixels, before
+/// the scale.
+pub(crate) const PANEL_BUTTON_GAP: f32 = 50.0;
+/// The side of the drawing inside the round buttons of the panel, in pixels,
+/// before the scale.
+pub(crate) const PANEL_BUTTON_ICON_SIZE: f32 = 20.0;
+/// The space between a round button of the panel and its text, in pixels,
+/// before the scale.
+pub(crate) const PANEL_BUTTON_LABEL_GAP: f32 = 6.0;
+/// The side of the green badge of the row of "My status", in pixels, before
+/// the scale.
+pub(crate) const OWN_BADGE_SIZE: f32 = 16.0;
+/// The space between the two rows of a status, in pixels, before the scale.
+///
+/// The reference makes every row seventy two pixels tall: the ring of the
+/// status and thirteen pixels above and below.
+pub(crate) const STATUS_ROW_PADDING: f32 = 13.0;
 /// The longest text of a status, in characters.
 ///
 /// port: `MAX_STATUS_LENGTH` of the origin.
@@ -89,6 +141,13 @@ pub(crate) struct StatusStripState {
     pub(crate) viewer: Option<StatusViewer>,
     /// The background of every status that was published locally.
     pub(crate) colors: HashMap<String, String>,
+    /// The senders of the statuses the user already opened.
+    ///
+    /// The reference draws the ring of a status in green when the user saw
+    /// it, and dashed when the status is new. The client of the origin asks
+    /// the sidecar to mark them, but the model of this client has no such
+    /// field, so the ring follows the viewer of this session.
+    pub(crate) seen: HashSet<String>,
     /// The color the next text status will have.
     pub(crate) text_color: String,
     /// How many times the viewer was opened. The task that moves the viewer
@@ -112,6 +171,19 @@ impl StatusStripState {
             ..Self::default()
         }
     }
+}
+
+/// Marks the status of one sender as seen.
+///
+/// The ring of a sender that was seen is solid; the ring of a sender that was
+/// never opened is dashed.
+pub(crate) fn mark_seen(state: &mut StatusStripState, sender_id: &str) {
+    state.seen.insert(sender_id.to_string());
+}
+
+/// Whether the status of one sender was already seen.
+pub(crate) fn has_seen(state: &StatusStripState, sender_id: &str) -> bool {
+    state.seen.contains(sender_id)
 }
 
 /// The letter that stands for a contact in the ring of its status.
@@ -289,16 +361,27 @@ fn message_time(timestamp_ms: i64) -> String {
 /// The time of a status, the way the reference writes it in the list.
 ///
 /// port: the reference writes the day and the hour, the same way the origin
-/// writes the day of a message (`formatDay` and `formatTime`).
+/// writes the day of a message (`formatDay` and `formatTime`). The hour
+/// goes in the 24 hour clock, like in the reference: "Today at 12:45".
 fn status_time(timestamp_ms: i64, now_ms: i64) -> String {
     let value = LocalTimestamp::new(timestamp_ms, 0);
     let now = LocalTimestamp::new(now_ms, 0);
     let day = format_day(value, now, DateLocale::EnUs);
-    let hour = format_time(value, DateLocale::EnUs);
+    let hour = status_hour(timestamp_ms);
     if day == "Today" {
         return format!("Today at {hour}");
     }
     format!("{day} at {hour}")
+}
+
+/// The hour of a status in the 24 hour clock.
+///
+/// The zone of the machine is not available in this crate (there is no
+/// library of dates), so the hour is the one of UTC, the same way the day
+/// of [`status_time`] is.
+fn status_hour(timestamp_ms: i64) -> String {
+    let minutes = (timestamp_ms / 60_000).rem_euclid(24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The strip of the statuses of the contacts.
@@ -358,13 +441,15 @@ impl StatusStrip {
 
     /// Draws the panel of the states that sits next to the list.
     ///
-    /// The reference draws the title, the explanation of what a status is and
-    /// two buttons: one for the text and one for the photo.
+    /// The reference draws the circle of dashes of the states at the top,
+    /// the title big below it, the explanation of what a status is and two
+    /// round buttons: one for the text and one for the photo.
     pub(crate) fn render_panel(
         &self,
         app: &Whatfast,
         cx: &mut Context<Whatfast>,
     ) -> gpui::Stateful<gpui::Div> {
+        let scale = app.ui_scale;
         let muted = cx.theme().muted_foreground;
         let text_open = self.state.borrow().text_composer_open;
         let mut panel = v_flex()
@@ -372,49 +457,155 @@ impl StatusStrip {
             .min_h_0()
             .items_center()
             .justify_center()
-            .gap_3()
+            .gap_4()
             .p_4()
+            // El dibujo grande del panel: el circulo de los estados.
+            .child(self.render_status_glyph(scale, cx))
             .child(
+                // El titulo va grande y centrado: es el texto mas grande
+                // del panel.
                 div()
-                    .text_xl()
-                    .font_weight(FontWeight::BOLD)
+                    .mt_4()
+                    .text_size(px(PANEL_TITLE_SIZE * scale))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(cx.theme().foreground)
                     .child("Share status"),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(muted)
+                    .text_center()
                     .child("Share photos, videos and text that disappear after 24 hours."),
             )
             .child(
+                // Los dos botones son redondos y llevan el dibujo adentro;
+                // el texto de cada uno va debajo, centrado.
                 h_flex()
-                    .gap_4()
-                    .child(
-                        Button::new("status-text")
-                            .secondary()
-                            .rounded_full()
-                            .icon(WhatfastIcon::Edit)
-                            .label("Text status")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.status_strip.toggle_text_composer();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("status-photo")
-                            .secondary()
-                            .rounded_full()
-                            .icon(IconName::GalleryVerticalEnd)
-                            .label("Photo and video")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.status_strip.publish_photo_status(window, cx);
-                            })),
-                    ),
+                    .gap_8()
+                    .items_start()
+                    .child(self.render_panel_button(
+                        "status-text",
+                        "Text status",
+                        Icon::new(WhatfastIcon::Edit),
+                        scale,
+                        |this, _, cx| {
+                            this.status_strip.toggle_text_composer();
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(self.render_panel_button(
+                        "status-photo",
+                        "Photo and video",
+                        Icon::new(IconName::GalleryVerticalEnd),
+                        scale,
+                        |this, window, cx| {
+                            this.status_strip.publish_photo_status(window, cx);
+                        },
+                        cx,
+                    )),
             );
         if text_open {
             panel = panel.child(self.render_form(app, cx));
         }
         panel.id("status-panel")
+    }
+
+    /// The big drawing of the panel: the circle of dashes of the states.
+    ///
+    /// The reference draws a circle with an opening at the top and the solid
+    /// circle of the middle. The rail of the icons draws the same circle.
+    fn render_status_glyph(
+        &self,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        // El color del dibujo: el del tema, apagado, porque en la referencia
+        // el circulo es gris y no blanco.
+        let color = cx.theme().foreground.opacity(0.2);
+        let background = cx.theme().background;
+        let stroke = px(PANEL_GLYPH_STROKE * scale);
+        let dot = px(PANEL_GLYPH_DOT_SIZE * scale);
+        let offset = px((PANEL_GLYPH_SIZE - PANEL_GLYPH_DOT_SIZE) * 0.5 * scale);
+        let gap = px(PANEL_GLYPH_GAP * scale);
+        let gap_left = px((PANEL_GLYPH_SIZE - PANEL_GLYPH_GAP) * 0.5 * scale);
+        div()
+            .id("status-panel-glyph")
+            .flex_none()
+            .relative()
+            .size(px(PANEL_GLYPH_SIZE * scale))
+            // El circulo de los estados.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .border(stroke)
+                    .border_color(color),
+            )
+            // La abertura del circulo, en la parte de arriba: el corte lleva
+            // el color del panel, que es el del fondo de la ventana.
+            .child(
+                div()
+                    .absolute()
+                    .left(gap_left)
+                    .top(px(0.))
+                    .w(gap)
+                    .h(stroke * 2.)
+                    .bg(background),
+            )
+            // El circulo solido del medio.
+            .child(
+                div()
+                    .absolute()
+                    .left(offset)
+                    .top(offset)
+                    .size(dot)
+                    .rounded_full()
+                    .bg(color),
+            )
+    }
+
+    /// One of the round buttons of the panel: the drawing inside the circle
+    /// and the text below.
+    fn render_panel_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        icon: Icon,
+        scale: f32,
+        on_click: impl Fn(&mut Whatfast, &mut Window, &mut Context<Whatfast>) + 'static,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let foreground = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().muted;
+        let background = cx.theme().secondary;
+        v_flex()
+            .id(ElementId::named_usize(id, 0))
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id(id)
+                    .flex_none()
+                    .size(px(PANEL_BUTTON_SIZE * scale))
+                    .rounded_full()
+                    .bg(background)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(foreground)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_click(this, window, cx);
+                    }))
+                    .child(icon.with_size(px(PANEL_BUTTON_ICON_SIZE * scale))),
+            )
+            .child(div().text_sm().text_color(muted).child(label))
     }
 
     /// Draws the view of the states.
@@ -431,7 +622,6 @@ impl StatusStrip {
         self.ensure_loaded(app, cx);
         let groups = app.store.statuses();
         let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
 
         let mut list = v_flex()
             .id("status-view")
@@ -445,8 +635,6 @@ impl StatusStrip {
                     .gap(px(4.))
                     .px(px(16. * scale))
                     .py(px(12. * scale))
-                    .border_b_1()
-                    .border_color(border)
                     .child(
                         h_flex()
                             .gap(px(12. * scale))
@@ -539,11 +727,17 @@ impl StatusStrip {
             }))
     }
 
-    /// The ring of the status of the user.
+    /// The circle of the row of "My status".
+    ///
+    /// The reference puts the photo of the user in a circle with the green
+    /// badge of the "+" in its corner. The app has no photo of the user, so
+    /// the circle carries the glyph of the person, the same way the panel of
+    /// the settings does.
     fn render_own_ring(&self, scale: f32, cx: &mut Context<Whatfast>) -> gpui::Stateful<gpui::Div> {
-        let border = cx.theme().border;
         let accent = cx.theme().accent;
         let accent_foreground = cx.theme().accent_foreground;
+        let secondary = cx.theme().secondary;
+        let muted = cx.theme().muted_foreground;
         let state = self.state.clone();
         div()
             .id("status-own-ring")
@@ -551,21 +745,23 @@ impl StatusStrip {
             .relative()
             .size(px(RING_SIZE * scale))
             .rounded_full()
-            .border(px(RING_BORDER * scale))
-            .border_color(border)
+            .bg(secondary)
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(16. * scale))
-            .font_weight(FontWeight::BOLD)
-            .child("Me")
             .child(
+                Icon::new(IconName::User)
+                    .with_size(px(RING_SIZE * 0.48 * scale))
+                    .text_color(muted),
+            )
+            .child(
+                // El circulito verde del "+": esta en la esquina de la foto.
                 div()
                     .id("status-own-add")
                     .absolute()
-                    .right(px(-2.))
-                    .bottom(px(14. * scale))
-                    .size(px(16. * scale))
+                    .right(px(-2. * scale))
+                    .bottom(px(3.5 * scale))
+                    .size(px(OWN_BADGE_SIZE * scale))
                     .rounded_full()
                     .bg(accent)
                     .flex()
@@ -1230,5 +1426,28 @@ mod tests {
     fn a_text_status_has_no_picture() {
         let message = text_status_message("status@broadcast", "hello", 7);
         assert_eq!(message_image_path(&message), None);
+    }
+
+    #[test]
+    fn the_hour_of_a_status_goes_in_the_twenty_four_hour_clock() {
+        // The reference writes "Today at 12:45", not "Today at 12:45 PM".
+        assert_eq!(status_hour(0), "00:00");
+        assert_eq!(status_hour(45 * 60_000), "00:45");
+        assert_eq!(status_hour(12 * 3_600_000 + 45 * 60_000), "12:45");
+        assert_eq!(status_hour(23 * 3_600_000 + 5 * 60_000), "23:05");
+    }
+
+    #[test]
+    fn the_time_of_a_status_writes_the_day_and_the_hour() {
+        let noon = 12 * 3_600_000;
+        assert_eq!(
+            status_time(noon, noon),
+            format!("Today at {}", status_hour(noon))
+        );
+        let yesterday = noon - 24 * 3_600_000;
+        assert_eq!(
+            status_time(yesterday, noon),
+            format!("Yesterday at {}", status_hour(yesterday))
+        );
     }
 }

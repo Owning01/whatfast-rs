@@ -440,6 +440,8 @@ impl Whatfast {
     /// The view of the states, the column that replaces the chats.
     fn render_states(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let scale = self.ui_scale;
+        let foreground = cx.theme().foreground;
+        let hover = cx.theme().muted;
         v_flex()
             .h_full()
             .w(px(384. * scale))
@@ -461,23 +463,25 @@ impl Whatfast {
                                 .child("States"),
                         )
                         .child(
-                            // El boton verde del estado nuevo, como el de la
-                            // columna de los chats.
+                            // El boton del estado nuevo: en la referencia es
+                            // un circulo con el borde, no el relleno verde.
                             div()
                                 .id("new-status")
                                 .flex_none()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .size(px(36. * scale))
+                                .size(px(28. * scale))
                                 .rounded_full()
-                                .bg(cx.theme().accent)
-                                .text_color(cx.theme().accent_foreground)
+                                .border_1()
+                                .border_color(foreground)
+                                .text_color(foreground)
                                 .cursor_pointer()
+                                .hover(move |style| style.bg(hover))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.status_strip.publish_photo_status(window, cx);
                                 }))
-                                .child(Icon::new(IconName::Plus).with_size(px(20. * scale))),
+                                .child(Icon::new(IconName::Plus).with_size(px(16. * scale))),
                         ),
                 ),
             )
