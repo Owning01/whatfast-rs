@@ -1,4 +1,4 @@
-﻿//! The strip of the statuses of the contacts, and the viewer of one status.
+//! The strip of the statuses of the contacts, and the viewer of one status.
 //!
 //! port: taken from the origin's `tauri/src/components/StatusStrip.tsx`. The
 //! lengths come from the stylesheet of the origin (`tauri/src/styles.css`,
@@ -22,10 +22,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla,
-    InteractiveElement as _, ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, canvas,
-    div, img, point, px, quad, rgba,
+    AppContext as _, Context, ElementId, Entity, FontWeight, InteractiveElement as _, ObjectFit,
+    ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Window, div, img, px, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -72,17 +71,9 @@ pub(crate) const PANEL_GLYPH_SIZE: f32 = 52.0;
 /// The width of the line of the circle of the big drawing, in pixels, before
 /// the scale.
 pub(crate) const PANEL_GLYPH_STROKE: f32 = 5.0;
-/// How many degrees covers one of the three arcs of the big drawing.
-///
-/// The reference does not draw a closed circle: it draws three arcs of about
-/// a hundred degrees, with the opening of the first one at the top.
-pub(crate) const PANEL_GLYPH_ARC_DEGREES: f32 = 87.0;
-/// How many degrees covers one of the three openings between the arcs of the
-/// big drawing.
-pub(crate) const PANEL_GLYPH_GAP_DEGREES: f32 = 33.0;
-/// Where the first arc of the big drawing starts, in degrees, measured from
-/// the top and turning to the right.
-pub(crate) const PANEL_GLYPH_FIRST_ARC_DEGREES: f32 = 16.5;
+/// The width of the opening of the circle of the big drawing, in pixels,
+/// before the scale.
+pub(crate) const PANEL_GLYPH_GAP: f32 = 12.0;
 /// The side of the solid circle in the middle of the big drawing, in pixels,
 /// before the scale.
 pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
@@ -90,22 +81,11 @@ pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
 ///
 /// The reference writes the title big: it is the biggest text of the panel.
 pub(crate) const PANEL_TITLE_SIZE: f32 = 30.0;
-/// The width of the round buttons of the panel, in pixels, before the scale.
-pub(crate) const PANEL_BUTTON_WIDTH: f32 = 57.0;
-/// The height of the round buttons of the panel, in pixels, before the scale.
-pub(crate) const PANEL_BUTTON_HEIGHT: f32 = 48.0;
-/// The radius of the corners of the round buttons of the panel, in pixels,
-/// before the scale.
-pub(crate) const PANEL_BUTTON_RADIUS: f32 = 16.0;
-/// The space between the two round buttons of the panel, in pixels, before
-/// the scale.
-pub(crate) const PANEL_BUTTON_GAP: f32 = 50.0;
+/// The side of the round buttons of the panel, in pixels, before the scale.
+pub(crate) const PANEL_BUTTON_SIZE: f32 = 56.0;
 /// The side of the drawing inside the round buttons of the panel, in pixels,
 /// before the scale.
 pub(crate) const PANEL_BUTTON_ICON_SIZE: f32 = 20.0;
-/// The space between a round button of the panel and its text, in pixels,
-/// before the scale.
-pub(crate) const PANEL_BUTTON_LABEL_GAP: f32 = 6.0;
 /// The side of the green badge of the row of "My status", in pixels, before
 /// the scale.
 pub(crate) const OWN_BADGE_SIZE: f32 = 16.0;
