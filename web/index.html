@@ -1072,13 +1072,21 @@
         </p>
 
         <div class="hero-cta-group motion-enter motion-delay-2">
-          <a href="#descargar" class="btn-primary">
+          <a href="https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-setup.exe" class="btn-primary">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
               <polyline points="7 10 12 15 17 10"></polyline>
               <line x1="12" y1="15" x2="12" y2="3"></line>
             </svg>
-            <span>Descargar para Windows (x64)</span>
+            <span>Descargar para Windows</span>
+          </a>
+          <a href="https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-linux.tar.gz" class="btn-secondary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            <span>Descargar para Linux</span>
           </a>
           <a href="#workbench" class="btn-secondary">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1090,11 +1098,11 @@
         </div>
 
         <div class="hero-requirements motion-enter motion-delay-3">
-          <span>Instalador oficial de 36.1 MB</span>
-          <span>•</span>
           <span>Windows 10 o posterior (64-bit)</span>
           <span>•</span>
-          <span>Binario portable sin instalación disponible</span>
+          <span>Linux (x86_64)</span>
+          <span>•</span>
+          <span>Sin cuenta: se vincula con el QR</span>
         </div>
 
         <!-- Workbench App Preview Showcase -->
@@ -1311,8 +1319,10 @@
               </svg>
               <span id="copy-label">Copiar</span>
             </button>
-            <code class="terminal-code" id="terminal-code-content"># Descargar e instalar Whatfast en Windows (%LOCALAPPDATA%\Programs\Whatfast)
-irm https://github.com/Owning01/whatfast-rs/releases/latest/download/instalar.ps1 | iex</code>
+            <code class="terminal-code" id="terminal-code-content"># Descargar la última versión y descomprimirla en %LOCALAPPDATA%\Programs\Whatfast
+$zip = "$env:TEMP\whatfast.zip"
+Invoke-WebRequest https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-windows.zip -OutFile $zip
+Expand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\Programs\Whatfast" -Force</code>
           </div>
         </div>
 
@@ -1404,30 +1414,34 @@ irm https://github.com/Owning01/whatfast-rs/releases/latest/download/instalar.ps
         <div data-ui="cta-banner">
           <h2 class="cta-heading">Descarga Whatfast</h2>
           <p class="cta-subtext">
-            Disponible para Windows 10 y Windows 11 (64-bit). Disfruta de un cliente de mensajería liviano, privado y sin sobrecarga de navegador.
+            Para Windows 10 y 11 (64-bit) y para Linux (x86_64). Un cliente de mensajería liviano, privado y sin la carga de un navegador.
           </p>
 
           <div class="hero-cta-group">
-            <a href="https://github.com/Owning01/whatfast-rs/releases/latest" target="_blank" rel="noopener noreferrer" class="btn-primary">
+            <a href="https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-setup.exe" class="btn-primary">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                 <polyline points="7 10 12 15 17 10"></polyline>
                 <line x1="12" y1="15" x2="12" y2="3"></line>
               </svg>
-              <span>Descargar Instalador (36.1 MB)</span>
+              <span>Descargar para Windows</span>
             </a>
-            <a href="https://github.com/Owning01/whatfast-rs/releases/latest" target="_blank" rel="noopener noreferrer" class="btn-secondary">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                <line x1="12" y1="22.08" x2="12" y2="12"></line>
+            <a href="https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-linux.tar.gz" class="btn-secondary">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
               </svg>
-              <span>Descargar Paquete Portable (.zip)</span>
+              <span>Descargar para Linux</span>
             </a>
           </div>
 
           <div style="margin-top: 24px; font-size: 0.875rem; color: var(--text-secondary);">
-            ¿No sabés cuál bajar? El instalador es el más simple: siguiente, siguiente y listo.
+            Los dos botones bajan la última versión publicada, sin pasar por GitHub.
+            ¿Preferís no instalar nada? El paquete portable de Windows es
+            <a href="https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-windows.zip">whatfast-windows.zip</a>.
+            Las versiones anteriores están en
+            <a href="https://github.com/Owning01/whatfast-rs/releases">GitHub</a>.
           </div>
         </div>
 
@@ -1843,7 +1857,7 @@ irm https://github.com/Owning01/whatfast-rs/releases/latest/download/instalar.ps
       const copyLabel = document.getElementById('copy-label');
 
       const codeSnippets = {
-        'install': '# Descargar e instalar Whatfast en Windows (%LOCALAPPDATA%\\Programs\\Whatfast)\nirm https://github.com/Owning01/whatfast-rs/releases/latest/download/instalar.ps1 | iex',
+        'install': '# Descargar la última versión y descomprimirla en %LOCALAPPDATA%\\Programs\\Whatfast\n$zip = "$env:TEMP\\whatfast.zip"\nInvoke-WebRequest https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-windows.zip -OutFile $zip\nExpand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\\Programs\\Whatfast" -Force',
         'cargo': '# Clonar y compilar la interfaz GPUI en modo release\ngit clone https://github.com/Owning01/whatfast-rs\ncd whatfast-rs\ncargo run -p whatfast-desktop --release',
         'demo': '# Ejecutar el backend simulado de prueba (sin escanear QR ni cuenta real)\ncargo run -p whatfast-protocol --bin whatfast-demo'
       };

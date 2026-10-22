@@ -1050,3 +1050,24 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   claro, filtros, grupos, conversacion, adjuntos, emojis, info de grupo,
   info de contacto, volver, boton derecho) con `browser.evaluate`; consola
   sin mensajes; sin desborde horizontal a 1380 px y a 390 px.
+
+## 2026-10-22 - Menu del mensaje flotante y botones de descarga directa
+
+- **Sintoma**: el clic derecho sobre un mensaje abria el menu con el ancho de
+  la ventana y al final de la conversacion, no donde estaba el puntero.
+- **Causa**: `MessageMenu` se sumaba como un hijo mas de la columna; sin
+  `position: absolute` el `align-items: stretch` lo estiraba y caia al pie.
+- **Arreglo**: el panel es `absolute` con ancho fijo 230 y `floating_origin`
+  lo mete dentro de la ventana; el clic derecho de la burbuja y el boton "..."
+  abren en la posicion del puntero; un fondo transparente lo cierra con clic
+  afuera y con escape. `cargo test -p whatfast-ui` en verde (194, tres tests
+  nuevos de geometria), clippy y fmt limpios.
+- **Pagina**: el hero y `#descargar` tienen "Descargar para Windows"
+  (`whatfast-setup.exe`) y "Descargar para Linux" (`whatfast-linux.tar.gz`)
+  apuntando a `releases/latest/download/`; las tres URLs responden 200.
+- **Trampa**: el comando de `#desarrolladores` bajaba `instalar.ps1`, que no
+  se publica y espera `dist\` local; ahora baja `whatfast-windows.zip` y lo
+  descomprime con `Expand-Archive`.
+- **CSP**: al tocar el `<script>` inline el hash cambio a
+  `sha256-kwF4pkFpYP7GotkhrYh3MShOasvsXVWkJnD3lkqshr8=`; verificado en el
+  navegador (las pestanas de codigo cambian, consola sin mensajes).
