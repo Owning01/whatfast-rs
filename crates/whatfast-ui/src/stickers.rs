@@ -130,16 +130,17 @@ impl StickerTray {
         let sending = self.state.borrow().sending.clone();
 
         v_flex()
-            .w(px(TRAY_WIDTH * scale))
+            .w_full()
             .h(px(TRAY_HEIGHT * scale))
             .flex_shrink_0()
-            .rounded_lg()
-            .border_1()
+            .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .overflow_hidden()
             .child(self.render_tabs(app, packs, cx))
             .child(self.render_body(app, active, &sending, cx))
+            // Los tabs del pie, los mismos del panel de los emojis.
+            .child(app.render_panel_tabs(cx))
     }
 
     /// The strip of the tabs of the packs.

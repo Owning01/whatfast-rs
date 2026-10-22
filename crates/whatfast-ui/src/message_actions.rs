@@ -48,6 +48,7 @@ use gpui_component::{
 use whatfast_model::model::message_text;
 use whatfast_protocol::{AttachmentKind, Chat, Message};
 
+use crate::icons::WhatfastIcon;
 use crate::tokens::normalized_ui_scale;
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1334,14 @@ pub(crate) enum AttachmentAction {
         /// Why the file could not be saved.
         message: String,
     },
+    /// The user asked for a picture of the device.
+    Photo,
+    /// The user asked for a poll.
+    Poll,
+    /// The user asked for the tray of the stickers.
+    Sticker,
+    /// The user asked to make a sticker of a picture.
+    MakeSticker,
 }
 
 /// The handler the button of the clip reports to.
@@ -1557,7 +1566,7 @@ impl AttachmentBar {
                         }))
                 })
                 .aria_label("Attach")
-                .child(Icon::new(IconName::Plus).with_size(px(ATTACHMENT_ICON_SIZE * scale))),
+                .child(Icon::new(WhatfastIcon::Attach).with_size(px(ATTACHMENT_ICON_SIZE * scale))),
         );
 
         if self.open {
@@ -1572,6 +1581,7 @@ impl AttachmentBar {
                 .border_color(theme.border)
                 .bg(theme.popover)
                 .shadow_lg();
+            // The kinds of the files the user can send.
             for item in attachment_kinds() {
                 let kind = item.kind;
                 menu = menu.child(
@@ -1592,6 +1602,34 @@ impl AttachmentBar {
                             cx.notify();
                         }))
                         .child(item.label),
+                );
+            }
+            // The things the app can do that are not files: the picture of
+            // the device, the poll and the stickers.
+            for (label, action) in [
+                ("Photo or video", AttachmentAction::Photo),
+                ("Poll", AttachmentAction::Poll),
+                ("Sticker", AttachmentAction::Sticker),
+                ("Make a sticker", AttachmentAction::MakeSticker),
+            ] {
+                menu = menu.child(
+                    div()
+                        .id(format!("attachment-action-{label}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(ATTACHMENT_ITEM_GAP * scale))
+                        .w_full()
+                        .min_h(px(ATTACHMENT_ITEM_MIN_HEIGHT * scale))
+                        .px(px(ATTACHMENT_ITEM_PADDING_X * scale))
+                        .rounded(radius)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_open(false);
+                            this.report(action.clone(), window, cx);
+                            cx.notify();
+                        }))
+                        .child(label),
                 );
             }
             bar = bar.child(menu);

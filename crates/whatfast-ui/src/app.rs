@@ -327,6 +327,48 @@ pub(crate) enum ChatContextAction {
     Block,
 }
 
+/// The menu of the options of a conversation.
+///
+/// The reference of WhatsApp Desktop has many more rows (the calls, the
+/// temporary messages, the export, the report): the menu only draws the
+/// ones the app can do.
+pub(crate) struct ChatMenu {
+    /// The conversation the menu is of.
+    pub(crate) chat_id: String,
+    /// Where the menu opens, in pixels of the window.
+    pub(crate) position: Point<Pixels>,
+}
+
+/// The actions of the menu of the options of a conversation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatMenuAction {
+    /// Opens the info of the contact.
+    Info,
+    /// Searches in the conversation.
+    Search,
+    /// Mutes or unmutes the conversation.
+    Mute,
+    /// Marks the conversation as a favorite, or takes the mark away.
+    Favorite,
+    /// Blocks or unblocks the contact.
+    Block,
+}
+
+/// The tab of the panel of the composer.
+///
+/// The panel of the reference has three tabs: the emojis, the pictures with
+/// movement and the stickers. The app has no pictures with movement, so
+/// that tab is drawn but it cannot be pressed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PanelTab {
+    /// The emojis.
+    Emoji,
+    /// The pictures with movement.
+    Gif,
+    /// The stickers.
+    Sticker,
+}
+
 /// Transient state for one peer. Each chat keeps a sender-keyed collection so
 /// concurrent group participants do not overwrite one another.
 pub(crate) struct TypingIndicator {
@@ -577,6 +619,7 @@ pub(crate) struct Whatfast {
     pub(crate) chat_switcher: Option<ChatSwitcher>,
     pub(crate) chat_info: Option<ChatInfoState>,
     pub(crate) chat_context_menu: Option<ChatContextMenu>,
+    pub(crate) chat_menu: Option<ChatMenu>,
     pub(crate) mention_picker: Option<MentionPicker>,
     pub(crate) mention_directories: HashMap<String, Vec<ChatParticipant>>,
     pub(crate) mention_directory_pending: HashSet<String>,
@@ -658,6 +701,8 @@ pub(crate) struct Whatfast {
     pub(crate) sticker_tray: StickerTray,
     /// Whether the tray of the stickers is open.
     pub(crate) sticker_tray_open: bool,
+    /// The tab of the panel of the composer.
+    pub(crate) panel_tab: PanelTab,
     /// The menu of a message, when it is open.
     pub(crate) message_menu: Option<Entity<MessageMenu>>,
     /// The dialog to forward a message.
@@ -832,6 +877,7 @@ impl Whatfast {
             chat_switcher: None,
             chat_info: None,
             chat_context_menu: None,
+            chat_menu: None,
             mention_picker: None,
             mention_directories: HashMap::new(),
             mention_directory_pending: HashSet::new(),
@@ -883,6 +929,7 @@ impl Whatfast {
             member_panel: MemberPanel::default(),
             sticker_tray: StickerTray::default(),
             sticker_tray_open: false,
+            panel_tab: PanelTab::Emoji,
             message_menu: None,
             forward_picker: None,
             poll_composer: None,
@@ -2654,10 +2701,42 @@ impl Whatfast {
     }
 
     pub(crate) fn toggle_composer_emoji(&mut self) {
-        self.emoji_target = match self.emoji_target {
-            Some(EmojiTarget::Composer) => None,
-            _ => Some(EmojiTarget::Composer),
-        };
+        // El panel del compositor: la pestana de los emojis.
+        if matches!(self.emoji_target, Some(EmojiTarget::Composer))
+            && self.panel_tab == PanelTab::Emoji
+        {
+            self.emoji_target = None;
+        } else {
+            self.panel_tab = PanelTab::Emoji;
+            self.sticker_tray_open = false;
+            self.emoji_target = Some(EmojiTarget::Composer);
+        }
+    }
+
+    /// Opens the panel of the composer in one of its tabs.
+    pub(crate) fn set_panel_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
+        self.panel_tab = tab;
+        match tab {
+            PanelTab::Emoji => {
+                self.sticker_tray_open = false;
+                if self.emoji_target.is_none() {
+                    self.emoji_target = Some(EmojiTarget::Composer);
+                }
+            }
+            PanelTab::Sticker => {
+                // The picker of the reactions is not the panel of the
+                // composer: it stays open.
+                if !matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. })) {
+                    self.emoji_target = None;
+                }
+                self.sticker_tray_open = true;
+                self.load_stickers();
+            }
+            // The app has no pictures with movement: the tab is drawn but it
+            // cannot be pressed.
+            PanelTab::Gif => {}
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_reaction_picker(&mut self, chat_id: String, message_id: String) {
@@ -3164,6 +3243,52 @@ impl Whatfast {
     /// Closes the menu of a row of the list of conversations.
     pub(crate) fn close_chat_context_menu(&mut self, cx: &mut Context<Self>) {
         self.chat_context_menu = None;
+        cx.notify();
+    }
+
+    /// Opens the menu of the options of a conversation.
+    pub(crate) fn open_chat_menu(
+        &mut self,
+        chat_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_menu = Some(ChatMenu { chat_id, position });
+        cx.notify();
+    }
+
+    /// Closes the menu of the options of a conversation.
+    pub(crate) fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
+        self.chat_menu = None;
+        cx.notify();
+    }
+
+    /// Runs one action of the menu of the options of a conversation.
+    pub(crate) fn run_chat_menu_action(
+        &mut self,
+        action: ChatMenuAction,
+        chat_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_menu = None;
+        match action {
+            ChatMenuAction::Info => {
+                self.open_chat_info(chat_id);
+            }
+            ChatMenuAction::Search => {
+                self.focus_search(window, cx);
+            }
+            ChatMenuAction::Mute => {
+                let muted = self.store.chat(&chat_id).is_some_and(|chat| !chat.muted);
+                self.set_chat_muted(chat_id, muted, None);
+            }
+            ChatMenuAction::Favorite => self.toggle_favorite(chat_id, cx),
+            ChatMenuAction::Block => {
+                let blocked = self.store.chat(&chat_id).is_some_and(|chat| !chat.blocked);
+                self.set_chat_blocked(chat_id, blocked);
+            }
+        }
         cx.notify();
     }
 
@@ -4811,14 +4936,33 @@ impl Whatfast {
             AttachmentAction::SaveFailed { message } => {
                 self.store.toast_error = Some(message);
             }
+            AttachmentAction::Photo => {
+                self.choose_image(window, cx);
+            }
+            AttachmentAction::Poll => {
+                self.open_poll_composer(window, cx);
+            }
+            AttachmentAction::Sticker => {
+                self.toggle_sticker_tray(cx);
+            }
+            AttachmentAction::MakeSticker => {
+                self.choose_sticker(window, cx);
+            }
         }
         let _ = window;
     }
 
     /// Opens or closes the tray of the stickers.
     pub(crate) fn toggle_sticker_tray(&mut self, cx: &mut Context<Self>) {
-        self.sticker_tray_open = !self.sticker_tray_open;
-        if self.sticker_tray_open {
+        // El panel del compositor: la pestana de los stickers.
+        if self.sticker_tray_open && self.panel_tab == PanelTab::Sticker {
+            self.sticker_tray_open = false;
+        } else {
+            self.panel_tab = PanelTab::Sticker;
+            if !matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. })) {
+                self.emoji_target = None;
+            }
+            self.sticker_tray_open = true;
             self.load_stickers();
         }
         cx.notify();

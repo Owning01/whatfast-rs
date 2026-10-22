@@ -764,6 +764,16 @@ pub(crate) fn app_theme(appearance: ThemeAppearance) -> Theme {
         .unwrap_or_else(whatfast_core::theme::default_theme)
 }
 
+/// The colors of the bubbles of the messages.
+///
+/// The theme of `gpui_component` has no colors for the bubbles, so the ones
+/// of Whatfast are used: the received messages go on the gray of the
+/// reference and the sent ones on its green.
+pub(crate) fn bubble_colors(appearance: ThemeAppearance) -> (Rgba, Rgba) {
+    let colors = ThemeColors::resolve(&app_theme(appearance));
+    (colors.bubble_in_bg, colors.bubble_out_bg)
+}
+
 /// Applies an interface scale to the fonts of the application.
 ///
 /// port: `apply_theme_scale` of the origin: the base font size (16px) and the

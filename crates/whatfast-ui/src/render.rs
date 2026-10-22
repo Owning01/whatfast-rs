@@ -44,9 +44,9 @@ use whatfast_model::model::{
 };
 
 use crate::app::{
-    ChatContextAction, CycleRecentChat, CycleRecentChatReverse, DARK_GREEN, EMOJI_COLUMNS,
-    EmojiTarget, MAX_UI_SCALE, MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, ToggleArchived,
-    ToggleChannels, ToggleStates, UI_SCALE_STEP, Whatfast,
+    ChatContextAction, ChatMenuAction, CycleRecentChat, CycleRecentChatReverse, DARK_GREEN,
+    EMOJI_COLUMNS, EmojiTarget, MAX_UI_SCALE, MIN_UI_SCALE, PANEL, PanelTab, ScrollSurface,
+    SearchResultRow, ToggleArchived, ToggleChannels, ToggleStates, UI_SCALE_STEP, Whatfast,
 };
 use crate::helpers::{
     avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
@@ -55,6 +55,7 @@ use crate::helpers::{
 };
 use crate::rpc::PendingRequest;
 use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, split_url_token};
+use crate::tokens;
 
 /// One entry of the menu of a row of the list of conversations.
 enum ChatContextEntry {
@@ -605,6 +606,135 @@ impl Whatfast {
                     )
             })
             .collect::<Vec<_>>()
+    }
+
+    /// The menu of the options of a conversation.
+    ///
+    /// The reference of WhatsApp Desktop has many more rows (the calls, the
+    /// temporary messages, the export, the report): the menu only draws the
+    /// ones the app can do, in the same order.
+    fn render_chat_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let Some(menu) = self.chat_menu.as_ref() else {
+            return div().id("chat-menu-empty");
+        };
+        let Some(chat) = self.store.chat(&menu.chat_id).cloned() else {
+            return div().id("chat-menu-empty");
+        };
+        let ui_scale = self.ui_scale;
+        let is_favorite = self.store.is_favorite(&chat.id);
+        let items: Vec<(ChatMenuAction, SharedString, Icon)> = vec![
+            (
+                ChatMenuAction::Info,
+                "Contact info".into(),
+                Icon::new(IconName::Info),
+            ),
+            (
+                ChatMenuAction::Search,
+                "Search".into(),
+                Icon::new(IconName::Search),
+            ),
+            (
+                ChatMenuAction::Mute,
+                if chat.muted {
+                    "Unmute notifications"
+                } else {
+                    "Mute notifications"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Bell),
+            ),
+            (
+                ChatMenuAction::Favorite,
+                if is_favorite {
+                    "Remove from favorites"
+                } else {
+                    "Add to favorites"
+                }
+                .into(),
+                Icon::new(IconName::Heart),
+            ),
+            (
+                ChatMenuAction::Block,
+                if chat.blocked {
+                    "Unblock contact"
+                } else {
+                    "Block contact"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Shield),
+            ),
+        ];
+
+        let hover = cx.theme().muted;
+        let foreground = cx.theme().foreground;
+        let danger = cx.theme().danger;
+        let panel = cx.theme().popover;
+        let border = cx.theme().muted_foreground.opacity(0.22);
+        let width = px(240. * ui_scale);
+        let height = px(38. * ui_scale * items.len() as f32) + px(12. * ui_scale);
+        let viewport = window.viewport_size();
+        let left = menu
+            .position
+            .x
+            .min(viewport.width - width - px(8.))
+            .max(px(8.));
+        let top = menu
+            .position
+            .y
+            .min(viewport.height - height - px(8.))
+            .max(px(8.));
+        let chat_id = chat.id.clone();
+
+        let mut panel = v_flex()
+            .w(width)
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(panel)
+            .py(px(4.));
+        for (index, (action, label, icon)) in items.into_iter().enumerate() {
+            let is_block = action == ChatMenuAction::Block;
+            let color = if is_block { danger } else { foreground };
+            panel = panel.child(
+                div()
+                    .id(("chat-menu-item", index))
+                    .w_full()
+                    .px_3()
+                    .py(px(8.))
+                    .flex()
+                    .gap_3()
+                    .items_center()
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener({
+                        let chat_id = chat_id.clone();
+                        move |this, _, window, cx| {
+                            this.run_chat_menu_action(action, chat_id.clone(), window, cx);
+                        }
+                    }))
+                    .child(icon.with_size(px(16. * ui_scale)).text_color(color))
+                    .child(div().flex_1().truncate().text_color(color).child(label)),
+            );
+        }
+        // El fondo que cierra el menu con cualquier clic fuera de el.
+        div()
+            .id("chat-menu-backdrop")
+            .absolute()
+            .inset_0()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_menu(cx);
+                cx.stop_propagation();
+            }))
+            .on_aux_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_menu(cx);
+                cx.stop_propagation();
+            }))
+            .child(panel.absolute().left(left).top(top))
     }
 
     /// The menu that the right click opens on a row of the list of
@@ -1641,8 +1771,12 @@ impl Whatfast {
                                     .tooltip("Conversation menu")
                                     .on_click(cx.listener({
                                         let chat_id = header_chat_id.clone();
-                                        move |this, _, _, cx| {
-                                            this.open_chat_info(chat_id.clone());
+                                        move |this, _, window, cx| {
+                                            // El menu abre donde esta el
+                                            // puntero, como el de la
+                                            // referencia.
+                                            let position = window.mouse_position();
+                                            this.open_chat_menu(chat_id.clone(), position, cx);
                                             cx.notify();
                                         }
                                     })),
@@ -1772,6 +1906,11 @@ impl Whatfast {
             .when(self.emoji_target.is_some(), |column| {
                 column.child(self.render_emoji_picker(cx))
             })
+            .when(self.sticker_tray_open, |column| {
+                // The tray of the stickers opens over the composer, the same
+                // way the panel of the emojis does.
+                column.child(self.sticker_tray.render(self, cx))
+            })
             .when(self.mention_popup_visible(), |column| {
                 column.child(self.render_mention_picker(cx))
             })
@@ -1849,70 +1988,46 @@ impl Whatfast {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        h_flex()
-                            .p_3()
-                            .gap_2()
-                            .child(
-                                Button::new("emoji-picker")
-                                    .label("😀")
-                                    .disabled(!connected)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_composer_emoji();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(self.attachment_bar.clone())
-                            .child(
-                                Button::new("create-poll")
-                                    .small()
-                                    .label("Poll")
-                                    .disabled(!connected)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_poll_composer(window, cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("send-image")
-                                    .label("📷")
-                                    .disabled(!connected)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_image(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("send-sticker")
-                                    .small()
-                                    .label(if self.sticker_preparing {
-                                        "Preparing…"
-                                    } else {
-                                        "Sticker"
-                                    })
-                                    .disabled(!connected || self.sticker_preparing)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_sticker_tray(cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("make-sticker")
-                                    .small()
-                                    .label("Make a sticker")
-                                    .disabled(!connected || self.sticker_preparing)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_sticker(window, cx)
-                                    })),
-                            )
-                            .child(Input::new(&self.composer).disabled(!connected).flex_1())
-                            .child(
-                                Button::new("send")
-                                    .primary()
-                                    .label("Send")
-                                    .disabled(!connected)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.send_text(window, cx)
-                                    })),
-                            ),
+                        // The pill of the message: the clip, the emoji, the
+                        // text and the button of sending, the same way the
+                        // reference draws it.
+                        h_flex().p_2().gap_2().child(
+                            h_flex()
+                                .flex_1()
+                                .h(px(42. * self.ui_scale))
+                                .rounded_full()
+                                .bg(cx.theme().input)
+                                .px_2()
+                                .gap_1()
+                                .items_center()
+                                .child(self.attachment_bar.clone())
+                                .child(
+                                    Button::new("emoji-picker")
+                                        .ghost()
+                                        .icon(WhatfastIcon::Smile)
+                                        .tooltip("Emoji")
+                                        .disabled(!connected)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_composer_emoji();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Input::new(&self.composer)
+                                        .appearance(false)
+                                        .disabled(!connected)
+                                        .flex_1(),
+                                )
+                                .child(
+                                    Button::new("send")
+                                        .primary()
+                                        .label("Send")
+                                        .disabled(!connected)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.send_text(window, cx)
+                                        })),
+                                ),
+                        ),
                     ),
             )
     }
@@ -1990,16 +2105,33 @@ impl Whatfast {
             _ => false,
         };
         v_flex()
-            .h(px(300.))
+            .h(px(340. * self.ui_scale))
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().popover)
+            // La fila de las categorias, con el dibujo de cada una, como la
+            // referencia.
+            .child(self.render_emoji_categories(cx))
+            // El buscador, con la lupa dentro.
             .child(
                 h_flex()
                     .px_3()
-                    .py_2()
+                    .pb_2()
                     .gap_2()
-                    .child(Input::new(&self.emoji_search).flex_1())
+                    .child(
+                        Input::new(&self.emoji_search)
+                            .w_full()
+                            .h(px(36. * self.ui_scale))
+                            .rounded_full()
+                            .bg(cx.theme().input)
+                            .border_1()
+                            .border_color(cx.theme().accent)
+                            .prefix(
+                                Icon::new(IconName::Search)
+                                    .with_size(px(16. * self.ui_scale))
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
                     .when(has_own_reaction, |row| {
                         row.child(
                             Button::new("remove-reaction")
@@ -2009,33 +2141,16 @@ impl Whatfast {
                                     cx.notify();
                                 })),
                         )
-                    })
-                    .child(Button::new("close-emoji").label("×").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.emoji_target = None;
-                            cx.notify();
-                        },
-                    ))),
+                    }),
             )
+            // El titulo de la seccion, como el de la referencia.
             .child(
-                h_flex()
+                div()
                     .px_3()
-                    .gap_1()
-                    .children(EmojiCategory::ALL.into_iter().enumerate().map(
-                        |(index, category)| {
-                            let button =
-                                Button::new(("emoji-category", index)).label(category.label());
-                            let button = if category == selected {
-                                button.primary()
-                            } else {
-                                button
-                            };
-                            button.on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_emoji_category(category);
-                                cx.notify();
-                            }))
-                        },
-                    )),
+                    .pb_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(selected.label()),
             )
             .child(
                 div()
@@ -2093,6 +2208,120 @@ impl Whatfast {
                         .child("Choose one emoji to react"),
                 )
             })
+            // Los tabs del pie: los emojis, las imagenes con movimiento y los
+            // stickers.
+            .when(!reaction_mode, |panel| {
+                panel.child(self.render_panel_tabs(cx))
+            })
+    }
+
+    /// The row of the categories of emojis, with the drawing of each one.
+    fn render_emoji_categories(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let selected = self.emoji_category;
+        let hover = cx.theme().muted;
+        h_flex().flex_none().px_3().py_2().gap_1().children(
+            EmojiCategory::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, category)| {
+                    let active = category == selected;
+                    div()
+                        .id(("emoji-category", index))
+                        .size(px(32. * self.ui_scale))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(20. * self.ui_scale))
+                        .cursor_pointer()
+                        .when(active, |button| button.bg(cx.theme().accent.opacity(0.2)))
+                        .hover(move |style| style.bg(hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_emoji_category(category);
+                            cx.notify();
+                        }))
+                        .child(emoji_category_glyph(category))
+                }),
+        )
+    }
+
+    /// The tabs of the panel of the composer.
+    ///
+    /// port: the reference has three tabs at the foot of the panel: the
+    /// emojis, the pictures with movement and the stickers. The app has no
+    /// pictures with movement, so that tab cannot be pressed.
+    pub(crate) fn render_panel_tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let active = self.panel_tab;
+        let hover = cx.theme().muted;
+        h_flex()
+            .flex_none()
+            .justify_center()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .py(px(8.))
+            .child(
+                h_flex()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .gap(px(2.))
+                    .p(px(2.))
+                    .child(
+                        div()
+                            .id("panel-tab-emoji")
+                            .h(px(28. * self.ui_scale))
+                            .px_3()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(active == PanelTab::Emoji, |tab| {
+                                tab.bg(cx.theme().accent.opacity(0.2))
+                            })
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_panel_tab(PanelTab::Emoji, cx);
+                            }))
+                            .child(
+                                Icon::new(WhatfastIcon::Smile).with_size(px(18. * self.ui_scale)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("panel-tab-gif")
+                            .h(px(28. * self.ui_scale))
+                            .px_3()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("GIF"),
+                    )
+                    .child(
+                        div()
+                            .id("panel-tab-sticker")
+                            .h(px(28. * self.ui_scale))
+                            .px_3()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(active == PanelTab::Sticker, |tab| {
+                                tab.bg(cx.theme().accent.opacity(0.2))
+                            })
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_panel_tab(PanelTab::Sticker, cx);
+                            }))
+                            .child(
+                                Icon::new(WhatfastIcon::Sticker).with_size(px(18. * self.ui_scale)),
+                            ),
+                    ),
+            )
     }
 
     fn render_reaction_details(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3119,6 +3348,15 @@ impl Whatfast {
 
     fn render_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
         let message = &self.store.messages[index];
+        // The bubbles of the messages: the gray of the received ones and the
+        // green of the sent ones, the same colors of the reference.
+        let (bubble_in, bubble_out) = tokens::bubble_colors(if cx.theme().is_dark() {
+            whatfast_core::theme::ThemeAppearance::Dark
+        } else {
+            whatfast_core::theme::ThemeAppearance::Light
+        });
+        let bubble_in = gpui::Hsla::from(bubble_in);
+        let bubble_out = gpui::Hsla::from(bubble_out);
         let text_content = match message.content.as_ref() {
             Some(proto::message::Content::Text(text)) => Some(text.clone()),
             _ => None,
@@ -3220,15 +3458,11 @@ impl Whatfast {
                             } else if message.from_me {
                                 // port: the bubble of the sent messages of the
                                 // reference is the green of the theme.
-                                if cx.theme().is_dark() {
-                                    rgb(0x144d37).into()
-                                } else {
-                                    gpui::hsla(0.31, 0.87, 0.91, 1.0)
-                                }
+                                bubble_out
                             } else {
-                                // The received messages have no bubble: the text is
-                                // painted over the background of the conversation.
-                                cx.theme().background
+                                // The received messages have their own bubble:
+                                // the gray of the reference.
+                                bubble_in
                             })
                             .when(group_incoming, |bubble| {
                                 let name_color =
@@ -3835,6 +4069,9 @@ impl Render for Whatfast {
             .when(self.chat_context_menu.is_some(), |root| {
                 root.child(self.render_chat_context_menu(window, cx))
             })
+            .when(self.chat_menu.is_some(), |root| {
+                root.child(self.render_chat_menu(window, cx))
+            })
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))
             })
@@ -3846,22 +4083,31 @@ impl Render for Whatfast {
             .when_some(self.poll_composer.clone(), |root, composer| {
                 root.child(composer)
             })
-            .when(self.sticker_tray_open, |root| {
-                // The tray of the stickers opens over the composer.
-                root.child(
-                    div()
-                        .absolute()
-                        .bottom(px(76. * self.ui_scale))
-                        .left(px(404. * self.ui_scale))
-                        .child(self.sticker_tray.render(self, cx)),
-                )
-            })
     }
 }
 
 /// The message the column shows when the filter keeps no conversation.
 ///
 /// port: `emptyLabel` of the origin (`tauri/src/components/Sidebar.tsx`).
+/// The drawing of a category of emojis.
+///
+/// The reference draws a row of categories at the top of the panel, each one
+/// with its own drawing.
+fn emoji_category_glyph(category: EmojiCategory) -> &'static str {
+    match category {
+        EmojiCategory::All => "🕐",
+        EmojiCategory::Smileys => "😀",
+        EmojiCategory::People => "👋",
+        EmojiCategory::Nature => "🌿",
+        EmojiCategory::Food => "🍎",
+        EmojiCategory::Travel => "✈️",
+        EmojiCategory::Activities => "⚽",
+        EmojiCategory::Objects => "💡",
+        EmojiCategory::Symbols => "❤️",
+        EmojiCategory::Flags => "🚩",
+    }
+}
+
 fn empty_label(filter: ChatFilter) -> &'static str {
     match filter {
         ChatFilter::All => "No conversations yet",
