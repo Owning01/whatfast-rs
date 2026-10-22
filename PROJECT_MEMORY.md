@@ -922,3 +922,27 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   de compilar la interfaz.
 - **Pendiente**: el enlace de macOS no se pudo verificar (esta maquina no tiene
   SDK de Apple); lo cubre el CI en un runner macOS.
+
+### La app en Linux y macOS
+
+- **La interfaz compila para Linux y para macOS.** Verificado con los targets
+  `x86_64-unknown-linux-gnu` y `x86_64-apple-darwin`: en Linux ademas enlaza
+  (un ELF x86-64) y pasan los tests nativos en WSL Arch Linux; en macOS el
+  `cargo check` da cero errores y cero avisos, pero el enlace necesita el SDK
+  de Apple y por eso lo cierra el job del CI en un runner macOS.
+- **El lock de instancia unica estaba roto en macOS**: usaba `/proc/<pid>`,
+  que en macOS no existe, asi que el lock se veia vencido siempre. Ahora usa
+  `libc::kill(pid, 0)` en unix (EPERM cuenta como vivo).
+- **El icono del ejecutable** se decide por el sistema de destino
+  (`CARGO_CFG_TARGET_OS`) y no por el de la maquina: al cruzar, el recurso iba
+  al sistema equivocado.
+- **La compilacion cruzada de Linux desde Windows no sirve** para verificar:
+  `psm` pide `x86_64-linux-gnu-gcc`. Se verifica con WSL nativo o con el CI.
+  El `cargo check` de macOS desde Windows tampoco alcanza: los build scripts
+  de `media` (los bindings con `xcrun`) y de `gpui_macos` (los shaders) se
+  compilan para el host y quedan vacios.
+- **Los paquetes de las tres plataformas** salen del workflow de release: el
+  `.zip` y el instalador de Windows, el `.tar.gz` de Linux con el `.desktop` y
+  los iconos en `share/`, y el `Whatfast.app` de macOS (arm64 nativo y x64
+  cruzado, con firma ad hoc). La guia de instalacion esta en
+  `docs/plataformas.md`.

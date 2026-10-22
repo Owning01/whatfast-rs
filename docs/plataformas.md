@@ -9,13 +9,11 @@ El estado de cada paquete, primero, porque no es el mismo:
 | Sistema | Paquete | Estado |
 |---|---|---|
 | Windows | `whatfast-setup.exe` (instalador) y `whatfast-windows.zip` | **Probado.** Se midió y se ejecutó en Windows 11 x86-64. |
-| Linux | `whatfast-linux.tar.gz` | **Sin probar en una máquina Linux.** El workflow lo arma; nadie lo ejecutó todavía en un escritorio real. |
-| macOS | `whatfast-macos-arm64.zip` y `whatfast-macos-x64.zip` | **En camino.** El paquete todavía no está publicado. |
+| Linux | `whatfast-linux.tar.gz` | **Compila, enlaza y pasa los tests en Linux** (nativo, en WSL Arch Linux: el binario es un ELF x86-64). Falta abrirlo en un escritorio con pantalla real. |
+| macOS | `whatfast-macos-arm64.zip` y `whatfast-macos-x64.zip` | **En camino.** La interfaz compila para `x86_64-apple-darwin` sin errores ni avisos; el enlace lo tiene que cerrar el job del CI en un runner de Apple, que es el único que tiene el SDK. |
 
 Lo que sí está probado en los tres casos es lo de abajo: la forma del paquete,
-los nombres de los archivos y las rutas de los datos. Lo que falta probar es
-que la interfaz arranque en Linux y en macOS; eso lo está cerrando el trabajo
-de portabilidad.
+los nombres de los archivos y las rutas de los datos.
 
 Los paquetes salen de los releases de GitHub del repositorio
 (`Owning01/whatfast`). Si un archivo no está en la página de releases, ese
@@ -23,9 +21,8 @@ paquete todavía no salió.
 
 Los nombres de los archivos y la estructura interna salen de
 `.github/workflows/release.yml` y de `installer.nsi`. La parte de Linux y macOS
-del workflow vive en el trabajo de empaquetado y todavía no está en `main`: es
-la que define el `.tar.gz` con `share/`, los `.sha256` y el job de macOS.
-Cuando eso se integre, esta guía queda alineada sin cambios de fondo.
+del workflow define el `.tar.gz` con `share/`, los `.sha256` y el job de macOS,
+que arma el `Whatfast.app` con `plutil`, la firma ad hoc y `ditto`.
 
 ---
 
