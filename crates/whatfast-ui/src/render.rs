@@ -76,6 +76,33 @@ enum ChatMenuEntry {
     Separator,
 }
 
+/// The state of the menu of the filters of the column of chats.
+///
+/// The state of the application lives in `app.rs`; this one belongs to the
+/// menu of the filters, which is drawn here, so it is a global of GPUPI: the
+/// menu is a thing of the interface, not of the application.
+#[derive(Default)]
+struct ChatFilterMenu {
+    /// Whether the menu is open.
+    open: bool,
+    /// Where the pointer was when the menu opened.
+    position: gpui::Point<Pixels>,
+}
+
+impl gpui::Global for ChatFilterMenu {}
+
+/// The height of a line of text, as a multiple of the size of its font.
+///
+/// The font of the system, que es el que usa la aplicacion, pide esta
+/// altura para su linea: la columna de la derecha de una fila de
+/// conversaciones (la hora y los dibujitos) tiene que alinearse con las dos
+/// lineas del texto, asi que sus dos lineas usan esta altura.
+const LINE_HEIGHT: f32 = 1.53;
+
+/// The size of the preview of a conversation, as a multiple of the size of
+/// the font of the interface (the same that `text_sm` puts).
+const PREVIEW_FONT_RATIO: f32 = 0.875;
+
 impl Whatfast {
     fn render_pairing(&self, cx: &mut Context<Self>) -> gpui::Div {
         let qr = self
@@ -153,8 +180,39 @@ impl Whatfast {
         let states_open = self.states_open;
         let channels_open = self.channels_open;
         let archived_open = self.archived_open;
+        // El menu de los filtros: lo abre la flecha del final de la fila de
+        // los chips y elige el filtro de la columna.
+        let filter_menu = cx.try_global::<ChatFilterMenu>();
+        let filter_menu_open = filter_menu.is_some_and(|menu| menu.open);
+        let filter_menu_position = filter_menu
+            .map(|menu| menu.position)
+            .unwrap_or(point(px(0.), px(0.)));
+        let filter_menu_active = self.store.chat_filter();
+        let filter_menu_scale = self.ui_scale;
+        let filter_menu_hover = cx.theme().muted;
+        let filter_menu_foreground = cx.theme().foreground;
+        let filter_menu_accent = cx.theme().accent;
+        let filter_menu_panel = cx.theme().popover;
+        let filter_menu_border = cx.theme().muted_foreground.opacity(0.22);
+        let filter_menu_viewport = window.viewport_size();
         h_flex()
             .size_full()
+            // The menu de los filtros se dibuja encima de la columna, asi
+            // que la raiz es la que lo posiciona.
+            .relative()
+            // El menu de los filtros se cierra con la tecla de escape, como
+            // los otros menus de la aplicacion.
+            .capture_key_down(cx.listener(|_this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && cx
+                        .try_global::<ChatFilterMenu>()
+                        .is_some_and(|menu| menu.open)
+                {
+                    cx.default_global::<ChatFilterMenu>().open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             // The column of icons is the left edge of the window: it is the
             // navigation of the web client, the same way.
             .child(self.nav_rail.clone())
@@ -193,6 +251,112 @@ impl Whatfast {
                         .child(self.member_panel.render(self, cx))
                 }
             })
+            .when(filter_menu_open, |root| {
+                // Los filtros del menu: los de la fila de los chips y el de
+                // los archivados, que es su propia vista.
+                let filters = [
+                    ChatFilter::All,
+                    ChatFilter::Unread,
+                    ChatFilter::Favorites,
+                    ChatFilter::Groups,
+                    ChatFilter::Archived,
+                ];
+                let width = px(210. * filter_menu_scale);
+                let height = px(34. * filter_menu_scale * filters.len() as f32)
+                    + px(12. * filter_menu_scale);
+                // El menu no sale de la ventana.
+                let left = filter_menu_position
+                    .x
+                    .min(filter_menu_viewport.width - width - px(8.))
+                    .max(px(8.));
+                let top = filter_menu_position
+                    .y
+                    .min(filter_menu_viewport.height - height - px(8.))
+                    .max(px(8.));
+                let mut menu = v_flex()
+                    .w(width)
+                    .rounded_md()
+                    .border_1()
+                    .border_color(filter_menu_border)
+                    .bg(filter_menu_panel)
+                    .py(px(4.));
+                for (index, filter) in filters.into_iter().enumerate() {
+                    let selected = filter == filter_menu_active;
+                    let color = if selected {
+                        filter_menu_accent
+                    } else {
+                        filter_menu_foreground
+                    };
+                    menu = menu.child(
+                        div()
+                            .id(("chat-filter-menu-item", index))
+                            .w_full()
+                            .px_3()
+                            .py(px(6.))
+                            .flex()
+                            .gap_3()
+                            .items_center()
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(filter_menu_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_chat_filter(filter, window, cx);
+                                // Los archivados son su propia vista: la
+                                // columna los muestra en la de los archivados.
+                                if filter == ChatFilter::Archived {
+                                    this.archived_open = true;
+                                    this.states_open = false;
+                                    this.channels_open = false;
+                                }
+                                cx.default_global::<ChatFilterMenu>().open = false;
+                                // El clic no sigue hacia la fila de la lista,
+                                // que esta debajo del menu: al abrir una
+                                // conversacion el filtro vuelve a ser el de
+                                // todos.
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            // El filtro que esta puesto lleva el visto.
+                            .child(if selected {
+                                div().flex_none().w(px(16. * filter_menu_scale)).child(
+                                    Icon::new(IconName::Check)
+                                        .with_size(px(14. * filter_menu_scale))
+                                        .text_color(filter_menu_accent),
+                                )
+                            } else {
+                                div().flex_none().w(px(16. * filter_menu_scale))
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(color)
+                                    .child(filter.label()),
+                            ),
+                    );
+                }
+                root.child(
+                    // El fondo que cierra el menu con cualquier clic fuera de
+                    // el, el mismo patron que el menu de la fila.
+                    div()
+                        .id("chat-filter-menu-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.default_global::<ChatFilterMenu>().open = false;
+                            // El clic no sigue hacia la fila de la lista:
+                            // abrir el menu no abre una conversacion.
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .on_aux_click(cx.listener(|_this, _, _, cx| {
+                            cx.default_global::<ChatFilterMenu>().open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child(menu.absolute().left(left).top(top)),
+                )
+            })
     }
 
     /// The row of filters of the column of chats.
@@ -200,15 +364,20 @@ impl Whatfast {
     /// port: the `.chat-filters` row of the origin
     /// (`tauri/src/styles.css`): the chips scroll sideways, the active one
     /// wears the accent of the theme.
+    ///
+    /// The reference draws a round button with an arrow at the end of the
+    /// row: it opens the menu of the filters that do not fit in the row.
     fn render_chat_filters(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let active = self.store.chat_filter();
         let accent = cx.theme().accent;
         let border = cx.theme().border;
+        let hover = cx.theme().muted;
+        let foreground = cx.theme().muted_foreground;
+        let ui_scale = self.ui_scale;
         h_flex()
             .id("chat-filters")
             .flex_none()
             .gap(px(6.))
-            .px(px(12.))
             .pt(px(2.))
             .pb(px(8.))
             .overflow_x_scroll()
@@ -234,10 +403,38 @@ impl Whatfast {
                     .when(!selected, |chip| chip.text_color(cx.theme().foreground))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_chat_filter(filter, window, cx);
+                        // Eligir un chip cierra el menu de los filtros.
+                        cx.default_global::<ChatFilterMenu>().open = false;
                         cx.notify();
                     }))
                     .child(filter.label())
             }))
+            // El boton de la flecha de la referencia: esta al final de la
+            // fila y abre el menu de los filtros de la columna.
+            .child(
+                div()
+                    .id("chat-filter-menu-button")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(30. * ui_scale))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(border)
+                    .text_color(foreground)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(|_this, event: &ClickEvent, _, cx| {
+                        let menu = cx.default_global::<ChatFilterMenu>();
+                        menu.open = !menu.open;
+                        // El menu se abre donde esta el puntero, como el
+                        // menu de la fila de la conversacion.
+                        menu.position = event.mouse_position().unwrap_or(point(px(0.), px(0.)));
+                        cx.notify();
+                    }))
+                    .child(Icon::new(IconName::ChevronDown).with_size(px(14. * ui_scale))),
+            )
     }
 
     /// The view of the states, the column that replaces the chats.
@@ -452,6 +649,13 @@ impl Whatfast {
         // colores del tema: asi respetan la paleta de la referencia.
         let selected_background = cx.theme().secondary;
         let hover_background = cx.theme().muted;
+        // La altura de las dos lineas de la fila: la del nombre y la del
+        // preview. La columna de la derecha (la hora y los dibujitos) las
+        // usa como altura de sus dos lineas, para que quede alineada con el
+        // texto.
+        let font_size = cx.theme().font_size;
+        let title_line = font_size * LINE_HEIGHT;
+        let preview_line = font_size * PREVIEW_FONT_RATIO * LINE_HEIGHT;
         range
             .map(|index| {
                 let Some(chat) = visible
@@ -523,53 +727,65 @@ impl Whatfast {
                     }))
                     .child(avatar)
                     .child(
+                        // El texto de la conversacion: el nombre en la
+                        // primera linea y el preview en la segunda.
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .gap_1()
                             .child(
+                                h_flex().w_full().items_center().child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(one_line(&chat.title)),
+                                ),
+                            )
+                            .child(
+                                h_flex().w_full().items_center().child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(if row_typing {
+                                            if dark {
+                                                gpui::Hsla::from(rgb(0x25d366))
+                                            } else {
+                                                gpui::Hsla::from(rgb(DARK_GREEN))
+                                            }
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .child(one_line(&preview)),
+                                ),
+                            ),
+                    )
+                    .child(
+                        // La columna de la derecha: la hora arriba, alineada
+                        // con el nombre, y los dibujitos de la conversacion
+                        // abajo, como los dibuja la referencia.
+                        v_flex()
+                            .flex_none()
+                            .items_end()
+                            .gap_1()
+                            .child(
                                 h_flex()
-                                    .w_full()
+                                    .flex_none()
+                                    .h(title_line)
                                     .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(one_line(&chat.title)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(chat_time),
-                                    ),
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(chat_time),
                             )
                             .child(
                                 h_flex()
-                                    .w_full()
+                                    .flex_none()
+                                    .h(preview_line)
                                     .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .text_color(if row_typing {
-                                                if dark {
-                                                    gpui::Hsla::from(rgb(0x25d366))
-                                                } else {
-                                                    gpui::Hsla::from(rgb(DARK_GREEN))
-                                                }
-                                            } else {
-                                                cx.theme().muted_foreground
-                                            })
-                                            .child(one_line(&preview)),
-                                    )
+                                    .gap_1()
                                     // port: the flags of the row of the origin
                                     // (`tauri/src/components/Sidebar.tsx`, the
                                     // `chat-flags` block): the silence, the
