@@ -1071,3 +1071,7 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
 - **CSP**: al tocar el `<script>` inline el hash cambio a
   `sha256-kwF4pkFpYP7GotkhrYh3MShOasvsXVWkJnD3lkqshr8=`; verificado en el
   navegador (las pestanas de codigo cambian, consola sin mensajes).
+- **Cache**: el HTML sale con `Cache-Control: no-cache` (antes 3600 s) y las
+  imagenes con un dia. En pantalla chica los botones usan `flex: 0 0 auto`
+  para no partir el texto, y `.btn-secondary` lleva un borde interno para
+  distinguirse del fondo de la tarjeta de descarga.
