@@ -52,9 +52,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
+          # gpui_wgpu usa font-kit: pkg-config tiene que encontrar fontconfig y
+          # freetype, o yeslogic-fontconfig-sys no compila.
           sudo apt-get install --yes \
             build-essential cmake clang lld pkg-config \
-            libfontconfig-dev libfreetype6-dev \
+            libfontconfig-dev libfreetype-dev libfreetype6-dev \
             libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev \
             xvfb
