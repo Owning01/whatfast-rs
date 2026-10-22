@@ -67,9 +67,10 @@ crates/whatfast-core                ← lógica pura portada del frontend
   mantiene el orquestador: los agentes escriben su módulo, no el `lib.rs`.
 - El repo de ORIGEN (`G:\Proyectos\16-whatsapp2`) es de solo lectura para
   esta migración: no se toca ni un test.
-- Los clics sintéticos llegan a las filas de la lista y a los botones de la
-  cabecera, pero **no al riel de la izquierda**: las vistas de los estados,
-  los canales y los archivados se capturan con su atajo de teclado
+- Los clics sintéticos llegan a las filas, a la cabecera y a los botones del
+  riel. Si la ventana no tiene el foco, la primera pulsación solo la activa:
+  el guion de captura insiste hasta que el foco queda en la app. Las vistas de
+  los estados, los canales y los archivados también tienen atajo
   (`Ctrl+Shift+S`, `Ctrl+Shift+N` y `Ctrl+Shift+H`).
 - El archivo de bloqueo (`whatfast.lock`) escribe el número del proceso **y
   el nombre del programa**: Windows vuelve a dar los números a otros

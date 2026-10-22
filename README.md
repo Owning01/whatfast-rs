@@ -99,6 +99,43 @@ y `Ctrl+Shift+H`) o con la columna de iconos de la izquierda.
 
 ![Archivados](docs/screenshots/06-archivados.png)
 
+### La barra de filtros
+
+El chevron de la fila de filtros abre el menú con todos y los cuatro
+filtros; el chip activo se dibuja con el borde verde.
+
+![Menú de filtros](docs/screenshots/01-menu-de-filtros.png)
+
+![Filtro de grupos](docs/screenshots/01-filtro-de-grupos.png)
+
+### El compositor
+
+El panel de emojis y el menú de adjuntos salen del compositor. Las tarjetas
+de los adjuntos abren su propio menú para abrirlos o guardarlos.
+
+![Panel de emojis](docs/screenshots/08-panel-de-emojis.png)
+
+![Menú de adjuntos](docs/screenshots/12-adjuntos.png)
+
+### La información de una conversación
+
+El clic en la cabecera abre el panel de la derecha: el de un contacto o el
+de un grupo, con la descripción, los permisos y los miembros.
+
+![Información del contacto](docs/screenshots/10-info-contacto.png)
+
+![Información del grupo](docs/screenshots/11-info-grupo.png)
+
+### Ajustes y temas
+
+Los ajustes ocupan la columna de la lista y dejan la conversación a la
+vista. El botón de apariencia cambia entre el tema oscuro y el claro de
+WhatsApp.
+
+![Ajustes en el tema oscuro](docs/screenshots/08-ajustes.png)
+
+![Ajustes en el tema claro](docs/screenshots/09-ajustes-claro.png)
+
 ### Referencias visuales
 
 En [`docs/referencia/`](docs/referencia/README.md) están las capturas de

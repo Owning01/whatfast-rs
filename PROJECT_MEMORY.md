@@ -946,3 +946,24 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   los iconos en `share/`, y el `Whatfast.app` de macOS (arm64 nativo y x64
   cruzado, con firma ad hoc). La guia de instalacion esta en
   `docs/plataformas.md`.
+
+## 2026-10-22 - El riel que no respondia
+
+- **El riel no cambiaba de vista** (estados, canales, archivados): los botones
+  quedaban deshabilitados porque la columna se sincronizaba con la pantalla
+  solo en `sync_shell`, y ese metodo no se llamaba cuando el backend respondia
+  la lista de chats ni el progreso del sync. La columna se quedaba en
+  `LinkState::Pairing` para siempre y solo respondia el engranaje, que tiene
+  `enabled: true` fijo. Ahora `handle_bridge` sincroniza despues de cada
+  mensaje del backend (commit `10b6aca`).
+- **Como se encontro**: un `eprintln!` temporal en el `on_click` del boton y en
+  `on_nav_action` mostro `CLICK States enabled=false` y ningun `NAV States`,
+  mientras que el engranaje si llegaba a `NAV Settings`.
+- **Evidencia**: `cargo fmt --check` limpio, `clippy --all-targets -D warnings`
+  limpio, 34 grupos de tests en verde, `funcionalidad.py` con 50/50 RPC y 21/21
+  componentes, `parity.py` con 153/153.
+- **Trampa para las capturas**: con el navegador de OpenCode en primer plano,
+  `AttachThreadInput` y `SetForegroundWindow` fallan (devuelven `False`) y la
+  primera pulsacion sobre la app solo la activa. Hay que poner la ventana
+  arriba con `SetWindowPos` y `HWND_TOPMOST` e insistir hasta que el foco quede
+  en la app, o el primer clic de la secuencia se pierde.

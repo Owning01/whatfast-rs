@@ -3259,7 +3259,8 @@ impl Whatfast {
             .right_0()
             .top_0()
             .bottom_0()
-            .bg(cx.theme().overlay)
+            // port: el panel de la referencia no oscurece el resto de la
+            // ventana: la conversacion sigue visible al lado.
             // Without occlusion the clicks fall through to the conversation
             // below, which is behind the panel.
             .occlude()
