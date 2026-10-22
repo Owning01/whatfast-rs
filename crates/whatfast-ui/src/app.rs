@@ -18,7 +18,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -664,6 +664,9 @@ pub(crate) struct Whatfast {
     pub(crate) attachment_download_attempted: HashSet<(String, String)>,
     /// The attachments whose download failed.
     pub(crate) attachment_failures: HashMap<(String, String), String>,
+    /// The attachment that the user asked to open and that is not in the
+    /// disk yet: it goes to the program of the system when it arrives.
+    pub(crate) attachment_open_requested: Option<(String, String)>,
     /// Whether the health of the local database is being checked.
     pub(crate) integrity_checking: bool,
     /// Whether the library of stickers is being loaded.
@@ -913,6 +916,7 @@ impl Whatfast {
             pin_generations: HashMap::new(),
             attachment_download_attempted: HashSet::new(),
             attachment_failures: HashMap::new(),
+            attachment_open_requested: None,
             integrity_checking: false,
             sticker_library_loading: false,
             newsletters_loading: false,
@@ -1283,6 +1287,7 @@ impl Whatfast {
                     chat_id,
                     message_id,
                 } => {
+                    self.attachment_open_requested = None;
                     self.attachment_failures.insert(
                         (chat_id.clone(), message_id.clone()),
                         "Downloading the file timed out · Click to retry".into(),
@@ -1779,6 +1784,7 @@ impl Whatfast {
                 message_id,
             } = &pending
             {
+                self.attachment_open_requested = None;
                 self.attachment_failures.insert(
                     (chat_id.clone(), message_id.clone()),
                     if error.retryable {
@@ -2172,6 +2178,7 @@ impl Whatfast {
             ) if response.chat_id == chat_id && response.message_id == message_id => {
                 let key = (chat_id.clone(), message_id.clone());
                 if response.local_path.is_empty() {
+                    self.attachment_open_requested = None;
                     self.attachment_failures
                         .insert(key, "That file is no longer available".into());
                 } else {
@@ -2179,8 +2186,14 @@ impl Whatfast {
                     self.store.set_message_attachment_path(
                         &chat_id,
                         &message_id,
-                        response.local_path,
+                        response.local_path.clone(),
                     );
+                    // The user asked to open the file before it was in the
+                    // disk: it goes to the program of the system now.
+                    if self.attachment_open_requested.as_ref() == Some(&key) {
+                        self.attachment_open_requested = None;
+                        self.open_file_with_the_system(&response.local_path, cx);
+                    }
                 }
             }
             (PendingRequest::Stickers, rpc_response::Result::ListStickers(response)) => {
@@ -3724,6 +3737,7 @@ impl Whatfast {
         self.pin_generations.clear();
         self.attachment_download_attempted.clear();
         self.attachment_failures.clear();
+        self.attachment_open_requested = None;
         self.integrity_checking = false;
         self.sticker_library_loading = false;
         self.newsletters_loading = false;
@@ -4153,6 +4167,59 @@ impl Whatfast {
         self.store
             .set_message_attachment_path(&chat_id, &message_id, String::new());
         self.load_message_attachment(chat_id, message_id);
+    }
+
+    /// Opens the file of one attachment.
+    ///
+    /// The file that is already in the disk goes to the program of the
+    /// system, and the one that is not there is asked for to the sidecar: it
+    /// goes to the program of the system when it arrives.
+    ///
+    /// port: `openAttachment` of `tauri/src/state/app.ts` opens the file
+    /// that is in the disk and downloads the one that is not there.
+    pub(crate) fn open_message_attachment(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (chat_id.clone(), message_id.clone());
+        // A download that failed before is asked again.
+        if self.attachment_failures.remove(&key).is_some() {
+            self.attachment_download_attempted.remove(&key);
+        }
+        let Some(path) =
+            self.store
+                .message(&message_id)
+                .and_then(|message| match message.content.as_ref() {
+                    Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
+                        Some(attachment.local_path.clone())
+                    }
+                    _ => None,
+                })
+        else {
+            // The message has no attachment: there is nothing to open.
+            return;
+        };
+        if !path.is_empty() && Path::new(&path).is_file() {
+            self.open_file_with_the_system(&path, cx);
+            return;
+        }
+        // The file is not in the disk: the path that the message had is
+        // stale, and the file is asked for again.
+        self.store
+            .set_message_attachment_path(&chat_id, &message_id, String::new());
+        self.attachment_open_requested = Some(key);
+        self.load_message_attachment(chat_id, message_id);
+    }
+
+    /// Opens one file with the program of the system.
+    ///
+    /// port: the menu of the clip of the composer opens the file that the
+    /// user chose with the same url (`file:///C:/...`).
+    pub(crate) fn open_file_with_the_system(&mut self, path: &str, cx: &mut Context<Self>) {
+        let url = format!("file:///{}", path.replace('\\', "/"));
+        cx.open_url(&url);
     }
 
     // ---------------------------------------------------------------------
