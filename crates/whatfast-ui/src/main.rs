@@ -56,6 +56,7 @@ mod stickers;
 mod tabs;
 mod text;
 mod tokens;
+mod ubicaciones;
 
 use app::Whatfast;
 
