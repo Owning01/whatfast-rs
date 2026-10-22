@@ -504,7 +504,9 @@ fn fake_dataset_is_deterministic() {
         chat.last_message_preview,
         "This is virtualized conversation number 0"
     );
-    assert_eq!(chat.last_message_timestamp_ms, 1_900_000_000_000);
+    // The time of the fake is the real one: the history of the chat goes
+    // back from now.
+    assert!(chat.last_message_timestamp_ms > 1_700_000_000_000);
     // Zero is a multiple of seven too: the chat zero has one unread.
     assert_eq!(chat.unread_count, 1);
     assert!(chat.pinned);
@@ -540,7 +542,11 @@ fn fake_dataset_is_deterministic() {
     assert_eq!(message.sender_name, "Fast friend");
     assert_eq!(message.sender_phone_number, "+15551234567");
     assert!(!message.from_me);
-    assert_eq!(message.timestamp_ms, 1);
+    // The time of the fake is the real one: the history goes back from
+    // now, a message every minute and a half.
+    assert!(message.timestamp_ms > 1_700_000_000_000);
+    let newer = fake_message("chat-0", 2, Path::new("unused"));
+    assert!(newer.timestamp_ms > message.timestamp_ms);
     assert_eq!(
         message.status,
         whatfast_protocol::MessageStatus::Read as i32

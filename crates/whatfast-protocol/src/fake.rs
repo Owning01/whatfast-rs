@@ -1687,7 +1687,7 @@ pub fn fake_chat(id: usize) -> Chat {
             format!("Fast friend {id}")
         },
         last_message_preview: format!("This is virtualized conversation number {id}"),
-        last_message_timestamp_ms: 1_900_000_000_000 - id as i64,
+        last_message_timestamp_ms: fake_timestamp_ms(id),
         unread_count: (id % 7 == 0) as u32 * ((id % 4) + 1) as u32,
         pinned: id < 3,
         phone_number: if id % 5 != 0 {
@@ -1707,6 +1707,36 @@ pub fn fake_chat(id: usize) -> Chat {
         },
         ..Default::default()
     }
+}
+
+/// The moment the fake counts as "now".
+///
+/// The history of the fake goes back from this moment, so the app shows
+/// real hours and real days (and the separator of the day has something to
+/// separate). The moment is taken once, so the times of the messages do not
+/// move while the app is open.
+fn fake_now_ms() -> i64 {
+    static NOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *NOW.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_millis() as i64)
+            .unwrap_or(0)
+    })
+}
+
+/// The gap between two messages of the fake, in milliseconds.
+///
+/// Ninety seconds: with a thousand messages the history spans a bit more
+/// than a day, so the app shows "Today" and "Yesterday".
+const FAKE_STEP_MS: i64 = 90_000;
+
+/// The moment of a message of the dataset.
+///
+/// The newest message is the one of now, and the older ones go back.
+fn fake_timestamp_ms(id: usize) -> i64 {
+    let total = MESSAGE_TOTAL.max(id + 1) as i64;
+    fake_now_ms() - (total - id as i64) * FAKE_STEP_MS
 }
 
 /// A message of the dataset.
@@ -1730,7 +1760,7 @@ pub fn fake_message(chat_id: &str, id: usize, profile_dir: &Path) -> Message {
             "+15551234567".into()
         },
         from_me: id % 2 == 0,
-        timestamp_ms: id as i64,
+        timestamp_ms: fake_timestamp_ms(id),
         status: MessageStatus::Read as i32,
         content: Some(if id % 37 == 0 && id > 0 {
             // A real picture on disk, so the media path (thumbnail, full

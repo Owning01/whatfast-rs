@@ -50,6 +50,10 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern void keybd_event(byte v, byte s, uint f, IntPtr e);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint id1, uint id2, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -83,6 +87,25 @@ function EnPrimerPlano([IntPtr]$handle, [int]$idProceso) {
         [Ventana]::SetForegroundWindow($handle) | Out-Null
         [Ventana]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 250
+        $idEnfrente = 0
+        [Ventana]::GetWindowThreadProcessId([Ventana]::GetForegroundWindow(), [ref]$idEnfrente) | Out-Null
+        if($idEnfrente -eq $idProceso) {
+            return $true
+        }
+    }
+    # Otra ventana tiene el foco y no lo suelta (por ejemplo la de
+    # WhatsApp): el truco de AttachThreadInput roba el foco de verdad.
+    for($i = 0; $i -lt 10; $i++) {
+        $enfrente = [Ventana]::GetForegroundWindow()
+        $hiloEnfrente = [Ventana]::GetWindowThreadProcessId($enfrente, [ref]([int]$null))
+        $hiloPropio = [Ventana]::GetCurrentThreadId()
+        [Ventana]::AttachThreadInput($hiloPropio, $hiloEnfrente, $true) | Out-Null
+        [Ventana]::ShowWindow($handle, 5) | Out-Null
+        [Ventana]::BringWindowToTop($handle) | Out-Null
+        [Ventana]::SetForegroundWindow($handle) | Out-Null
+        [Ventana]::SetFocus($handle) | Out-Null
+        [Ventana]::AttachThreadInput($hiloPropio, $hiloEnfrente, $false) | Out-Null
+        Start-Sleep -Milliseconds 300
         $idEnfrente = 0
         [Ventana]::GetWindowThreadProcessId([Ventana]::GetForegroundWindow(), [ref]$idEnfrente) | Out-Null
         if($idEnfrente -eq $idProceso) {
