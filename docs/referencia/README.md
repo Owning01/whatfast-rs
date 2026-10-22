@@ -28,7 +28,7 @@ tiene que verse la app, y se revisan una por una mientras se trabaja.
 | Estados (`02`) | Tiene su propio destino en el riel: "My status", la sección "RECENT" y el panel "Share status" con los botones "Text status" y "Photo and video". |
 | Canales (`05`) | Tiene su propio destino en el riel: el buscador, la lista de canales con la hora a la derecha y los botones "Follow" y "New local channel". |
 | Archivados (`03`) | Tiene su propio destino en el riel, con la explicación de arriba y la lista. |
-| Perfil (`04`) | El panel de ajustes del riel, con la escala, el tema y la salida. |
+| Perfil (`04`) | El panel de ajustes es la columna de la izquierda: el nombre del usuario arriba, el buscador con el borde verde, la foto en un círculo y la lista de secciones con un dibujo a la izquierda, el título en negrita y la descripción apagada. |
 | Llamadas (`06`) | Todavía no: el ladocar no tiene RPC de llamadas. |
 
 ## Los colores de la referencia

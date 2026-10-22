@@ -853,3 +853,48 @@ que hay que hacerlas a mano.
   la conversacion. Los enviados usan el verde de la referencia (`#144d37`).
 - Los verdes que estaban escritos a mano (la barra de la cita, el borde del
   mensaje buscado y el de las reacciones) salen ahora del acento del tema.
+
+### La paridad visual, con agentes en paralelo
+
+Ocho agentes trabajaron en worktrees separados (`agente/<nombre>`) y sus
+ramas se integraron con `scripts/integrar-agentes.ps1`. Cada uno tenía una
+zona de archivos y nadie toco `render.rs` fuera de su region.
+
+- **`conversacion`**: el fondo con dibujitos (una capa fija de glifos a una
+  opacidad de 0.055), la cola de la burbuja (un triangulo del color de la
+  burbuja), la hora dentro de la burbuja, la pastillita de "Load older
+  messages" arriba y el boton redondo de "ir a los ultimos" abajo a la
+  derecha. La burbuja ahora hugge su contenido (`align-self`).
+- **`emojis`**: el panel es una caja flotante con borde y sombra, la
+  categoria activa lleva la linea verde de 2 px debajo, hay seccion
+  "Recent" (los emojis usados, en `emoji_recent.rs`) y la rejilla es densa
+  (44 px, diez columnas).
+- **`stickers`**: la bandeja flotante con el buscador de la tienda de
+  stickers, el boton de "Crear" y la fila de packs.
+- **`lista`**: el boton de la flecha al final de los filtros, que abre el
+  menu con los filtros de la app, y la columna de la derecha de la fila
+  con la hora arriba y los dibujitos (silencio, favorito, pin) abajo.
+- **`paneles`**: el panel de ajustes con la forma del perfil de la
+  referencia (nombre, buscador con borde verde, foto en un circulo y las
+  secciones con dibujo) y el de info del contacto con titulo en negrita y
+  valor apagado.
+- **`adjuntos`**: la tarjeta de un archivo que viene con un mensaje (el
+  dibujo del tipo, el nombre, el tamano, la duracion y el mime), que baja
+  el archivo con el RPC y lo abre con el programa del sistema.
+- **`fake-media`**: el backend de demostracion genera un documento, un
+  video, un audio y una nota de voz, con los archivos escritos en disco.
+- **`ubicacion`**: la tarjeta de la ubicacion (que abre el mapa) y la de
+  los contactos (que copia la vcard).
+
+- **Las horas del backend de demostracion son reales**: antes cada mensaje
+  tenia `timestamp_ms: id` (las 00:00 de 1970). Ahora la historia va para
+  atras desde el ahora, un mensaje cada noventa segundos, asi que se ven
+  la hora, el "Today"/"Yesterday" y el separador de dia.
+- **Los tres enganches de las tarjetas** (el adjunto, la ubicacion y los
+  contactos) los hice yo al final, en `render.rs`: cuelgan la tarjeta
+  antes del texto, dejan de repetir el texto debajo y suman el alto de la
+  tarjeta a la medida de los mensajes (si no, la lista virtual la corta).
+- **Trampa**: un dialogo de "Open with" del sistema, abierto por una
+  prueba de los adjuntos, se queda con el foco y hace fallar todas las
+  capturas ("la ventana de la app no queda en primer plano"). Se cierra
+  matando el proceso `OpenWith`.
