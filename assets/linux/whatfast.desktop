@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Whatfast
+GenericName=Cliente de WhatsApp
+Comment=Cliente de escritorio de WhatsApp
+Comment[en]=WhatsApp desktop client
+Exec=whatfast
+TryExec=whatfast
+Icon=whatfast
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=whatsapp;chat;mensajes;messaging;
+StartupNotify=true
+StartupWMClass=whatfast
