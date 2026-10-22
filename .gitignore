@@ -17,3 +17,6 @@ __pycache__/
 
 # Las capturas del trabajo en curso: las definitivas van en docs/screenshots.
 docs/screenshots/actual/
+# Las capturas de trabajo de los agentes, fuera del repositorio.
+capturas/
+
