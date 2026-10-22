@@ -33,8 +33,8 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    ParentElement as _, PathPromptOptions, Pixels, Point, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, point, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -65,6 +65,17 @@ const EDIT_WINDOW_MS: i64 = 20 * 60_000;
 ///
 /// port: `.chat-context-menu { min-width: 210px }`.
 const MENU_MIN_WIDTH: f32 = 210.0;
+
+/// The width of the menu, before the scale.
+///
+/// The menu is a floating panel: it takes the width of its rows and not the
+/// width of the window it is drawn in.
+const MENU_WIDTH: f32 = 230.0;
+
+/// The tallest height of the menu, before the scale: the rows, the divider and
+/// the padding. It keeps the panel inside the window when the pointer is near
+/// the bottom edge.
+const MENU_MAX_HEIGHT: f32 = 340.0;
 
 /// The padding of the menu, before the scale.
 ///
@@ -160,8 +171,28 @@ pub(crate) struct MessageMenu {
     edit_deadline_ms: i64,
     /// The scale of the interface.
     scale: f32,
+    /// Where the pointer was when the menu opened, in pixels of the window.
+    position: Point<Pixels>,
     /// The handler the rows report to.
     on_action: MessageActionHandler,
+}
+
+/// The corner of a floating panel: where the pointer is, moved inside the
+/// window when the panel would not fit.
+fn floating_origin(
+    position: Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    width: Pixels,
+    height: Pixels,
+    margin: Pixels,
+) -> Point<Pixels> {
+    point(
+        position.x.min(viewport.width - width - margin).max(margin),
+        position
+            .y
+            .min(viewport.height - height - margin)
+            .max(margin),
+    )
 }
 
 impl std::fmt::Debug for MessageMenu {
@@ -218,8 +249,16 @@ impl MessageMenu {
             pinned,
             edit_deadline_ms: message.timestamp_ms + EDIT_WINDOW_MS,
             scale: normalized_ui_scale(scale),
+            position: point(px(0.), px(0.)),
             on_action: None,
         }
+    }
+
+    /// The place of the window the menu opens at: the pointer of the right
+    /// click, or the button that opens it.
+    pub(crate) fn at(mut self, position: Point<Pixels>) -> Self {
+        self.position = position;
+        self
     }
 
     /// The handler the rows of the menu report to.
@@ -339,7 +378,11 @@ impl MessageMenu {
     }
 
     /// The menu of the message.
-    pub(crate) fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    ///
+    /// The panel floats: it is drawn where the pointer was and it keeps the
+    /// width of its rows. Added as one more child of the column of the layout it
+    /// would stretch to the whole window, which is not what a menu is.
+    pub(crate) fn render(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let foreground = theme.foreground;
         let muted = theme.muted_foreground;
@@ -347,8 +390,25 @@ impl MessageMenu {
         let danger = theme.danger;
         let radius = theme.radius;
 
+        // El menu no sale de la ventana: se corre para adentro cuando el puntero
+        // esta cerca del borde.
+        let width = px(MENU_WIDTH * self.scale);
+        let origin = floating_origin(
+            self.position,
+            window.viewport_size(),
+            width,
+            px(MENU_MAX_HEIGHT * self.scale),
+            px(8.),
+        );
+        let left = origin.x;
+        let top = origin.y;
+
         let mut menu = v_flex()
-            .min_w(px(MENU_MIN_WIDTH))
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(width)
+            .min_w(px(MENU_MIN_WIDTH * self.scale))
             .p(px(MENU_PADDING))
             .rounded(radius)
             .border_1()
@@ -399,8 +459,8 @@ impl MessageMenu {
 }
 
 impl Render for MessageMenu {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        MessageMenu::render(self, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        MessageMenu::render(self, window, cx)
     }
 }
 
@@ -1658,12 +1718,13 @@ impl Render for AttachmentBar {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{point, px};
     use whatfast_protocol::message::Content;
     use whatfast_protocol::{Chat, ChatKind, Message, TextContent};
 
     use super::{
         AttachmentBar, EDIT_WINDOW_MS, MessageAction, MessageMenu, MessageMenuItem, PollForm,
-        attachment_kinds, chat_matches, filter_chats, toggle_selection,
+        attachment_kinds, chat_matches, filter_chats, floating_origin, toggle_selection,
     };
 
     /// A message of the user, with a text.
@@ -1957,5 +2018,43 @@ mod tests {
         assert!(bar.enabled());
         bar.set_enabled(false);
         assert!(!bar.enabled());
+    }
+
+    /// The panel of the menu is drawn where the pointer is: the bug was that it
+    /// landed below the app, as wide as the window.
+    #[test]
+    fn the_menu_opens_where_the_pointer_is() {
+        let origin = floating_origin(
+            point(px(320.), px(240.)),
+            gpui::size(px(1000.), px(700.)),
+            px(230.),
+            px(340.),
+            px(8.),
+        );
+        assert_eq!(origin, point(px(320.), px(240.)));
+    }
+
+    #[test]
+    fn the_menu_does_not_leave_the_window() {
+        let origin = floating_origin(
+            point(px(980.), px(690.)),
+            gpui::size(px(1000.), px(700.)),
+            px(230.),
+            px(340.),
+            px(8.),
+        );
+        assert_eq!(origin, point(px(762.), px(352.)));
+    }
+
+    #[test]
+    fn a_window_smaller_than_the_menu_keeps_the_margin() {
+        let origin = floating_origin(
+            point(px(300.), px(300.)),
+            gpui::size(px(200.), px(180.)),
+            px(230.),
+            px(340.),
+            px(8.),
+        );
+        assert_eq!(origin, point(px(8.), px(8.)));
     }
 }

@@ -4150,6 +4150,7 @@ impl Whatfast {
         let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
         let reply_action_message_id = message_id.clone();
         let more_action_message_id = message_id.clone();
+        let bubble_menu_message_id = message_id.clone();
         let message_image_chat_id = chat_id.clone();
         let message_image_id = message_id.clone();
         let image_failure = self
@@ -4243,8 +4244,25 @@ impl Whatfast {
                     })
                     .child(
                         v_flex()
+                            .id(("message-bubble", index))
                             .max_w(px(560.))
                             .gap_1()
+                            // El clic derecho sobre el mensaje abre el mismo
+                            // menu del boton "...", donde esta el puntero.
+                            .on_aux_click(cx.listener({
+                                let message_id = bubble_menu_message_id.clone();
+                                move |this, event: &ClickEvent, window, cx| {
+                                    if !event.is_secondary() {
+                                        return;
+                                    }
+                                    let position = event
+                                        .mouse_position()
+                                        .unwrap_or_else(|| window.mouse_position());
+                                    this.open_message_menu(message_id.clone(), position, cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }))
                             // port: the reference paints the actions of a
                             // message outside of the bubble, below it.
                             .child(
@@ -4672,13 +4690,19 @@ impl Whatfast {
                                             .small()
                                             .label("…")
                                             .tooltip("More")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.open_message_menu(
-                                                    more_action_message_id.clone(),
-                                                    cx,
-                                                );
-                                                cx.notify();
-                                            })),
+                                            .on_click(cx.listener(
+                                                move |this, event: &ClickEvent, window, cx| {
+                                                    let position = event
+                                                        .mouse_position()
+                                                        .unwrap_or_else(|| window.mouse_position());
+                                                    this.open_message_menu(
+                                                        more_action_message_id.clone(),
+                                                        position,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            )),
                                     ),
                             ),
                     ),
@@ -4965,6 +4989,13 @@ impl Render for Whatfast {
                     cx.notify();
                     return;
                 }
+                // El menu del mensaje tambien.
+                if this.message_menu.is_some() && event.keystroke.key == "escape" {
+                    this.message_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 let composer_focused = this.composer.read(cx).focus_handle(cx).is_focused(window);
                 let emoji_focused = this
                     .emoji_search
@@ -5082,7 +5113,27 @@ impl Render for Whatfast {
                 root.child(self.render_chat_switcher(cx))
             })
             .when_some(self.media_editor.clone(), |root, editor| root.child(editor))
-            .when_some(self.message_menu.clone(), |root, menu| root.child(menu))
+            .when_some(self.message_menu.clone(), |root, menu| {
+                // El fondo que cierra el menu con un clic fuera de el. Va antes
+                // que el panel para que el panel quede arriba y reciba el clic.
+                root.child(
+                    div()
+                        .id("message-menu-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.message_menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .on_aux_click(cx.listener(|this, _, _, cx| {
+                            this.message_menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                )
+                .child(menu)
+            })
             .when_some(self.forward_picker.clone(), |root, picker| {
                 root.child(picker)
             })

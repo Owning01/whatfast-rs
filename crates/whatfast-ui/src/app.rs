@@ -4845,7 +4845,15 @@ impl Whatfast {
     // -----------------------------------------------------------------------
 
     /// Opens the menu of a message.
-    pub(crate) fn open_message_menu(&mut self, message_id: String, cx: &mut Context<Self>) {
+    ///
+    /// `position` is where the pointer of the right click was, in pixels of the
+    /// window: the menu opens there and not in the corner of the layout.
+    pub(crate) fn open_message_menu(
+        &mut self,
+        message_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             return;
         };
@@ -4856,14 +4864,14 @@ impl Whatfast {
         let scale = self.ui_scale;
         let view = cx.entity();
         let menu = cx.new(|_| {
-            MessageMenu::new(chat_id, &message, pinned, now_ms(), scale).on_action(
-                move |action, window, cx| {
+            MessageMenu::new(chat_id, &message, pinned, now_ms(), scale)
+                .at(position)
+                .on_action(move |action, window, cx| {
                     view.update(cx, |this, cx| {
                         this.on_message_action(action, window, cx);
                         cx.notify();
                     });
-                },
-            )
+                })
         });
         self.message_menu = Some(menu);
     }
