@@ -16,6 +16,8 @@
 //! - `app`: the state of the application and the actions that change it
 //! - `rpc`: the lifecycle of the requests towards the sidecar
 //! - `render`: the drawing of every panel
+//! - `attachments`: the card of a file that comes with a message
+//! - `emoji_recent`: the emojis that the user used lately
 //! - `helpers`: the free functions used by the drawing
 //! - `icons`: the icon set of the web client
 //! - `instance`: the lock that keeps a single instance of the app
@@ -30,6 +32,7 @@
 //! - `tabs`: the strip of open chats
 //! - `text`: the pure helpers of the text of a message
 //! - `tokens`: the theme tokens and the scale of the interface
+//! - `ubicaciones`: the card of a place and the card of a contact
 
 // Whatfast is a window, not a console program: with the `windows` subsystem
 // the executable does not open a black terminal behind the interface when it
@@ -41,6 +44,7 @@ use gpui_component::Root;
 
 mod app;
 mod attachments;
+mod emoji_recent;
 mod helpers;
 mod icons;
 mod instance;
