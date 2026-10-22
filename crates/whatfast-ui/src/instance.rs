@@ -79,6 +79,12 @@ struct Owner {
     pid: u32,
     /// The name of its program: an empty name is a lock of an older version,
     /// and then the number of the process is all there is.
+    ///
+    /// Only the Windows branch reads it: there the number of a process goes
+    /// back to the system and another program can get it, so the name says
+    /// whether the lock is really of Whatfast. On unix the question goes to
+    /// `kill(pid, 0)`, which does not return the name.
+    #[cfg_attr(not(windows), allow(dead_code))]
     program: String,
 }
 
@@ -165,9 +171,20 @@ fn program_of(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<String> 
 }
 
 /// Whether the process of the lock is still running.
+///
+/// `/proc` exists on Linux and not on macOS, so the question goes to the
+/// system: `kill(pid, 0)` does not send a signal, it only says whether the
+/// process exists. A process that exists but that belongs to another user
+/// answers `EPERM`, and that still counts as running.
 #[cfg(unix)]
 fn is_alive(owner: &Owner) -> bool {
-    Path::new(&format!("/proc/{}", owner.pid)).exists()
+    let pid = i32::try_from(owner.pid).unwrap_or(i32::MAX);
+    // SAFETY: the signal 0 does not send anything to the process.
+    let sent = unsafe { libc::kill(pid, 0) };
+    if sent == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]
