@@ -843,3 +843,13 @@ que hay que hacerlas a mano.
   numero del proceso, y Windows vuelve a dar esos numeros a otros
   programas: un lock de una app matada podia bloquear la app para siempre.
   Ahora el lock tambien escribe el nombre del programa y compara los dos.
+
+### Las burbujas y las acciones de los mensajes
+
+- **Las acciones de un mensaje van fuera de la burbuja**, abajo: el estado
+  de lectura, las respuestas, el corazon y el menu. La referencia de
+  WhatsApp Desktop las pinta debajo de la burbuja y no dentro.
+- **Los mensajes recibidos no tienen burbuja**: el texto va sobre el fondo de
+  la conversacion. Los enviados usan el verde de la referencia (`#144d37`).
+- Los verdes que estaban escritos a mano (la barra de la cita, el borde del
+  mensaje buscado y el de las reacciones) salen ahora del acento del tema.
