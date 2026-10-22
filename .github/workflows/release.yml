@@ -83,11 +83,12 @@ jobs:
             sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
             ```
 
-            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
-            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+            El binario pide estas bibliotecas del sistema (Wayland y fontconfig
+            van por dlopen: si estan, las usa). En Debian y Ubuntu:
 
             ```
-            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
             ```
 
             ## macOS
@@ -124,7 +125,9 @@ jobs:
           sudo apt-get install --yes \
             build-essential cmake clang lld pkg-config \
             libfontconfig-dev libfreetype-dev libfreetype6-dev \
-            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-xkb-dev libxau-dev libxdmcp-dev \
+            libwayland-dev libx11-xcb-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev
       - name: el sidecar en Go
         run: |
@@ -191,11 +194,12 @@ jobs:
             sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
             ```
 
-            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
-            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+            El binario pide estas bibliotecas del sistema (Wayland y fontconfig
+            van por dlopen: si estan, las usa). En Debian y Ubuntu:
 
             ```
-            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
             ```
 
             ## macOS
@@ -321,11 +325,12 @@ jobs:
             sudo cp -r share/icons/hicolor/* /usr/share/icons/hicolor/
             ```
 
-            Depende de las bibliotecas del stack de GPUI (X11 o Wayland,
-            fontconfig, Vulkan o GL). En Debian y Ubuntu:
+            El binario pide estas bibliotecas del sistema (Wayland y fontconfig
+            van por dlopen: si estan, las usa). En Debian y Ubuntu:
 
             ```
-            sudo apt install libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libgl1 libvulkan1
+            sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
             ```
 
             ## macOS

@@ -57,7 +57,9 @@ jobs:
           sudo apt-get install --yes \
             build-essential cmake clang lld pkg-config \
             libfontconfig-dev libfreetype-dev libfreetype6-dev \
-            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-xkb-dev libxau-dev libxdmcp-dev \
+            libwayland-dev libx11-xcb-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev \
             xvfb
       - uses: Swatinem/rust-cache@v2
