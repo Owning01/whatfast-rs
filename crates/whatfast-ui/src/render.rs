@@ -65,6 +65,14 @@ enum ChatContextEntry {
     Separator,
 }
 
+/// One entry of the menu of the options of a conversation.
+enum ChatMenuEntry {
+    /// A row of the menu: the action is `None` when the app can not do it.
+    Item(Box<(Option<ChatMenuAction>, SharedString, Icon)>),
+    /// The line that separates two groups of rows.
+    Separator,
+}
+
 impl Whatfast {
     fn render_pairing(&self, cx: &mut Context<Self>) -> gpui::Div {
         let qr = self
@@ -626,19 +634,28 @@ impl Whatfast {
         };
         let ui_scale = self.ui_scale;
         let is_favorite = self.store.is_favorite(&chat.id);
-        let items: Vec<(ChatMenuAction, SharedString, Icon)> = vec![
-            (
-                ChatMenuAction::Info,
+        // The rows of the menu of the reference (`docs/referencia/
+        // 07-paneles-del-compositor.md`): the ones the app can not do are
+        // drawn too, but they cannot be pressed, the same way the menu of a
+        // message draws the rows that do not apply.
+        let entries: Vec<ChatMenuEntry> = vec![
+            ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Info),
                 "Contact info".into(),
                 Icon::new(IconName::Info),
-            ),
-            (
-                ChatMenuAction::Search,
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Search),
                 "Search".into(),
                 Icon::new(IconName::Search),
-            ),
-            (
-                ChatMenuAction::Mute,
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Select messages".into(),
+                Icon::new(WhatfastIcon::Check),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Mute),
                 if chat.muted {
                     "Unmute notifications"
                 } else {
@@ -646,9 +663,24 @@ impl Whatfast {
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Bell),
-            ),
-            (
-                ChatMenuAction::Favorite,
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Temporary messages".into(),
+                Icon::new(WhatfastIcon::Clock),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Restrict chat".into(),
+                Icon::new(WhatfastIcon::Shield),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Chat style".into(),
+                Icon::new(WhatfastIcon::Palette),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Favorite),
                 if is_favorite {
                     "Remove from favorites"
                 } else {
@@ -656,9 +688,46 @@ impl Whatfast {
                 }
                 .into(),
                 Icon::new(IconName::Heart),
-            ),
-            (
-                ChatMenuAction::Block,
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Add to list".into(),
+                Icon::new(IconName::File),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Export chat".into(),
+                Icon::new(IconName::ArrowDown),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Close chat".into(),
+                Icon::new(IconName::CircleX),
+            ))),
+            ChatMenuEntry::Separator,
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Send call link".into(),
+                Icon::new(IconName::ExternalLink),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Schedule call".into(),
+                Icon::new(IconName::Calendar),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "New group call".into(),
+                Icon::new(IconName::User),
+            ))),
+            ChatMenuEntry::Separator,
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Report".into(),
+                Icon::new(IconName::TriangleAlert),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Block),
                 if chat.blocked {
                     "Unblock contact"
                 } else {
@@ -666,16 +735,27 @@ impl Whatfast {
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Shield),
-            ),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Clear chat".into(),
+                Icon::new(IconName::CircleX),
+            ))),
+            ChatMenuEntry::Item(Box::new((
+                None,
+                "Delete chat".into(),
+                Icon::new(WhatfastIcon::Trash),
+            ))),
         ];
 
         let hover = cx.theme().muted;
         let foreground = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let panel = cx.theme().popover;
         let border = cx.theme().muted_foreground.opacity(0.22);
         let width = px(240. * ui_scale);
-        let height = px(38. * ui_scale * items.len() as f32) + px(12. * ui_scale);
+        let height = px(38. * ui_scale * entries.len() as f32) + px(12. * ui_scale);
         let viewport = window.viewport_size();
         let left = menu
             .position
@@ -696,9 +776,24 @@ impl Whatfast {
             .border_color(border)
             .bg(panel)
             .py(px(4.));
-        for (index, (action, label, icon)) in items.into_iter().enumerate() {
-            let is_block = action == ChatMenuAction::Block;
-            let color = if is_block { danger } else { foreground };
+        for (index, entry) in entries.into_iter().enumerate() {
+            let (action, label, icon) = match entry {
+                ChatMenuEntry::Separator => {
+                    panel = panel.child(div().h(px(1.)).my(px(4.)).mx_2().bg(border));
+                    continue;
+                }
+                ChatMenuEntry::Item(item) => *item,
+            };
+            let is_block = action == Some(ChatMenuAction::Block);
+            let enabled = action.is_some();
+            let color = if !enabled {
+                muted
+            } else if is_block {
+                danger
+            } else {
+                foreground
+            };
+            let action = action.unwrap();
             panel = panel.child(
                 div()
                     .id(("chat-menu-item", index))
@@ -709,14 +804,18 @@ impl Whatfast {
                     .gap_3()
                     .items_center()
                     .text_sm()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .on_click(cx.listener({
-                        let chat_id = chat_id.clone();
-                        move |this, _, window, cx| {
-                            this.run_chat_menu_action(action, chat_id.clone(), window, cx);
-                        }
-                    }))
+                    .text_color(color)
+                    .when(enabled, |row| {
+                        row.cursor_pointer().hover(move |style| style.bg(hover))
+                    })
+                    .when(enabled, |row| {
+                        row.on_click(cx.listener({
+                            let chat_id = chat_id.clone();
+                            move |this, _, window, cx| {
+                                this.run_chat_menu_action(action, chat_id.clone(), window, cx);
+                            }
+                        }))
+                    })
                     .child(icon.with_size(px(16. * ui_scale)).text_color(color))
                     .child(div().flex_1().truncate().text_color(color).child(label)),
             );
