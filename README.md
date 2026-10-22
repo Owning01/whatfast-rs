@@ -20,6 +20,7 @@ el protocolo de dispositivos vinculados.
 - [Dónde Whatfast gana de verdad](#dónde-whatfast-gana-de-verdad)
 - [Dónde todavía pierde](#dónde-todavía-pierde)
 - [Cómo está armado](#cómo-está-armado)
+- [Instalar](#instalar)
 - [Compilar y correr](#compilar-y-correr)
 - [Checks](#checks)
 - [Protocolo](#protocolo)
@@ -218,6 +219,39 @@ por eso la UI es el único crate que depende de GPUI.
 
 ---
 
+## Instalar
+
+Hay paquetes para las tres plataformas. La guía completa, con las
+dependencias y las trampas de cada sistema, está en
+[`docs/plataformas.md`](docs/plataformas.md).
+
+| Sistema | Paquete | Estado |
+|---|---|---|
+| Windows | `whatfast-setup.exe` (instalador) o `whatfast-windows.zip` (portable) | **Probado** en Windows 11 x86-64 |
+| Linux | `whatfast-linux.tar.gz` | Sin probar en un escritorio Linux |
+| macOS | `whatfast-macos-arm64.zip` y `whatfast-macos-x64.zip` | En camino, todavía no publicado |
+
+En los tres casos la app son **dos ejecutables**: la interfaz y el sidecar
+`whatfast-backend`. El sidecar tiene que quedar al lado de la interfaz, o
+apuntado desde la variable `WHATFAST_BACKEND`. La cuenta se vincula una sola
+vez, con el QR de **WhatsApp → Dispositivos vinculados**.
+
+### Windows, desde el código
+
+El script copia los dos ejecutables en la carpeta de programas del usuario,
+deja el logo de Whatfast en el acceso directo del escritorio y arma el del
+menú Inicio:
+
+```sh
+powershell -ExecutionPolicy Bypass -File scripts\instalar.ps1
+```
+
+Para desinstalar: borrar `%LOCALAPPDATA%\Programs\Whatfast` y los dos
+accesos directos. Esa instalación es distinta del `.exe`: el instalador NSIS
+escribe en `C:\Program Files\Whatfast` y deja su propio desinstalador.
+
+---
+
 ## Compilar y correr
 
 ```sh
@@ -235,19 +269,6 @@ dist\whatfast.exe --fake-backend
 
 El backend real es el sidecar en Go: el binario tiene que estar al lado del
 ejecutable de la interfaz, o en la variable `WHATFAST_BACKEND`.
-
-### Instalar en esta máquina
-
-El script copia los dos ejecutables en la carpeta de programas del usuario,
-deja el logo de Whatfast en el acceso directo del escritorio y arma el del
-menú Inicio:
-
-```sh
-powershell -ExecutionPolicy Bypass -File scripts\instalar.ps1
-```
-
-Para desinstalar: borrar `%LOCALAPPDATA%\Programs\Whatfast` y los dos
-accesos directos.
 
 ### El logo
 
