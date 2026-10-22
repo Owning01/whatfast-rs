@@ -1467,6 +1467,10 @@ impl Whatfast {
             }
             RpcIncoming::Ignore => {}
         }
+        // La columna de iconos se habilita cuando el dispositivo queda
+        // emparejado: sin esto se queda en `Pairing` para siempre y los
+        // botones de los estados, los canales y los archivados no responden.
+        self.sync_shell(cx);
     }
 
     pub(crate) fn handle_response(
