@@ -62,6 +62,34 @@ const MESSAGE_TOTAL: usize = 1_000;
 /// How many messages a chat has in the performance fixture.
 const PERF_MESSAGE_TOTAL: usize = 2_000;
 
+/// Every how many messages the dataset has a document.
+///
+/// The photo has its own stride (every 37 messages) and these four strides
+/// are coprime between them and with the one of the photo, so no message of
+/// the dataset carries two files.
+const DOCUMENT_EVERY: usize = 59;
+
+/// Every how many messages the dataset has a video.
+const VIDEO_EVERY: usize = 73;
+
+/// Every how many messages the dataset has an audio file.
+const AUDIO_EVERY: usize = 67;
+
+/// Every how many messages the dataset has a voice note.
+const VOICE_NOTE_EVERY: usize = 97;
+
+/// The name of the document of the dataset.
+const DOCUMENT_FILE: &str = "informe.pdf";
+
+/// The name of the video of the dataset.
+const VIDEO_FILE: &str = "vacaciones.mp4";
+
+/// The name of the audio file of the dataset.
+const AUDIO_FILE: &str = "cancion.wav";
+
+/// The name of the voice note of the dataset.
+const VOICE_NOTE_FILE: &str = "nota-de-voz.wav";
+
 /// How many participants a group has in the performance fixture.
 const PERF_PARTICIPANTS: usize = 1_000;
 
@@ -867,12 +895,20 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::GetMessageAttachment(request)) => {
+                // The file of the message: the one that the message carries.
+                // A message without a file has nothing to download.
+                let local_path = request
+                    .message_id
+                    .strip_prefix("message-")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .and_then(fake_attachment_of)
+                    .map(|attachment| fake_attachment_path(attachment, &profile_dir))
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 rpc_response::Result::GetMessageAttachment(GetMessageAttachmentResponse {
                     chat_id: request.chat_id,
                     message_id: request.message_id,
-                    local_path: ensure_fake_audio(&profile_dir)
-                        .to_string_lossy()
-                        .into_owned(),
+                    local_path,
                 })
             }
             Some(rpc_request::Request::SendAttachment(request)) => fake_send_attachment(request),
@@ -1113,32 +1149,30 @@ pub fn fake_send_attachment(request: crate::SendAttachmentRequest) -> rpc_respon
     if kind == AttachmentKind::Audio && !request.caption.is_empty() {
         return fake_invalid_argument("audio messages do not support captions");
     }
-    let (kind_name, mime_type, file_name) = match kind {
-        AttachmentKind::Document => (
-            "document",
-            "application/octet-stream",
-            Path::new(&request.file_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("attachment")
-                .to_owned(),
-        ),
-        AttachmentKind::Video => ("video", "video/mp4", String::new()),
-        AttachmentKind::Audio => (
-            "audio",
-            if request.voice_note {
-                "audio/ogg; codecs=opus"
-            } else {
-                "audio/ogg"
-            },
-            String::new(),
-        ),
+    let (kind_name, default_mime) = match kind {
+        AttachmentKind::Document => ("document", "application/octet-stream"),
+        AttachmentKind::Video => ("video", "video/mp4"),
+        AttachmentKind::Audio => ("audio", "audio/ogg"),
         // The kind was validated above: the arm is here to keep the match
         // exhaustive without a panic.
         AttachmentKind::Unspecified => {
             return fake_invalid_argument("attachment kind is required");
         }
     };
+    // The type of the file comes from its extension: the fake does not open
+    // the file, but the interface shows the type next to the name.
+    let mime_type = if request.voice_note {
+        // A voice note is always Ogg Opus: that is what the protocol asks
+        // for.
+        "audio/ogg; codecs=opus".to_string()
+    } else {
+        fake_mime_of(&request.file_path, default_mime).to_string()
+    };
+    let file_name = Path::new(&request.file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment")
+        .to_owned();
     rpc_response::Result::SendAttachment(SendAttachmentResponse {
         message: Some(Message {
             id: request.client_message_id,
@@ -1151,11 +1185,12 @@ pub fn fake_send_attachment(request: crate::SendAttachmentRequest) -> rpc_respon
             content: Some(proto_message::Content::Attachment(AttachmentContent {
                 kind: kind_name.into(),
                 caption: request.caption,
-                mime_type: mime_type.into(),
+                mime_type,
                 file_name,
                 // Match the real backend's ownership boundary: a selected
                 // source path is never exposed as a renderable cache asset.
                 local_path: String::new(),
+                file_size: fake_file_size(&request.file_path),
                 voice_note: request.voice_note,
                 downloadable: true,
                 ..Default::default()
@@ -1167,46 +1202,212 @@ pub fn fake_send_attachment(request: crate::SendAttachmentRequest) -> rpc_respon
     })
 }
 
+/// The type of a file, guessed from its extension.
+///
+/// The fake does not open the file: the extension is enough to fill the type
+/// that the interface shows next to the name.
+fn fake_mime_of<'a>(file_path: &str, fallback: &'a str) -> &'a str {
+    let extension = Path::new(file_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mp3" => "audio/mpeg",
+        "ogg" | "opus" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => fallback,
+    }
+}
+
+/// The size of a file on disk, zero when it is not there.
+fn fake_file_size(file_path: &str) -> u64 {
+    std::fs::metadata(file_path)
+        .map(|meta| meta.len())
+        .unwrap_or_default()
+}
+
 /// Materialize a tiny real PCM WAV once per profile so fake-mode audio and
 /// voice notes have a playable file to point the inline player at. The file
 /// lives under the managed media tree, which is the only path the asset
 /// protocol serves.
 pub fn ensure_fake_audio(profile_dir: &Path) -> PathBuf {
+    ensure_fake_audio_named(profile_dir, "fake-audio.wav")
+}
+
+/// Materialize a real PCM WAV with the name that the dataset uses.
+///
+/// The wave is the same tone of the fake: a playable file that the inline
+/// player of the interface can open without another dependency.
+pub fn ensure_fake_audio_named(profile_dir: &Path, name: &str) -> PathBuf {
     let media_dir = profile_dir.join("media");
-    let path = media_dir.join("fake-audio.wav");
+    let path = media_dir.join(name);
     if path.exists() {
         return path;
     }
     if ensure_media_dir(&media_dir).is_err() {
         return path;
     }
-    let sample_rate: u32 = 8000;
-    let seconds: u32 = 2;
-    let samples = (sample_rate * seconds) as usize;
-    let mut data = Vec::with_capacity(samples * 2);
-    for i in 0..samples {
-        let t = i as f32 / sample_rate as f32;
-        let value = (t * 440.0 * std::f32::consts::TAU).sin() * 0.25;
-        data.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
+    let wav = wav::encode_tone(8_000, 2, 440.0);
+    if std::fs::write(&path, wav).is_ok() {
+        let _ = restrict_permissions(&path);
     }
-    let mut wav = Vec::with_capacity(44 + data.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    wav.extend_from_slice(&data);
-    let _ = std::fs::write(&path, wav);
-    let _ = restrict_permissions(&path);
     path
+}
+
+/// Materialize a real document once per profile, so the document of the
+/// dataset opens with the reader of the system instead of failing.
+///
+/// The file is a PDF of one page: it starts with the header of the version
+/// 1.4 and ends with the marker of the end of the file.
+pub fn ensure_fake_document(profile_dir: &Path) -> PathBuf {
+    let media_dir = profile_dir.join("media");
+    let path = media_dir.join(DOCUMENT_FILE);
+    if path.exists() {
+        return path;
+    }
+    if ensure_media_dir(&media_dir).is_err() {
+        return path;
+    }
+    if std::fs::write(&path, pdf::encode_one_page("Informe de Whatfast")).is_ok() {
+        let _ = restrict_permissions(&path);
+    }
+    path
+}
+
+/// Materialize a real video once per profile, so the video of the dataset
+/// opens with the player of the system instead of failing.
+///
+/// A full movie is not something the fake can build: the file carries the
+/// header of the format and a chunk of data, which is what the system needs
+/// to recognize it as a video.
+pub fn ensure_fake_video(profile_dir: &Path) -> PathBuf {
+    let media_dir = profile_dir.join("media");
+    let path = media_dir.join(VIDEO_FILE);
+    if path.exists() {
+        return path;
+    }
+    if ensure_media_dir(&media_dir).is_err() {
+        return path;
+    }
+    if std::fs::write(&path, mp4::encode_stub(4_096)).is_ok() {
+        let _ = restrict_permissions(&path);
+    }
+    path
+}
+
+/// The file of the attachment, written under the media tree of the profile.
+fn fake_attachment_path(attachment: FakeAttachment, profile_dir: &Path) -> PathBuf {
+    match attachment {
+        FakeAttachment::Document => ensure_fake_document(profile_dir),
+        FakeAttachment::Video => ensure_fake_video(profile_dir),
+        FakeAttachment::Audio => ensure_fake_audio_named(profile_dir, AUDIO_FILE),
+        FakeAttachment::VoiceNote => ensure_fake_audio_named(profile_dir, VOICE_NOTE_FILE),
+    }
+}
+
+/// The content of the attachment of a message of the dataset.
+///
+/// The file is real: it lives under the media tree of the profile, so the
+/// interface can open it, play it or download it.
+fn fake_attachment_content(
+    attachment: FakeAttachment,
+    profile_dir: &Path,
+) -> proto_message::Content {
+    let path = fake_attachment_path(attachment, profile_dir);
+    let (kind, caption, mime_type, file_name, duration_seconds, width, height, voice_note) =
+        match attachment {
+            FakeAttachment::Document => (
+                "document",
+                "El informe",
+                "application/pdf",
+                DOCUMENT_FILE,
+                0,
+                0,
+                0,
+                false,
+            ),
+            FakeAttachment::Video => (
+                "video",
+                "El viaje",
+                "video/mp4",
+                VIDEO_FILE,
+                12,
+                1280,
+                720,
+                false,
+            ),
+            FakeAttachment::Audio => ("audio", "", "audio/wav", AUDIO_FILE, 2, 0, 0, false),
+            FakeAttachment::VoiceNote => ("audio", "", "audio/wav", VOICE_NOTE_FILE, 2, 0, 0, true),
+        };
+    proto_message::Content::Attachment(AttachmentContent {
+        kind: kind.into(),
+        caption: caption.into(),
+        mime_type: mime_type.into(),
+        file_name: file_name.into(),
+        local_path: path.to_string_lossy().into_owned(),
+        file_size: std::fs::metadata(&path)
+            .map(|meta| meta.len())
+            .unwrap_or_default(),
+        width,
+        height,
+        duration_seconds,
+        voice_note,
+        downloadable: true,
+        ..Default::default()
+    })
+}
+
+/// The kind of file that the dataset puts in a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FakeAttachment {
+    /// A document: a PDF that the reader of the system opens.
+    Document,
+    /// A video: an MP4 that the player of the system opens.
+    Video,
+    /// An audio file: a song that the player of the system opens.
+    Audio,
+    /// A voice note: the audio of a message recorded with the phone.
+    VoiceNote,
+}
+
+/// The file that the message of the dataset carries, if it carries one.
+///
+/// The index decides it, the same way the photo does: the history has a file
+/// of another kind every few messages, so the interface can draw the
+/// document, the video, the audio and the voice note.
+fn fake_attachment_of(id: usize) -> Option<FakeAttachment> {
+    if id == 0 {
+        return None;
+    }
+    if id % DOCUMENT_EVERY == 0 {
+        Some(FakeAttachment::Document)
+    } else if id % VIDEO_EVERY == 0 {
+        Some(FakeAttachment::Video)
+    } else if id % AUDIO_EVERY == 0 {
+        Some(FakeAttachment::Audio)
+    } else if id % VOICE_NOTE_EVERY == 0 {
+        Some(FakeAttachment::VoiceNote)
+    } else {
+        None
+    }
 }
 
 /// Materialize a real picture on disk, so the media path (thumbnail, full
@@ -1550,6 +1751,11 @@ pub fn fake_message(chat_id: &str, id: usize, profile_dir: &Path) -> Message {
                 downloadable: true,
                 ..Default::default()
             })
+        } else if let Some(attachment) = fake_attachment_of(id) {
+            // A real file on disk, so the media path (document, video, audio
+            // and voice note) is exercised by the fake backend instead of
+            // showing a message with nothing to open.
+            fake_attachment_content(attachment, profile_dir)
         } else {
             proto_message::Content::Text(TextContent {
                 text: if id % 9 == 0 {
@@ -1842,5 +2048,219 @@ mod png {
             high = (high + low) % 65521;
         }
         (high << 16) | low
+    }
+}
+
+/// A small PCM WAV writer: the fake needs a real audio file on disk and the
+/// crate may not depend on an encoder.
+///
+/// The wave is mono of sixteen bits with a tone of the given frequency: it
+/// is a file that every player of the system opens.
+mod wav {
+    /// Write a mono PCM WAV with a tone of the given frequency.
+    pub fn encode_tone(sample_rate: u32, seconds: u32, hertz: f32) -> Vec<u8> {
+        let samples = (sample_rate * seconds) as usize;
+        let mut data = Vec::with_capacity(samples * 2);
+        for index in 0..samples {
+            let time = index as f32 / sample_rate as f32;
+            let value = (time * hertz * std::f32::consts::TAU).sin() * 0.25;
+            data.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let mut out = Vec::with_capacity(44 + data.len());
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+}
+
+/// A small PDF writer: the fake needs a real document on disk and the crate
+/// may not depend on a library of documents.
+///
+/// The file is the header of the version 1.4, five objects (the catalogue,
+/// the pages, the page, the text of the page and the font), the table of the
+/// cross references and the marker of the end of the file.
+mod pdf {
+    /// The header of a PDF file of the version 1.4.
+    const HEADER: &str = "%PDF-1.4\n";
+
+    /// Write a document of one page with a line of text.
+    pub fn encode_one_page(text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 18 Tf 72 760 Td ({}) Tj ET\n", escape(text));
+        let mut out = Vec::new();
+        out.extend_from_slice(HEADER.as_bytes());
+        // Every object of the document, with the offset where it starts.
+        let mut offsets = Vec::new();
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+              /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+        );
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        out.extend_from_slice(content.as_bytes());
+        out.extend_from_slice(b"endstream\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        // The table of the cross references: the free entry of the head and
+        // the offset of every object.
+        let table = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", offsets.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n",
+                offsets.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// Escape the parentheses and the backslashes of the text of the page.
+    fn escape(text: &str) -> String {
+        text.replace('\\', r"\\")
+            .replace('(', r"\(")
+            .replace(')', r"\)")
+    }
+}
+
+/// A small MP4 writer: the fake needs a real video file on disk and the
+/// crate may not depend on an encoder.
+///
+/// A movie is not something the fake can build: the file carries the box of
+/// the type of the format (its brands) and a box of data, which is what the
+/// system needs to recognize it as a video and to open it with its player.
+mod mp4 {
+    /// The brands that the header of the file declares.
+    const BRANDS: [&[u8]; 4] = [b"isom", b"iso2", b"avc1", b"mp41"];
+
+    /// Write the header of the format and a chunk of data of the given size.
+    pub fn encode_stub(payload: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(payload + 64);
+        // The box of the type: the size, the name, the brand and the version.
+        let size = 8 + 4 + 4 + BRANDS.iter().map(|brand| brand.len()).sum::<usize>();
+        out.extend_from_slice(&(size as u32).to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(BRANDS[0]);
+        out.extend_from_slice(&0x0000_0200u32.to_be_bytes());
+        for brand in &BRANDS[1..] {
+            out.extend_from_slice(brand);
+        }
+        // The box of the data of the video.
+        out.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
+        out.extend_from_slice(b"mdat");
+        out.resize(out.len() + payload, 0);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A private directory of the test run for the media of the fake.
+    fn profile_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("whatfast-fake-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create the profile of the test");
+        path
+    }
+
+    #[test]
+    fn the_dataset_carries_a_file_of_every_kind() {
+        let profile = profile_dir("attachments");
+        let cases = [
+            (DOCUMENT_EVERY * 16, "document", DOCUMENT_FILE, false),
+            (VIDEO_EVERY * 13, "video", VIDEO_FILE, false),
+            (AUDIO_EVERY * 14, "audio", AUDIO_FILE, false),
+            (VOICE_NOTE_EVERY * 10, "audio", VOICE_NOTE_FILE, true),
+        ];
+        for (id, kind, file_name, voice_note) in cases {
+            let message = fake_message("chat-0", id, &profile);
+            let Some(proto_message::Content::Attachment(attachment)) = message.content else {
+                panic!("the message {id} carries a file");
+            };
+            assert_eq!(attachment.kind, kind);
+            assert_eq!(attachment.file_name, file_name);
+            assert_eq!(attachment.voice_note, voice_note);
+            assert!(attachment.downloadable);
+            assert!(attachment.file_size > 0);
+            let path = PathBuf::from(&attachment.local_path);
+            assert!(path.is_file(), "the file of the message {id} is on disk");
+            assert!(path.starts_with(profile.join("media")));
+        }
+    }
+
+    #[test]
+    fn the_files_of_the_dataset_are_the_ones_of_the_formats() {
+        let profile = profile_dir("formats");
+        let document = ensure_fake_document(&profile);
+        let bytes = std::fs::read(&document).expect("the document of the fake");
+        assert!(bytes.starts_with(b"%PDF-1.4"));
+        assert!(bytes.ends_with(b"%%EOF\n"));
+
+        let video = ensure_fake_video(&profile);
+        let bytes = std::fs::read(&video).expect("the video of the fake");
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert_eq!(&bytes[8..12], b"isom");
+
+        let audio = ensure_fake_audio_named(&profile, AUDIO_FILE);
+        let bytes = std::fs::read(&audio).expect("the audio of the fake");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn only_the_messages_of_the_strides_carry_a_file() {
+        assert!(fake_attachment_of(0).is_none());
+        assert!(fake_attachment_of(1).is_none());
+        assert_eq!(
+            fake_attachment_of(DOCUMENT_EVERY * 16),
+            Some(FakeAttachment::Document)
+        );
+        assert_eq!(
+            fake_attachment_of(VIDEO_EVERY * 13),
+            Some(FakeAttachment::Video)
+        );
+        assert_eq!(
+            fake_attachment_of(AUDIO_EVERY * 14),
+            Some(FakeAttachment::Audio)
+        );
+        assert_eq!(
+            fake_attachment_of(VOICE_NOTE_EVERY * 10),
+            Some(FakeAttachment::VoiceNote)
+        );
+        // The photo has its own stride: no message carries a photo and a
+        // file at the same time.
+        for id in (0..PERF_MESSAGE_TOTAL).filter(|id| id % 37 == 0) {
+            assert!(
+                fake_attachment_of(id).is_none(),
+                "the message {id} carries the photo and a file"
+            );
+        }
     }
 }
