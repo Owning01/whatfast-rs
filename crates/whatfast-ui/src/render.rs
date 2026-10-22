@@ -48,6 +48,7 @@ use crate::app::{
     EMOJI_COLUMNS, EmojiTarget, MAX_UI_SCALE, MIN_UI_SCALE, PANEL, PanelTab, ScrollSurface,
     SearchResultRow, ToggleArchived, ToggleChannels, ToggleStates, UI_SCALE_STEP, Whatfast,
 };
+use crate::emoji_recent;
 use crate::helpers::{
     avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
     format_epoch_date, identity_hue, image_render_size, message_preview, message_status, one_line,
@@ -2091,8 +2092,22 @@ impl Whatfast {
             }))
     }
 
+    /// The panel of the emojis.
+    ///
+    /// The reference draws it as a floating box above the composer, with
+    /// the rounded corners, the border and the shadow: the box is painted
+    /// over the list of the messages and does not push it.
     fn render_emoji_picker(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let row_count = self.emoji_results.len().div_ceil(EMOJI_COLUMNS);
+        // The measures of the box and of the grid.
+        const EMOJI_CELL: f32 = 44.;
+        const EMOJI_GLYPH: f32 = 24.;
+        const EMOJI_GAP: f32 = 2.;
+        const EMOJI_PADDING: f32 = 8.;
+        const EMOJI_PANEL_HEIGHT: f32 = 380.;
+        const EMOJI_PANEL_GAP: f32 = 8.;
+        const EMOJI_PANEL_MARGIN: f32 = 12.;
+        const COMPOSER_HEIGHT: f32 = 56.;
+        const REPLY_BAR_HEIGHT: f32 = 60.;
         let selected = self.emoji_category;
         let reaction_mode = matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. }));
         let has_own_reaction = match &self.emoji_target {
@@ -2104,11 +2119,64 @@ impl Whatfast {
                 .is_some_and(|message| message.reactions.iter().any(|reaction| reaction.from_me)),
             _ => false,
         };
+        let scale = self.ui_scale;
+        // The grid of the reference is dense: the cell is bigger than the
+        // one of the origin and the panel has one column more.
+        let columns = EMOJI_COLUMNS + 1;
+        let cell = px(EMOJI_CELL * scale);
+        let gap = px(EMOJI_GAP * scale);
+        let padding = px(EMOJI_PADDING * scale);
+        // The section of the recent ones goes at the top of the panel, when
+        // the category that is active is the one of all.
+        let recent = emoji_recent::recent_emojis();
+        let show_recent = selected == EmojiCategory::All && !recent.is_empty();
+        let recent_rows = recent.len().div_ceil(columns);
+        // The rows of the list: the title of the recent ones, the emojis
+        // used lately, the title of the section and the grid of the emojis.
+        let title_row = if show_recent { 1 + recent_rows } else { 0 };
+        let empty = self.emoji_results.is_empty();
+        let grid_rows = self.emoji_results.len().div_ceil(columns);
+        let total_rows = title_row + 1 + grid_rows;
+        // The title of the section: the one of the reference when the
+        // category is the one of all, the name of the category otherwise.
+        let label: &'static str = if selected == EmojiCategory::All {
+            "Smileys and people"
+        } else {
+            selected.label()
+        };
+        let hover = cx.theme().muted;
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+        // The width of the box: the grid of the emojis and the padding of
+        // its rows.
+        let width = px((columns as f32 * (EMOJI_CELL + EMOJI_GAP) - EMOJI_GAP
+            + EMOJI_PADDING * 2.)
+            * scale);
+        // The bottom of the box: above the composer, with the gap of the
+        // reference. When there is a reply in the air, the bar of the reply
+        // is under the box and the box goes a little higher.
+        let bottom = COMPOSER_HEIGHT
+            + EMOJI_PANEL_GAP
+            + if self.replying_to_message_id.is_some() {
+                REPLY_BAR_HEIGHT
+            } else {
+                0.
+            };
         v_flex()
-            .h(px(340. * self.ui_scale))
-            .border_t_1()
+            // The box floats over the list of the messages, above the button
+            // of the composer that opens it.
+            .absolute()
+            .left(px(EMOJI_PANEL_MARGIN * scale))
+            .bottom(px(bottom * scale))
+            .w(width)
+            .max_w_full()
+            .h(px(EMOJI_PANEL_HEIGHT * scale))
+            .rounded_md()
+            .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
+            .shadow_lg()
+            .overflow_hidden()
             // La fila de las categorias, con el dibujo de cada una, como la
             // referencia.
             .child(self.render_emoji_categories(cx))
@@ -2121,14 +2189,14 @@ impl Whatfast {
                     .child(
                         Input::new(&self.emoji_search)
                             .w_full()
-                            .h(px(36. * self.ui_scale))
-                            .rounded_full()
+                            .h(px(36. * scale))
+                            .rounded_md()
                             .bg(cx.theme().input)
                             .border_1()
                             .border_color(cx.theme().accent)
                             .prefix(
                                 Icon::new(IconName::Search)
-                                    .with_size(px(16. * self.ui_scale))
+                                    .with_size(px(16. * scale))
                                     .text_color(cx.theme().muted_foreground),
                             ),
                     )
@@ -2143,60 +2211,114 @@ impl Whatfast {
                         )
                     }),
             )
-            // El titulo de la seccion, como el de la referencia.
+            // La rejilla: la seccion de los recientes, el titulo de la
+            // seccion y los emojis de la categoria.
             .child(
-                div()
-                    .px_3()
-                    .pb_1()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(selected.label()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        uniform_list(
-                            "emoji-results",
-                            row_count,
-                            cx.processor(|this, rows: Range<usize>, _, cx| {
-                                rows.map(|row| {
-                                    h_flex().h(px(42.)).px_3().gap_1().children(
-                                        (0..EMOJI_COLUMNS).filter_map(|column| {
-                                            let index = row * EMOJI_COLUMNS + column;
-                                            let emoji = this.emoji_results.get(index)?;
-                                            let value = emoji.as_str().to_string();
+                div().flex_1().min_h_0().child(
+                    uniform_list(
+                        "emoji-results",
+                        total_rows,
+                        cx.processor(move |this, rows: Range<usize>, _, cx| {
+                            rows.map(|row| {
+                                // El titulo de la seccion de los
+                                // recientes.
+                                if show_recent && row == 0 {
+                                    return h_flex().h(cell).px(padding).items_center().child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(foreground)
+                                            .child("Recent"),
+                                    );
+                                }
+                                // Los emojis usados hace poco.
+                                if show_recent && row <= recent_rows {
+                                    let first = (row - 1) * columns;
+                                    return h_flex().h(cell).px(padding).gap(gap).children(
+                                        (0..columns).filter_map(|column| {
+                                            let index = first + column;
+                                            let value = recent.get(index)?.clone();
+                                            let picked = value.clone();
                                             Some(
-                                                Button::new(("emoji", index))
-                                                    .label(value.clone())
+                                                div()
+                                                    .id(("recent-emoji", index))
+                                                    .size(cell)
+                                                    .rounded_md()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(EMOJI_GLYPH * scale))
+                                                    .cursor_pointer()
+                                                    .hover(move |style| style.bg(hover))
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
-                                                            this.choose_emoji(&value, window, cx);
+                                                            emoji_recent::remember_emoji(&picked);
+                                                            this.choose_emoji(&picked, window, cx);
                                                             cx.notify();
                                                         },
-                                                    )),
+                                                    ))
+                                                    .child(value),
                                             )
                                         }),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                            }),
-                        )
-                        .h_full(),
+                                    );
+                                }
+                                // El titulo de la seccion.
+                                if row == title_row {
+                                    if empty {
+                                        return h_flex()
+                                            .h(cell)
+                                            .px(padding)
+                                            .items_center()
+                                            .justify_center()
+                                            .text_sm()
+                                            .text_color(muted_foreground)
+                                            .child("No emoji found");
+                                    }
+                                    return h_flex().h(cell).px(padding).items_center().child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(foreground)
+                                            .child(label),
+                                    );
+                                }
+                                // La rejilla de los emojis de la
+                                // categoria.
+                                let grid_row = row - title_row - 1;
+                                h_flex().h(cell).px(padding).gap(gap).children(
+                                    (0..columns).filter_map(|column| {
+                                        let index = grid_row * columns + column;
+                                        let emoji = this.emoji_results.get(index)?;
+                                        let value = emoji.as_str().to_string();
+                                        let picked = value.clone();
+                                        Some(
+                                            div()
+                                                .id(("emoji", index))
+                                                .size(cell)
+                                                .rounded_md()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(EMOJI_GLYPH * scale))
+                                                .cursor_pointer()
+                                                .hover(move |style| style.bg(hover))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        emoji_recent::remember_emoji(&picked);
+                                                        this.choose_emoji(&picked, window, cx);
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child(value),
+                                        )
+                                    }),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                        }),
                     )
-                    .when(row_count == 0, |panel| {
-                        panel.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No emoji found"),
-                        )
-                    }),
+                    .h_full(),
+                ),
             )
             .when(reaction_mode, |panel| {
                 panel.child(
@@ -2216,31 +2338,52 @@ impl Whatfast {
     }
 
     /// The row of the categories of emojis, with the drawing of each one.
+    ///
+    /// The reference underlines the category that is active with a green
+    /// line under its drawing.
     fn render_emoji_categories(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // The measures of the row and of the line of the active category.
+        const CATEGORY_SIZE: f32 = 34.;
+        const CATEGORY_GLYPH: f32 = 19.;
+        const CATEGORY_LINE: f32 = 20.;
         let selected = self.emoji_category;
         let hover = cx.theme().muted;
-        h_flex().flex_none().px_3().py_2().gap_1().children(
+        let accent = cx.theme().accent;
+        let scale = self.ui_scale;
+        h_flex().flex_none().px_2().py_2().gap_1().children(
             EmojiCategory::ALL
                 .into_iter()
                 .enumerate()
                 .map(|(index, category)| {
                     let active = category == selected;
-                    div()
+                    v_flex()
                         .id(("emoji-category", index))
-                        .size(px(32. * self.ui_scale))
-                        .rounded_full()
-                        .flex()
+                        .w(px(CATEGORY_SIZE * scale))
+                        .h(px(CATEGORY_SIZE * scale))
+                        .rounded_md()
                         .items_center()
                         .justify_center()
-                        .text_size(px(20. * self.ui_scale))
+                        .gap(px(2.))
                         .cursor_pointer()
-                        .when(active, |button| button.bg(cx.theme().accent.opacity(0.2)))
                         .hover(move |style| style.bg(hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_emoji_category(category);
                             cx.notify();
                         }))
-                        .child(emoji_category_glyph(category))
+                        .child(
+                            div()
+                                .text_size(px(CATEGORY_GLYPH * scale))
+                                .child(emoji_category_glyph(category)),
+                        )
+                        // The green line under the drawing of the category
+                        // that is active.
+                        .child(
+                            div()
+                                .h(px(2.))
+                                .w(px(CATEGORY_LINE * scale))
+                                .rounded_full()
+                                .when(active, |line| line.bg(accent)),
+                        )
                 }),
         )
     }
@@ -2251,74 +2394,92 @@ impl Whatfast {
     /// emojis, the pictures with movement and the stickers. The app has no
     /// pictures with movement, so that tab cannot be pressed.
     pub(crate) fn render_panel_tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // The measures of the pill and of its tabs.
+        const TAB_SIZE: f32 = 28.;
+        const TAB_WIDTH: f32 = 44.;
         let active = self.panel_tab;
         let hover = cx.theme().muted;
+        let accent = cx.theme().accent;
+        let muted_foreground = cx.theme().muted_foreground;
+        let scale = self.ui_scale;
         h_flex()
             .flex_none()
             .justify_center()
             .border_t_1()
             .border_color(cx.theme().border)
-            .py(px(8.))
+            .py(px(8. * scale))
+            // The three tabs live in a pill, like in the reference.
             .child(
                 h_flex()
                     .rounded_full()
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .gap(px(2.))
-                    .p(px(2.))
+                    .p(px(3. * scale))
                     .child(
                         div()
                             .id("panel-tab-emoji")
-                            .h(px(28. * self.ui_scale))
-                            .px_3()
+                            .h(px(TAB_SIZE * scale))
+                            .w(px(TAB_WIDTH * scale))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
                             .when(active == PanelTab::Emoji, |tab| {
-                                tab.bg(cx.theme().accent.opacity(0.2))
+                                tab.bg(accent.opacity(0.18))
                             })
                             .hover(move |style| style.bg(hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_panel_tab(PanelTab::Emoji, cx);
                             }))
                             .child(
-                                Icon::new(WhatfastIcon::Smile).with_size(px(18. * self.ui_scale)),
+                                Icon::new(WhatfastIcon::Smile)
+                                    .with_size(px(18. * scale))
+                                    .text_color(if active == PanelTab::Emoji {
+                                        accent
+                                    } else {
+                                        muted_foreground
+                                    }),
                             ),
                     )
                     .child(
                         div()
                             .id("panel-tab-gif")
-                            .h(px(28. * self.ui_scale))
-                            .px_3()
+                            .h(px(TAB_SIZE * scale))
+                            .w(px(TAB_WIDTH * scale))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(muted_foreground)
                             .child("GIF"),
                     )
                     .child(
                         div()
                             .id("panel-tab-sticker")
-                            .h(px(28. * self.ui_scale))
-                            .px_3()
+                            .h(px(TAB_SIZE * scale))
+                            .w(px(TAB_WIDTH * scale))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
                             .when(active == PanelTab::Sticker, |tab| {
-                                tab.bg(cx.theme().accent.opacity(0.2))
+                                tab.bg(accent.opacity(0.18))
                             })
                             .hover(move |style| style.bg(hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_panel_tab(PanelTab::Sticker, cx);
                             }))
                             .child(
-                                Icon::new(WhatfastIcon::Sticker).with_size(px(18. * self.ui_scale)),
+                                Icon::new(WhatfastIcon::Sticker)
+                                    .with_size(px(18. * scale))
+                                    .text_color(if active == PanelTab::Sticker {
+                                        accent
+                                    } else {
+                                        muted_foreground
+                                    }),
                             ),
                     ),
             )

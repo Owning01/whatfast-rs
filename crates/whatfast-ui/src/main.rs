@@ -40,6 +40,7 @@ use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
 mod app;
+mod emoji_recent;
 mod helpers;
 mod icons;
 mod instance;
