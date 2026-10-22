@@ -34,13 +34,14 @@ use qrcode::QrCode;
 // the same names, at the root of the crate.
 use whatfast_protocol as proto;
 
+use crate::attachments;
 use crate::icons::WhatfastIcon;
 
 use whatfast_model::emoji_picker::EmojiCategory;
 use whatfast_model::geom;
 use whatfast_model::model::{
-    ChatFilter, Screen, image_row_path, image_viewer_path, message_text, reaction_counts,
-    reaction_sender_detail, reaction_sender_name,
+    ChatFilter, Screen, image_row_path, image_viewer_path, reaction_counts, reaction_sender_detail,
+    reaction_sender_name,
 };
 
 use crate::app::{
@@ -57,6 +58,7 @@ use crate::helpers::{
 use crate::rpc::PendingRequest;
 use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, split_url_token};
 use crate::tokens;
+use crate::ubicaciones;
 
 /// One entry of the menu of a row of the list of conversations.
 enum ChatContextEntry {
@@ -3759,11 +3761,24 @@ impl Whatfast {
             Some(proto::message::Content::Image(image)) => Some(image.clone()),
             _ => None,
         };
+        // El adjunto (un documento, un video o un audio) y las tarjetas de
+        // la ubicacion y de los contactos.
+        let attachment_content = match message.content.as_ref() {
+            Some(proto::message::Content::Attachment(attachment)) => Some(attachment.clone()),
+            _ => None,
+        };
+        let card_content = message
+            .content
+            .as_ref()
+            .filter(|content| ubicaciones::is_card_content(content))
+            .cloned();
         let sticker = image_content.as_ref().is_some_and(|image| image.sticker);
         let text = if sticker {
             String::new()
         } else {
-            message_text(message).to_string()
+            // port: el texto de la burbuja no repite el nombre del archivo ni
+            // el del lugar: las tarjetas ya los dicen.
+            attachments::bubble_text(message).to_string()
         };
         let reaction_chips = reaction_counts(message);
         let reply_target_id = message.reply_to_message_id.clone();
@@ -4141,6 +4156,28 @@ impl Whatfast {
                                                 .child(self.render_link_preview(index, preview, cx))
                                         },
                                     )
+                                    // La tarjeta del adjunto y las de la
+                                    // ubicacion y de los contactos van antes
+                                    // del texto, como en el origen.
+                                    .when_some(attachment_content.clone(), |bubble, attachment| {
+                                        bubble.child(self.render_attachment_card(
+                                            index,
+                                            message,
+                                            &attachment,
+                                            cx,
+                                        ))
+                                    })
+                                    .when_some(
+                                        card_content.as_ref().and_then(|content| {
+                                            ubicaciones::render_content_card(
+                                                content,
+                                                index,
+                                                self.ui_scale,
+                                                cx,
+                                            )
+                                        }),
+                                        |bubble, card| bubble.child(card),
+                                    )
                                     .when(!text.is_empty(), |bubble| {
                                         // The hour goes at the end of the text,
                                         // inside the bubble, the way the
@@ -4312,7 +4349,10 @@ impl Whatfast {
             } else {
                 let (id, text) = {
                     let message = &self.store.messages[index];
-                    (message.id.clone(), message_text(message).to_string())
+                    (
+                        message.id.clone(),
+                        attachments::bubble_text(message).to_string(),
+                    )
                 };
                 // The hour goes at the end of the text, inside the bubble:
                 // the text wraps before it, so the width it takes is not
@@ -4377,9 +4417,20 @@ impl Whatfast {
                 } else {
                     px(0.)
                 };
+                // The card of the attachment and the cards of the place and of
+                // the contacts take room of their own.
+                let attachment_height = self.attachment_height(&self.store.messages[index]);
+                let card_height = match self.store.messages[index].content.as_ref() {
+                    Some(content) if ubicaciones::is_card_content(content) => {
+                        px(ubicaciones::card_height(content, self.ui_scale))
+                    }
+                    _ => px(0.),
+                };
                 let height = text_height
                     + image_height
                     + link_preview_height
+                    + attachment_height
+                    + card_height
                     + px(40. * self.ui_scale)
                     + reaction_height
                     + reply_height
