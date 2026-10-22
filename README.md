@@ -79,6 +79,13 @@ nativa, sin pasar por un webview.
 
 ![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png)
 
+### El menú de una fila
+
+El clic derecho sobre una fila abre su menú: fijar, silenciar, archivar,
+favoritos, marcar como leído o no leído y bloquear el contacto.
+
+![Menú de la fila](docs/screenshots/07-menu-contextual.png)
+
 ### Las vistas que no son chats
 
 Los estados, los canales y los archivados son vistas propias, con su

@@ -20,6 +20,8 @@ param(
     # es el numero de icono: 1 chats, 2 busqueda, 3 estados, 4 canales.
     [string]$Destinos = "",
     [string]$Clics = "",
+    # El clic derecho, en "x,y": abre el menu de la fila.
+    [string]$ClicDerecho = "",
     # El nombre de la foto que se deja al final.
     [string]$Nombre = "01-lista-de-chats.png",
     # Las vueltas de la rueda: "x,y,pasos" por cada una.
@@ -120,6 +122,30 @@ function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
     Write-Output ("    el cursor quedo en {0},{1} de la pantalla" -f $cursor.X, $cursor.Y)
 }
 
+function ClicDerecho([IntPtr]$handle, [int]$dx, [int]$dy) {
+    # El boton derecho del raton: es el que abre el menu de la fila.
+    [Ventana]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 400
+    $origen = Origen $handle
+    $destinoX = $origen[0] + $dx
+    $destinoY = $origen[1] + $dy
+    [Ventana]::SetCursorPos($destinoX, $destinoY) | Out-Null
+    Start-Sleep -Milliseconds 150
+    $ancho = [Ventana]::GetSystemMetrics(0)
+    $alto = [Ventana]::GetSystemMetrics(1)
+    $normalX = [int]($destinoX * 65535 / $ancho)
+    $normalY = [int]($destinoY * 65535 / $alto)
+    [Ventana]::mouse_event(0x8001, $normalX, $normalY, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+    [Ventana]::mouse_event(0x0008, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    [Ventana]::mouse_event(0x0010, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 900
+    $cursor = New-Object Ventana+POINT
+    [Ventana]::GetCursorPos([ref]$cursor) | Out-Null
+    Write-Output ("    el cursor quedo en {0},{1} de la pantalla" -f $cursor.X, $cursor.Y)
+}
+
 function Rueda([IntPtr]$handle, [int]$dx, [int]$dy, [int]$pasos) {
     $origen = Origen $handle
     [Ventana]::SetCursorPos($origen[0] + $dx, $origen[1] + $dy) | Out-Null
@@ -204,6 +230,10 @@ try {
             }
         }
         Remove-Item (Join-Path $destino "00-sonda.png") -ErrorAction SilentlyContinue
+    }
+    if($ClicDerecho -ne "") {
+        $punto = $ClicDerecho -split ","
+        ClicDerecho $handle ([int]$punto[0]) ([int]$punto[1])
     }
     if($Ruedas -ne "") {
         foreach($par in $Ruedas -split ";") {

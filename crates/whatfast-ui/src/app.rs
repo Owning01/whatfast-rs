@@ -293,6 +293,40 @@ pub(crate) struct ChatInfoState {
     pub(crate) info: Option<whatfast_protocol::GetChatInfoResponse>,
 }
 
+/// The menu that the right click opens on a row of the list of conversations.
+///
+/// port: the `chat-context-menu` of the origin
+/// (`tauri/src/components/Sidebar.tsx`): it opens where the pointer is and
+/// it works on the conversation under the pointer.
+pub(crate) struct ChatContextMenu {
+    /// The conversation the menu works on.
+    pub(crate) chat_id: String,
+    /// Where the pointer was when the menu opened, in pixels of the window.
+    pub(crate) position: Point<Pixels>,
+}
+
+/// The actions of the menu of a row of the list of conversations.
+///
+/// port: the items of the `chat-context-menu` of the origin
+/// (`tauri/src/components/Sidebar.tsx`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatContextAction {
+    /// Pins or unpins the conversation.
+    Pin,
+    /// Mutes or unmutes the conversation.
+    Mute,
+    /// Archives or unarchives the conversation.
+    Archive,
+    /// Marks the conversation as a favorite, or takes the mark away.
+    Favorite,
+    /// Marks the conversation as read.
+    MarkRead,
+    /// Marks the conversation as unread.
+    MarkUnread,
+    /// Blocks or unblocks the contact.
+    Block,
+}
+
 /// Transient state for one peer. Each chat keeps a sender-keyed collection so
 /// concurrent group participants do not overwrite one another.
 pub(crate) struct TypingIndicator {
@@ -542,6 +576,7 @@ pub(crate) struct Whatfast {
     pub(crate) recent_chat_ids: Vec<String>,
     pub(crate) chat_switcher: Option<ChatSwitcher>,
     pub(crate) chat_info: Option<ChatInfoState>,
+    pub(crate) chat_context_menu: Option<ChatContextMenu>,
     pub(crate) mention_picker: Option<MentionPicker>,
     pub(crate) mention_directories: HashMap<String, Vec<ChatParticipant>>,
     pub(crate) mention_directory_pending: HashSet<String>,
@@ -796,6 +831,7 @@ impl Whatfast {
             recent_chat_ids: Vec::new(),
             chat_switcher: None,
             chat_info: None,
+            chat_context_menu: None,
             mention_picker: None,
             mention_directories: HashMap::new(),
             mention_directory_pending: HashSet::new(),
@@ -3107,6 +3143,81 @@ impl Whatfast {
         self.store.toggle_favorite(&chat_id);
         if let Err(error) = favorites::save_favorites(self.store.favorite_chat_ids()) {
             self.store.toast_error = Some(format!("Could not save the favorites: {error}"));
+        }
+        cx.notify();
+    }
+
+    /// Opens the menu of a row of the list of conversations.
+    ///
+    /// port: the `contextmenu` of the origin opens the menu of the
+    /// conversation under the pointer, where the pointer is.
+    pub(crate) fn open_chat_context_menu(
+        &mut self,
+        chat_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_context_menu = Some(ChatContextMenu { chat_id, position });
+        cx.notify();
+    }
+
+    /// Closes the menu of a row of the list of conversations.
+    pub(crate) fn close_chat_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.chat_context_menu = None;
+        cx.notify();
+    }
+
+    /// Marks a conversation as unread.
+    ///
+    /// port: `markChatUnread` of the origin (`tauri/src/state/app.ts`): the
+    /// count of unread messages goes up by one.
+    pub(crate) fn mark_chat_unread(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.store.mark_chat_unread(&chat_id);
+        cx.notify();
+    }
+
+    /// Marks a conversation as read.
+    ///
+    /// port: `markChatRead` of the origin: the conversation that is open is
+    /// marked read through its last incoming message, and any other one
+    /// loses its count of unread messages.
+    pub(crate) fn mark_chat_read(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str()) {
+            self.mark_read();
+            return;
+        }
+        self.store.mark_chat_read_locally(&chat_id);
+        cx.notify();
+    }
+
+    /// Runs one action of the menu of a row of the list of conversations.
+    pub(crate) fn run_chat_context_action(
+        &mut self,
+        action: ChatContextAction,
+        chat_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_context_menu = None;
+        match action {
+            ChatContextAction::Pin => {
+                let pinned = self.store.chat(&chat_id).is_some_and(|chat| !chat.pinned);
+                self.set_chat_pinned(chat_id, pinned);
+            }
+            ChatContextAction::Mute => {
+                let muted = self.store.chat(&chat_id).is_some_and(|chat| !chat.muted);
+                self.set_chat_muted(chat_id, muted, None);
+            }
+            ChatContextAction::Archive => {
+                let archived = self.store.chat(&chat_id).is_some_and(|chat| !chat.archived);
+                self.set_chat_archived(chat_id, archived);
+            }
+            ChatContextAction::Favorite => self.toggle_favorite(chat_id, cx),
+            ChatContextAction::MarkRead => self.mark_chat_read(chat_id, cx),
+            ChatContextAction::MarkUnread => self.mark_chat_unread(chat_id, cx),
+            ChatContextAction::Block => {
+                let blocked = self.store.chat(&chat_id).is_some_and(|chat| !chat.blocked);
+                self.set_chat_blocked(chat_id, blocked);
+            }
         }
         cx.notify();
     }

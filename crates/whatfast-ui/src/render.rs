@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, ElementId, Focusable as _, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    Window, div, img, point, px, rgb, rgba, size, uniform_list,
+    ClickEvent, Context, ElementId, Focusable as _, FontWeight, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels,
+    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Window, div, img, point, px, rgb, rgba, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -44,9 +44,9 @@ use whatfast_model::model::{
 };
 
 use crate::app::{
-    CycleRecentChat, CycleRecentChatReverse, DARK_GREEN, EMOJI_COLUMNS, EmojiTarget, MAX_UI_SCALE,
-    MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, ToggleArchived, ToggleChannels,
-    ToggleStates, UI_SCALE_STEP, Whatfast,
+    ChatContextAction, CycleRecentChat, CycleRecentChatReverse, DARK_GREEN, EMOJI_COLUMNS,
+    EmojiTarget, MAX_UI_SCALE, MIN_UI_SCALE, PANEL, ScrollSurface, SearchResultRow, ToggleArchived,
+    ToggleChannels, ToggleStates, UI_SCALE_STEP, Whatfast,
 };
 use crate::helpers::{
     avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
@@ -55,6 +55,14 @@ use crate::helpers::{
 };
 use crate::rpc::PendingRequest;
 use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, split_url_token};
+
+/// One entry of the menu of a row of the list of conversations.
+enum ChatContextEntry {
+    /// An action of the menu, with its text and its icon.
+    Item(Box<(ChatContextAction, SharedString, Icon)>),
+    /// The line that separates two groups of actions.
+    Separator,
+}
 
 impl Whatfast {
     fn render_pairing(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -482,9 +490,24 @@ impl Whatfast {
                         gpui::transparent_black()
                     })
                     .hover(move |style| style.bg(hover_background))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_chat(chat.id.clone(), window, cx);
-                        cx.notify();
+                    .on_click(cx.listener({
+                        let chat_id = chat.id.clone();
+                        move |this, _, window, cx| {
+                            this.open_chat(chat_id.clone(), window, cx);
+                            cx.notify();
+                        }
+                    }))
+                    // El boton derecho abre el menu de la conversacion, el
+                    // mismo que el origen abre con el `contextmenu`.
+                    .on_aux_click(cx.listener({
+                        let chat_id = chat.id.clone();
+                        move |this, event: &ClickEvent, _, cx| {
+                            if event.is_secondary() {
+                                let position =
+                                    event.mouse_position().unwrap_or(point(px(0.), px(0.)));
+                                this.open_chat_context_menu(chat_id.clone(), position, cx);
+                            }
+                        }
                     }))
                     .child(avatar)
                     .child(
@@ -582,6 +605,185 @@ impl Whatfast {
                     )
             })
             .collect::<Vec<_>>()
+    }
+
+    /// The menu that the right click opens on a row of the list of
+    /// conversations.
+    ///
+    /// port: the `chat-context-menu` of the origin
+    /// (`tauri/src/components/Sidebar.tsx`): the items are the ones of the
+    /// origin, in the same order, and the menu opens where the pointer is.
+    fn render_chat_context_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let Some(menu) = self.chat_context_menu.as_ref() else {
+            return div().id("chat-context-menu-empty");
+        };
+        let Some(chat) = self.store.chat(&menu.chat_id).cloned() else {
+            return div().id("chat-context-menu-empty");
+        };
+        let ui_scale = self.ui_scale;
+        let is_group = chat.kind() == proto::ChatKind::Group;
+        let is_favorite = self.store.is_favorite(&chat.id);
+        // Los items del menu, en el orden del origen.
+        let items: Vec<(ChatContextAction, SharedString, Icon)> = vec![
+            (
+                ChatContextAction::Pin,
+                if chat.pinned {
+                    "Unpin chat"
+                } else {
+                    "Pin chat"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Pin),
+            ),
+            (
+                ChatContextAction::Mute,
+                if chat.muted {
+                    "Unmute notifications"
+                } else {
+                    "Mute notifications"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Bell),
+            ),
+            (
+                ChatContextAction::Archive,
+                if chat.archived {
+                    "Unarchive chat"
+                } else {
+                    "Archive chat"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Archive),
+            ),
+            (
+                ChatContextAction::Favorite,
+                if is_favorite {
+                    "Remove from favorites"
+                } else {
+                    "Add to favorites"
+                }
+                .into(),
+                Icon::new(if is_favorite {
+                    IconName::StarFill
+                } else {
+                    IconName::Star
+                }),
+            ),
+            (
+                if chat.unread_count > 0 {
+                    ChatContextAction::MarkRead
+                } else {
+                    ChatContextAction::MarkUnread
+                },
+                if chat.unread_count > 0 {
+                    "Mark as read"
+                } else {
+                    "Mark as unread"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::CheckDouble),
+            ),
+        ];
+        // El origen pone un separador antes de bloquear, y solo deja
+        // bloquear a los contactos que no son grupos.
+        let mut entries: Vec<ChatContextEntry> = items
+            .into_iter()
+            .map(|item| ChatContextEntry::Item(Box::new(item)))
+            .collect();
+        if !is_group {
+            entries.push(ChatContextEntry::Separator);
+            entries.push(ChatContextEntry::Item(Box::new((
+                ChatContextAction::Block,
+                if chat.blocked {
+                    "Unblock contact"
+                } else {
+                    "Block contact"
+                }
+                .into(),
+                Icon::new(WhatfastIcon::Shield),
+            ))));
+        }
+
+        let hover = cx.theme().muted;
+        let foreground = cx.theme().foreground;
+        let danger = cx.theme().danger;
+        let panel = cx.theme().popover;
+        // El borde del menu y el separador son una linea clara sobre el
+        // panel: con el color del borde del tema no se ven.
+        let border = cx.theme().muted_foreground.opacity(0.22);
+        let width = px(240. * ui_scale);
+        // El menu no sale de la ventana.
+        let viewport = window.viewport_size();
+        let height = px(34. * ui_scale * entries.len() as f32) + px(24. * ui_scale);
+        let left = menu
+            .position
+            .x
+            .min(viewport.width - width - px(8.))
+            .max(px(8.));
+        let top = menu
+            .position
+            .y
+            .min(viewport.height - height - px(8.))
+            .max(px(8.));
+        let chat_id = chat.id.clone();
+
+        let mut panel = v_flex()
+            .w(width)
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(panel)
+            .py(px(4.));
+        for (index, entry) in entries.into_iter().enumerate() {
+            let (action, label, icon) = match entry {
+                ChatContextEntry::Separator => {
+                    panel = panel.child(div().h(px(1.)).my(px(4.)).mx_2().bg(border));
+                    continue;
+                }
+                ChatContextEntry::Item(item) => *item,
+            };
+            let is_block = action == ChatContextAction::Block;
+            let color = if is_block { danger } else { foreground };
+            panel = panel.child(
+                div()
+                    .id(("chat-context-item", index))
+                    .w_full()
+                    .px_3()
+                    .py(px(6.))
+                    .flex()
+                    .gap_3()
+                    .items_center()
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener({
+                        let chat_id = chat_id.clone();
+                        move |this, _, _, cx| {
+                            this.run_chat_context_action(action, chat_id.clone(), cx);
+                        }
+                    }))
+                    .child(icon.with_size(px(16. * ui_scale)).text_color(color))
+                    .child(div().flex_1().truncate().text_color(color).child(label)),
+            );
+        }
+        // El fondo que cierra el menu con cualquier clic fuera de el.
+        div()
+            .id("chat-context-backdrop")
+            .absolute()
+            .inset_0()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_context_menu(cx);
+                cx.stop_propagation();
+            }))
+            .on_aux_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_context_menu(cx);
+                cx.stop_propagation();
+            }))
+            .child(panel.absolute().left(left).top(top))
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1259,24 +1461,26 @@ impl Whatfast {
         } else {
             self.store.connection_detail.clone()
         };
-        let mut identity_parts = Vec::new();
-        if !chat.phone_number.is_empty() {
-            identity_parts.push(chat.phone_number.clone());
-        }
-        if !chat.business_name.is_empty() && chat.business_name != chat.title {
-            identity_parts.push(chat.business_name.clone());
-        }
-        if !chat.push_name.is_empty()
-            && chat.push_name != chat.title
-            && chat.push_name != chat.business_name
-        {
-            identity_parts.push(chat.push_name.clone());
-        }
-        identity_parts.push(connection_detail);
         let typing_line = self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
         let header_typing = typing_line.is_some();
         let composer_typing_line = typing_line.clone();
-        let identity_line = typing_line.unwrap_or_else(|| identity_parts.join(" · "));
+        // port: the `conversationSubtitle` of the origin
+        // (`tauri/src/components/Conversation.tsx`): the header says that the
+        // tap opens the info of the contact or of the group. The reference
+        // draws the same hint.
+        let contact_subtitle = if chat.kind() == proto::ChatKind::Group {
+            "Tap for group info".to_string()
+        } else {
+            "Tap for contact info".to_string()
+        };
+        // Without connection the state of the backend is what the user
+        // needs to read under the name.
+        let subtitle = if connected {
+            contact_subtitle
+        } else {
+            connection_detail
+        };
+        let identity_line = typing_line.unwrap_or(subtitle);
         let reply_context = self.replying_to_message_id.as_deref().map(|message_id| {
             self.store.message(message_id).map_or_else(
                 || {
@@ -1298,7 +1502,11 @@ impl Whatfast {
             )
         });
         let header_avatar =
-            avatar_element(&chat.title, &chat.avatar_path, px(38. * self.ui_scale), cx);
+            avatar_element(&chat.title, &chat.avatar_path, px(41. * self.ui_scale), cx);
+        // El nombre de la conversacion se mueve al pintarlo: estos dos datos
+        // se sacan antes.
+        let is_group = chat.kind() == proto::ChatKind::Group;
+        let header_chat_id = chat.id.clone();
         let list_sizes = Rc::new(
             sizes
                 .iter()
@@ -1373,16 +1581,72 @@ impl Whatfast {
                                     ),
                             ),
                     )
-                    // El buscador de la conversacion, a la derecha de la
-                    // cabecera, como en la referencia.
+                    // Los botones de la derecha de la cabecera, como en la
+                    // referencia: la videollamada, la llamada, el buscador y
+                    // el menu de la conversacion.
                     .child(
-                        Button::new("search-in-chat")
-                            .small()
-                            .icon(IconName::Search)
-                            .tooltip("Search in chat")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.focus_search(window, cx);
-                            })),
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .child(
+                                Button::new("video-call")
+                                    .small()
+                                    .icon(WhatfastIcon::Video)
+                                    .tooltip("Video call")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.store.toast_error =
+                                            Some("The backend has no calls yet.".to_string());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("voice-call")
+                                    .small()
+                                    .icon(WhatfastIcon::Phone)
+                                    .tooltip("Call")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.store.toast_error =
+                                            Some("The backend has no calls yet.".to_string());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("search-in-chat")
+                                    .small()
+                                    .icon(IconName::Search)
+                                    .tooltip("Search in chat")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.focus_search(window, cx);
+                                    })),
+                            )
+                            // port: the origin shows the members of a group
+                            // in a panel that this button opens.
+                            .when(is_group, |row| {
+                                row.child(
+                                    Button::new("show-members")
+                                        .small()
+                                        .icon(IconName::User)
+                                        .tooltip("Show members")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let open = !this.member_panel.is_open();
+                                            this.member_panel.set_open(open);
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("conversation-menu")
+                                    .small()
+                                    .icon(IconName::EllipsisVertical)
+                                    .tooltip("Conversation menu")
+                                    .on_click(cx.listener({
+                                        let chat_id = header_chat_id.clone();
+                                        move |this, _, _, cx| {
+                                            this.open_chat_info(chat_id.clone());
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -3439,6 +3703,13 @@ impl Render for Whatfast {
                     cx.notify();
                     return;
                 }
+                // El menu de la fila se cierra con la tecla de escape.
+                if this.chat_context_menu.is_some() && event.keystroke.key == "escape" {
+                    this.chat_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 let composer_focused = this.composer.read(cx).focus_handle(cx).is_focused(window);
                 let emoji_focused = this
                     .emoji_search
@@ -3545,6 +3816,9 @@ impl Render for Whatfast {
             })
             .when(self.chat_info.is_some(), |root| {
                 root.child(self.render_chat_info(cx))
+            })
+            .when(self.chat_context_menu.is_some(), |root| {
+                root.child(self.render_chat_context_menu(window, cx))
             })
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))

@@ -1,4 +1,4 @@
-﻿//! The icon set of Whatfast, ported from the web client.
+//! The icon set of Whatfast, ported from the web client.
 //!
 //! port: the origin draws its icons with `tauri/src/components/ThemeIcon.tsx`:
 //! a `ThemeIconName` and the path of every glyph. The native client keeps the
@@ -223,6 +223,20 @@ const PIN: Glyph = Glyph {
     overlay: &[],
 };
 
+/// The handset of a call.
+///
+/// The reference of WhatsApp Desktop draws the call of a conversation in the
+/// header, and the web client has no calls: these two glyphs are the only
+/// ones of the set that are not in the origin.
+const PHONE: Glyph = Glyph {
+    path: "M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02z",
+    main: &[
+        "M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02z",
+    ],
+    cutout: &[],
+    overlay: &[],
+};
+
 const POLL: Glyph = Glyph {
     path: "M5.5 3h13a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5z M7 7h2v8H7zm4 3h2v5h-2zm4-5h2v10h-2zm-8 11h10v2H7z",
     main: &[
@@ -353,6 +367,20 @@ const TRASH: Glyph = Glyph {
     overlay: &[],
 };
 
+/// The camera of a video call.
+///
+/// The reference of WhatsApp Desktop draws the video call of a conversation
+/// in the header, and the web client has no calls: these two glyphs are the
+/// only ones of the set that are not in the origin.
+const VIDEO: Glyph = Glyph {
+    path: "M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11z",
+    main: &[
+        "M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11z",
+    ],
+    cutout: &[],
+    overlay: &[],
+};
+
 const WARNING: Glyph = Glyph {
     path: "M10 2.8a2.3 2.3 0 0 1 4 0l9.1 16A2.1 2.1 0 0 1 21.2 22H2.8a2.1 2.1 0 0 1-1.9-3.2z M10.6 7h2.8l-.4 8h-2zm0 10h2.8v2.5h-2.8z",
     main: &["M10 2.8a2.3 2.3 0 0 1 4 0l9.1 16A2.1 2.1 0 0 1 21.2 22H2.8a2.1 2.1 0 0 1-1.9-3.2z"],
@@ -386,6 +414,7 @@ pub enum WhatfastIcon {
     Minimize,
     NewChat,
     Palette,
+    Phone,
     Pin,
     Poll,
     Reply,
@@ -400,12 +429,13 @@ pub enum WhatfastIcon {
     Sticker,
     Storage,
     Trash,
+    Video,
     Warning,
 }
 
 impl WhatfastIcon {
     /// Every icon of the set.
-    pub const ALL: [WhatfastIcon; 34] = [
+    pub const ALL: [WhatfastIcon; 36] = [
         WhatfastIcon::Archive,
         WhatfastIcon::Attach,
         WhatfastIcon::Bell,
@@ -425,6 +455,7 @@ impl WhatfastIcon {
         WhatfastIcon::Minimize,
         WhatfastIcon::NewChat,
         WhatfastIcon::Palette,
+        WhatfastIcon::Phone,
         WhatfastIcon::Pin,
         WhatfastIcon::Poll,
         WhatfastIcon::Reply,
@@ -439,6 +470,7 @@ impl WhatfastIcon {
         WhatfastIcon::Sticker,
         WhatfastIcon::Storage,
         WhatfastIcon::Trash,
+        WhatfastIcon::Video,
         WhatfastIcon::Warning,
     ];
 
@@ -464,6 +496,7 @@ impl WhatfastIcon {
             WhatfastIcon::Minimize => "minimize",
             WhatfastIcon::NewChat => "new-chat",
             WhatfastIcon::Palette => "palette",
+            WhatfastIcon::Phone => "phone",
             WhatfastIcon::Pin => "pin",
             WhatfastIcon::Poll => "poll",
             WhatfastIcon::Reply => "reply",
@@ -478,6 +511,7 @@ impl WhatfastIcon {
             WhatfastIcon::Sticker => "sticker",
             WhatfastIcon::Storage => "storage",
             WhatfastIcon::Trash => "trash",
+            WhatfastIcon::Video => "video",
             WhatfastIcon::Warning => "warning",
         }
     }
@@ -550,6 +584,7 @@ impl WhatfastIcon {
             WhatfastIcon::Minimize => &MINIMIZE,
             WhatfastIcon::NewChat => &NEW_CHAT,
             WhatfastIcon::Palette => &PALETTE,
+            WhatfastIcon::Phone => &PHONE,
             WhatfastIcon::Pin => &PIN,
             WhatfastIcon::Poll => &POLL,
             WhatfastIcon::Reply => &REPLY,
@@ -564,6 +599,7 @@ impl WhatfastIcon {
             WhatfastIcon::Sticker => &STICKER,
             WhatfastIcon::Storage => &STORAGE,
             WhatfastIcon::Trash => &TRASH,
+            WhatfastIcon::Video => &VIDEO,
             WhatfastIcon::Warning => &WARNING,
         }
     }
@@ -838,6 +874,10 @@ mod tests {
                 "minimize",
                 "new-chat",
                 "palette",
+                // These two are not in the web client: the reference of
+                // WhatsApp Desktop draws the calls in the header of the
+                // conversation and the client of the web has no calls.
+                "phone",
                 "pin",
                 "poll",
                 "reply",
@@ -852,6 +892,7 @@ mod tests {
                 "sticker",
                 "storage",
                 "trash",
+                "video",
                 "warning",
             ]
         );

@@ -464,6 +464,27 @@ impl Store {
         }
     }
 
+    /// Marks a conversation as unread.
+    ///
+    /// port: `markChatUnread` of the origin (`tauri/src/state/app.ts`): the
+    /// count goes up by one and never goes below one.
+    pub fn mark_chat_unread(&mut self, chat_id: &str) {
+        if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id) {
+            chat.unread_count = chat.unread_count.saturating_add(1).max(1);
+        }
+    }
+
+    /// Clears the count of unread messages of a conversation.
+    ///
+    /// port: `markChatRead` of the origin: the count goes to zero while the
+    /// backend confirms it.
+    pub fn mark_chat_read_locally(&mut self, chat_id: &str) -> Option<u32> {
+        let chat = self.chats.iter_mut().find(|chat| chat.id == chat_id)?;
+        let previous = chat.unread_count;
+        chat.unread_count = 0;
+        Some(previous)
+    }
+
     pub fn set_chat_avatar(&mut self, chat_id: &str, avatar_path: String) {
         if let Some(chat) = self
             .chat_index

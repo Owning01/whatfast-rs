@@ -819,3 +819,27 @@ que hay que hacerlas a mano.
 - **`scripts/captura-estados.ps1`** abre una de esas vistas con el atajo y
   saca la foto: el riel no toma los clics sinteticos (los de las filas de la
   lista si), asi que el guion usa el teclado.
+
+### El menu de la fila y la cabecera de la conversacion
+
+- **El clic derecho sobre una fila abre su menu**: fijar, silenciar,
+  archivar, favoritos, marcar como leido o no leido y bloquear el contacto.
+  Son los items del `chat-context-menu` del cliente web, en el mismo orden.
+  El menu abre donde esta el puntero, se cierra con Escape o con un clic
+  fuera, y el separador antes de bloquear solo aparece en los contactos que
+  no son grupos.
+- **Marcar como no leido** suma uno al contador de mensajes sin leer (el
+  cliente web hace lo mismo) y **marcar como leido** lo deja en cero; si la
+  conversacion es la que esta abierta, el marcado va con el RPC.
+- **La cabecera de la conversacion** quedo como la de la referencia: la foto
+  de 41 px, el nombre, la linea `Tap for contact info` (o `Tap for group
+  info`) y a la derecha la videollamada, la llamada, el buscador y el menu.
+- **Los glifos de la llamada** (la camara y el auricular) son los unicos que
+  no estan en el cliente web: el cliente no tiene llamadas y avisa que el
+  backend todavia no las tiene.
+- **El panel de los miembros** de un grupo se abre con el boton de la
+  cabecera, como en el cliente web.
+- **Bug del lock de instancia unica**: el archivo de bloqueo solo guardaba el
+  numero del proceso, y Windows vuelve a dar esos numeros a otros
+  programas: un lock de una app matada podia bloquear la app para siempre.
+  Ahora el lock tambien escribe el nombre del programa y compara los dos.

@@ -32,7 +32,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `crates/whatfast-core/` | Lógica pura. 25 módulos declarados en `src/lib.rs`. |
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte (`transport.rs`) + backend de demostración (`fake.rs`). |
 | `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `favorites`, `sticker`, `emoji_picker`. Cero GPUI en su árbol de dependencias. |
-| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
+| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales), `instance.rs` (el lock de instancia única). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
 | `backend/` | El sidecar en Go (módulo `github.com/Owning01/whatfast/backend`). |
 | `proto/bridge.proto` | Copia del contrato v21 del origen. |
 | `assets/icons/` | Los iconos de Whatfast (los mismos del cliente de Tauri). |
@@ -45,7 +45,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `scripts/instalar.ps1` | Instala la app en `%LOCALAPPDATA%\Programs\Whatfast` y deja los accesos directos con el logo. |
 | `installer.nsi` | El instalador de Windows: deja el logo en los accesos directos y en el archivo de instalación. |
 | `scripts/capturas.ps1` | Captura la ventana para el README. Mide la escala de la pantalla: sin eso la captura sale recortada. |
-| `scripts/captura-frontal.ps1` | Captura la ventana con la app en primer plano: la trae al frente con el truco de ALT, la deja en la esquina y mide el botón del riel sobre una foto de prueba. |
+| `scripts/captura-frontal.ps1` | Captura la ventana con la app en primer plano: la trae al frente con el truco de ALT, la deja en la esquina y mide el botón del riel sobre una foto de prueba. Sabe pulsar el botón izquierdo (`-Clics`), el derecho (`-ClicDerecho`, el que abre el menú de la fila) y la rueda (`-Ruedas`). |
 | `scripts/captura-estados.ps1` | Abre una de las vistas que no son chats (los estados, los canales, los archivados) con su atajo de teclado y saca la foto. |
 | `scripts/medir_riel.py` | Mide en una captura dónde está cada botón del riel (los que se apartan del fondo). Devuelve la línea `posiciones` con el centro de cada uno. |
 | `scripts/detectar-estados.py` | Dice si la vista de los estados está abierta en una captura (la fila de filtros no tiene el chip verde). |
@@ -65,6 +65,14 @@ crates/whatfast-core                ← lógica pura portada del frontend
   mantiene el orquestador: los agentes escriben su módulo, no el `lib.rs`.
 - El repo de ORIGEN (`G:\Proyectos\16-whatsapp2`) es de solo lectura para
   esta migración: no se toca ni un test.
+- Los clics sintéticos llegan a las filas de la lista y a los botones de la
+  cabecera, pero **no al riel de la izquierda**: las vistas de los estados,
+  los canales y los archivados se capturan con su atajo de teclado
+  (`Ctrl+Shift+S`, `Ctrl+Shift+N` y `Ctrl+Shift+H`).
+- El archivo de bloqueo (`whatfast.lock`) escribe el número del proceso **y
+  el nombre del programa**: Windows vuelve a dar los números a otros
+  programas, y sin el nombre un lock de una app matada bloquea la app para
+  siempre.
 
 ## Comandos
 

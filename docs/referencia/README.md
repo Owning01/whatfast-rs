@@ -24,7 +24,7 @@ tiene que verse la app, y se revisan una por una mientras se trabaja.
 
 | Vista | Estado |
 |---|---|
-| Chats (`01`) | La barra quedó con el título "Chats", el botón verde de nuevo chat, el buscador en pastilla con la lupa dentro, la fila de filtros con el chip activo en verde, la hora a la derecha de cada fila, el prefijo "You:" y los indicadores de silencio, favorito y pin. Cada fila lleva su foto. La paleta es la de la referencia. |
+| Chats (`01`) | La barra quedó con el título "Chats", el botón verde de nuevo chat, el buscador en pastilla con la lupa dentro, la fila de filtros con el chip activo en verde, la hora a la derecha de cada fila, el prefijo "You:" y los indicadores de silencio, favorito y pin. Cada fila lleva su foto. La paleta es la de la referencia. El clic derecho abre el menú de la fila. |
 | Estados (`02`) | Tiene su propio destino en el riel: "My status", la sección "RECENT" y el panel "Share status" con los botones "Text status" y "Photo and video". |
 | Canales (`05`) | Tiene su propio destino en el riel: el buscador, la lista de canales con la hora a la derecha y los botones "Follow" y "New local channel". |
 | Archivados (`03`) | Tiene su propio destino en el riel, con la explicación de arriba y la lista. |
