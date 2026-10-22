@@ -449,41 +449,46 @@ impl Whatfast {
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
-                v_flex().flex_none().px_3().py_2().gap_1().child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(24. * scale))
-                                .font_weight(FontWeight::BOLD)
-                                .child("States"),
-                        )
-                        .child(
-                            // El boton del estado nuevo: en la referencia es
-                            // un circulo con el borde, no el relleno verde.
-                            div()
-                                .id("new-status")
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(28. * scale))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(foreground)
-                                .text_color(foreground)
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(hover))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.status_strip.publish_photo_status(window, cx);
-                                }))
-                                .child(Icon::new(IconName::Plus).with_size(px(16. * scale))),
-                        ),
-                ),
+                v_flex()
+                    .flex_none()
+                    .px(px(20. * scale))
+                    .py_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(24. * scale))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("States"),
+                            )
+                            .child(
+                                // El boton del estado nuevo: en la referencia es
+                                // un circulo con el borde, no el relleno verde.
+                                div()
+                                    .id("new-status")
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22. * scale))
+                                    .rounded_full()
+                                    .border(px(1.5 * scale))
+                                    .border_color(foreground)
+                                    .text_color(foreground)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(hover))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.status_strip.publish_photo_status(window, cx);
+                                    }))
+                                    .child(Icon::new(IconName::Plus).with_size(px(12. * scale))),
+                            ),
+                    ),
             )
             .child(self.status_strip.render_view(self, cx))
     }

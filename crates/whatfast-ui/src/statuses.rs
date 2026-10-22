@@ -1,4 +1,4 @@
-//! The strip of the statuses of the contacts, and the viewer of one status.
+﻿//! The strip of the statuses of the contacts, and the viewer of one status.
 //!
 //! port: taken from the origin's `tauri/src/components/StatusStrip.tsx`. The
 //! lengths come from the stylesheet of the origin (`tauri/src/styles.css`,
@@ -22,9 +22,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, Context, ElementId, Entity, FontWeight, InteractiveElement as _, ObjectFit,
-    ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Window, div, img, px, rgba,
+    AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
+    ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _, Subscription, Window, canvas, div, img, point, px, quad, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -55,6 +55,15 @@ pub(crate) const RING_SIZE: f32 = 46.0;
 pub(crate) const VIEWER_AVATAR_SIZE: f32 = 34.0;
 /// The width of the ring of a status, in pixels, before the scale.
 pub(crate) const RING_BORDER: f32 = 3.0;
+/// The length of every dash of the ring of a status that was not seen, in
+/// pixels, before the scale.
+///
+/// The reference cuts the circle of a new status in short dashes: about
+/// twenty four of them around the ring.
+pub(crate) const RING_DASH: f32 = 3.4;
+/// The opening between two dashes of the ring of a status that was not seen,
+/// in pixels, before the scale.
+pub(crate) const RING_DASH_GAP: f32 = 2.4;
 /// The gap between two rings, in pixels, before the scale.
 pub(crate) const RING_GAP: f32 = 10.0;
 /// The height of a segment of the progress bar, in pixels, before the scale.
@@ -71,9 +80,17 @@ pub(crate) const PANEL_GLYPH_SIZE: f32 = 52.0;
 /// The width of the line of the circle of the big drawing, in pixels, before
 /// the scale.
 pub(crate) const PANEL_GLYPH_STROKE: f32 = 5.0;
-/// The width of the opening of the circle of the big drawing, in pixels,
-/// before the scale.
-pub(crate) const PANEL_GLYPH_GAP: f32 = 12.0;
+/// How many degrees covers one of the three arcs of the big drawing.
+///
+/// The reference does not draw a closed circle: it draws three arcs of about
+/// a hundred degrees, with the opening of the first one at the top.
+pub(crate) const PANEL_GLYPH_ARC_DEGREES: f32 = 87.0;
+/// How many degrees covers one of the three openings between the arcs of the
+/// big drawing.
+pub(crate) const PANEL_GLYPH_GAP_DEGREES: f32 = 33.0;
+/// Where the first arc of the big drawing starts, in degrees, measured from
+/// the top and turning to the right.
+pub(crate) const PANEL_GLYPH_FIRST_ARC_DEGREES: f32 = 16.5;
 /// The side of the solid circle in the middle of the big drawing, in pixels,
 /// before the scale.
 pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
@@ -81,11 +98,22 @@ pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
 ///
 /// The reference writes the title big: it is the biggest text of the panel.
 pub(crate) const PANEL_TITLE_SIZE: f32 = 30.0;
-/// The side of the round buttons of the panel, in pixels, before the scale.
-pub(crate) const PANEL_BUTTON_SIZE: f32 = 56.0;
+/// The width of the round buttons of the panel, in pixels, before the scale.
+pub(crate) const PANEL_BUTTON_WIDTH: f32 = 60.0;
+/// The height of the round buttons of the panel, in pixels, before the scale.
+pub(crate) const PANEL_BUTTON_HEIGHT: f32 = 48.0;
+/// The radius of the corners of the round buttons of the panel, in pixels,
+/// before the scale.
+pub(crate) const PANEL_BUTTON_RADIUS: f32 = 21.0;
+/// The space between the two round buttons of the panel, in pixels, before
+/// the scale.
+pub(crate) const PANEL_BUTTON_GAP: f32 = 48.0;
 /// The side of the drawing inside the round buttons of the panel, in pixels,
 /// before the scale.
 pub(crate) const PANEL_BUTTON_ICON_SIZE: f32 = 20.0;
+/// The space between a round button of the panel and its text, in pixels,
+/// before the scale.
+pub(crate) const PANEL_BUTTON_LABEL_GAP: f32 = 6.0;
 /// The side of the green badge of the row of "My status", in pixels, before
 /// the scale.
 pub(crate) const OWN_BADGE_SIZE: f32 = 16.0;
@@ -445,7 +473,7 @@ impl StatusStrip {
                 // El titulo va grande y centrado: es el texto mas grande
                 // del panel.
                 div()
-                    .mt_4()
+                    .mt_2()
                     .text_size(px(PANEL_TITLE_SIZE * scale))
                     .font_weight(FontWeight::NORMAL)
                     .text_color(cx.theme().foreground)
@@ -453,7 +481,7 @@ impl StatusStrip {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(15. * scale))
                     .text_color(muted)
                     .text_center()
                     .child("Share photos, videos and text that disappear after 24 hours."),
@@ -462,12 +490,13 @@ impl StatusStrip {
                 // Los dos botones son redondos y llevan el dibujo adentro;
                 // el texto de cada uno va debajo, centrado.
                 h_flex()
-                    .gap_8()
+                    .mt_2()
+                    .gap(px(PANEL_BUTTON_GAP * scale))
                     .items_start()
                     .child(self.render_panel_button(
                         "status-text",
                         "Text status",
-                        Icon::new(WhatfastIcon::Edit),
+                        PanelGlyph::Text,
                         scale,
                         |this, _, cx| {
                             this.status_strip.toggle_text_composer();
@@ -478,7 +507,7 @@ impl StatusStrip {
                     .child(self.render_panel_button(
                         "status-photo",
                         "Photo and video",
-                        Icon::new(IconName::GalleryVerticalEnd),
+                        PanelGlyph::Photo,
                         scale,
                         |this, window, cx| {
                             this.status_strip.publish_photo_status(window, cx);
@@ -494,66 +523,40 @@ impl StatusStrip {
 
     /// The big drawing of the panel: the circle of dashes of the states.
     ///
-    /// The reference draws a circle with an opening at the top and the solid
-    /// circle of the middle. The rail of the icons draws the same circle.
-    fn render_status_glyph(
-        &self,
-        scale: f32,
-        cx: &mut Context<Whatfast>,
-    ) -> gpui::Stateful<gpui::Div> {
+    /// The reference draws three arcs of about a hundred degrees, with the
+    /// opening of the first one at the top, and the solid circle of the
+    /// middle. A circle of the layout cannot draw the arcs, so the drawing
+    /// goes to the canvas of the element.
+    fn render_status_glyph(&self, scale: f32, cx: &mut Context<Whatfast>) -> gpui::Div {
         // El color del dibujo: el del tema, apagado, porque en la referencia
-        // el circulo es gris y no blanco.
-        let color = cx.theme().foreground.opacity(0.2);
-        let background = cx.theme().background;
-        let stroke = px(PANEL_GLYPH_STROKE * scale);
-        let dot = px(PANEL_GLYPH_DOT_SIZE * scale);
-        let offset = px((PANEL_GLYPH_SIZE - PANEL_GLYPH_DOT_SIZE) * 0.5 * scale);
-        let gap = px(PANEL_GLYPH_GAP * scale);
-        let gap_left = px((PANEL_GLYPH_SIZE - PANEL_GLYPH_GAP) * 0.5 * scale);
-        div()
-            .id("status-panel-glyph")
-            .flex_none()
-            .relative()
-            .size(px(PANEL_GLYPH_SIZE * scale))
-            // El circulo de los estados.
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded_full()
-                    .border(stroke)
-                    .border_color(color),
+        // el circulo es gris y no blanco. Va mezclado con el fondo y opaco:
+        // las puntas de los arcos se pintan encima de la linea, y una capa
+        // semitransparente dejaria una costura en cada punta.
+        let color = cx
+            .theme()
+            .background
+            .blend(cx.theme().foreground.opacity(0.2));
+        let size = PANEL_GLYPH_SIZE * scale;
+        let stroke = PANEL_GLYPH_STROKE * scale;
+        let dot = PANEL_GLYPH_DOT_SIZE * scale;
+        div().flex_none().size(px(size)).child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    paint_status_glyph(bounds, size, stroke, dot, color, window);
+                },
             )
-            // La abertura del circulo, en la parte de arriba: el corte lleva
-            // el color del panel, que es el del fondo de la ventana.
-            .child(
-                div()
-                    .absolute()
-                    .left(gap_left)
-                    .top(px(0.))
-                    .w(gap)
-                    .h(stroke * 2.)
-                    .bg(background),
-            )
-            // El circulo solido del medio.
-            .child(
-                div()
-                    .absolute()
-                    .left(offset)
-                    .top(offset)
-                    .size(dot)
-                    .rounded_full()
-                    .bg(color),
-            )
+            .size_full(),
+        )
     }
 
-    /// One of the round buttons of the panel: the drawing inside the circle
+    /// One of the round buttons of the panel: the drawing inside the button
     /// and the text below.
     fn render_panel_button(
         &self,
         id: &'static str,
         label: &'static str,
-        icon: Icon,
+        glyph: PanelGlyph,
         scale: f32,
         on_click: impl Fn(&mut Whatfast, &mut Window, &mut Context<Whatfast>) + 'static,
         cx: &mut Context<Whatfast>,
@@ -565,14 +568,16 @@ impl StatusStrip {
         v_flex()
             .id(ElementId::named_usize(id, 0))
             .flex_none()
+            .w(px(PANEL_BUTTON_WIDTH * scale))
             .items_center()
-            .gap_2()
+            .gap(px(PANEL_BUTTON_LABEL_GAP * scale))
             .child(
                 div()
                     .id(id)
                     .flex_none()
-                    .size(px(PANEL_BUTTON_SIZE * scale))
-                    .rounded_full()
+                    .w(px(PANEL_BUTTON_WIDTH * scale))
+                    .h(px(PANEL_BUTTON_HEIGHT * scale))
+                    .rounded(px(PANEL_BUTTON_RADIUS * scale))
                     .bg(background)
                     .flex()
                     .items_center()
@@ -583,9 +588,15 @@ impl StatusStrip {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         on_click(this, window, cx);
                     }))
-                    .child(icon.with_size(px(PANEL_BUTTON_ICON_SIZE * scale))),
+                    .child(render_panel_glyph(glyph, foreground, background, scale)),
             )
-            .child(div().text_sm().text_color(muted).child(label))
+            .child(
+                div()
+                    .text_size(px(13. * scale))
+                    .text_color(muted)
+                    .whitespace_nowrap()
+                    .child(label),
+            )
     }
 
     /// Draws the view of the states.
@@ -644,9 +655,9 @@ impl StatusStrip {
         if !groups.is_empty() {
             list = list.child(
                 div()
-                    .px(px(16. * scale))
-                    .pt(px(14. * scale))
-                    .pb(px(6. * scale))
+                    .px(px(19. * scale))
+                    .pt(px(45. * scale))
+                    .pb(px(22. * scale))
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
@@ -671,6 +682,7 @@ impl StatusStrip {
         let muted = cx.theme().muted_foreground;
         let state = self.state.clone();
         let label = sender_label(group);
+        let sender = group.sender_id.clone();
         let time = group
             .messages
             .first()
@@ -681,8 +693,8 @@ impl StatusStrip {
             .id(ElementId::named_usize("status-row", index))
             .w_full()
             .gap(px(12. * scale))
-            .px(px(16. * scale))
-            .py(px(8. * scale))
+            .px(px(19. * scale))
+            .py(px(STATUS_ROW_PADDING * scale))
             .flex()
             .items_center()
             .cursor_pointer()
@@ -703,7 +715,7 @@ impl StatusStrip {
                     .child(div().text_xs().text_color(muted).child(time)),
             )
             .on_click(cx.listener(move |_app, _, _, cx| {
-                open_viewer(&state, index, cx);
+                open_viewer(&state, index, &sender, cx);
             }))
     }
 
@@ -759,6 +771,11 @@ impl StatusStrip {
     }
 
     /// The ring of the status of one contact.
+    ///
+    /// The reference draws the circle of a status that was already seen in
+    /// green and the circle of a new status in green dashes. The dashes are
+    /// shorter than the ones of a border of the layout, so the circle goes to
+    /// the canvas.
     fn render_ring(
         &self,
         group: &StatusGroup,
@@ -767,23 +784,38 @@ impl StatusStrip {
         cx: &mut Context<Whatfast>,
     ) -> gpui::Stateful<gpui::Div> {
         let accent = cx.theme().accent;
+        let secondary = cx.theme().secondary;
         let label = sender_label(group);
         let state = self.state.clone();
+        let sender = group.sender_id.clone();
+        let seen = has_seen(&self.state.borrow(), &sender);
+        let size = RING_SIZE * scale;
+        let thickness = RING_BORDER * scale;
         div()
             .id(ElementId::named_usize("status-ring", index))
             .flex_shrink_0()
-            .size(px(RING_SIZE * scale))
+            .relative()
+            .size(px(size))
             .rounded_full()
-            .border(px(RING_BORDER * scale))
-            .border_color(accent)
+            .bg(secondary)
             .flex()
             .items_center()
             .justify_center()
             .text_size(px(16. * scale))
             .font_weight(FontWeight::BOLD)
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        paint_status_ring(bounds, size, thickness, seen, accent, scale, window);
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(avatar_label(&label))
             .on_click(cx.listener(move |_app, _, _, cx| {
-                open_viewer(&state, index, cx);
+                open_viewer(&state, index, &sender, cx);
             }))
     }
 
@@ -1056,6 +1088,200 @@ impl StatusStrip {
     }
 }
 
+/// The drawing inside one of the round buttons of the panel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PanelGlyph {
+    /// The pencil of the text status.
+    Text,
+    /// The camera of the photo status.
+    Photo,
+}
+
+/// Draws the drawing of one of the round buttons of the panel.
+///
+/// The text status carries the pencil of the set of the icons. The photo
+/// status carries a camera: the set of the icons has no camera (the `Video`
+/// glyph is a camcorder), so the camera is drawn here.
+fn render_panel_glyph(glyph: PanelGlyph, color: Hsla, background: Hsla, scale: f32) -> gpui::Div {
+    let size = PANEL_BUTTON_ICON_SIZE * scale;
+    match glyph {
+        PanelGlyph::Text => div()
+            .flex_none()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Icon::new(WhatfastIcon::Edit)
+                    .with_size(px(size))
+                    .text_color(color),
+            ),
+        PanelGlyph::Photo => render_camera(color, background, scale),
+    }
+}
+
+/// Draws the camera of the button of the photo status.
+///
+/// The reference draws a camera of line: the body, the hump of the top and
+/// the ring of the lens. The body is drawn after the hump, with the color of
+/// the button, so it hides the bottom edge of the hump.
+fn render_camera(color: Hsla, background: Hsla, scale: f32) -> gpui::Div {
+    let width = 21. * scale;
+    let height = 18. * scale;
+    let body = 15. * scale;
+    let top = height - body;
+    let hump_width = 8. * scale;
+    let hump_height = 4. * scale;
+    let lens = 7.5 * scale;
+    let stroke = px(1.4 * scale);
+    div()
+        .flex_none()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .child(
+            div()
+                .absolute()
+                .left(px((width - hump_width) * 0.5))
+                .top(px(0.))
+                .w(px(hump_width))
+                .h(px(hump_height + top))
+                .border(stroke)
+                .border_color(color)
+                .rounded_t(px(2. * scale)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(top))
+                .w(px(width))
+                .h(px(body))
+                .rounded(px(3. * scale))
+                .border(stroke)
+                .border_color(color)
+                .bg(background)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(lens))
+                        .rounded_full()
+                        .border(stroke)
+                        .border_color(color),
+                ),
+        )
+}
+
+/// Paints the big drawing of the panel: the three arcs of the circle of the
+/// states and the solid circle of the middle.
+fn paint_status_glyph(
+    bounds: Bounds<gpui::Pixels>,
+    size: f32,
+    stroke: f32,
+    dot: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let center = bounds.center();
+    let radius = (size - stroke) * 0.5;
+    let mut start = PANEL_GLYPH_FIRST_ARC_DEGREES;
+    for _ in 0..3 {
+        let from = point_on_circle(&center, radius, start);
+        let to = point_on_circle(&center, radius, start + PANEL_GLYPH_ARC_DEGREES);
+        let mut builder = PathBuilder::stroke(px(stroke));
+        builder.move_to(from);
+        builder.arc_to(point(px(radius), px(radius)), px(0.), false, true, to);
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+        // La punta redonda de cada arco: la referencia cierra los arcos con
+        // una punta redonda, asi que cada extremo lleva el circulito de la
+        // linea.
+        paint_circle(window, from, stroke, color);
+        paint_circle(window, to, stroke, color);
+        start += PANEL_GLYPH_ARC_DEGREES + PANEL_GLYPH_GAP_DEGREES;
+    }
+    paint_circle(window, center, dot, color);
+}
+
+/// One point of a circle, in degrees from the top and turning to the right.
+fn point_on_circle(
+    center: &gpui::Point<gpui::Pixels>,
+    radius: f32,
+    degrees: f32,
+) -> gpui::Point<gpui::Pixels> {
+    let radians = degrees.to_radians();
+    point(
+        center.x + px(radius * radians.sin()),
+        center.y - px(radius * radians.cos()),
+    )
+}
+
+/// Paints a filled circle of the given side, centered on one point.
+fn paint_circle(
+    window: &mut Window,
+    center: gpui::Point<gpui::Pixels>,
+    diameter: f32,
+    color: Hsla,
+) {
+    let half = diameter * 0.5;
+    window.paint_quad(quad(
+        Bounds::new(
+            point(center.x - px(half), center.y - px(half)),
+            gpui::size(px(diameter), px(diameter)),
+        ),
+        px(half),
+        color,
+        px(0.),
+        color,
+        gpui::BorderStyle::default(),
+    ));
+}
+
+/// Paints the ring of the status of one contact.
+///
+/// A status that was seen carries a closed circle; a status that is new
+/// carries the same circle cut in short dashes.
+fn paint_status_ring(
+    bounds: Bounds<gpui::Pixels>,
+    size: f32,
+    thickness: f32,
+    seen: bool,
+    color: Hsla,
+    scale: f32,
+    window: &mut Window,
+) {
+    let center = bounds.center();
+    let radius = (size - thickness) * 0.5;
+    let mut builder = PathBuilder::stroke(px(thickness));
+    if !seen {
+        builder = builder.dash_array(&[px(RING_DASH * scale), px(RING_DASH_GAP * scale)]);
+    }
+    // El circulo completo: dos semicirculos, para que el trazo no tenga una
+    // costura en el punto de arranque.
+    builder.move_to(point_on_circle(&center, radius, 0.));
+    builder.arc_to(
+        point(px(radius), px(radius)),
+        px(0.),
+        false,
+        true,
+        point_on_circle(&center, radius, 180.),
+    );
+    builder.arc_to(
+        point(px(radius), px(radius)),
+        px(0.),
+        false,
+        true,
+        point_on_circle(&center, radius, 360.),
+    );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
 /// Publishes a text status in the memory of the client.
 ///
 /// port: `publishTextStatus` of the origin.
@@ -1146,9 +1372,12 @@ fn statuses_chat_id(app: &Whatfast) -> String {
 }
 
 /// Opens the viewer of the status of one group.
+///
+/// The group passes to be a seen status: its ring becomes solid.
 fn open_viewer(
     state: &Rc<RefCell<StatusStripState>>,
     group_index: usize,
+    sender_id: &str,
     cx: &mut Context<Whatfast>,
 ) {
     let generation = {
@@ -1158,6 +1387,7 @@ fn open_viewer(
             group_index,
             message_index: 0,
         });
+        mark_seen(&mut inner, sender_id);
         inner.generation
     };
     cx.notify();
@@ -1406,6 +1636,28 @@ mod tests {
     fn a_text_status_has_no_picture() {
         let message = text_status_message("status@broadcast", "hello", 7);
         assert_eq!(message_image_path(&message), None);
+    }
+
+    #[test]
+    fn a_status_is_new_until_the_user_opens_it() {
+        let state = StatusStripState::new();
+        assert!(!has_seen(&state, "maya@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn opening_a_status_marks_it_as_seen_and_leaves_the_others_new() {
+        let mut state = StatusStripState::new();
+        mark_seen(&mut state, "maya@s.whatsapp.net");
+        assert!(has_seen(&state, "maya@s.whatsapp.net"));
+        assert!(!has_seen(&state, "priya@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn the_first_degree_of_the_glyph_starts_at_the_top_of_the_circle() {
+        let center = point(px(10.), px(10.));
+        assert_eq!(point_on_circle(&center, 4., 0.), point(px(10.), px(6.)));
+        assert_eq!(point_on_circle(&center, 4., 90.), point(px(14.), px(10.)));
+        assert_eq!(point_on_circle(&center, 4., 180.), point(px(10.), px(14.)));
     }
 
     #[test]

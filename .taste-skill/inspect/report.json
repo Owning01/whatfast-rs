@@ -1,0 +1,1678 @@
+{
+ "url": "g:\\Proyectos\\17-whatfast-rs\\web\\index.html",
+ "at": "2026-10-22T16:27:51.543Z",
+ "allow": [],
+ "viewports": [
+  {
+   "width": 1440,
+   "height": 900,
+   "load": "load",
+   "screens": 6,
+   "filled": [
+    0.52,
+    0.47,
+    0.82,
+    0.51,
+    0.68,
+    0.8
+   ],
+   "motion": {
+    "elements": 25,
+    "css": 25,
+    "transitions": 0,
+    "scripted": 0,
+    "videos": 0,
+    "playingVideos": 0
+   },
+   "metrics": {
+    "viewport": {
+     "w": 1440,
+     "h": 900
+    },
+    "page": {
+     "height": 5212,
+     "screens": 5.8,
+     "words": 691,
+     "img": 3,
+     "video": 0,
+     "canvas": 0,
+     "svg": 7,
+     "sections": 6,
+     "horizontalOverflow": 0,
+     "overflowCulprits": [],
+     "uiFragments": 9,
+     "uiAbuse": false,
+     "realPictures": 0,
+     "videoCount": 0,
+     "uiPictures": 6,
+     "pictureSamples": [],
+     "blendText": 0,
+     "sideScrollers": 0,
+     "brokenImages": [],
+     "emoji": []
+    },
+    "hero": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "chars": 34,
+     "lines": 2,
+     "size": 67.2,
+     "vw": 4.7,
+     "font": "-apple-system",
+     "weight": 800,
+     "tracking": -0.035,
+     "leading": 1.12,
+     "upper": false,
+     "italic": false,
+     "mono": false,
+     "align": "center",
+     "position": "center",
+     "widthRatio": 0.83,
+     "top": 152,
+     "tag": "h1",
+     "kind": "heading"
+    },
+    "h1": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "lines": 2,
+     "size": 67.2,
+     "font": "-apple-system"
+    },
+    "headings": [
+     {
+      "text": "WhatsApp nativo. Rápido de verdad.",
+      "words": 5,
+      "chars": 34,
+      "lines": 2,
+      "size": 67.2,
+      "vw": 4.7,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.035,
+      "leading": 1.12,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.83,
+      "top": 152,
+      "tag": "h1",
+      "kind": "heading"
+     },
+     {
+      "text": "Rendimiento extremo. Privacidad por diseño.",
+      "words": 5,
+      "chars": 43,
+      "lines": 2,
+      "size": 46.4,
+      "vw": 3.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.56,
+      "top": 1468,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Mediciones reales contra las alternativas",
+      "words": 5,
+      "chars": 41,
+      "lines": 2,
+      "size": 46.4,
+      "vw": 3.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.56,
+      "top": 2303,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "92,3 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 2.1,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "left",
+      "widthRatio": 0.15,
+      "top": 2796,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0 KB",
+      "words": 2,
+      "chars": 4,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 2.1,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "left",
+      "widthRatio": 0.15,
+      "top": 2796,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0,84 s",
+      "words": 2,
+      "chars": 6,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 2.1,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "right",
+      "widthRatio": 0.15,
+      "top": 2796,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "36,1 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 2.1,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "right",
+      "widthRatio": 0.15,
+      "top": 2796,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "Comienza con un solo comando",
+      "words": 5,
+      "chars": 28,
+      "lines": 1,
+      "size": 46.4,
+      "vw": 3.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.56,
+      "top": 3186,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Especificaciones arquitectónicas",
+      "words": 2,
+      "chars": 32,
+      "lines": 1,
+      "size": 46.4,
+      "vw": 3.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.56,
+      "top": 3605,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Descarga Whatfast",
+      "words": 2,
+      "chars": 17,
+      "lines": 1,
+      "size": 44.8,
+      "vw": 3.1,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.03,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.77,
+      "top": 4394,
+      "tag": "h2",
+      "kind": "heading"
+     }
+    ],
+    "headingSummary": {
+     "count": 10,
+     "maxLines": 2,
+     "over2Lines": 0,
+     "statements": 0,
+     "centered": 6,
+     "medianWords": 2,
+     "mixedFontHeadings": 0
+    },
+    "type": {
+     "families": [
+      {
+       "family": "-apple-system",
+       "share": 0.88,
+       "mono": false
+      },
+      {
+       "family": "ui-monospace",
+       "share": 0.12,
+       "mono": false
+      }
+     ],
+     "familyCount": 2,
+     "sizes": [
+      13,
+      14,
+      15,
+      16,
+      18,
+      20,
+      46,
+      67
+     ],
+     "sizeCount": 8,
+     "notLoaded": [],
+     "body": {
+      "font": "-apple-system",
+      "size": 18,
+      "leading": 1.6,
+      "weight": 400,
+      "tracking": 0,
+      "contrast": 13.2
+     },
+     "measureChars": 74,
+     "max": {
+      "size": 67.2,
+      "vw": 4.7,
+      "font": "-apple-system",
+      "text": "WhatsApp nativo. Rápido de verdad."
+     },
+     "monoShare": 0.12,
+     "monoProseShare": 0,
+     "monoFamilies": [
+      "ui-monospace"
+     ],
+     "monoSamples": [],
+     "microLabels": 0,
+     "microLabelShare": 0,
+     "microSamples": [],
+     "upperShare": 0.03,
+     "centerShare": 0.32,
+     "smallText": 0
+    },
+    "eyebrows": [],
+    "numbered": [],
+    "color": {
+     "bodyBg": "#0b0c0e",
+     "bodyBgHsl": {
+      "h": 220,
+      "s": 0.12,
+      "l": 0.05
+     },
+     "dark": true,
+     "sectionBgs": [
+      {
+       "color": "#121316",
+       "top": 620,
+       "hsl": {
+        "h": 225,
+        "s": 0.1,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#0e0f12",
+       "top": 671,
+       "hsl": {
+        "h": 225,
+        "s": 0.13,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#0b0c0e",
+       "top": 671,
+       "hsl": {
+        "h": 220,
+        "s": 0.12,
+        "l": 0.05
+       }
+      },
+      {
+       "color": "#08090a",
+       "top": 716,
+       "hsl": {
+        "h": 210,
+        "s": 0.11,
+        "l": 0.04
+       }
+      },
+      {
+       "color": "#0e0f13",
+       "top": 2199,
+       "hsl": {
+        "h": 228,
+        "s": 0.15,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#121418",
+       "top": 4330,
+       "hsl": {
+        "h": 220,
+        "s": 0.14,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#08090b",
+       "top": 4835,
+       "hsl": {
+        "h": 220,
+        "s": 0.16,
+        "l": 0.04
+       }
+      }
+     ],
+     "textColors": [
+      {
+       "color": "#cbd5e1",
+       "share": 0.56
+      },
+      {
+       "color": "#f8fafc",
+       "share": 0.2
+      },
+      {
+       "color": "#e2e8f0",
+       "share": 0.1
+      },
+      {
+       "color": "#94a3b8",
+       "share": 0.07
+      },
+      {
+       "color": "#10b981",
+       "share": 0.03
+      }
+     ],
+     "button": {
+      "bg": "#121316",
+      "hsl": {
+       "h": 225,
+       "s": 0.1,
+       "l": 0.08
+      },
+      "fg": "#cbd5e1"
+     },
+     "lowContrast": []
+    },
+    "buttons": {
+     "count": 12,
+     "inHero": 3,
+     "radius": "pill",
+     "height": 52,
+     "withShadow": 0,
+     "withGradient": 0,
+     "mono": 0,
+     "upper": 0,
+     "heroLabels": [
+      "Descargar",
+      "Descargar para Windows (x64)",
+      "Compilar desde el código"
+     ]
+    },
+    "surfaces": {
+     "shadowStatic": 0,
+     "shadowOverlay": 0,
+     "shadowSamples": [],
+     "gradients": 0,
+     "scrims": 0,
+     "gradientSamples": [],
+     "gradientText": 0,
+     "hairlines": 0,
+     "hairlineSamples": [],
+     "outlinedBoxes": 0,
+     "dashed": 0,
+     "blurred": 0,
+     "roundedBoxes": 11,
+     "boxRadius": 16,
+     "squareMedia": 0,
+     "roundedMedia": 1,
+     "mediaRadius": 10,
+     "textShadow": 0,
+     "cardRows": [
+      {
+       "count": 4,
+       "iconTopped": false,
+       "rounded": true,
+       "top": 2743
+      }
+     ]
+    },
+    "heroMedia": [
+     {
+      "type": "img",
+      "ratio": 0.1
+     }
+    ],
+    "nav": {
+     "links": 7,
+     "fixed": true,
+     "height": 64,
+     "floatingPill": false,
+     "blur": false
+    },
+    "fontsLoaded": []
+   },
+   "consoleErrors": []
+  },
+  {
+   "width": 768,
+   "height": 1024,
+   "load": "load",
+   "screens": 7,
+   "filled": [
+    0.72,
+    0.62,
+    0.84,
+    0.93,
+    0.7,
+    0.69,
+    1
+   ],
+   "motion": {
+    "elements": 25,
+    "css": 25,
+    "transitions": 0,
+    "scripted": 0,
+    "videos": 0,
+    "playingVideos": 0
+   },
+   "metrics": {
+    "viewport": {
+     "w": 768,
+     "h": 1024
+    },
+    "page": {
+     "height": 6949,
+     "screens": 6.8,
+     "words": 684,
+     "img": 3,
+     "video": 0,
+     "canvas": 0,
+     "svg": 7,
+     "sections": 6,
+     "horizontalOverflow": 0,
+     "overflowCulprits": [],
+     "uiFragments": 9,
+     "uiAbuse": false,
+     "realPictures": 0,
+     "videoCount": 0,
+     "uiPictures": 6,
+     "pictureSamples": [],
+     "blendText": 0,
+     "sideScrollers": 0,
+     "brokenImages": [],
+     "emoji": []
+    },
+    "hero": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "chars": 34,
+     "lines": 2,
+     "size": 39.9,
+     "vw": 5.2,
+     "font": "-apple-system",
+     "weight": 800,
+     "tracking": -0.035,
+     "leading": 1.12,
+     "upper": false,
+     "italic": false,
+     "mono": false,
+     "align": "center",
+     "position": "center",
+     "widthRatio": 0.94,
+     "top": 152,
+     "tag": "h1",
+     "kind": "heading"
+    },
+    "h1": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "lines": 2,
+     "size": 39.9,
+     "font": "-apple-system"
+    },
+    "headings": [
+     {
+      "text": "WhatsApp nativo. Rápido de verdad.",
+      "words": 5,
+      "chars": 34,
+      "lines": 2,
+      "size": 39.9,
+      "vw": 5.2,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.035,
+      "leading": 1.12,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.94,
+      "top": 152,
+      "tag": "h1",
+      "kind": "heading"
+     },
+     {
+      "text": "Rendimiento extremo. Privacidad por diseño.",
+      "words": 5,
+      "chars": 43,
+      "lines": 1,
+      "size": 32,
+      "vw": 4.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.94,
+      "top": 1627,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Mediciones reales contra las alternativas",
+      "words": 5,
+      "chars": 41,
+      "lines": 1,
+      "size": 32,
+      "vw": 4.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.94,
+      "top": 2709,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "92,3 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 3.9,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.78,
+      "top": 3179,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0 KB",
+      "words": 2,
+      "chars": 4,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 3.9,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.78,
+      "top": 3375,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0,84 s",
+      "words": 2,
+      "chars": 6,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 3.9,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.78,
+      "top": 3571,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "36,1 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 3.9,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.78,
+      "top": 3767,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "Comienza con un solo comando",
+      "words": 5,
+      "chars": 28,
+      "lines": 1,
+      "size": 32,
+      "vw": 4.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.94,
+      "top": 4139,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Especificaciones arquitectónicas",
+      "words": 2,
+      "chars": 32,
+      "lines": 1,
+      "size": 32,
+      "vw": 4.2,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.18,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.94,
+      "top": 4570,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Descarga Whatfast",
+      "words": 2,
+      "chars": 17,
+      "lines": 1,
+      "size": 32,
+      "vw": 4.2,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.03,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.83,
+      "top": 5496,
+      "tag": "h2",
+      "kind": "heading"
+     }
+    ],
+    "headingSummary": {
+     "count": 10,
+     "maxLines": 2,
+     "over2Lines": 0,
+     "statements": 0,
+     "centered": 6,
+     "medianWords": 2,
+     "mixedFontHeadings": 0
+    },
+    "type": {
+     "families": [
+      {
+       "family": "-apple-system",
+       "share": 0.88,
+       "mono": false
+      },
+      {
+       "family": "ui-monospace",
+       "share": 0.12,
+       "mono": false
+      }
+     ],
+     "familyCount": 2,
+     "sizes": [
+      13,
+      14,
+      16,
+      17,
+      18,
+      32,
+      40
+     ],
+     "sizeCount": 7,
+     "notLoaded": [],
+     "body": {
+      "font": "-apple-system",
+      "size": 18,
+      "leading": 1.6,
+      "weight": 400,
+      "tracking": 0,
+      "contrast": 13.2
+     },
+     "measureChars": 86,
+     "max": {
+      "size": 39.9,
+      "vw": 5.2,
+      "font": "-apple-system",
+      "text": "WhatsApp nativo. Rápido de verdad."
+     },
+     "monoShare": 0.12,
+     "monoProseShare": 0,
+     "monoFamilies": [
+      "ui-monospace"
+     ],
+     "monoSamples": [],
+     "microLabels": 0,
+     "microLabelShare": 0,
+     "microSamples": [],
+     "upperShare": 0.03,
+     "centerShare": 0.36,
+     "smallText": 0
+    },
+    "eyebrows": [],
+    "numbered": [],
+    "color": {
+     "bodyBg": "#0b0c0e",
+     "bodyBgHsl": {
+      "h": 220,
+      "s": 0.12,
+      "l": 0.05
+     },
+     "dark": true,
+     "sectionBgs": [
+      {
+       "color": "#121316",
+       "top": 516,
+       "hsl": {
+        "h": 225,
+        "s": 0.1,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#0e0f12",
+       "top": 568,
+       "hsl": {
+        "h": 225,
+        "s": 0.13,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#121317",
+       "top": 568,
+       "hsl": {
+        "h": 228,
+        "s": 0.12,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#0b0c0e",
+       "top": 917,
+       "hsl": {
+        "h": 220,
+        "s": 0.12,
+        "l": 0.05
+       }
+      },
+      {
+       "color": "#08090a",
+       "top": 962,
+       "hsl": {
+        "h": 210,
+        "s": 0.11,
+        "l": 0.04
+       }
+      },
+      {
+       "color": "#15171b",
+       "top": 1804,
+       "hsl": {
+        "h": 220,
+        "s": 0.13,
+        "l": 0.09
+       }
+      },
+      {
+       "color": "#0e0f13",
+       "top": 2605,
+       "hsl": {
+        "h": 228,
+        "s": 0.15,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#121418",
+       "top": 5432,
+       "hsl": {
+        "h": 220,
+        "s": 0.14,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#08090b",
+       "top": 5986,
+       "hsl": {
+        "h": 220,
+        "s": 0.16,
+        "l": 0.04
+       }
+      }
+     ],
+     "textColors": [
+      {
+       "color": "#cbd5e1",
+       "share": 0.56
+      },
+      {
+       "color": "#f8fafc",
+       "share": 0.2
+      },
+      {
+       "color": "#e2e8f0",
+       "share": 0.1
+      },
+      {
+       "color": "#94a3b8",
+       "share": 0.07
+      },
+      {
+       "color": "#10b981",
+       "share": 0.03
+      }
+     ],
+     "button": {
+      "bg": "#121316",
+      "hsl": {
+       "h": 225,
+       "s": 0.1,
+       "l": 0.08
+      },
+      "fg": "#cbd5e1"
+     },
+     "lowContrast": []
+    },
+    "buttons": {
+     "count": 11,
+     "inHero": 2,
+     "radius": "pill",
+     "height": 52,
+     "withShadow": 0,
+     "withGradient": 0,
+     "mono": 0,
+     "upper": 0,
+     "heroLabels": [
+      "Descargar para Windows (x64)",
+      "Compilar desde el código"
+     ]
+    },
+    "surfaces": {
+     "shadowStatic": 0,
+     "shadowOverlay": 0,
+     "shadowSamples": [],
+     "gradients": 0,
+     "scrims": 0,
+     "gradientSamples": [],
+     "gradientText": 0,
+     "hairlines": 0,
+     "hairlineSamples": [],
+     "outlinedBoxes": 0,
+     "dashed": 0,
+     "blurred": 0,
+     "roundedBoxes": 11,
+     "boxRadius": 16,
+     "squareMedia": 0,
+     "roundedMedia": 1,
+     "mediaRadius": 10,
+     "textShadow": 0,
+     "cardRows": [
+      {
+       "count": 4,
+       "iconTopped": false,
+       "rounded": true,
+       "top": 3126
+      }
+     ]
+    },
+    "heroMedia": [],
+    "nav": {
+     "links": 2,
+     "fixed": true,
+     "height": 64,
+     "floatingPill": false,
+     "blur": false
+    },
+    "fontsLoaded": []
+   },
+   "consoleErrors": []
+  },
+  {
+   "width": 390,
+   "height": 844,
+   "load": "load",
+   "screens": 10,
+   "filled": [
+    0.56,
+    0.74,
+    0.78,
+    0.81,
+    1,
+    1,
+    0.52,
+    0.8,
+    0.83,
+    1
+   ],
+   "motion": {
+    "elements": 25,
+    "css": 25,
+    "transitions": 0,
+    "scripted": 0,
+    "videos": 0,
+    "playingVideos": 0
+   },
+   "metrics": {
+    "viewport": {
+     "w": 390,
+     "h": 844
+    },
+    "page": {
+     "height": 8276,
+     "screens": 9.8,
+     "words": 684,
+     "img": 3,
+     "video": 0,
+     "canvas": 0,
+     "svg": 7,
+     "sections": 6,
+     "horizontalOverflow": 0,
+     "overflowCulprits": [],
+     "uiFragments": 9,
+     "uiAbuse": false,
+     "realPictures": 0,
+     "videoCount": 0,
+     "uiPictures": 6,
+     "pictureSamples": [],
+     "blendText": 0,
+     "sideScrollers": 0,
+     "brokenImages": [],
+     "emoji": []
+    },
+    "hero": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "chars": 34,
+     "lines": 2,
+     "size": 29.6,
+     "vw": 7.6,
+     "font": "-apple-system",
+     "weight": 800,
+     "tracking": -0.035,
+     "leading": 1.15,
+     "upper": false,
+     "italic": false,
+     "mono": false,
+     "align": "center",
+     "position": "center",
+     "widthRatio": 0.88,
+     "top": 152,
+     "tag": "h1",
+     "kind": "heading"
+    },
+    "h1": {
+     "text": "WhatsApp nativo. Rápido de verdad.",
+     "words": 5,
+     "lines": 2,
+     "size": 29.6,
+     "font": "-apple-system"
+    },
+    "headings": [
+     {
+      "text": "WhatsApp nativo. Rápido de verdad.",
+      "words": 5,
+      "chars": 34,
+      "lines": 2,
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.035,
+      "leading": 1.15,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.88,
+      "top": 152,
+      "tag": "h1",
+      "kind": "heading"
+     },
+     {
+      "text": "Rendimiento extremo. Privacidad por diseño.",
+      "words": 5,
+      "chars": 43,
+      "lines": 2,
+      "size": 26.4,
+      "vw": 6.8,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.2,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.88,
+      "top": 1703,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Renderizado nativo con GPUI en Rust puro",
+      "words": 7,
+      "chars": 40,
+      "lines": 2,
+      "size": 23.2,
+      "vw": 5.9,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.67,
+      "top": 2032,
+      "tag": "h3",
+      "kind": "heading"
+     },
+     {
+      "text": "Aislamiento y SQLite local",
+      "words": 4,
+      "chars": 26,
+      "lines": 2,
+      "size": 23.2,
+      "vw": 5.9,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.67,
+      "top": 2640,
+      "tag": "h3",
+      "kind": "heading"
+     },
+     {
+      "text": "Mediciones reales contra las alternativas",
+      "words": 5,
+      "chars": 41,
+      "lines": 2,
+      "size": 26.4,
+      "vw": 6.8,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.2,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.88,
+      "top": 3378,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "92,3 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.57,
+      "top": 4110,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0 KB",
+      "words": 2,
+      "chars": 4,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.57,
+      "top": 4326,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "0,84 s",
+      "words": 2,
+      "chars": 6,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.57,
+      "top": 4541,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "36,1 MB",
+      "words": 2,
+      "chars": 7,
+      "lines": 1,
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.02,
+      "leading": 1.5,
+      "upper": true,
+      "italic": false,
+      "mono": false,
+      "align": "left",
+      "position": "center",
+      "widthRatio": 0.57,
+      "top": 4756,
+      "tag": "div",
+      "kind": "heading"
+     },
+     {
+      "text": "Comienza con un solo comando",
+      "words": 5,
+      "chars": 28,
+      "lines": 2,
+      "size": 26.4,
+      "vw": 6.8,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.2,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.88,
+      "top": 5146,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Especificaciones arquitectónicas",
+      "words": 2,
+      "chars": 32,
+      "lines": 2,
+      "size": 26.4,
+      "vw": 6.8,
+      "font": "-apple-system",
+      "weight": 700,
+      "tracking": -0.03,
+      "leading": 1.2,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.88,
+      "top": 5669,
+      "tag": "h2",
+      "kind": "heading"
+     },
+     {
+      "text": "Descarga Whatfast",
+      "words": 2,
+      "chars": 17,
+      "lines": 1,
+      "size": 26.4,
+      "vw": 6.8,
+      "font": "-apple-system",
+      "weight": 800,
+      "tracking": -0.03,
+      "leading": 1.2,
+      "upper": false,
+      "italic": false,
+      "mono": false,
+      "align": "center",
+      "position": "center",
+      "widthRatio": 0.67,
+      "top": 6666,
+      "tag": "h2",
+      "kind": "heading"
+     }
+    ],
+    "headingSummary": {
+     "count": 12,
+     "maxLines": 2,
+     "over2Lines": 0,
+     "statements": 0,
+     "centered": 6,
+     "medianWords": 2,
+     "mixedFontHeadings": 0
+    },
+    "type": {
+     "families": [
+      {
+       "family": "-apple-system",
+       "share": 0.88,
+       "mono": false
+      },
+      {
+       "family": "ui-monospace",
+       "share": 0.12,
+       "mono": false
+      }
+     ],
+     "familyCount": 2,
+     "sizes": [
+      13,
+      14,
+      16,
+      17,
+      18,
+      26,
+      30
+     ],
+     "sizeCount": 7,
+     "notLoaded": [],
+     "body": {
+      "font": "-apple-system",
+      "size": 18,
+      "leading": 1.6,
+      "weight": 400,
+      "tracking": 0,
+      "contrast": 13.2
+     },
+     "measureChars": 41,
+     "max": {
+      "size": 29.6,
+      "vw": 7.6,
+      "font": "-apple-system",
+      "text": "WhatsApp nativo. Rápido de verdad."
+     },
+     "monoShare": 0.12,
+     "monoProseShare": 0,
+     "monoFamilies": [
+      "ui-monospace"
+     ],
+     "monoSamples": [],
+     "microLabels": 0,
+     "microLabelShare": 0,
+     "microSamples": [],
+     "upperShare": 0.03,
+     "centerShare": 0.36,
+     "smallText": 0
+    },
+    "eyebrows": [],
+    "numbered": [],
+    "color": {
+     "bodyBg": "#0b0c0e",
+     "bodyBgHsl": {
+      "h": 220,
+      "s": 0.12,
+      "l": 0.05
+     },
+     "dark": true,
+     "sectionBgs": [
+      {
+       "color": "#121316",
+       "top": 685,
+       "hsl": {
+        "h": 225,
+        "s": 0.1,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#0e0f12",
+       "top": 776,
+       "hsl": {
+        "h": 225,
+        "s": 0.13,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#121317",
+       "top": 776,
+       "hsl": {
+        "h": 228,
+        "s": 0.12,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#0b0c0e",
+       "top": 1125,
+       "hsl": {
+        "h": 220,
+        "s": 0.12,
+        "l": 0.05
+       }
+      },
+      {
+       "color": "#08090a",
+       "top": 1254,
+       "hsl": {
+        "h": 210,
+        "s": 0.11,
+        "l": 0.04
+       }
+      },
+      {
+       "color": "#15171b",
+       "top": 1992,
+       "hsl": {
+        "h": 220,
+        "s": 0.13,
+        "l": 0.09
+       }
+      },
+      {
+       "color": "#0e0f13",
+       "top": 3274,
+       "hsl": {
+        "h": 228,
+        "s": 0.15,
+        "l": 0.06
+       }
+      },
+      {
+       "color": "#121418",
+       "top": 6602,
+       "hsl": {
+        "h": 220,
+        "s": 0.14,
+        "l": 0.08
+       }
+      },
+      {
+       "color": "#08090b",
+       "top": 7292,
+       "hsl": {
+        "h": 220,
+        "s": 0.16,
+        "l": 0.04
+       }
+      }
+     ],
+     "textColors": [
+      {
+       "color": "#cbd5e1",
+       "share": 0.56
+      },
+      {
+       "color": "#f8fafc",
+       "share": 0.2
+      },
+      {
+       "color": "#e2e8f0",
+       "share": 0.1
+      },
+      {
+       "color": "#94a3b8",
+       "share": 0.07
+      },
+      {
+       "color": "#10b981",
+       "share": 0.03
+      }
+     ],
+     "button": {
+      "bg": "#121316",
+      "hsl": {
+       "h": 225,
+       "s": 0.1,
+       "l": 0.08
+      },
+      "fg": "#cbd5e1"
+     },
+     "lowContrast": []
+    },
+    "buttons": {
+     "count": 11,
+     "inHero": 2,
+     "radius": "pill",
+     "height": 39,
+     "withShadow": 0,
+     "withGradient": 0,
+     "mono": 0,
+     "upper": 0,
+     "heroLabels": [
+      "Descargar para Windows (x64)",
+      "Compilar desde el código"
+     ]
+    },
+    "surfaces": {
+     "shadowStatic": 0,
+     "shadowOverlay": 0,
+     "shadowSamples": [],
+     "gradients": 0,
+     "scrims": 0,
+     "gradientSamples": [],
+     "gradientText": 0,
+     "hairlines": 0,
+     "hairlineSamples": [],
+     "outlinedBoxes": 0,
+     "dashed": 0,
+     "blurred": 0,
+     "roundedBoxes": 11,
+     "boxRadius": 16,
+     "squareMedia": 0,
+     "roundedMedia": 1,
+     "mediaRadius": 10,
+     "textShadow": 0,
+     "cardRows": [
+      {
+       "count": 4,
+       "iconTopped": false,
+       "rounded": true,
+       "top": 4057
+      }
+     ]
+    },
+    "heroMedia": [],
+    "nav": {
+     "links": 2,
+     "fixed": true,
+     "height": 64,
+     "floatingPill": false,
+     "blur": false
+    },
+    "fontsLoaded": []
+   },
+   "consoleErrors": []
+  }
+ ],
+ "findings": [
+  {
+   "level": "WARN",
+   "id": "no-real-pictures",
+   "width": 1440,
+   "message": "Only 0 real photograph(s) or clip(s); the rest are interface fragments.",
+   "fix": "Add two or more real pictures of the customer's world from scripts/assets.mjs, not stock of people at laptops."
+  },
+  {
+   "level": "WARN",
+   "id": "no-footage",
+   "width": 1440,
+   "message": "No video anywhere on the page.",
+   "fix": "Look for one honest clip with scripts/assets.mjs --video (the place, the material, the process) and use it as a muted loop with a poster frame. Defend its absence only if no clip fits the subject."
+  }
+ ],
+ "images": [
+  {
+   "viewport": "desktop",
+   "width": 1440,
+   "fold": "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\desktop-fold.jpg",
+   "pages": [
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\desktop-page-01.jpg",
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\desktop-page-02.jpg"
+   ]
+  },
+  {
+   "viewport": "tablet",
+   "width": 768,
+   "fold": "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\tablet-fold.jpg",
+   "pages": [
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\tablet-page-01.jpg",
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\tablet-page-02.jpg"
+   ]
+  },
+  {
+   "viewport": "mobile",
+   "width": 390,
+   "fold": "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\mobile-fold.jpg",
+   "pages": [
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\mobile-page-01.jpg",
+    "G:\\Proyectos\\17-whatfast-rs\\.taste-skill\\inspect\\mobile-page-02.jpg"
+   ]
+  }
+ ]
+}
