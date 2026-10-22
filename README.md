@@ -16,7 +16,7 @@ el protocolo de dispositivos vinculados.
 
 - [Qué es](#qué-es)
 - [Capturas](#capturas)
-- [Quéfast contra el cliente anterior, contra WhatsApp Web y contra la app de Windows](#quéfast-contra-el-cliente-anterior-contra-whatsapp-web-y-contra-la-app-de-windows)
+- [Whatfast contra el cliente anterior, contra WhatsApp Web y contra la app de Windows](#whatfast-contra-el-cliente-anterior-contra-whatsapp-web-y-contra-la-app-de-windows)
 - [Dónde Whatfast gana de verdad](#dónde-whatfast-gana-de-verdad)
 - [Dónde todavía pierde](#dónde-todavía-pierde)
 - [Cómo está armado](#cómo-está-armado)
@@ -55,86 +55,61 @@ Todo el historial es **local** (SQLite: `session.db` y `client.db`).
 
 Todas las capturas son del **backend de demostración** de la propia app (sin
 cuenta real, sin QR, sin red): los chats y los contactos están simulados
-dentro del repositorio.
+dentro del repositorio. Cada imagen es la ventana completa a 1475 × 950.
 
-### Lista de chats
+### La lista de chats y las vistas propias
 
-La columna de iconos de la izquierda, el buscador con la fila de filtros
-debajo, y la lista de chats (10.000 simulados, virtualizada). Los estados y
-los canales no son chats: tienen su propio destino en la columna de iconos.
+La lista virtualizada con 10.000 chats, el buscador, los filtros y los tres
+destinos que no son chats: estados, canales y archivados.
 
-![Lista de chats](docs/screenshots/01-lista-de-chats.png)
+| | |
+|---|---|
+| ![Menú de filtros](docs/screenshots/01-menu-de-filtros.png) | ![Filtro de grupos](docs/screenshots/01-filtro-de-grupos.png) |
+| El menú del chevron: todos, sin leer, favoritos, grupos y archivados. | El chip activo se dibuja con el borde verde y la lista se filtra. |
+| ![Estados](docs/screenshots/04-estados.png) | ![Canales](docs/screenshots/05-canales.png) |
+| Los estados, con el anillo de cada contacto y la vista para compartir. | Los canales, con el buscador, los seguidos y los que se pueden seguir. |
+| ![Archivados](docs/screenshots/06-archivados.png) | ![Menú de una fila](docs/screenshots/07-menu-contextual.png) |
+| Los archivados, con su propio destino en la columna de iconos. | El clic derecho sobre una fila: fijar, silenciar, archivar, favoritos. |
 
-### Conversación
+Las tres vistas también tienen atajo: `Ctrl+Shift+S` para los estados,
+`Ctrl+Shift+N` para los canales y `Ctrl+Shift+H` para los archivados.
+
+### La conversación y el compositor
 
 El strip de las conversaciones abiertas arriba, las burbujas con altura
-variable, respuestas, reacciones, acuses de lectura, preview de links y el
-menú de cada mensaje.
+variable, respuestas, reacciones, acuses de lectura, preview de links, las
+tarjetas de los adjuntos y el menú de cada mensaje.
 
-![Conversación](docs/screenshots/02-conversacion.png)
+| | |
+|---|---|
+| ![Conversación](docs/screenshots/02-conversacion.png) | ![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png) |
+| La conversación con el compositor, el clip, el emoji y el envío. | La imagen la genera el backend de demostración y la dibuja GPUI, sin webview. |
+| ![Menú de adjuntos](docs/screenshots/12-adjuntos.png) | ![Panel de emojis](docs/screenshots/08-panel-de-emojis.png) |
+| El clip abre los siete tipos de adjunto: documento, video, audio, foto, encuesta, sticker y sticker propio. | El panel de emojis, con las categorías, la búsqueda y el pie de emoji, GIF y sticker. |
 
-### Mensaje con foto
+Los adjuntos se abren con su visor nativo (PDF, video, audio e imagen) y se
+guardan en disco desde el menú de cada tarjeta.
 
-La imagen la genera el backend de demostración y la dibuja la interfaz
-nativa, sin pasar por un webview.
+### Los paneles de la derecha
 
-![Mensaje con foto](docs/screenshots/03-mensaje-con-foto.png)
+El clic en la cabecera abre el panel de la conversación: el de un contacto o
+el de un grupo, con la descripción, los permisos y los miembros.
 
-### El menú de una fila
-
-El clic derecho sobre una fila abre su menú: fijar, silenciar, archivar,
-favoritos, marcar como leído o no leído y bloquear el contacto.
-
-![Menú de la fila](docs/screenshots/07-menu-contextual.png)
-
-### Las vistas que no son chats
-
-Los estados, los canales y los archivados son vistas propias, con su
-columna y su panel. Se llegan con el teclado (`Ctrl+Shift+S`, `Ctrl+Shift+N`
-y `Ctrl+Shift+H`) o con la columna de iconos de la izquierda.
-
-![Estados](docs/screenshots/04-estados.png)
-
-![Canales](docs/screenshots/05-canales.png)
-
-![Archivados](docs/screenshots/06-archivados.png)
-
-### La barra de filtros
-
-El chevron de la fila de filtros abre el menú con todos y los cuatro
-filtros; el chip activo se dibuja con el borde verde.
-
-![Menú de filtros](docs/screenshots/01-menu-de-filtros.png)
-
-![Filtro de grupos](docs/screenshots/01-filtro-de-grupos.png)
-
-### El compositor
-
-El panel de emojis y el menú de adjuntos salen del compositor. Las tarjetas
-de los adjuntos abren su propio menú para abrirlos o guardarlos.
-
-![Panel de emojis](docs/screenshots/08-panel-de-emojis.png)
-
-![Menú de adjuntos](docs/screenshots/12-adjuntos.png)
-
-### La información de una conversación
-
-El clic en la cabecera abre el panel de la derecha: el de un contacto o el
-de un grupo, con la descripción, los permisos y los miembros.
-
-![Información del contacto](docs/screenshots/10-info-contacto.png)
-
-![Información del grupo](docs/screenshots/11-info-grupo.png)
+| | |
+|---|---|
+| ![Información del contacto](docs/screenshots/10-info-contacto.png) | ![Información del grupo](docs/screenshots/11-info-grupo.png) |
+| El contacto: el avatar grande, el teléfono, el estado y los botones. | El grupo: la descripción, la fecha de creación, los permisos y los miembros con su rol. |
 
 ### Ajustes y temas
 
-Los ajustes ocupan la columna de la lista y dejan la conversación a la
-vista. El botón de apariencia cambia entre el tema oscuro y el claro de
-WhatsApp.
+Los ajustes ocupan la columna de la lista y dejan la conversación a la vista.
+El botón de apariencia cambia entre el tema oscuro y el claro, con la paleta
+de WhatsApp Desktop.
 
-![Ajustes en el tema oscuro](docs/screenshots/08-ajustes.png)
-
-![Ajustes en el tema claro](docs/screenshots/09-ajustes-claro.png)
+| | |
+|---|---|
+| ![Ajustes en el tema oscuro](docs/screenshots/08-ajustes.png) | ![Ajustes en el tema claro](docs/screenshots/09-ajustes-claro.png) |
+| La escala de la interfaz, la apariencia y la cuenta. | El mismo panel con el tema claro. |
 
 ### Referencias visuales
 
@@ -145,7 +120,7 @@ cada cambio de la interfaz se compara contra ellas.
 
 ---
 
-## Quéfast contra el cliente anterior, contra WhatsApp Web y contra la app de Windows
+## Whatfast contra el cliente anterior, contra WhatsApp Web y contra la app de Windows
 
 Números **medidos el 20/10/2026 en esta máquina** (Windows 11 x86-64, sin
 cuenta de WhatsApp). La app de Windows no está instalada acá, así que sus

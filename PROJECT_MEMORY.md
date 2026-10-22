@@ -982,3 +982,20 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   de tests, `funcionalidad.py` 50/50 y 21/21, `parity.py` 153/153), las doce
   vistas capturadas y revisadas, `main` pusheado y la etiqueta
   `v0.1.0-beta.3` movida a `44faa41`.
+
+## 2026-10-22 - El README reconstruido y las fotos de la pagina
+
+- **El README** paso a una galeria de dos columnas con las 15 capturas
+  agrupadas por tema (lista y vistas propias, conversacion y compositor,
+  paneles de la derecha, ajustes) y se corrigio el titulo `Quéfast` por
+  `Whatfast`. Los 20 enlaces e imagenes se verificaron con un comando.
+- **La pagina** (`web/index.html`) tenia 6 vistas y las fotos viejas: ahora
+  tiene 15 botones, cada uno con su captura nueva en `web/assets/`, y la
+  columna del banco de vistas se desplaza adentro de un marco de 520 px
+  (media query de 993 px) para que la captura no cambie de tamano al cambiar
+  de vista.
+- **Verificado en el navegador**: las 15 imagenes cargan con 1475 px de ancho
+  y el clic en un boton cambia la captura y el rotulo. Medido con
+  `browser.evaluate`: 15 botones y columna de 520 px con 799 px de contenido.
+- **Trampa**: `web/` sigue fuera del indice de git. No se commiteo porque no
+  hay un pedido explicito; si la pagina se publica, hay que agregarla.
