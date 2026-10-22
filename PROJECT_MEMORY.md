@@ -967,3 +967,18 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   primera pulsacion sobre la app solo la activa. Hay que poner la ventana
   arriba con `SetWindowPos` y `HWND_TOPMOST` e insistir hasta que el foco quede
   en la app, o el primer clic de la secuencia se pierde.
+
+## 2026-10-22 - El panel de ajustes dejaba un bloque gris
+
+- **El tema claro mostraba el resto de la ventana en gris** al abrir los
+  ajustes: el panel se dibujaba sobre un velo `theme.overlay`, que en el tema
+  claro es negro al 40 % sobre blanco. La referencia no oscurece nada: se
+  quitó el velo y la conversación sigue visible al lado (commit `44faa41`).
+- **El primer build de release salió corrupto** (`E0786: corrupt metadata`
+  en `libwhatfast_protocol` y después en `gpui`): el corte del servidor mató
+  `rustc` a mitad de escritura. Se arregla con `cargo clean --release` y
+  6m55s de compilación; limpiar un solo crate no alcanza.
+- **Evidencia**: las cinco puertas en verde el 22/10 (fmt, clippy, 34 grupos
+  de tests, `funcionalidad.py` 50/50 y 21/21, `parity.py` 153/153), las doce
+  vistas capturadas y revisadas, `main` pusheado y la etiqueta
+  `v0.1.0-beta.3` movida a `44faa41`.
