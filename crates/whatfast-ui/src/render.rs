@@ -2461,35 +2461,178 @@ impl Whatfast {
             )
     }
 
+    /// The panel of the settings.
+    ///
+    /// The reference of WhatsApp Desktop (`docs/referencia/04-whatsapp-perfil.png`)
+    /// draws the settings as the column of the left: the name of the user at
+    /// the top, the search with the border of the accent below it, the photo
+    /// of the profile in the middle and the list of the sections, each one
+    /// with a drawing, the title in bold and the description in the muted
+    /// color.
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale = self.ui_scale;
         let scale_percent = (self.ui_scale * 100.0).round() as u32;
         let logout_pending = self.rpc.logout_pending();
         let dark = cx.theme().is_dark();
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        // The app does not know the name of the user: the panel carries the
+        // name of the app, the same way the panel of the info of a contact
+        // carries the name of the conversation.
+        let name = "Whatfast";
+
+        // The scale of the interface: the same buttons as before, under the
+        // title of their section.
+        let scale_control = v_flex()
+            .gap_2()
+            .mt_1()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("decrease-ui-scale")
+                            .label("−")
+                            .disabled(self.ui_scale <= MIN_UI_SCALE)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.adjust_ui_scale(-UI_SCALE_STEP, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .text_center()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{scale_percent}%")),
+                    )
+                    .child(
+                        Button::new("increase-ui-scale")
+                            .label("+")
+                            .disabled(self.ui_scale >= MAX_UI_SCALE)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.adjust_ui_scale(UI_SCALE_STEP, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("reset-ui-scale")
+                            .small()
+                            .label("Reset")
+                            .disabled(self.ui_scale == 1.0)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_ui_scale(1.0, window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Saved automatically for future launches."),
+            );
+
+        // The theme: the same button as before, under the title of its
+        // section. The row keeps the button at its own width instead of
+        // stretching it to the whole column.
+        let theme_control = h_flex().mt_1().child(
+            Button::new("theme")
+                .small()
+                .icon(if dark { IconName::Sun } else { IconName::Moon })
+                .label(if dark {
+                    "Use the light theme"
+                } else {
+                    "Use the dark theme"
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_theme(window, cx);
+                })),
+        );
+
+        // The account: the same button as before, under the title of its
+        // section.
+        let account_control = h_flex().mt_1().child(
+            Button::new("logout")
+                .small()
+                .label(if logout_pending {
+                    "Clearing…"
+                } else if self.confirming_logout {
+                    "Confirm"
+                } else {
+                    "Log out"
+                })
+                .disabled(logout_pending)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.confirming_logout {
+                        this.request_logout();
+                    } else {
+                        this.confirming_logout = true;
+                    }
+                    cx.notify();
+                })),
+        );
+
+        // A section of the panel: the drawing on the left, the title in bold
+        // and the description in the muted color, as the reference draws them.
+        let section = |icon: WhatfastIcon,
+                       heading: &'static str,
+                       description: &'static str,
+                       control: gpui::Div| {
+            h_flex()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(26. * scale))
+                        .pt_1()
+                        .child(Icon::new(icon).with_size(px(22. * scale)).text_color(muted)),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(heading))
+                        .child(div().text_sm().text_color(muted).child(description))
+                        .child(control),
+                )
+        };
+
         div()
             .absolute()
-            .inset_0()
+            // The column of the settings sits next to the column of icons,
+            // the same way the reference draws it.
+            .left(px(56. * scale))
+            .right_0()
+            .top_0()
+            .bottom_0()
+            .bg(cx.theme().overlay)
+            // Without occlusion the clicks fall through to the conversation
+            // below, which is behind the panel.
+            .occlude()
             .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .bg(rgba(0x00000088))
+            .justify_start()
             .child(
                 v_flex()
-                    .w(px(420.))
+                    .w(px(420. * scale))
                     .max_w_full()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .h_full()
+                    .border_r_1()
+                    .border_color(border)
                     .bg(cx.theme().background)
+                    // The name of the user, in big and bold.
                     .child(
                         h_flex()
-                            .h(px(58.))
-                            .px_4()
+                            .px_5()
+                            .pt_5()
+                            .pb_4()
                             .items_center()
                             .justify_between()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
+                            .child(
+                                div()
+                                    .text_size(px(22. * scale))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(name),
+                            )
                             .child(
                                 Button::new("close-settings")
                                     .label("×")
@@ -2499,133 +2642,84 @@ impl Whatfast {
                                     })),
                             ),
                     )
+                    // The search of the reference: the border of the accent
+                    // and the magnifier inside.
+                    .child(
+                        div().px_5().child(
+                            h_flex()
+                                .h(px(40. * scale))
+                                .px_3()
+                                .gap_2()
+                                .items_center()
+                                .rounded_full()
+                                .bg(cx.theme().input)
+                                .border_1()
+                                .border_color(cx.theme().accent)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .with_size(px(17. * scale))
+                                        .text_color(muted),
+                                )
+                                .child(div().text_sm().text_color(muted).child("Search")),
+                        ),
+                    )
+                    // The photo of the profile, in the middle. The app has no
+                    // photo of the user: the circle carries the glyph of the
+                    // person.
+                    .child(
+                        div().flex().justify_center().pt_6().child(
+                            div()
+                                .size(px(100. * scale))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    Icon::new(IconName::User)
+                                        .with_size(px(46. * scale))
+                                        .text_color(muted),
+                                ),
+                        ),
+                    )
+                    // The list of the sections.
                     .child(
                         v_flex()
-                            .p_4()
-                            .gap_3()
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div().font_weight(FontWeight::SEMIBOLD).child("UI scale"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(
-                                                "Increase text, controls, and interface spacing.",
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("decrease-ui-scale")
-                                            .label("−")
-                                            .disabled(self.ui_scale <= MIN_UI_SCALE)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.adjust_ui_scale(-UI_SCALE_STEP, window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(84.))
-                                            .text_center()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(format!("{scale_percent}%")),
-                                    )
-                                    .child(
-                                        Button::new("increase-ui-scale")
-                                            .label("+")
-                                            .disabled(self.ui_scale >= MAX_UI_SCALE)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.adjust_ui_scale(UI_SCALE_STEP, window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("reset-ui-scale")
-                                            .small()
-                                            .label("Reset")
-                                            .disabled(self.ui_scale == 1.0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_ui_scale(1.0, window, cx);
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Saved automatically for future launches."),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .mt_2()
-                                    .child(
-                                        div().font_weight(FontWeight::SEMIBOLD).child("Appearance"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("The dark and the light palette of WhatsApp."),
-                                    )
-                                    .child(
-                                        Button::new("theme")
-                                            .small()
-                                            .icon(if dark { IconName::Sun } else { IconName::Moon })
-                                            .label(if dark {
-                                                "Use the light theme"
-                                            } else {
-                                                "Use the dark theme"
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.toggle_theme(window, cx);
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .mt_2()
-                                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Account"))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(
-                                                "Sign out of this device and clear the local data.",
-                                            ),
-                                    )
-                                    .child(
-                                        Button::new("logout")
-                                            .small()
-                                            .label(if logout_pending {
-                                                "Clearing…"
-                                            } else if self.confirming_logout {
-                                                "Confirm"
-                                            } else {
-                                                "Log out"
-                                            })
-                                            .disabled(logout_pending)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                if this.confirming_logout {
-                                                    this.request_logout();
-                                                } else {
-                                                    this.confirming_logout = true;
-                                                }
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
+                            .id("settings-sections")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_5()
+                            .pt_6()
+                            .pb_6()
+                            .gap_6()
+                            .child(section(
+                                WhatfastIcon::Settings,
+                                "Interface scale",
+                                "Increase text, controls, and interface spacing.",
+                                scale_control,
+                            ))
+                            .child(section(
+                                WhatfastIcon::Palette,
+                                "Appearance",
+                                "The dark and the light palette of WhatsApp.",
+                                theme_control,
+                            ))
+                            .child(section(
+                                WhatfastIcon::Warning,
+                                "Account",
+                                "Sign out of this device and clear the local data.",
+                                account_control,
+                            )),
                     ),
             )
     }
 
+    /// The panel with the information of the contact or of the group.
+    ///
+    /// The style is the one of WhatsApp Desktop: the photo big and centered
+    /// at the top, the name under it and then the rows of the information,
+    /// each one with the title in bold and the value in the muted color.
     fn render_chat_info(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let Some(state) = self.chat_info.as_ref() else {
             return div().id("chat-info-backdrop");
@@ -2646,6 +2740,7 @@ impl Whatfast {
             .as_ref()
             .map(|chat| chat.avatar_path.clone())
             .unwrap_or_default();
+        let scale = self.ui_scale;
 
         // Warm the avatars for the members that are about to be shown; the
         // media budget in the RPC layer keeps this from flooding the backend.
@@ -2669,11 +2764,13 @@ impl Whatfast {
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let hover_background = cx.theme().muted;
+        // A row of the panel: the title in bold and the value in the muted
+        // color, the same way the reference draws the sections.
         let section = |label: &'static str, value: String| {
             v_flex()
                 .gap_1()
-                .child(div().text_xs().text_color(muted).child(label))
-                .child(div().text_sm().child(value))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
+                .child(div().text_sm().text_color(muted).child(value))
         };
 
         let subtitle = if let Some(info) = info.as_ref().filter(|_| is_group) {
@@ -2685,7 +2782,7 @@ impl Whatfast {
                 .map(|chat| chat.phone_number.clone())
                 .unwrap_or_default()
         };
-        let identity_avatar = avatar_element(&title, &avatar_path, px(96.), cx);
+        let identity_avatar = avatar_element(&title, &avatar_path, px(140. * scale), cx);
 
         let mut body = v_flex()
             .id("chat-info-body")
@@ -2696,12 +2793,16 @@ impl Whatfast {
             .on_scroll_wheel(cx.listener(|this, event, window, cx| {
                 this.handle_smooth_scroll_input(ScrollSurface::ChatInfo, event, window, cx);
             }))
-            .p_4()
-            .gap_4()
+            .px_5()
+            .pt_5()
+            .pb_6()
+            .gap_5()
+            // The photo, the name and the subtitle, in the middle.
             .child(
                 v_flex()
                     .items_center()
                     .gap_2()
+                    .pb_2()
                     .child(identity_avatar)
                     .child(
                         div()
@@ -2811,8 +2912,7 @@ impl Whatfast {
                     const MAX_MEMBER_ROWS: usize = 200;
                     let mut members = v_flex().gap_1().child(
                         div()
-                            .text_xs()
-                            .text_color(muted)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("{} members", info.participant_count)),
                     );
                     for (index, participant) in
@@ -2981,7 +3081,7 @@ impl Whatfast {
             }))
             .child(
                 v_flex()
-                    .w(px(400.))
+                    .w(px(400. * scale))
                     .max_w_full()
                     .h_full()
                     // Occlude the backdrop so clicks inside the pane don't hit
@@ -2992,8 +3092,8 @@ impl Whatfast {
                     .border_color(border)
                     .child(
                         h_flex()
-                            .h(px(58.))
-                            .px_4()
+                            .h(px(48. * scale))
+                            .px_5()
                             .items_center()
                             .justify_between()
                             .border_b_1()
