@@ -94,8 +94,10 @@ jobs:
 
             `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
             (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El paquete va sin firmar: la primera vez hay que abrirlo con
-            clic derecho > Abrir, o sacarle la cuarentena:
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
 
             ```
             xattr -dr com.apple.quarantine Whatfast.app
@@ -198,8 +200,10 @@ jobs:
 
             `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
             (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El paquete va sin firmar: la primera vez hay que abrirlo con
-            clic derecho > Abrir, o sacarle la cuarentena:
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
 
             ```
             xattr -dr com.apple.quarantine Whatfast.app
@@ -211,12 +215,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # GitHub ya no tiene runners Intel (macos-13 se retiro en diciembre
+          # de 2025 y los "large" son pagos): el paquete de x86_64 sale de una
+          # compilacion cruzada en el runner de arm64. Es la unica via, y por
+          # eso no frena el release: si falla, el de arm64 sale igual.
           - target: aarch64-apple-darwin
             arch: arm64
             goarch: arm64
+            tolerante: false
           - target: x86_64-apple-darwin
             arch: x64
             goarch: amd64
+            tolerante: true
+    continue-on-error: ${{ matrix.tolerante }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -319,8 +330,10 @@ jobs:
 
             `whatfast-macos-arm64.zip` (Apple Silicon) y `whatfast-macos-x64.zip`
             (Intel). Cada uno trae `Whatfast.app` con la interfaz y el sidecar
-            adentro. El paquete va sin firmar: la primera vez hay que abrirlo con
-            clic derecho > Abrir, o sacarle la cuarentena:
+            adentro. El de Intel sale de una compilacion cruzada en el runner de
+            arm64: si una version no trae el `.zip` de x64, fue esa compilacion
+            la que fallo. El paquete va sin firmar: la primera vez hay que
+            abrirlo con clic derecho > Abrir, o sacarle la cuarentena:
 
             ```
             xattr -dr com.apple.quarantine Whatfast.app
