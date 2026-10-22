@@ -8,7 +8,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\integrar-agentes.ps1
 
 param(
-    [string[]]$Agentes = @("conversacion", "emojis", "stickers", "lista", "paneles"),
+    [string[]]$Agentes = @("conversacion", "emojis", "stickers", "lista", "paneles", "adjuntos", "fake-media", "ubicacion"),
     [switch]$SinPush
 )
 
