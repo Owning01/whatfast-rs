@@ -5,10 +5,16 @@
 //! (`tauri/src/styles.css`, the classes `sticker-tray`, `sticker-tab-strip`,
 //! `sticker-pack-tab`, `sticker-grid` and `sticker-cell`).
 //!
+//! The look is the one of the reference of the desktop client of WhatsApp
+//! (`docs/referencia/07-paneles-del-compositor.md`, "El panel de los
+//! stickers"): a floating box over the composer, with the row of the packs,
+//! the field of the search, the grid of the stickers and the three tabs of
+//! the foot.
+//!
 //! The data is not here: the packs live in the store of the application
-//! (`store.sticker_packs()`), and the panel only draws them. The two actions
-//! it needs already exist in `app.rs`: `load_stickers()` and
-//! `send_sticker_from_library()`.
+//! (`store.sticker_packs()`), and the panel only draws them. The three
+//! actions it needs already exist in `app.rs`: `load_stickers()`,
+//! `send_sticker_from_library()` and `choose_sticker()`.
 
 #![allow(dead_code)]
 
@@ -18,29 +24,39 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, ElementId, InteractiveElement as _, ObjectFit, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px,
+    AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement as _,
+    ObjectFit, ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, div, img, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
+    input::{Input, InputState},
+    v_flex,
 };
 
-use whatfast_protocol::StickerPack;
+use whatfast_protocol::{Sticker, StickerPack};
 
 use crate::app::Whatfast;
 
-/// The width of the tray, in pixels, before the scale.
-pub(crate) const TRAY_WIDTH: f32 = 360.0;
 /// The height of the tray, in pixels, before the scale.
 pub(crate) const TRAY_HEIGHT: f32 = 420.0;
 /// The side of one cell of the grid of stickers, in pixels, before the scale.
-pub(crate) const CELL_SIZE: f32 = 72.0;
+pub(crate) const CELL_SIZE: f32 = 80.0;
 /// The side of one tab of the strip of packs, in pixels, before the scale.
 pub(crate) const TAB_SIZE: f32 = 34.0;
 /// The gap between two cells of the grid, in pixels, before the scale.
 pub(crate) const CELL_GAP: f32 = 6.0;
+/// The padding inside one cell of the grid, in pixels, before the scale.
+const CELL_PADDING: f32 = 2.0;
+/// The height of the composer, in pixels, before the scale: the tray floats
+/// over it.
+const COMPOSER_HEIGHT: f32 = 56.0;
+/// The gap between the tray and the composer, in pixels, before the scale.
+const COMPOSER_GAP: f32 = 8.0;
+/// The text that the field of the search shows while it is empty.
+const SEARCH_PLACEHOLDER: &str = "Search in the WhatsApp sticker store";
 
 /// The state of the tray of the stickers.
 #[derive(Default)]
@@ -55,6 +71,18 @@ pub(crate) struct StickerTrayState {
     /// and only when nothing was loaded and nothing failed. The flag is the
     /// memory of that first question, so the tray never hammers the backend.
     pub(crate) requested: bool,
+    /// The text of the search of the tray.
+    pub(crate) query: String,
+    /// The field of the search.
+    ///
+    /// The state of a field of text is born with a window, and the tray is
+    /// drawn while the window is busy: the field waits for the end of the
+    /// cycle of the effects (see `ensure_search_input`).
+    pub(crate) search_input: Option<Entity<InputState>>,
+    /// The subscription that hears the changes of the field of the search.
+    pub(crate) search_subscription: Option<Subscription>,
+    /// Whether the field of the search is being born right now.
+    pub(crate) search_pending: bool,
 }
 
 /// The pack that is open in the tray.
@@ -80,6 +108,19 @@ pub(crate) fn active_pack<'a>(
 /// port: the origin writes `pack.name.slice(0, 2).toUpperCase()`.
 pub(crate) fn pack_label(name: &str) -> String {
     name.chars().take(2).collect::<String>().to_uppercase()
+}
+
+/// Whether a sticker answers to the text of the search.
+///
+/// The stickers of the protocol do not carry a name yet (the `Sticker` of
+/// `bridge.proto` has the id, the path and the measures), so the search
+/// looks at the id of the sticker.
+pub(crate) fn sticker_matches(sticker: &Sticker, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    sticker.id.to_lowercase().contains(&query.to_lowercase())
 }
 
 /// The path of the local copy of one sticker.
@@ -121,6 +162,7 @@ impl StickerTray {
     pub(crate) fn render(&self, app: &Whatfast, cx: &mut Context<Whatfast>) -> gpui::Div {
         let scale = app.ui_scale;
         self.ensure_loaded(app, cx);
+        self.ensure_search_input(cx);
 
         let packs = app.store.sticker_packs();
         let active = {
@@ -128,22 +170,39 @@ impl StickerTray {
             active_pack(packs, &state.active_pack_id)
         };
         let sending = self.state.borrow().sending.clone();
+        let query = self.state.borrow().query.clone();
 
+        // The panel floats over the composer: a box with rounded corners, a
+        // border and a shadow, as wide as the conversation, with a small gap
+        // over the composer.
         v_flex()
-            .w_full()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px((COMPOSER_HEIGHT + COMPOSER_GAP) * scale))
+            .mx(px(8. * scale))
             .h(px(TRAY_HEIGHT * scale))
-            .flex_shrink_0()
-            .border_t_1()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
             .border_color(cx.theme().border)
+            .shadow_lg()
             .bg(cx.theme().popover)
             .overflow_hidden()
             .child(self.render_tabs(app, packs, cx))
-            .child(self.render_body(app, active, &sending, cx))
+            // El buscador, con la lupa dentro, como en la referencia.
+            .child(self.render_search(app, cx))
+            .child(self.render_body(app, active, &sending, &query, cx))
             // Los tabs del pie, los mismos del panel de los emojis.
             .child(app.render_panel_tabs(cx))
     }
 
     /// The strip of the tabs of the packs.
+    ///
+    /// The reference draws the categories of the stickers with a drawing each
+    /// one and the active one with a green line under it. The app has the
+    /// packs of the library instead of the categories: they are the tabs of
+    /// the row, with the short name of the pack, the active one marked with
+    /// the accent of the theme and the rest dimmed.
     fn render_tabs(
         &self,
         app: &Whatfast,
@@ -158,6 +217,7 @@ impl StickerTray {
             let state = self.state.borrow();
             active_pack(packs, &state.active_pack_id).map(|pack| pack.id.clone())
         };
+        let hover = cx.theme().muted;
         h_flex()
             .id("sticker-tab-strip")
             .flex_none()
@@ -176,22 +236,25 @@ impl StickerTray {
                     .size(px(TAB_SIZE * scale))
                     .flex_none()
                     .rounded_sm()
-                    .border_1()
-                    .border_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .bg(if selected {
-                        cx.theme().accent.opacity(0.12)
-                    } else {
-                        gpui::transparent_black()
-                    })
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(if selected {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .cursor_pointer()
+                    // La activa lleva el fondo verde suave y la linea verde
+                    // debajo, como la categoria activa de la referencia.
+                    .when(selected, |tab| {
+                        tab.bg(cx.theme().accent.opacity(0.16))
+                            .border_b_2()
+                            .border_color(cx.theme().accent)
+                    })
+                    .hover(move |style| style.bg(hover))
                     .child(pack_label(&pack.name))
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         state.borrow_mut().active_pack_id = pack_id.clone();
@@ -200,12 +263,65 @@ impl StickerTray {
             }))
     }
 
+    /// The field of the search.
+    ///
+    /// The reference draws a field with the green border of the accent and
+    /// the magnifier inside. The field of text is born with the first
+    /// drawing of the tray: until then the row shows the same field, but
+    /// without the cursor.
+    fn render_search(&self, app: &Whatfast, cx: &mut Context<Whatfast>) -> gpui::Div {
+        let scale = app.ui_scale;
+        let input = self.state.borrow().search_input.clone();
+        let magnifier = || {
+            Icon::new(IconName::Search)
+                .with_size(px(16. * scale))
+                .text_color(cx.theme().muted_foreground)
+        };
+        h_flex()
+            .flex_none()
+            .px_3()
+            .pt_2()
+            .pb_2()
+            .gap_2()
+            .child(match input {
+                Some(input) => Input::new(&input)
+                    .w_full()
+                    .h(px(36. * scale))
+                    .rounded_full()
+                    .bg(cx.theme().input)
+                    .border_1()
+                    .border_color(cx.theme().accent)
+                    .prefix(magnifier())
+                    .into_any_element(),
+                None => div()
+                    .w_full()
+                    .h(px(36. * scale))
+                    .rounded_full()
+                    .bg(cx.theme().input)
+                    .border_1()
+                    .border_color(cx.theme().accent)
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(magnifier())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SEARCH_PLACEHOLDER),
+                    )
+                    .into_any_element(),
+            })
+    }
+
     /// The grid of the stickers of the open pack.
     fn render_body(
         &self,
         app: &Whatfast,
         active: Option<&StickerPack>,
         sending: &str,
+        query: &str,
         cx: &mut Context<Whatfast>,
     ) -> gpui::Stateful<gpui::Div> {
         let scale = app.ui_scale;
@@ -215,15 +331,26 @@ impl StickerTray {
         if pack.stickers.is_empty() {
             return self.render_empty(cx);
         }
+        let stickers = pack
+            .stickers
+            .iter()
+            .filter(|sticker| sticker_matches(sticker, query))
+            .collect::<Vec<_>>();
         h_flex()
             .id("sticker-grid")
             .flex_1()
             .min_h_0()
             .flex_wrap()
+            // Las celdas arrancan arriba: la rejilla no se estira en el alto
+            // que sobra.
+            .items_start()
+            .content_start()
             .gap(px(CELL_GAP * scale))
             .p(px(10. * scale))
             .overflow_y_scroll()
-            .children(pack.stickers.iter().enumerate().map(|(index, sticker)| {
+            // La primera celda es el boton de crear un sticker.
+            .child(self.render_create(app, cx))
+            .children(stickers.iter().enumerate().map(|(index, sticker)| {
                 let sticker_id = sticker.id.clone();
                 let path = sticker_local_path(pack, &sticker.id).map(PathBuf::from);
                 let busy = sending == sticker.id;
@@ -233,7 +360,7 @@ impl StickerTray {
                     .size(px(CELL_SIZE * scale))
                     .flex_none()
                     .rounded_sm()
-                    .p(px(4. * scale))
+                    .p(px(CELL_PADDING * scale))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -242,11 +369,11 @@ impl StickerTray {
                     .child(match path {
                         Some(path) => div().child(
                             img(path)
-                                .size(px(CELL_SIZE * scale))
+                                .size(px((CELL_SIZE - 2. * CELL_PADDING) * scale))
                                 .object_fit(ObjectFit::Contain),
                         ),
                         None => div()
-                            .size(px(CELL_SIZE * scale))
+                            .size(px((CELL_SIZE - 2. * CELL_PADDING) * scale))
                             .rounded_sm()
                             .bg(cx.theme().muted)
                             .flex()
@@ -274,6 +401,51 @@ impl StickerTray {
                         });
                         cx.notify();
                     }))
+            }))
+            .when(stickers.is_empty(), |grid| {
+                grid.child(
+                    div()
+                        .w_full()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No stickers found."),
+                )
+            })
+    }
+
+    /// The first cell of the grid: the button that turns a picture of the
+    /// computer into a sticker.
+    fn render_create(
+        &self,
+        app: &Whatfast,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let scale = app.ui_scale;
+        div()
+            .id("sticker-create")
+            .size(px(CELL_SIZE * scale))
+            .flex_none()
+            .rounded_sm()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().muted))
+            .child(
+                Icon::new(IconName::Plus)
+                    .with_size(px(24. * scale))
+                    .text_color(cx.theme().accent),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().foreground)
+                    .child("Create"),
+            )
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.choose_sticker(window, cx);
             }))
     }
 
@@ -331,6 +503,57 @@ impl StickerTray {
             .ok();
         })
         .detach();
+    }
+
+    /// Creates the field of the search the first time the tray is drawn.
+    ///
+    /// The state of a field of text is born with a window, and the tray is
+    /// drawn while the window is busy with the drawing: the field waits for
+    /// the end of the cycle of the effects, where the window is free again.
+    fn ensure_search_input(&self, cx: &mut Context<Whatfast>) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.search_input.is_some() || state.search_pending {
+                return;
+            }
+            state.search_pending = true;
+        }
+        let state = self.state.clone();
+        let weak = cx.weak_entity();
+        let entity_id = cx.entity_id();
+        cx.defer(move |app| {
+            let created = app.with_window(entity_id, |window, cx| {
+                let input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder(SEARCH_PLACEHOLDER));
+                // Los cambios del campo son los de la busqueda.
+                weak.update(cx, |_this, cx| {
+                    let subscription = cx.observe(&input, {
+                        let state = state.clone();
+                        move |_this, input, cx| {
+                            let query = input.read(cx).value().to_string();
+                            state.borrow_mut().query = query;
+                            cx.notify();
+                        }
+                    });
+                    state.borrow_mut().search_subscription = Some(subscription);
+                })
+                .ok();
+                input
+            });
+            match created {
+                Some(input) => {
+                    state.borrow_mut().search_input = Some(input);
+                    state.borrow_mut().search_pending = false;
+                    // El campo recien nacido tiene que aparecer.
+                    weak.update(app, |_this, cx| cx.notify()).ok();
+                }
+                None => {
+                    // La ventana no estaba lista: el proximo dibujo lo
+                    // vuelve a intentar.
+                    state.borrow_mut().search_pending = false;
+                }
+            }
+        });
     }
 }
 
@@ -413,5 +636,18 @@ mod tests {
         )];
         assert_eq!(sticker_local_path(&packs[0], "fav-2"), None);
         assert_eq!(sticker_local_path(&packs[0], "gone"), None);
+    }
+
+    #[test]
+    fn an_empty_search_lets_every_sticker_through() {
+        assert!(sticker_matches(&sticker("fav-1", ""), ""));
+        assert!(sticker_matches(&sticker("fav-1", ""), "   "));
+    }
+
+    #[test]
+    fn the_search_looks_at_the_id_of_the_sticker() {
+        assert!(sticker_matches(&sticker("fav-1", ""), "fav"));
+        assert!(sticker_matches(&sticker("fav-1", ""), "FAV-1"));
+        assert!(!sticker_matches(&sticker("fav-1", ""), "recent"));
     }
 }
