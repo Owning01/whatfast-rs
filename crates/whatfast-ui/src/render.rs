@@ -19,7 +19,7 @@ use gpui::{
     ClickEvent, Context, ElementId, Focusable as _, FontWeight, InteractiveElement as _,
     IntoElement, KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels,
     Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, div, img, point, px, rgb, rgba, size, uniform_list,
+    StyledImage as _, Window, canvas, div, img, point, px, rgb, rgba, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -1627,6 +1627,15 @@ impl Whatfast {
         } else {
             available
         };
+        // The wallpaper covers the whole area of the messages, not only the
+        // width of the bubbles: the pattern of the reference reaches the
+        // borders of the conversation.
+        let wallpaper_width = if available < px(0.) {
+            px(0.)
+        } else {
+            available
+        };
+        let wallpaper_height = window.viewport_size().height;
         self.measure_message_heights(wrap_width, cx.theme().font_size, window);
         let sizes = self.store.message_sizes();
         if let Some(generation) = self.scroll_to_bottom_generation.take() {
@@ -1885,6 +1894,8 @@ impl Whatfast {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
                     .relative()
@@ -1892,107 +1903,130 @@ impl Whatfast {
                     .on_scroll_wheel(cx.listener(|this, event, window, cx| {
                         this.handle_smooth_scroll_input(ScrollSurface::Messages, event, window, cx);
                     }))
-                    // The buttons that jump through the history float over
-                    // the list of the messages, the same way the web client
-                    // draws them.
-                    .when(has_older, |list| {
-                        list.child(
-                            div()
-                                .absolute()
-                                .top_2()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .justify_center()
-                                .child(Button::new("older").label("Load older messages").on_click(
-                                    cx.listener(|this, _, _, cx| {
+                    // port: the reference paints a wallpaper of line drawings
+                    // behind the messages. The layer is the first child of the
+                    // area, so it stays behind the bubbles, and it is
+                    // absolute, so it does not move when the list scrolls.
+                    .child(self.conversation_wallpaper(wallpaper_width, wallpaper_height, cx))
+                    // port: the button that loads the older messages is a
+                    // small pill above the list of the messages, the same way
+                    // the reference draws it. It is not over the list: the
+                    // pill of the day of the first message lives there.
+                    .when(has_older, |area| {
+                        area.child(
+                            div().flex().justify_center().px_4().pt_2().pb_1().child(
+                                div()
+                                    .id("load-older")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(cx.theme().secondary)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .cursor_pointer()
+                                    .child("Load older messages")
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         this.load_older_messages();
                                         cx.notify();
-                                    }),
-                                )),
-                        )
-                    })
-                    .when(has_newer, |list| {
-                        list.child(
-                            div()
-                                .absolute()
-                                .bottom_2()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .justify_center()
-                                .child(
-                                    Button::new("jump-latest")
-                                        .primary()
-                                        .label("Jump to latest messages")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.refresh_latest();
-                                            cx.notify();
-                                        })),
-                                ),
+                                    })),
+                            ),
                         )
                     })
                     .child(
-                        v_virtual_list(
-                            cx.entity().clone(),
-                            "messages",
-                            list_sizes,
-                            |this, range: Range<usize>, window, cx| {
-                                let visible_images = range
-                                    .clone()
-                                    .filter_map(|index| this.store.messages.get(index))
-                                    .filter_map(|message| match message.content.as_ref() {
-                                        Some(proto::message::Content::Image(image))
-                                            if image.thumbnail_path.is_empty()
-                                                && image.downloadable =>
-                                        {
-                                            Some((message.chat_id.clone(), message.id.clone()))
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>();
-                                for (chat_id, message_id) in visible_images {
-                                    this.load_message_image(chat_id, message_id);
-                                }
-                                if this
-                                    .store
-                                    .selected_chat()
-                                    .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
-                                {
-                                    let participants = range
+                        div().flex_1().min_h_0().child(
+                            v_virtual_list(
+                                cx.entity().clone(),
+                                "messages",
+                                list_sizes,
+                                |this, range: Range<usize>, window, cx| {
+                                    let visible_images = range
                                         .clone()
                                         .filter_map(|index| this.store.messages.get(index))
-                                        .filter(|message| {
-                                            !message.from_me
-                                                && message.sender_avatar_path.is_empty()
-                                                && this
-                                                    .store
-                                                    .participant_avatar_path(&message.sender_id)
-                                                    .is_none()
-                                                && !message.sender_id.is_empty()
+                                        .filter_map(|message| match message.content.as_ref() {
+                                            Some(proto::message::Content::Image(image))
+                                                if image.thumbnail_path.is_empty()
+                                                    && image.downloadable =>
+                                            {
+                                                Some((message.chat_id.clone(), message.id.clone()))
+                                            }
+                                            _ => None,
                                         })
-                                        .map(|message| message.sender_id.clone())
-                                        .collect::<HashSet<_>>();
-                                    for participant_id in participants {
-                                        this.load_participant_avatar(participant_id);
+                                        .collect::<Vec<_>>();
+                                    for (chat_id, message_id) in visible_images {
+                                        this.load_message_image(chat_id, message_id);
                                     }
-                                }
-                                if range.end == this.store.messages.len()
-                                    && (this.store.has_newer_messages || this.store.newer_activity)
-                                {
-                                    this.load_newer_messages();
-                                } else if window.is_window_active()
-                                    && range.end == this.store.messages.len()
-                                {
-                                    this.mark_read();
-                                }
-                                range.map(|index| this.render_message(index, cx)).collect()
-                            },
+                                    if this
+                                        .store
+                                        .selected_chat()
+                                        .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
+                                    {
+                                        let participants = range
+                                            .clone()
+                                            .filter_map(|index| this.store.messages.get(index))
+                                            .filter(|message| {
+                                                !message.from_me
+                                                    && message.sender_avatar_path.is_empty()
+                                                    && this
+                                                        .store
+                                                        .participant_avatar_path(&message.sender_id)
+                                                        .is_none()
+                                                    && !message.sender_id.is_empty()
+                                            })
+                                            .map(|message| message.sender_id.clone())
+                                            .collect::<HashSet<_>>();
+                                        for participant_id in participants {
+                                            this.load_participant_avatar(participant_id);
+                                        }
+                                    }
+                                    if range.end == this.store.messages.len()
+                                        && (this.store.has_newer_messages
+                                            || this.store.newer_activity)
+                                    {
+                                        this.load_newer_messages();
+                                    } else if window.is_window_active()
+                                        && range.end == this.store.messages.len()
+                                    {
+                                        this.mark_read();
+                                    }
+                                    range.map(|index| this.render_message(index, cx)).collect()
+                                },
+                            )
+                            .track_scroll(&self.message_scroll)
+                            .p_4()
+                            .gap_2(),
+                        ),
+                    )
+                    // The button that jumps to the latest messages floats over
+                    // the list of the messages, the same way the web client
+                    // draws it. It comes after the list, so the messages do
+                    // not paint over it.
+                    .when(has_newer, |area| {
+                        area.child(
+                            div().absolute().bottom_4().right_4().child(
+                                // port: the reference draws a round button
+                                // with an arrow at the bottom right of the
+                                // list, not a wide bar in the middle.
+                                div()
+                                    .id("jump-latest")
+                                    .size(px(40. * self.ui_scale))
+                                    .rounded_full()
+                                    .bg(cx.theme().accent)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .child(
+                                        Icon::new(IconName::ArrowDown)
+                                            .with_size(px(20. * self.ui_scale))
+                                            .text_color(cx.theme().accent_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh_latest();
+                                        cx.notify();
+                                    })),
+                            ),
                         )
-                        .track_scroll(&self.message_scroll)
-                        .p_4()
-                        .gap_2(),
-                    ),
+                    }),
             )
             .when(!connected, |column| {
                 column.child(
@@ -3778,197 +3812,304 @@ impl Whatfast {
             }
             segments.join(" · ")
         };
-        h_flex()
+        // port: the reference writes the hour of the message at the end of
+        // the text, inside the bubble, and it is the first thing that
+        // changes when the day of the message is not the day of the one
+        // before it.
+        let time_label = bubble_time_label(message.timestamp_ms);
+        // The tail of the bubble has the colour of the bubble: a sticker has
+        // no bubble, so it has no tail either.
+        let bubble_color = if sticker {
+            gpui::transparent_black()
+        } else if message.from_me {
+            bubble_out
+        } else {
+            bubble_in
+        };
+        v_flex()
             .w_full()
-            .items_start()
             .gap_2()
-            .when(message.from_me, |row| row.justify_end())
-            .when(group_incoming, |row| {
-                let avatar_path = if message.sender_avatar_path.is_empty() {
-                    self.store
-                        .participant_avatar_path(&message.sender_id)
-                        .unwrap_or_default()
-                } else {
-                    message.sender_avatar_path.as_str()
-                };
-                row.child(avatar_element(
-                    &message.sender_name,
-                    avatar_path,
-                    px(34.),
-                    cx,
-                ))
+            // The pill of the day: the reference draws it centered above the
+            // first message of every day of the conversation.
+            .when_some(self.day_separator_label(index), |column, label| {
+                column.child(
+                    div().flex().justify_center().child(
+                        div()
+                            .h(px(DAY_SEPARATOR_HEIGHT))
+                            .px_3()
+                            .items_center()
+                            .rounded_full()
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label),
+                    ),
+                )
             })
             .child(
-                v_flex()
-                    .max_w(px(560.))
-                    .gap_1()
-                    // port: the reference paints the actions of a message
-                    // outside of the bubble, below it.
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_2()
+                    .when(message.from_me, |row| row.justify_end())
+                    .when(group_incoming, |row| {
+                        let avatar_path = if message.sender_avatar_path.is_empty() {
+                            self.store
+                                .participant_avatar_path(&message.sender_id)
+                                .unwrap_or_default()
+                        } else {
+                            message.sender_avatar_path.as_str()
+                        };
+                        row.child(avatar_element(
+                            &message.sender_name,
+                            avatar_path,
+                            px(34.),
+                            cx,
+                        ))
+                    })
                     .child(
                         v_flex()
                             .max_w(px(560.))
-                            .when(!sticker, |bubble| bubble.px_3().py_2())
-                            .rounded_lg()
-                            .when(search_target, |bubble| {
-                                bubble.border_2().border_color(cx.theme().accent)
-                            })
                             .gap_1()
-                            .bg(if sticker {
-                                gpui::transparent_black()
-                            } else if message.from_me {
-                                // port: the bubble of the sent messages of the
-                                // reference is the green of the theme.
-                                bubble_out
-                            } else {
-                                // The received messages have their own bubble:
-                                // the gray of the reference.
-                                bubble_in
-                            })
-                            .when(group_incoming, |bubble| {
-                                let name_color =
-                                    cx.theme().blue.hue(identity_hue(&message.sender_name));
-                                let show_number = !message.sender_phone_number.is_empty()
-                                    && message.sender_phone_number != message.sender_name;
-                                bubble.child(
-                                    h_flex()
-                                        .items_baseline()
-                                        .gap_2()
-                                        .child(
+                            // port: the reference paints the actions of a
+                            // message outside of the bubble, below it.
+                            .child(
+                                v_flex()
+                                    .max_w(px(560.))
+                                    .when(!sticker, |bubble| bubble.px_3().py_2())
+                                    .rounded_lg()
+                                    // The tail of the bubble is painted in the
+                                    // corner of the bubble, so the bubble has
+                                    // to be the place where it is measured.
+                                    .relative()
+                                    // The bubble hugs its content, the way the
+                                    // reference draws it: the hour goes right
+                                    // after the text and not at the end of a
+                                    // bubble as wide as the row of the actions.
+                                    .when(message.from_me, |bubble| bubble.self_end())
+                                    .when(!message.from_me, |bubble| bubble.self_start())
+                                    .when(search_target, |bubble| {
+                                        bubble.border_2().border_color(cx.theme().accent)
+                                    })
+                                    .gap_1()
+                                    .bg(if sticker {
+                                        gpui::transparent_black()
+                                    } else if message.from_me {
+                                        // port: the bubble of the sent messages of the
+                                        // reference is the green of the theme.
+                                        bubble_out
+                                    } else {
+                                        // The received messages have their own bubble:
+                                        // the gray of the reference.
+                                        bubble_in
+                                    })
+                                    // The point of the corner: at the left of the
+                                    // received bubbles and at the right of the
+                                    // sent ones. The tail sticks out of the
+                                    // corner, the way the reference draws it.
+                                    .when(!sticker, |bubble| {
+                                        bubble.child(
                                             div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(name_color)
-                                                .child(message.sender_name.clone()),
+                                                .absolute()
+                                                .top(px(BUBBLE_TAIL_OFFSET * self.ui_scale))
+                                                .when(message.from_me, |tail| {
+                                                    tail.right(px(
+                                                        BUBBLE_TAIL_OFFSET * self.ui_scale
+                                                    ))
+                                                })
+                                                .when(!message.from_me, |tail| {
+                                                    tail.left(
+                                                        px(BUBBLE_TAIL_OFFSET * self.ui_scale),
+                                                    )
+                                                })
+                                                .child(bubble_tail(
+                                                    bubble_color,
+                                                    message.from_me,
+                                                    self.ui_scale,
+                                                )),
                                         )
-                                        .when(show_number, |header| {
-                                            header.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(message.sender_phone_number.clone()),
-                                            )
-                                        }),
-                                )
-                            })
-                            .when(!reply_target_id.is_empty(), |bubble| {
-                                let target_id = reply_target_id.clone();
-                                let (sender, preview) = reply_target.as_ref().map_or_else(
-                                    || {
-                                        (
-                                            "Original message".to_string(),
-                                            "Message unavailable".to_string(),
-                                        )
-                                    },
-                                    |target| {
-                                        let sender = if target.from_me {
-                                            "You".to_string()
-                                        } else if !target.sender_name.trim().is_empty() {
-                                            target.sender_name.trim().to_string()
-                                        } else {
-                                            "Unknown contact".to_string()
-                                        };
-                                        (sender, message_preview(target))
-                                    },
-                                );
-                                bubble.child(
-                                    v_flex()
-                                        .id(("quoted-message", index))
-                                        .w_full()
-                                        .min_w(px(180.))
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .border_l_2()
-                                        .border_color(cx.theme().accent)
-                                        .bg(cx.theme().secondary)
-                                        .cursor_pointer()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(cx.theme().accent)
-                                                .child(sender),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(preview),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.scroll_to_message(&target_id);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when_some(image_content, |bubble, image| {
-                                let media_name = if image.sticker { "sticker" } else { "photo" };
-                                let (image_width, image_height) = image_render_size(&image);
-                                let image_path = image_row_path(&image).to_string();
-                                let viewer_path = image_viewer_path(&image).to_string();
-                                let image_is_cached = !image_path.is_empty()
-                                    && !viewer_path.is_empty()
-                                    && PathBuf::from(&image_path).is_file()
-                                    && PathBuf::from(&viewer_path).is_file();
-                                let cached_path_missing = (!image_path.is_empty()
-                                    || !viewer_path.is_empty())
-                                    && !image_is_cached;
-                                let retryable = image.downloadable
-                                    && (image_failure.is_some() || cached_path_missing);
-                                let placeholder = if cached_path_missing {
-                                    format!("Cached {media_name} missing · Click to reload")
-                                } else if let Some(failure) = image_failure.clone() {
-                                    failure
-                                } else if image.downloadable {
-                                    format!("Loading {media_name}…")
-                                } else if image.sticker {
-                                    "Sticker unavailable".to_string()
-                                } else {
-                                    "Photo unavailable".to_string()
-                                };
-                                let viewer_chat_id = message_image_chat_id.clone();
-                                let viewer_message_id = message_image_id.clone();
-                                let viewer_caption = image.caption.clone();
-                                let viewer_sticker = image.sticker;
-                                let retry_chat_id = message_image_chat_id.clone();
-                                let retry_message_id = message_image_id.clone();
-                                let loading_color = cx.theme().muted_foreground;
-                                let fallback_color = cx.theme().muted_foreground;
-                                let decoding_label = format!("Decoding {media_name}…");
-                                let decode_failure_label =
-                                    format!("Couldn't display {media_name} · Open to retry");
-                                bubble.child(
-                                    div()
-                                        .id(("message-image", index))
-                                        .w(image_width)
-                                        .h(image_height)
-                                        .max_w_full()
-                                        .overflow_hidden()
-                                        .rounded_md()
-                                        .when(!image.sticker, |container| {
-                                            container
-                                                .border_1()
-                                                .border_color(cx.theme().border)
-                                                .bg(cx.theme().secondary)
-                                        })
-                                        .when(image_is_cached, |container| {
-                                            container.child(
-                                                img(PathBuf::from(image_path.clone()))
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Contain)
-                                                    .with_loading(move || {
+                                    })
+                                    .when(group_incoming, |bubble| {
+                                        let name_color =
+                                            cx.theme().blue.hue(identity_hue(&message.sender_name));
+                                        let show_number = !message.sender_phone_number.is_empty()
+                                            && message.sender_phone_number != message.sender_name;
+                                        bubble.child(
+                                            h_flex()
+                                                .items_baseline()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(name_color)
+                                                        .child(message.sender_name.clone()),
+                                                )
+                                                .when(show_number, |header| {
+                                                    header.child(
                                                         div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(
+                                                                message.sender_phone_number.clone(),
+                                                            ),
+                                                    )
+                                                }),
+                                        )
+                                    })
+                                    .when(!reply_target_id.is_empty(), |bubble| {
+                                        let target_id = reply_target_id.clone();
+                                        let (sender, preview) = reply_target.as_ref().map_or_else(
+                                            || {
+                                                (
+                                                    "Original message".to_string(),
+                                                    "Message unavailable".to_string(),
+                                                )
+                                            },
+                                            |target| {
+                                                let sender = if target.from_me {
+                                                    "You".to_string()
+                                                } else if !target.sender_name.trim().is_empty() {
+                                                    target.sender_name.trim().to_string()
+                                                } else {
+                                                    "Unknown contact".to_string()
+                                                };
+                                                (sender, message_preview(target))
+                                            },
+                                        );
+                                        bubble.child(
+                                            v_flex()
+                                                .id(("quoted-message", index))
+                                                .w_full()
+                                                .min_w(px(180.))
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .border_l_2()
+                                                .border_color(cx.theme().accent)
+                                                .bg(cx.theme().secondary)
+                                                .cursor_pointer()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(cx.theme().accent)
+                                                        .child(sender),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(preview),
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.scroll_to_message(&target_id);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .when_some(image_content, |bubble, image| {
+                                        let media_name =
+                                            if image.sticker { "sticker" } else { "photo" };
+                                        let (image_width, image_height) = image_render_size(&image);
+                                        let image_path = image_row_path(&image).to_string();
+                                        let viewer_path = image_viewer_path(&image).to_string();
+                                        let image_is_cached = !image_path.is_empty()
+                                            && !viewer_path.is_empty()
+                                            && PathBuf::from(&image_path).is_file()
+                                            && PathBuf::from(&viewer_path).is_file();
+                                        let cached_path_missing = (!image_path.is_empty()
+                                            || !viewer_path.is_empty())
+                                            && !image_is_cached;
+                                        let retryable = image.downloadable
+                                            && (image_failure.is_some() || cached_path_missing);
+                                        let placeholder = if cached_path_missing {
+                                            format!("Cached {media_name} missing · Click to reload")
+                                        } else if let Some(failure) = image_failure.clone() {
+                                            failure
+                                        } else if image.downloadable {
+                                            format!("Loading {media_name}…")
+                                        } else if image.sticker {
+                                            "Sticker unavailable".to_string()
+                                        } else {
+                                            "Photo unavailable".to_string()
+                                        };
+                                        let viewer_chat_id = message_image_chat_id.clone();
+                                        let viewer_message_id = message_image_id.clone();
+                                        let viewer_caption = image.caption.clone();
+                                        let viewer_sticker = image.sticker;
+                                        let retry_chat_id = message_image_chat_id.clone();
+                                        let retry_message_id = message_image_id.clone();
+                                        let loading_color = cx.theme().muted_foreground;
+                                        let fallback_color = cx.theme().muted_foreground;
+                                        let decoding_label = format!("Decoding {media_name}…");
+                                        let decode_failure_label = format!(
+                                            "Couldn't display {media_name} · Open to retry"
+                                        );
+                                        bubble.child(
+                                            div()
+                                                .id(("message-image", index))
+                                                .w(image_width)
+                                                .h(image_height)
+                                                .max_w_full()
+                                                .overflow_hidden()
+                                                .rounded_md()
+                                                .when(!image.sticker, |container| {
+                                                    container
+                                                        .border_1()
+                                                        .border_color(cx.theme().border)
+                                                        .bg(cx.theme().secondary)
+                                                })
+                                                .when(image_is_cached, |container| {
+                                                    container.child(
+                                                        img(PathBuf::from(image_path.clone()))
                                                             .size_full()
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .text_sm()
-                                                            .text_color(loading_color)
-                                                            .child(decoding_label.clone())
-                                                            .into_any_element()
-                                                    })
-                                                    .with_fallback(move || {
+                                                            .object_fit(ObjectFit::Contain)
+                                                            .with_loading(move || {
+                                                                div()
+                                                                    .size_full()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .text_sm()
+                                                                    .text_color(loading_color)
+                                                                    .child(decoding_label.clone())
+                                                                    .into_any_element()
+                                                            })
+                                                            .with_fallback(move || {
+                                                                div()
+                                                                    .size_full()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .px_3()
+                                                                    .text_sm()
+                                                                    .text_color(fallback_color)
+                                                                    .child(
+                                                                        decode_failure_label
+                                                                            .clone(),
+                                                                    )
+                                                                    .into_any_element()
+                                                            }),
+                                                    )
+                                                })
+                                                .when(image_is_cached, |container| {
+                                                    container.cursor_pointer().on_click(
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.open_image_viewer(
+                                                                viewer_chat_id.clone(),
+                                                                viewer_message_id.clone(),
+                                                                viewer_path.clone(),
+                                                                viewer_caption.clone(),
+                                                                viewer_sticker,
+                                                            );
+                                                            cx.notify();
+                                                        }),
+                                                    )
+                                                })
+                                                .when(!image_is_cached, |container| {
+                                                    container.child(
                                                         div()
                                                             .size_full()
                                                             .flex()
@@ -3976,172 +4117,173 @@ impl Whatfast {
                                                             .justify_center()
                                                             .px_3()
                                                             .text_sm()
-                                                            .text_color(fallback_color)
-                                                            .child(decode_failure_label.clone())
-                                                            .into_any_element()
-                                                    }),
-                                            )
-                                        })
-                                        .when(image_is_cached, |container| {
-                                            container.cursor_pointer().on_click(cx.listener(
-                                                move |this, _, _, cx| {
-                                                    this.open_image_viewer(
-                                                        viewer_chat_id.clone(),
-                                                        viewer_message_id.clone(),
-                                                        viewer_path.clone(),
-                                                        viewer_caption.clone(),
-                                                        viewer_sticker,
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ))
-                                        })
-                                        .when(!image_is_cached, |container| {
-                                            container.child(
-                                                div()
-                                                    .size_full()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .px_3()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(placeholder),
-                                            )
-                                        })
-                                        .when(retryable, |container| {
-                                            container.cursor_pointer().on_click(cx.listener(
-                                                move |this, _, _, cx| {
-                                                    this.retry_message_image(
-                                                        retry_chat_id.clone(),
-                                                        retry_message_id.clone(),
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ))
-                                        }),
-                                )
-                            })
-                            .when_some(
-                                text_content.and_then(|text| text.link_preview),
-                                |bubble, preview| {
-                                    bubble.child(self.render_link_preview(index, preview, cx))
-                                },
-                            )
-                            .when(!text.is_empty(), |bubble| {
-                                bubble.child(self.render_linkified_text(
-                                    &body_message_id,
-                                    &text,
-                                    cx,
-                                ))
-                            })
-                            .when(!reaction_chips.is_empty(), |bubble| {
-                                bubble.child(h_flex().gap_1().children(
-                                    reaction_chips.into_iter().enumerate().map(
-                                        |(chip_index, reaction)| {
-                                            let emoji = reaction.emoji.to_string();
-                                            let clicked_emoji = emoji.clone();
-                                            let clicked_chat_id = reaction_chat_id.clone();
-                                            let clicked_message_id = reaction_message_id.clone();
-                                            div()
-                                                .id(format!("reaction-chip-{index}-{chip_index}"))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_lg()
-                                                .border_1()
-                                                .border_color(if reaction.from_me {
-                                                    cx.theme().accent
-                                                } else {
-                                                    cx.theme().border
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(placeholder),
+                                                    )
                                                 })
-                                                .bg(if reaction.from_me {
-                                                    own_reaction_background
-                                                } else {
-                                                    cx.theme().secondary
-                                                })
-                                                .hover(move |style| style.bg(reaction_hover))
-                                                .cursor_pointer()
-                                                .text_xs()
-                                                .child(format!("{emoji} {}", reaction.count))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_reaction_details(
-                                                        clicked_chat_id.clone(),
-                                                        clicked_message_id.clone(),
-                                                        clicked_emoji.clone(),
-                                                    );
-                                                    cx.notify();
-                                                }))
+                                                .when(retryable, |container| {
+                                                    container.cursor_pointer().on_click(
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.retry_message_image(
+                                                                retry_chat_id.clone(),
+                                                                retry_message_id.clone(),
+                                                            );
+                                                            cx.notify();
+                                                        }),
+                                                    )
+                                                }),
+                                        )
+                                    })
+                                    .when_some(
+                                        text_content.and_then(|text| text.link_preview),
+                                        |bubble, preview| {
+                                            bubble
+                                                .child(self.render_link_preview(index, preview, cx))
                                         },
+                                    )
+                                    .when(!text.is_empty(), |bubble| {
+                                        // The hour goes at the end of the text,
+                                        // inside the bubble, the way the
+                                        // reference writes it.
+                                        bubble.child(
+                                            h_flex()
+                                                .items_end()
+                                                .gap_1()
+                                                .child(self.render_linkified_text(
+                                                    &body_message_id,
+                                                    &text,
+                                                    cx,
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(time_label.clone()),
+                                                ),
+                                        )
+                                    })
+                                    .when(!reaction_chips.is_empty(), |bubble| {
+                                        bubble.child(h_flex().gap_1().children(
+                                            reaction_chips.into_iter().enumerate().map(
+                                                |(chip_index, reaction)| {
+                                                    let emoji = reaction.emoji.to_string();
+                                                    let clicked_emoji = emoji.clone();
+                                                    let clicked_chat_id = reaction_chat_id.clone();
+                                                    let clicked_message_id =
+                                                        reaction_message_id.clone();
+                                                    div()
+                                                        .id(format!(
+                                                            "reaction-chip-{index}-{chip_index}"
+                                                        ))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_lg()
+                                                        .border_1()
+                                                        .border_color(if reaction.from_me {
+                                                            cx.theme().accent
+                                                        } else {
+                                                            cx.theme().border
+                                                        })
+                                                        .bg(if reaction.from_me {
+                                                            own_reaction_background
+                                                        } else {
+                                                            cx.theme().secondary
+                                                        })
+                                                        .hover(move |style| {
+                                                            style.bg(reaction_hover)
+                                                        })
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .child(format!(
+                                                            "{emoji} {}",
+                                                            reaction.count
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.open_reaction_details(
+                                                                    clicked_chat_id.clone(),
+                                                                    clicked_message_id.clone(),
+                                                                    clicked_emoji.clone(),
+                                                                );
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .when(!meta_text.is_empty(), |footer| {
+                                        footer.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(meta_text.clone()),
+                                        )
+                                    })
+                                    .when(reply_count > 0, |footer| {
+                                        let reply_id = first_reply_id.clone().unwrap_or_default();
+                                        footer.child(
+                                            Button::new(("view-replies", index))
+                                                .ghost()
+                                                .small()
+                                                .label(if reply_count == 1 {
+                                                    "1 reply".to_string()
+                                                } else {
+                                                    format!("{reply_count} replies")
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.scroll_to_message(&reply_id);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new(("reply-message", index))
+                                            .ghost()
+                                            .small()
+                                            .icon(IconName::Undo)
+                                            .tooltip("Reply")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.start_reply(reply_action_message_id.clone());
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("react-message", index))
+                                            .ghost()
+                                            .small()
+                                            .icon(IconName::Heart)
+                                            .tooltip("React")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_reaction_picker(
+                                                    chat_id.clone(),
+                                                    message_id.clone(),
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        // The menu of the message: reply, forward,
+                                        // edit, delete and pin.
+                                        Button::new(("more-message", index))
+                                            .ghost()
+                                            .small()
+                                            .label("…")
+                                            .tooltip("More")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_message_menu(
+                                                    more_action_message_id.clone(),
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            })),
                                     ),
-                                ))
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .when(!meta_text.is_empty(), |footer| {
-                                footer.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(meta_text.clone()),
-                                )
-                            })
-                            .when(reply_count > 0, |footer| {
-                                let reply_id = first_reply_id.clone().unwrap_or_default();
-                                footer.child(
-                                    Button::new(("view-replies", index))
-                                        .ghost()
-                                        .small()
-                                        .label(if reply_count == 1 {
-                                            "1 reply".to_string()
-                                        } else {
-                                            format!("{reply_count} replies")
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.scroll_to_message(&reply_id);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new(("reply-message", index))
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Undo)
-                                    .tooltip("Reply")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.start_reply(reply_action_message_id.clone());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new(("react-message", index))
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Heart)
-                                    .tooltip("React")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_reaction_picker(
-                                            chat_id.clone(),
-                                            message_id.clone(),
-                                        );
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                // The menu of the message: reply, forward,
-                                // edit, delete and pin.
-                                Button::new(("more-message", index))
-                                    .ghost()
-                                    .small()
-                                    .label("…")
-                                    .tooltip("More")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_message_menu(more_action_message_id.clone(), cx);
-                                        cx.notify();
-                                    })),
                             ),
                     ),
             )
@@ -4172,6 +4314,16 @@ impl Whatfast {
                     let message = &self.store.messages[index];
                     (message.id.clone(), message_text(message).to_string())
                 };
+                // The hour goes at the end of the text, inside the bubble:
+                // the text wraps before it, so the width it takes is not
+                // there for the text.
+                let time_width = if text.is_empty() {
+                    px(0.)
+                } else {
+                    let label = bubble_time_label(self.store.messages[index].timestamp_ms);
+                    bubble_time_width(window, &label, font_size)
+                };
+                let text_wrap_width = (wrap_width - time_width).max(px(60.));
                 let text_height = if text.is_empty() {
                     px(0.)
                 } else {
@@ -4179,7 +4331,7 @@ impl Whatfast {
                     let run = window.text_style().to_run(text.len());
                     window
                         .text_system()
-                        .shape_text(text, font_size, &[run], Some(wrap_width), None)
+                        .shape_text(text, font_size, &[run], Some(text_wrap_width), None)
                         .map(|lines| {
                             lines.iter().fold(px(0.), |height, line| {
                                 height + line.size(line_height).height
@@ -4238,9 +4390,93 @@ impl Whatfast {
                 self.store.cache_message_height(id, width_bucket, height);
                 height
             };
-            sizes.push(geom::size(geom::px(1.), height));
+            // The pill of the day is not part of the cached height: the day
+            // of a message depends on the message before it, and that one
+            // changes when older messages arrive.
+            let separator_height = if self.starts_a_day(index) {
+                px(DAY_SEPARATOR_HEIGHT + DAY_SEPARATOR_GAP)
+            } else {
+                px(0.)
+            };
+            sizes.push(geom::size(
+                geom::px(1.),
+                height + f32::from(separator_height),
+            ));
         }
         self.store.set_measured_message_sizes(width_bucket, sizes);
+    }
+
+    /// The wallpaper of the conversation.
+    ///
+    /// port: the reference (`docs/referencia/01-whatsapp-chats.png`) paints a
+    /// pattern of line drawings behind the messages of the conversation.
+    /// GPUI cannot repeat an image, so the pattern is a grid of small glyphs
+    /// of the icon set, painted with a very low opacity. The layer is
+    /// absolute, so it does not move when the list of the messages scrolls.
+    fn conversation_wallpaper(
+        &self,
+        width: Pixels,
+        height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let color = cx.theme().muted_foreground.opacity(WALLPAPER_OPACITY);
+        let glyphs = wallpaper_glyphs();
+        let columns = (f32::from(width) / f32::from(WALLPAPER_STEP_X)).ceil() as usize + 1;
+        let rows = (f32::from(height) / f32::from(WALLPAPER_STEP_Y)).ceil() as usize + 1;
+        let mut layer = div().absolute().inset_0().overflow_hidden();
+        for row in 0..rows {
+            for column in 0..columns {
+                let index = row * columns + column;
+                let glyph = glyphs[index % glyphs.len()].clone();
+                // The pattern of the reference is not a perfect grid: a small
+                // offset per cell keeps it from looking like a table.
+                let offset_x = ((gpui::hash(&index) % 21) as f32 - 10.) * 2.5;
+                let offset_y = ((gpui::hash(&(index + 1)) % 15) as f32 - 7.) * 2.5;
+                let size = px(f32::from(WALLPAPER_GLYPH_SIZE) * (0.85 + (index % 4) as f32 * 0.1));
+                layer = layer.child(
+                    div()
+                        .absolute()
+                        .left(px(f32::from(WALLPAPER_STEP_X) * column as f32 + offset_x))
+                        .top(px(f32::from(WALLPAPER_STEP_Y) * row as f32 + offset_y))
+                        .size(size)
+                        .child(glyph.with_size(size).text_color(color)),
+                );
+            }
+        }
+        layer
+    }
+
+    /// Whether the message is the first one of its day.
+    ///
+    /// port: the origin (`tauri/src/components/Conversation.tsx`) paints the
+    /// pill of the day when the day of the message is not the day of the
+    /// message before it.
+    fn starts_a_day(&self, index: usize) -> bool {
+        let Some(message) = self.store.messages.get(index) else {
+            return false;
+        };
+        if message.timestamp_ms == 0 {
+            return false;
+        }
+        let key = message_day_key(message.timestamp_ms);
+        match index
+            .checked_sub(1)
+            .and_then(|previous| self.store.messages.get(previous))
+        {
+            Some(previous) if previous.timestamp_ms != 0 => {
+                message_day_key(previous.timestamp_ms) != key
+            }
+            _ => true,
+        }
+    }
+
+    /// The label of the pill that separates two days of the conversation.
+    fn day_separator_label(&self, index: usize) -> Option<String> {
+        if !self.starts_a_day(index) {
+            return None;
+        }
+        let timestamp = self.store.messages.get(index)?.timestamp_ms;
+        Some(message_day_label(timestamp, now_ms()))
     }
 }
 
@@ -4517,4 +4753,130 @@ fn chat_subtitle(chat: &proto::Chat) -> String {
         return preview;
     }
     format!("You: {preview}")
+}
+
+/// The height of the pill that separates two days of the conversation.
+const DAY_SEPARATOR_HEIGHT: f32 = 22.;
+
+/// The gap between the pill of the day and the message below it.
+const DAY_SEPARATOR_GAP: f32 = 8.;
+
+/// The opacity of the pattern of the background of the conversation.
+const WALLPAPER_OPACITY: f32 = 0.055;
+
+/// The distance between two glyphs of the pattern, from left to right.
+const WALLPAPER_STEP_X: Pixels = px(120.);
+
+/// The distance between two glyphs of the pattern, from top to bottom.
+const WALLPAPER_STEP_Y: Pixels = px(104.);
+
+/// The size of a glyph of the pattern.
+const WALLPAPER_GLYPH_SIZE: Pixels = px(54.);
+
+/// The size of the tail of a bubble, in unscaled pixels.
+const BUBBLE_TAIL_SIZE: f32 = 14.;
+
+/// How far the tail of a bubble sticks out of its corner, in unscaled pixels.
+const BUBBLE_TAIL_OFFSET: f32 = -6.;
+
+/// The hour of a message, the way the reference writes it inside the bubble.
+///
+/// The reference writes the hour of the twenty-four hours ("10:45"). The
+/// crate has no zone of the machine, so the hour is the one of UTC, the same
+/// as the rest of the times of the app.
+fn bubble_time_label(timestamp_ms: i64) -> String {
+    let millis = timestamp_ms.rem_euclid(86_400_000);
+    format!("{:02}:{:02}", millis / 3_600_000, (millis / 60_000) % 60)
+}
+
+/// The width the hour of a message takes inside its bubble.
+///
+/// The measure is done with the text system of the window, at the size of
+/// the small text of the interface. The gap between the text and the hour
+/// comes with it, and a couple of pixels of margin: the text of the bubble
+/// has to wrap before the hour, and a measure that is too small would put
+/// the text under the hour.
+fn bubble_time_width(window: &mut Window, label: &str, font_size: Pixels) -> Pixels {
+    let line_height = window.line_height();
+    let size = font_size * 0.75;
+    let text: SharedString = label.into();
+    let run = window.text_style().to_run(text.len());
+    window
+        .text_system()
+        .shape_text(text, size, &[run], None, None)
+        .map(|lines| {
+            lines
+                .iter()
+                .fold(px(0.), |width, line| width + line.size(line_height).width)
+        })
+        .unwrap_or(px(0.))
+        // The gap of the row that holds the text and the hour.
+        + font_size * 0.25
+        // The margin of the measure.
+        + px(2.)
+}
+
+/// The tail of a bubble: the point of its corner.
+///
+/// The reference paints a small triangle at the top corner of every bubble:
+/// at the left of the received ones and at the right of the sent ones. The
+/// tail has the same colour as the bubble.
+fn bubble_tail(color: gpui::Hsla, from_me: bool, scale: f32) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| bounds,
+        move |bounds, _, window, _| {
+            let size = bounds.size.width;
+            let mut path = gpui::PathBuilder::fill();
+            if from_me {
+                path.move_to(point(bounds.origin.x + size, bounds.origin.y));
+                path.line_to(point(bounds.origin.x + size, bounds.origin.y + size));
+                path.line_to(point(bounds.origin.x, bounds.origin.y + size));
+            } else {
+                path.move_to(point(bounds.origin.x, bounds.origin.y));
+                path.line_to(point(bounds.origin.x, bounds.origin.y + size));
+                path.line_to(point(bounds.origin.x + size, bounds.origin.y + size));
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(BUBBLE_TAIL_SIZE * scale))
+}
+
+/// The glyphs of the pattern of the background of the conversation.
+fn wallpaper_glyphs() -> Vec<Icon> {
+    vec![
+        Icon::new(WhatfastIcon::Smile),
+        Icon::new(IconName::Heart),
+        Icon::new(IconName::Star),
+        Icon::new(WhatfastIcon::Bell),
+        Icon::new(WhatfastIcon::Clock),
+        Icon::new(WhatfastIcon::Globe),
+        Icon::new(WhatfastIcon::Chat),
+        Icon::new(IconName::Moon),
+    ]
+}
+
+/// The key of the day of a message.
+///
+/// port: `dayKey` of the origin (`tauri/src/lib/format.ts`).
+fn message_day_key(timestamp_ms: i64) -> String {
+    whatfast_core::message_format::day_key(whatfast_core::message_format::LocalTimestamp::new(
+        timestamp_ms,
+        0,
+    ))
+}
+
+/// The day of a message, the way the reference writes it in the pill that
+/// separates two days.
+///
+/// port: `formatDay` of the origin (`tauri/src/lib/format.ts`).
+fn message_day_label(timestamp_ms: i64, now_ms: i64) -> String {
+    whatfast_core::message_format::format_day(
+        whatfast_core::message_format::LocalTimestamp::new(timestamp_ms, 0),
+        whatfast_core::message_format::LocalTimestamp::new(now_ms, 0),
+        whatfast_core::message_format::DateLocale::EnUs,
+    )
 }
