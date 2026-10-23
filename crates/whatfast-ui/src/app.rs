@@ -888,7 +888,7 @@ impl Whatfast {
                 // its own event handler. Answering the click right here closed
                 // the app with "cannot update TabStrip while it is already
                 // being updated".
-                tab_view.update(cx, |this, cx| {
+                tab_view.update(cx, |_this, cx| {
                     cx.defer_in(window, move |this, window, cx| {
                         this.on_tab_action(action, window, cx);
                         cx.notify();
