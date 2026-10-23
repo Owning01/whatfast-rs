@@ -106,7 +106,8 @@ jobs:
 
             ```
             sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
-              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1 \
+              libasound2
             ```
 
             ## macOS
@@ -139,6 +140,9 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-xkb-dev libxau-dev libxdmcp-dev \
             libwayland-dev libx11-xcb-dev \
+            # rodio suena por ALSA en Linux: cpal busca la cabecera con
+            # pkg-config o el crate alsa-sys no compila.
+            libasound2-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev
       - name: el sidecar en Go
         run: |
@@ -210,7 +214,8 @@ jobs:
 
             ```
             sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
-              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1 \
+              libasound2
             ```
 
             ## macOS
@@ -337,7 +342,8 @@ jobs:
 
             ```
             sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
-              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1
+              libxcb-xkb1 libxau6 libxdmcp6 libfontconfig1 libgl1 libvulkan1 \
+              libasound2
             ```
 
             ## macOS
