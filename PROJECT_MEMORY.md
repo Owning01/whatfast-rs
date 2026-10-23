@@ -1319,3 +1319,22 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   mono y 115 MB en estereo antes de codificar; las notas enviadas no se
   borran de `data/voice-notes` (solo las descartadas); y `sanitize_file_name`
   no cubre los nombres reservados de Windows (`CON`, `NUL`, `COM1`...).
+
+## 2026-10-23 - La app se cerraba al tocar una pestaña
+
+- **Sintoma**: un clic en una pestaña del riel cerraba la app; lo mismo pasaba
+  con la X de cerrar y con el boton de abrir una pestaña nueva.
+- **Causa**: el manejador del riel corria dentro de `TabStrip` (un listener de
+  la entidad). `on_tab_action` termina en `sync_shell`, que hace
+  `self.tab_strip.update(...)`: GPUI no deja actualizar una entidad dentro de
+  su propio manejador y paniquea con "cannot update TabStrip while it is
+  already being updated". El stderr del `.exe` lo mostro en la linea 142 de
+  `entity_map.rs`.
+- **Arreglo**: el manejador del riel ahora programa `on_tab_action` con
+  `cx.defer_in`, al final del ciclo de efectos, cuando la entidad ya salio de
+  la pila. La seleccion, el cierre y el alta de pestaña siguen el mismo camino.
+- **Prueba**: con `--fake-backend` y perfil aparte, tres clics que antes
+  cerraban la app: abrir un chat, cambiar de pestaña y cerrarla con la X.
+  Ninguno deja panic en el stderr y la conversacion cambia. El mas abre la
+  busqueda y el foco llega al campo.
+- **Release**: v0.2.4 (Windows y Linux; macOS sigue fuera).

@@ -125,7 +125,8 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | B-U9 | la barra de chats como en la referencia: `ChatFilter`, conversaciones ocultas, favoritos locales, estados y canales en su propia vista | cerrado | 153/153 |
 
 **Paridad del oráculo: 153/153 (100 %) + 45 tests de caracterización.
-527 tests en verde en el workspace; clippy limpio.**
+542 tests en verde en el workspace; clippy limpio con tres lints ajenos de
+Rust 1.98 permitidos.**
 
 ## Medido (release, 20/10/2026)
 
