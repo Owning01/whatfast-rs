@@ -4654,10 +4654,16 @@ impl Whatfast {
                                             reaction_chips.into_iter().enumerate().map(
                                                 |(chip_index, reaction)| {
                                                     let emoji = reaction.emoji.to_string();
-                                                    let clicked_emoji = emoji.clone();
-                                                    let clicked_chat_id = reaction_chat_id.clone();
-                                                    let clicked_message_id =
-                                                        reaction_message_id.clone();
+                                                    // El clic saca la reaccion propia o suma
+                                                    // la del que toca; la lista de quienes
+                                                    // reaccionaron queda en el boton derecho.
+                                                    let click_chat = reaction_chat_id.clone();
+                                                    let click_message = reaction_message_id.clone();
+                                                    let click_emoji = emoji.clone();
+                                                    let aux_chat = reaction_chat_id.clone();
+                                                    let aux_message = reaction_message_id.clone();
+                                                    let aux_emoji = emoji.clone();
+                                                    let mine = reaction.from_me;
                                                     div()
                                                         .id(format!(
                                                             "reaction-chip-{index}-{chip_index}"
@@ -4687,10 +4693,22 @@ impl Whatfast {
                                                         ))
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
+                                                                this.click_reaction_chip(
+                                                                    click_chat.clone(),
+                                                                    click_message.clone(),
+                                                                    click_emoji.clone(),
+                                                                    mine,
+                                                                    cx,
+                                                                );
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .on_aux_click(cx.listener(
+                                                            move |this, _, _, cx| {
                                                                 this.open_reaction_details(
-                                                                    clicked_chat_id.clone(),
-                                                                    clicked_message_id.clone(),
-                                                                    clicked_emoji.clone(),
+                                                                    aux_chat.clone(),
+                                                                    aux_message.clone(),
+                                                                    aux_emoji.clone(),
                                                                 );
                                                                 cx.notify();
                                                             },

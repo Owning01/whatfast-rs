@@ -3125,6 +3125,25 @@ impl Whatfast {
         }
     }
 
+    /// El chip de una reacción: saca la mía o suma la del emoji del chip.
+    ///
+    /// port: el cliente de WhatsApp quita la reacción propia al tocar el
+    /// chip y suma la propia al tocar el chip de otro. La lista de quienes
+    /// reaccionaron se abre con el botón derecho del mouse.
+    pub(crate) fn click_reaction_chip(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        emoji: String,
+        from_me: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let emoji = if from_me { String::new() } else { emoji };
+        self.send_reaction_request(chat_id, message_id, emoji, Uuid::new_v4().to_string(), 0);
+        self.reaction_details = None;
+        cx.notify();
+    }
+
     pub(crate) fn remove_reaction(&mut self) {
         let Some(EmojiTarget::Reaction {
             chat_id,
