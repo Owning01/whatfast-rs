@@ -29,6 +29,7 @@ use gpui_component::{
     input::Input,
     scroll::{ScrollableElement as _, ScrollbarAxis},
     switch::Switch,
+    text::{TextView, TextViewStyle},
     v_flex, v_virtual_list,
 };
 use qrcode::QrCode;
@@ -4676,43 +4677,17 @@ impl Whatfast {
             .into_any_element()
     }
 
-    fn render_linkified_text(
-        &self,
-        message_id: &str,
-        text: &str,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let mut lines = Vec::new();
-        for (line_index, line) in text.split('\n').enumerate() {
-            let mut row = h_flex().flex_wrap();
-            if line.is_empty() {
-                row = row.child(div().child(" "));
-            }
-            for (token_index, token) in line.split_whitespace().enumerate() {
-                if let Some((prefix, url, suffix)) = split_url_token(token) {
-                    if !prefix.is_empty() {
-                        row = row.child(div().child(prefix.to_string()));
-                    }
-                    let target = url.to_string();
-                    row = row.child(
-                        div()
-                            .id(format!(
-                                "message-link-{message_id}-{line_index}-{token_index}"
-                            ))
-                            .cursor_pointer()
-                            .text_color(rgb(0x0b57d0))
-                            .underline()
-                            .child(url.to_string())
-                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&target))),
-                    );
-                    row = row.child(div().child(format!("{suffix} ")));
-                } else {
-                    row = row.child(div().child(format!("{token} ")));
-                }
-            }
-            lines.push(row.into_any_element());
-        }
-        div().child(v_flex().children(lines))
+    fn render_linkified_text(&self, message_id: &str, text: &str) -> TextView {
+        // La vista de texto de gpui-component (HTML simple) es la que sabe
+        // seleccionar y copiar: el texto de la burbuja deja de ser una fila de
+        // divs por palabra y pasa a ser un solo bloque seleccionable. Los
+        // enlaces se siguen abriendo con el clic y el resto se escapa.
+        TextView::html(
+            ElementId::Name(format!("message-text-{message_id}").into()),
+            message_html(text),
+        )
+        .selectable(true)
+        .style(TextViewStyle::default().paragraph_gap(gpui::rems(0.)))
     }
 
     fn render_link_preview(
@@ -5287,11 +5262,12 @@ impl Whatfast {
                                             h_flex()
                                                 .items_end()
                                                 .gap_1()
-                                                .child(self.render_linkified_text(
-                                                    &body_message_id,
-                                                    &text,
-                                                    cx,
-                                                ))
+                                                .child(
+                                                    self.render_linkified_text(
+                                                        &body_message_id,
+                                                        &text,
+                                                    ),
+                                                )
                                                 .when(starred, |row| {
                                                     row.child(
                                                         Icon::new(IconName::StarFill)
@@ -6230,9 +6206,78 @@ fn message_day_label(timestamp_ms: i64, now_ms: i64) -> String {
     )
 }
 
+/// Escapa el texto de un mensaje para el HTML de la vista de texto.
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// El HTML del texto de un mensaje: los saltos de linea, los espacios y cada
+/// enlace en su ancla.
+fn message_html(text: &str) -> String {
+    let mut html = String::new();
+    for line in text.split('\n') {
+        // Un parrafo por linea: el `<br>` de esta vista de texto se pinta como
+        // un div vacio y no separa nada.
+        html.push_str("<p>");
+        for (token_index, token) in line.split(' ').enumerate() {
+            if token_index > 0 {
+                html.push(' ');
+            }
+            if let Some((prefix, url, suffix)) = split_url_token(token) {
+                html.push_str(&escape_html(prefix));
+                html.push_str("<a href=\"");
+                html.push_str(&escape_html(url));
+                html.push_str("\">");
+                html.push_str(&escape_html(url));
+                html.push_str("</a>");
+                html.push_str(&escape_html(suffix));
+            } else {
+                html.push_str(&escape_html(token));
+            }
+        }
+        if line.is_empty() {
+            html.push(' ');
+        }
+        html.push_str("</p>");
+    }
+    html
+}
+
 #[cfg(test)]
 mod tests {
-    use super::bubble_time_label;
+    use super::{bubble_time_label, message_html};
+
+    #[test]
+    fn the_html_of_a_message_escapes_the_markup() {
+        assert_eq!(
+            message_html("<b> & \"x\""),
+            "<p>&lt;b&gt; &amp; &quot;x&quot;</p>"
+        );
+    }
+
+    #[test]
+    fn the_html_of_a_message_keeps_one_paragraph_per_line() {
+        assert_eq!(message_html("uno\ndos"), "<p>uno</p><p>dos</p>");
+    }
+
+    #[test]
+    fn the_html_of_a_message_wraps_the_links_in_anchors() {
+        assert_eq!(
+            message_html("ver https://example.com ahora"),
+            "<p>ver <a href=\"https://example.com\">https://example.com</a> ahora</p>"
+        );
+    }
 
     #[test]
     fn the_hour_of_a_bubble_is_the_hour_of_the_zone_of_the_offset() {
