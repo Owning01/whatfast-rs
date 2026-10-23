@@ -133,15 +133,15 @@ jobs:
         run: |
           sudo apt-get update
           # gpui_wgpu usa font-kit: pkg-config tiene que encontrar fontconfig y
-          # freetype, o yeslogic-fontconfig-sys no compila.
+          # freetype, o yeslogic-fontconfig-sys no compila. rodio suena por
+          # ALSA en Linux: cpal busca la cabecera con pkg-config o el crate
+          # alsa-sys no compila.
           sudo apt-get install --yes \
             build-essential cmake clang lld pkg-config \
             libfontconfig-dev libfreetype-dev libfreetype6-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-xkb-dev libxau-dev libxdmcp-dev \
             libwayland-dev libx11-xcb-dev \
-            # rodio suena por ALSA en Linux: cpal busca la cabecera con
-            # pkg-config o el crate alsa-sys no compila.
             libasound2-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev
       - name: el sidecar en Go
