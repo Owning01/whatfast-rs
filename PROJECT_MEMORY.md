@@ -1097,3 +1097,5 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   `capture_key_down` no llega a verlo. Hay que interceptar la accion `Paste`
   con `capture_action` sobre la conversacion.
 - **Version**: 0.2.1, para publicar el release con estas tres cosas.
+- **Release**: `v0.2.1` salio en verde (windows y linux; macOS salteado) y
+  quedo como `latest`: los tres botones de la pagina responden 200.
