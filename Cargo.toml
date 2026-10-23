@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 # 1.88 is the floor of `opus-pure`, the pure-Rust encoder of the voice notes
 # (`whatfast-ui`): the rest of the workspace compiles with less.

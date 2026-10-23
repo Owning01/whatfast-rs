@@ -1338,3 +1338,21 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   Ninguno deja panic en el stderr y la conversacion cambia. El mas abre la
   busqueda y el foco llega al campo.
 - **Release**: v0.2.4 (Windows y Linux; macOS sigue fuera).
+
+
+## 2026-10-23 - El texto de los mensajes se selecciona y se copia
+
+- **Pedido**: el texto de la app no se podia seleccionar; hacia falta poder
+  arrastrar sobre un mensaje y copiarlo con Ctrl+C.
+- **Cambio**: `render_linkified_text` deja de armar una fila de divs por palabra
+  y usa `TextView` (gpui-component, HTML simple) con `selectable(true)`. La
+  seleccion del componente es de ventana: un arrastre puede cruzar varios
+  mensajes y el Copy del `Root` copia el texto elegido.
+- **HTML**: el texto se escapa (`&`, `<`, `>`, `"`, `'`) y cada URL del mensaje
+  queda en un `<a href>`; los enlaces siguen abriendo con el clic. Un parrafo
+  por linea porque el `<br>` de esa vista se pinta como un div vacio.
+- **Prueba**: 545 tests en verde (tres nuevos del armado del HTML). Con
+  `--fake-backend`, un arrastre sobre "Fast native message 947" y Ctrl+C dejo
+  ese texto en el portapapeles; un arrastre entre mensajes pinta la seleccion
+  en los tres.
+- **Release**: v0.2.5.

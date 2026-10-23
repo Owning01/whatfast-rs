@@ -8163,7 +8163,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -8171,14 +8171,14 @@ dependencies = [
 
 [[package]]
 name = "whatfast-i18n"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "whatfast-model"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "emojis",
  "image",
@@ -8191,7 +8191,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-protocol"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-channel",
  "prost",
@@ -8202,7 +8202,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-ui"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-channel",
