@@ -882,9 +882,17 @@ impl Whatfast {
         let tab_view = shell_view.clone();
         let tab_strip = cx.new(|cx| {
             TabStrip::new(cx, "whatfast", ui_scale).on_action(move |action, window, cx| {
+                // The action runs at the end of the effect cycle: every
+                // gesture of the strip ends in `sync_shell`, which updates the
+                // strip itself, and GPUI refuses to update an entity inside
+                // its own event handler. Answering the click right here closed
+                // the app with "cannot update TabStrip while it is already
+                // being updated".
                 tab_view.update(cx, |this, cx| {
-                    this.on_tab_action(action, window, cx);
-                    cx.notify();
+                    cx.defer_in(window, move |this, window, cx| {
+                        this.on_tab_action(action, window, cx);
+                        cx.notify();
+                    });
                 });
             })
         });
