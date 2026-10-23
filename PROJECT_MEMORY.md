@@ -1099,3 +1099,12 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
 - **Version**: 0.2.1, para publicar el release con estas tres cosas.
 - **Release**: `v0.2.1` salio en verde (windows y linux; macOS salteado) y
   quedo como `latest`: los tres botones de la pagina responden 200.
+
+## 2026-10-22 - El chip de la reaccion quita la propia
+
+- **Sintoma**: tocar el chip de una reaccion abria la lista de quienes
+  reaccionaron, tambien en las propias, y no habia forma de sacarla.
+- **Arreglo**: el clic en el chip propio manda la reaccion vacia (la quita) y
+  el clic en el chip de otro suma la propia, como el cliente de WhatsApp. La
+  lista de quienes reaccionaron queda en el boton derecho del mouse.
+- **Release**: `v0.2.2` en verde (windows y linux) e instalada en la maquina.
