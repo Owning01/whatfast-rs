@@ -45,6 +45,7 @@ use whatfast_protocol::{
     MessageSearchResult, RpcResponse, backend_event, rpc_request, rpc_response,
 };
 
+use crate::audio::{VoiceAudio, VoiceState};
 use crate::media_editor::{MediaEditor, MediaEditorEvent};
 use crate::members::MemberPanel;
 use crate::message_actions::{
@@ -107,6 +108,12 @@ pub(crate) const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) use crate::tokens::{MAX_UI_SCALE, MIN_UI_SCALE, UI_SCALE_STEP};
 /// How many conversations the recency history keeps.
 pub(crate) const MAX_RECENT_CHATS: usize = 10;
+/// The width of the column of the chats, before the scale of the screen.
+pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 384.0;
+/// The narrowest the column of the chats may be dragged to.
+pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 260.0;
+/// The widest the column of the chats may be dragged to.
+pub(crate) const MAX_SIDEBAR_WIDTH: f32 = 560.0;
 /// How long two wheel events may be apart to be part of the same gesture.
 pub(crate) const SMOOTH_SCROLL_INPUT_RESET: Duration = Duration::from_millis(180);
 /// How long one frame of the inertial scroll lasts.
@@ -667,6 +674,19 @@ pub(crate) struct Whatfast {
     /// The attachment that the user asked to open and that is not in the
     /// disk yet: it goes to the program of the system when it arrives.
     pub(crate) attachment_open_requested: Option<(String, String)>,
+    /// The width of the column of the chats, before the scale of the screen.
+    pub(crate) sidebar_width: f32,
+    /// Whether the column of the chats is hidden, so the conversation takes
+    /// the whole window.
+    pub(crate) sidebar_hidden: bool,
+    /// Whether the border of the column of the chats is being dragged.
+    pub(crate) sidebar_dragging: bool,
+    /// The voice note that the window is playing, when there is one.
+    pub(crate) voice: VoiceState,
+    /// The thread of the sound of the voice notes.
+    pub(crate) voice_audio: VoiceAudio,
+    /// Whether the tick that moves the wave of the voice note is running.
+    pub(crate) voice_tick: bool,
     /// Whether the health of the local database is being checked.
     pub(crate) integrity_checking: bool,
     /// Whether the library of stickers is being loaded.
@@ -917,6 +937,12 @@ impl Whatfast {
             attachment_download_attempted: HashSet::new(),
             attachment_failures: HashMap::new(),
             attachment_open_requested: None,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_hidden: false,
+            sidebar_dragging: false,
+            voice: VoiceState::default(),
+            voice_audio: VoiceAudio::new(),
+            voice_tick: false,
             integrity_checking: false,
             sticker_library_loading: false,
             newsletters_loading: false,
@@ -2193,10 +2219,31 @@ impl Whatfast {
                         response.local_path.clone(),
                     );
                     // The user asked to open the file before it was in the
-                    // disk: it goes to the program of the system now.
+                    // disk: a voice note plays here, and any other file goes
+                    // to the program of the system now.
                     if self.attachment_open_requested.as_ref() == Some(&key) {
                         self.attachment_open_requested = None;
-                        self.open_file_with_the_system(&response.local_path, cx);
+                        let voice = self
+                            .store
+                            .message(&message_id)
+                            .and_then(|message| match message.content.as_ref() {
+                                Some(whatfast_protocol::message::Content::Attachment(
+                                    attachment,
+                                )) => Some(attachment.voice_note),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        if voice {
+                            self.toggle_voice_note(
+                                &chat_id,
+                                &message_id,
+                                &response.local_path,
+                                window,
+                                cx,
+                            );
+                        } else {
+                            self.open_file_with_the_system(&response.local_path, cx);
+                        }
                     }
                 }
             }
@@ -4114,6 +4161,67 @@ impl Whatfast {
                 voice_note,
             }),
         );
+    }
+
+    /// Pega la imagen del portapapeles en la conversacion abierta.
+    ///
+    /// Devuelve `true` cuando el portapapeles tenia una imagen: el texto
+    /// sigue el camino normal del campo de escritura.
+    pub(crate) fn paste_image_from_clipboard(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        let Some(image) = item.entries.iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if image.bytes.len() as u64 > MAX_IMAGE_BYTES {
+            self.store.toast_error = Some("The pasted image is too big".into());
+            return true;
+        }
+        // El portapapeles de Windows entrega el mapa de bits como BMP, que
+        // WhatsApp no manda como foto: las demas formas se pasan a PNG.
+        let (bytes, extension) = match image.format {
+            gpui::ImageFormat::Png => (image.bytes.clone(), "png"),
+            gpui::ImageFormat::Jpeg => (image.bytes.clone(), "jpg"),
+            gpui::ImageFormat::Gif => (image.bytes.clone(), "gif"),
+            gpui::ImageFormat::Webp => (image.bytes.clone(), "webp"),
+            _ => {
+                let Ok(decoded) = image::load_from_memory(&image.bytes) else {
+                    self.store.toast_error = Some("The pasted image could not be read".into());
+                    return true;
+                };
+                let mut png = Vec::new();
+                if decoded
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .is_err()
+                {
+                    self.store.toast_error = Some("The pasted image could not be read".into());
+                    return true;
+                }
+                (png, "png")
+            }
+        };
+        // El archivo que pide el backend tiene que existir en el disco: la
+        // imagen del portapapeles se guarda en la carpeta temporal.
+        let directory = std::env::temp_dir().join("whatfast-pegado");
+        if std::fs::create_dir_all(&directory).is_err() {
+            self.store.toast_error = Some("The pasted image could not be saved".into());
+            return true;
+        }
+        let path = directory.join(format!("pegado-{}.{}", Uuid::new_v4(), extension));
+        if std::fs::write(&path, &bytes).is_err() {
+            self.store.toast_error = Some("The pasted image could not be saved".into());
+            return true;
+        }
+        self.send_image(path, window, cx);
+        true
     }
 
     /// Asks the user for a file and sends it to the open conversation.

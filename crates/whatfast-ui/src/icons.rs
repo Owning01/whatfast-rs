@@ -223,6 +223,26 @@ const PIN: Glyph = Glyph {
     overlay: &[],
 };
 
+/// The two bars that stop the sound of a voice note.
+///
+/// The player of the voice note is not in the web client either: the bubble
+/// of the reference plays the audio with the `<audio>` tag of the browser,
+/// which paints its own controls.
+const PAUSE: Glyph = Glyph {
+    path: "M8 5h3v14H8z M15 5h3v14h-3z",
+    main: &["M8 5h3v14H8z", "M15 5h3v14h-3z"],
+    cutout: &[],
+    overlay: &[],
+};
+
+/// The triangle that starts the sound of a voice note.
+const PLAY: Glyph = Glyph {
+    path: "M8 5l11 7-11 7z",
+    main: &["M8 5l11 7-11 7z"],
+    cutout: &[],
+    overlay: &[],
+};
+
 /// The handset of a call.
 ///
 /// The reference of WhatsApp Desktop draws the call of a conversation in the
@@ -414,8 +434,10 @@ pub enum WhatfastIcon {
     Minimize,
     NewChat,
     Palette,
+    Pause,
     Phone,
     Pin,
+    Play,
     Poll,
     Reply,
     ReplyPrivate,
@@ -435,7 +457,7 @@ pub enum WhatfastIcon {
 
 impl WhatfastIcon {
     /// Every icon of the set.
-    pub const ALL: [WhatfastIcon; 36] = [
+    pub const ALL: [WhatfastIcon; 38] = [
         WhatfastIcon::Archive,
         WhatfastIcon::Attach,
         WhatfastIcon::Bell,
@@ -455,8 +477,10 @@ impl WhatfastIcon {
         WhatfastIcon::Minimize,
         WhatfastIcon::NewChat,
         WhatfastIcon::Palette,
+        WhatfastIcon::Pause,
         WhatfastIcon::Phone,
         WhatfastIcon::Pin,
+        WhatfastIcon::Play,
         WhatfastIcon::Poll,
         WhatfastIcon::Reply,
         WhatfastIcon::ReplyPrivate,
@@ -496,8 +520,10 @@ impl WhatfastIcon {
             WhatfastIcon::Minimize => "minimize",
             WhatfastIcon::NewChat => "new-chat",
             WhatfastIcon::Palette => "palette",
+            WhatfastIcon::Pause => "pause",
             WhatfastIcon::Phone => "phone",
             WhatfastIcon::Pin => "pin",
+            WhatfastIcon::Play => "play",
             WhatfastIcon::Poll => "poll",
             WhatfastIcon::Reply => "reply",
             WhatfastIcon::ReplyPrivate => "reply-private",
@@ -584,8 +610,10 @@ impl WhatfastIcon {
             WhatfastIcon::Minimize => &MINIMIZE,
             WhatfastIcon::NewChat => &NEW_CHAT,
             WhatfastIcon::Palette => &PALETTE,
+            WhatfastIcon::Pause => &PAUSE,
             WhatfastIcon::Phone => &PHONE,
             WhatfastIcon::Pin => &PIN,
+            WhatfastIcon::Play => &PLAY,
             WhatfastIcon::Poll => &POLL,
             WhatfastIcon::Reply => &REPLY,
             WhatfastIcon::ReplyPrivate => &REPLY_PRIVATE,
@@ -874,11 +902,13 @@ mod tests {
                 "minimize",
                 "new-chat",
                 "palette",
-                // These two are not in the web client: the reference of
+                // These three are not in the web client: the reference of
                 // WhatsApp Desktop draws the calls in the header of the
-                // conversation and the client of the web has no calls.
+                // conversation, and the player of the voice note.
+                "pause",
                 "phone",
                 "pin",
+                "play",
                 "poll",
                 "reply",
                 "reply-private",

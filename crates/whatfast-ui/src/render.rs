@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    ClickEvent, Context, ElementId, Focusable as _, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, Pixels,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, canvas, div, img, point, px, rgb, rgba, size, uniform_list,
+    ClickEvent, Context, CursorStyle, ElementId, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent, MouseButton,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, Pixels, Render, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, canvas,
+    div, img, point, px, rgb, rgba, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -175,7 +176,38 @@ impl Whatfast {
     fn render_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let selected = self.store.selected_chat_id.clone();
         let compact = window.viewport_size().width < px(800. * self.ui_scale);
-        let show_sidebar = !compact || selected.is_none();
+        // La columna de los chats se esconde con su boton, pero no cuando no
+        // hay ninguna conversacion abierta: ahi no quedaria nada en la
+        // ventana y no habria donde tocar para traerla de vuelta.
+        let show_sidebar =
+            (!self.sidebar_hidden || selected.is_none()) && (!compact || selected.is_none());
+        // Mientras se arrastra el borde de la columna, el puntero se sigue
+        // con un escucha de la ventana entera: a los pocos pixeles el puntero
+        // sale del asa y el borde no recibiria mas movimientos.
+        if self.sidebar_dragging {
+            let moved = cx.entity().downgrade();
+            window.on_mouse_event(move |event: &MouseMoveEvent, _phase, _window, cx| {
+                let _ = moved.update(cx, |this, cx| {
+                    if !this.sidebar_dragging {
+                        return;
+                    }
+                    let rail = crate::navrail::column_width(this.ui_scale);
+                    let width = (f32::from(event.position.x) - f32::from(rail)) / this.ui_scale;
+                    this.sidebar_width =
+                        width.clamp(crate::app::MIN_SIDEBAR_WIDTH, crate::app::MAX_SIDEBAR_WIDTH);
+                    cx.notify();
+                });
+            });
+            let released = cx.entity().downgrade();
+            window.on_mouse_event(move |_: &MouseUpEvent, _phase, _window, cx| {
+                let _ = released.update(cx, |this, cx| {
+                    if this.sidebar_dragging {
+                        this.sidebar_dragging = false;
+                        cx.notify();
+                    }
+                });
+            });
+        }
         let show_conversation = !compact || selected.is_some();
         let states_open = self.states_open;
         let channels_open = self.channels_open;
@@ -217,19 +249,19 @@ impl Whatfast {
             // navigation of the web client, the same way.
             .child(self.nav_rail.clone())
             .when(show_sidebar, |root| {
-                if states_open {
+                root.child(div().relative().h_full().flex_none().child(if states_open {
                     // The states are their own view: they take the place of
                     // the column of chats.
-                    root.child(self.render_states(cx))
+                    self.render_states(cx)
                 } else if channels_open {
                     // The channels are their own view too.
-                    root.child(self.render_channels(cx))
+                    self.render_channels(cx)
                 } else if archived_open {
                     // The archived conversations are their own view.
-                    root.child(self.render_archived(cx))
+                    self.render_archived(cx)
                 } else {
-                    root.child(self.render_sidebar(cx))
-                }
+                    self.render_sidebar(cx)
+                }))
             })
             .when(show_conversation, |root| {
                 if self.selected_newsletter.is_some() {
@@ -250,6 +282,30 @@ impl Whatfast {
                         // conversation of a group.
                         .child(self.member_panel.render(self, cx))
                 }
+            })
+            // El asa del ancho de la columna: seis pixeles sobre su borde
+            // derecho y encima de todo, porque la barra de desplazamiento de
+            // la lista de los chats queda justo debajo.
+            .when(show_sidebar, |root| {
+                let rail = crate::navrail::column_width(self.ui_scale);
+                let left = rail + px(self.sidebar_width * self.ui_scale) - px(3.);
+                root.child(
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .top_0()
+                        .left(left)
+                        .h_full()
+                        .w(px(6. * self.ui_scale))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_dragging = true;
+                                cx.notify();
+                            }),
+                        ),
+                )
             })
             .when(filter_menu_open, |root| {
                 // Los filtros del menu: los de la fila de los chips y el de
@@ -444,8 +500,8 @@ impl Whatfast {
         let hover = cx.theme().muted;
         v_flex()
             .h_full()
-            .w(px(384. * scale))
-            .min_w(px(300. * scale))
+            .w(px(self.sidebar_width * scale))
+            .flex_none()
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -502,8 +558,8 @@ impl Whatfast {
         let hover = cx.theme().muted;
         v_flex()
             .h_full()
-            .w(px(384. * scale))
-            .min_w(px(300. * scale))
+            .w(px(self.sidebar_width * scale))
+            .flex_none()
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -737,8 +793,8 @@ impl Whatfast {
         let list_id = "archived-chat-list";
         v_flex()
             .h_full()
-            .w(px(384. * scale))
-            .min_w(px(300. * scale))
+            .w(px(self.sidebar_width * scale))
+            .flex_none()
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -1397,8 +1453,8 @@ impl Whatfast {
         let visible_for_list = visible_chat_ids.clone();
         v_flex()
             .h_full()
-            .w(px(384. * ui_scale))
-            .min_w(px(300. * ui_scale))
+            .w(px(self.sidebar_width * ui_scale))
+            .flex_none()
             .border_r_1()
             .border_color(cx.theme().border)
             .child(
@@ -1424,6 +1480,19 @@ impl Whatfast {
                             .child(
                                 h_flex()
                                     .gap_1()
+                                    // El boton que esconde la columna: la
+                                    // conversacion ocupa entonces toda la
+                                    // ventana.
+                                    .child(
+                                        Button::new("hide-sidebar")
+                                            .small()
+                                            .icon(WhatfastIcon::Sidebar)
+                                            .tooltip("Hide chat list")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.sidebar_hidden = true;
+                                                cx.notify();
+                                            })),
+                                    )
                                     .child(
                                         Button::new("settings")
                                             .small()
@@ -2117,6 +2186,17 @@ impl Whatfast {
             .h_full()
             .min_w_0()
             .relative()
+            // Ctrl+V con una imagen en el portapapeles la manda como foto de
+            // la conversacion. La accion se toma antes que el campo de
+            // escritura, que pega su texto cuando no hay imagen.
+            .capture_action(
+                cx.listener(|this, _: &gpui_component::input::Paste, window, cx| {
+                    if this.paste_image_from_clipboard(window, cx) {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
             // The strip of the open chats sits above the header of the
             // conversation, the same way the web client draws it.
             .child(self.tab_strip.clone())
@@ -2180,35 +2260,27 @@ impl Whatfast {
                                     ),
                             ),
                     )
-                    // Los botones de la derecha de la cabecera, como en la
-                    // referencia: la videollamada, la llamada, el buscador y
-                    // el menu de la conversacion.
+                    // Los botones de la derecha de la cabecera: el de la
+                    // columna de los chats cuando esta escondida, el buscador
+                    // y el menu de la conversacion. Las llamadas y las
+                    // videollamadas no estan: el backend todavia no las tiene,
+                    // asi que no se dibujan.
                     .child(
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            .child(
-                                Button::new("video-call")
-                                    .small()
-                                    .icon(WhatfastIcon::Video)
-                                    .tooltip("Video call")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.store.toast_error =
-                                            Some("The backend has no calls yet.".to_string());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("voice-call")
-                                    .small()
-                                    .icon(WhatfastIcon::Phone)
-                                    .tooltip("Call")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.store.toast_error =
-                                            Some("The backend has no calls yet.".to_string());
-                                        cx.notify();
-                                    })),
-                            )
+                            .when(self.sidebar_hidden, |row| {
+                                row.child(
+                                    Button::new("show-sidebar")
+                                        .small()
+                                        .icon(WhatfastIcon::Sidebar)
+                                        .tooltip("Show chat list")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sidebar_hidden = false;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("search-in-chat")
                                     .small()

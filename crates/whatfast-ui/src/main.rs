@@ -44,6 +44,7 @@ use gpui_component::Root;
 
 mod app;
 mod attachments;
+mod audio;
 mod emoji_recent;
 mod helpers;
 mod icons;

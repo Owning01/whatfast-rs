@@ -1075,3 +1075,25 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   imagenes con un dia. En pantalla chica los botones usan `flex: 0 0 auto`
   para no partir el texto, y `.btn-secondary` lleva un borde interno para
   distinguirse del fondo de la tarjeta de descarga.
+
+## 2026-10-22 - La nota de voz suena en el chat y la columna se acomoda
+
+- **Nota de voz**: se reproduce dentro de la burbuja (chip de 1x/1.5x/2x,
+  play y pausa, onda y reloj). El hilo `whatfast-audio` decodifica una vez
+  (Ogg Opus con `opus-decoder`; el resto con rodio) y empuja el PCM al
+  dispositivo con `rodio::Player`. La posicion la lleva un reloj propio, asi
+  la onda avanza pareja aunque el decodificador tarde. Sin dispositivo sale
+  un aviso y el chat sigue.
+- **Columna de chats**: se esconde con el boton del icono de panel y vuelve
+  con el mismo boton en la cabecera de la conversacion; el ancho se arrastra
+  desde el borde (260..560). El arrastre se sigue con `window.on_mouse_event`
+  porque el puntero sale del asa de seis pixeles enseguida.
+- **Cabecera**: se fueron los botones de llamada y videollamada; quedan el
+  buscador y el menu (y el de miembros en los grupos).
+- **Pegado**: Ctrl+V con una imagen en el portapapeles la manda como foto.
+  Windows entrega el mapa de bits como BMP y `send_image` solo acepta
+  JPEG, PNG, GIF o WebP: la imagen se pasa a PNG con el crate `image`.
+- **Trampa**: el campo de escritura se queda con Ctrl+V; un
+  `capture_key_down` no llega a verlo. Hay que interceptar la accion `Paste`
+  con `capture_action` sobre la conversacion.
+- **Version**: 0.2.1, para publicar el release con estas tres cosas.
