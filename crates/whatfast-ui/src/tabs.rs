@@ -863,6 +863,10 @@ impl TabStrip {
             .cursor_pointer()
             .hover(|style| style.bg(hover).text_color(foreground))
             .on_click(cx.listener(move |this, _event, window, cx| {
+                // El riel entrega el clic a cada caja que lo contiene, no solo
+                // a la de arriba: sin esto, el clic de la X llegaba tambien a
+                // la pestaña, que volvia a abrir el chat y deshacia el cierre.
+                cx.stop_propagation();
                 this.close_and_report(&chat_id, window, cx);
             }))
             .child(Icon::new(IconName::Close).with_size(px(CLOSE_ICON_SIZE * scale)))

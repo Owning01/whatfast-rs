@@ -4108,6 +4108,24 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_chat_with(chat_id, true, window, cx);
+    }
+
+    /// Selects a chat that is already open in a tab.
+    ///
+    /// The strip keeps the order the user gave it: the recency history is not
+    /// rewritten, so a click on a tab does not move it to the front.
+    fn select_open_tab(&mut self, chat_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_chat_with(chat_id, false, window, cx);
+    }
+
+    fn open_chat_with(
+        &mut self,
+        chat_id: String,
+        record_recent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.store.chat(&chat_id).is_none() {
             return;
         }
@@ -4115,7 +4133,9 @@ impl Whatfast {
         // bandeja: solo se vacia cuando el usuario se va a otra.
         let switching_chat = self.store.selected_chat_id.as_deref() != Some(chat_id.as_str());
         self.show_chat_in_the_column(&chat_id);
-        record_recent_chat(&mut self.recent_chat_ids, &chat_id);
+        if record_recent {
+            record_recent_chat(&mut self.recent_chat_ids, &chat_id);
+        }
         self.load_selected_chat(chat_id.clone());
         // The pictures of the tray belong to the conversation that was open:
         // the reference drops them when the user moves to another chat.
@@ -5848,10 +5868,21 @@ impl Whatfast {
     ) {
         match action {
             TabAction::Select { chat_id } => {
-                self.open_chat(chat_id, window, cx);
+                self.select_open_tab(chat_id, window, cx);
             }
-            TabAction::Close { chat_id, .. } => {
+            TabAction::Close {
+                chat_id,
+                next_chat_id,
+                ..
+            } => {
                 self.recent_chat_ids.retain(|id| id != &chat_id);
+                // The closed tab gives the conversation to its neighbour: the
+                // same rule the strip already used to pick the next one.
+                if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+                    && let Some(next_chat_id) = next_chat_id
+                {
+                    self.select_open_tab(next_chat_id, window, cx);
+                }
             }
             TabAction::Reorder { chat_id, index, .. } => {
                 self.move_recent_chat(&chat_id, index);
