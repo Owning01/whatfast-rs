@@ -122,6 +122,10 @@ pub(crate) enum MessageAction {
     Pin,
     /// Take the message out of the pinned ones.
     Unpin,
+    /// Star the message, so it stays findable in the profile.
+    Star,
+    /// Take the star off the message.
+    Unstar,
 }
 
 /// One row of the menu of a message.
@@ -168,6 +172,8 @@ pub(crate) struct MessageMenu {
     editable: bool,
     /// The message is pinned in the conversation.
     pinned: bool,
+    /// The message is starred in the profile.
+    starred: bool,
     /// The instant in which the window of the edit closes.
     edit_deadline_ms: i64,
     /// The scale of the interface.
@@ -208,6 +214,7 @@ impl std::fmt::Debug for MessageMenu {
             .field("has_text", &self.has_text)
             .field("editable", &self.editable)
             .field("pinned", &self.pinned)
+            .field("starred", &self.starred)
             .field("edit_deadline_ms", &self.edit_deadline_ms)
             .field("scale", &self.scale)
             .finish_non_exhaustive()
@@ -223,6 +230,7 @@ impl MessageMenu {
         chat_id: impl Into<String>,
         message: &Message,
         pinned: bool,
+        starred: bool,
         now_ms: i64,
         scale: f32,
     ) -> Self {
@@ -248,6 +256,7 @@ impl MessageMenu {
             text,
             editable,
             pinned,
+            starred,
             edit_deadline_ms: message.timestamp_ms + EDIT_WINDOW_MS,
             scale: normalized_ui_scale(scale),
             position: point(px(0.), px(0.)),
@@ -301,6 +310,11 @@ impl MessageMenu {
     /// The message is pinned, or it is not.
     pub(crate) fn set_pinned(&mut self, pinned: bool) {
         self.pinned = pinned;
+    }
+
+    /// The message is starred, or it is not.
+    pub(crate) fn starred(&self) -> bool {
+        self.starred
     }
 
     /// The message can still be edited.
@@ -359,6 +373,18 @@ impl MessageMenu {
                 action: MessageAction::Unpin,
                 label: "Unpin message",
                 enabled: self.pinned,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::Star,
+                label: "Star message",
+                enabled: forwardable && !self.starred,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::Unstar,
+                label: "Unstar message",
+                enabled: self.starred,
                 danger: false,
             },
             MessageMenuItem {
@@ -1593,7 +1619,11 @@ impl AttachmentBar {
         let selected = cx.prompt_for_new_path(&directory, Some(file_name.as_str()));
         cx.spawn_in(window, async move |weak, window| {
             let destination = selected.await.ok()?.ok()??;
-            let outcome = std::fs::copy(&path, &destination);
+            // The picker only returns the path: the bytes of a video can take
+            // seconds to travel and must not stop the painting of the window.
+            let copy_path = path.clone();
+            let copy_destination = destination.clone();
+            let outcome = smol::unblock(move || std::fs::copy(&copy_path, &copy_destination)).await;
             window
                 .update(|window, cx| {
                     weak.update(cx, |this, cx| {
@@ -1790,8 +1820,8 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_has_the_eight_rows_of_the_oracle() {
-        let menu = MessageMenu::new("chat-1", &own_message(0), false, 0, 1.0);
+    fn the_menu_has_the_rows_of_the_oracle() {
+        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
         let actions: Vec<MessageAction> = menu.items().iter().map(action_of).collect();
         assert_eq!(
             actions,
@@ -1802,6 +1832,8 @@ mod tests {
                 MessageAction::Copy,
                 MessageAction::Pin,
                 MessageAction::Unpin,
+                MessageAction::Star,
+                MessageAction::Unstar,
                 MessageAction::Delete,
                 MessageAction::DeleteForEveryone,
             ]
@@ -1810,8 +1842,8 @@ mod tests {
 
     #[test]
     fn the_menu_is_the_same_for_a_message_of_the_user_and_for_one_of_another() {
-        let mine = MessageMenu::new("chat-1", &own_message(0), false, 0, 1.0);
-        let other = MessageMenu::new("chat-1", &other_message(0), false, 0, 1.0);
+        let mine = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
+        let other = MessageMenu::new("chat-1", &other_message(0), false, false, 0, 1.0);
         let labels = |menu: &MessageMenu| {
             menu.items()
                 .into_iter()
@@ -1823,7 +1855,7 @@ mod tests {
 
     #[test]
     fn the_rows_of_a_message_of_another_cannot_be_pressed() {
-        let menu = MessageMenu::new("chat-1", &other_message(0), false, 0, 1.0);
+        let menu = MessageMenu::new("chat-1", &other_message(0), false, false, 0, 1.0);
         assert!(enabled(&menu, MessageAction::Reply));
         assert!(enabled(&menu, MessageAction::Forward));
         assert!(enabled(&menu, MessageAction::Copy));
@@ -1835,8 +1867,18 @@ mod tests {
     }
 
     #[test]
+    fn a_message_is_starred_or_not_from_its_menu() {
+        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
+        assert!(enabled(&menu, MessageAction::Star));
+        assert!(!enabled(&menu, MessageAction::Unstar));
+        let starred = MessageMenu::new("chat-1", &own_message(0), false, true, 0, 1.0);
+        assert!(!enabled(&starred, MessageAction::Star));
+        assert!(enabled(&starred, MessageAction::Unstar));
+    }
+
+    #[test]
     fn the_rows_of_a_message_of_the_user_can_be_pressed() {
-        let menu = MessageMenu::new("chat-1", &own_message(0), false, 0, 1.0);
+        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
         assert!(enabled(&menu, MessageAction::Edit));
         assert!(enabled(&menu, MessageAction::DeleteForEveryone));
     }
@@ -1844,13 +1886,14 @@ mod tests {
     #[test]
     fn the_edit_is_closed_after_the_window_of_twenty_minutes() {
         let now = 1_000_000i64;
-        let fresh = MessageMenu::new("chat-1", &own_message(now), false, now, 1.0);
+        let fresh = MessageMenu::new("chat-1", &own_message(now), false, false, now, 1.0);
         assert!(fresh.editable());
         assert_eq!(fresh.edit_deadline_ms(), now + EDIT_WINDOW_MS);
 
         let late = MessageMenu::new(
             "chat-1",
             &own_message(now),
+            false,
             false,
             now + EDIT_WINDOW_MS,
             1.0,
@@ -1863,17 +1906,17 @@ mod tests {
     fn the_edit_is_closed_when_the_message_is_not_a_text() {
         let mut message = own_message(0);
         message.content = Some(Content::Image(Default::default()));
-        let menu = MessageMenu::new("chat-1", &message, false, 0, 1.0);
+        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
         assert!(!menu.editable());
     }
 
     #[test]
     fn a_pinned_message_can_be_unpinned_and_not_pinned_again() {
-        let pinned = MessageMenu::new("chat-1", &own_message(0), true, 0, 1.0);
+        let pinned = MessageMenu::new("chat-1", &own_message(0), true, false, 0, 1.0);
         assert!(enabled(&pinned, MessageAction::Unpin));
         assert!(!enabled(&pinned, MessageAction::Pin));
 
-        let unpinned = MessageMenu::new("chat-1", &own_message(0), false, 0, 1.0);
+        let unpinned = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
         assert!(enabled(&unpinned, MessageAction::Pin));
         assert!(!enabled(&unpinned, MessageAction::Unpin));
     }
@@ -1882,7 +1925,7 @@ mod tests {
     fn a_deleted_message_cannot_be_deleted_again() {
         let mut message = own_message(0);
         message.revoked = true;
-        let menu = MessageMenu::new("chat-1", &message, false, 0, 1.0);
+        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
         assert!(!enabled(&menu, MessageAction::Delete));
         assert!(!enabled(&menu, MessageAction::DeleteForEveryone));
         assert!(!enabled(&menu, MessageAction::Forward));
@@ -1895,14 +1938,14 @@ mod tests {
             from_me: true,
             ..Message::default()
         };
-        let menu = MessageMenu::new("chat-1", &message, false, 0, 1.0);
+        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
         assert!(!enabled(&menu, MessageAction::Forward));
         assert!(!enabled(&menu, MessageAction::Pin));
     }
 
     #[test]
     fn the_menu_keeps_the_message_it_is_of() {
-        let menu = MessageMenu::new("chat-7", &own_message(0), false, 0, 1.0);
+        let menu = MessageMenu::new("chat-7", &own_message(0), false, false, 0, 1.0);
         assert_eq!(menu.chat_id(), "chat-7");
         assert_eq!(menu.message_id(), "message-1");
         assert!(menu.is_from_me());
@@ -1911,7 +1954,7 @@ mod tests {
         // clipboard.
         assert_eq!(menu.text(), "hello");
 
-        let mut pinned = MessageMenu::new("chat-7", &own_message(0), false, 0, 1.0);
+        let mut pinned = MessageMenu::new("chat-7", &own_message(0), false, false, 0, 1.0);
         pinned.set_pinned(true);
         assert!(pinned.pinned());
     }

@@ -29,6 +29,7 @@
 //!   the clip of the composer
 //! - `navrail`: the column of icons at the left
 //! - `newsletters`: the panel of the channels
+//! - `recording`: the capture of the voice notes of the composer
 //! - `statuses`: the strip of the states of the contacts
 //! - `stickers`: the tray of the stickers
 //! - `tabs`: the strip of open chats
@@ -59,6 +60,7 @@ mod message_actions;
 mod navrail;
 mod newsletters;
 mod notifications;
+mod recording;
 mod render;
 mod rpc;
 mod statuses;

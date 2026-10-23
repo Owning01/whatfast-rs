@@ -41,7 +41,7 @@ use whatfast_model::{
     favorites,
     model::{CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
     settings::{self, Density, Settings},
-    sticker,
+    starred, sticker,
 };
 use whatfast_protocol::{
     AttachmentKind, BackendEvent, Chat, ChatParticipant, ConnectionState, ContactSearchResult,
@@ -59,6 +59,7 @@ use crate::message_actions::{
 use crate::navrail::{LinkState, NavAction, NavRail};
 use crate::newsletters::NewsletterPanel;
 use crate::notifications::{Note, Notifier};
+use crate::recording::{MAX_DURATION_SECONDS, MIN_DURATION_SECONDS, RecorderEvent, VoiceRecorder};
 use crate::rpc::{
     BridgeMessage, OutgoingAttachment, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY,
     RpcClient, RpcIncoming, TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
@@ -240,6 +241,36 @@ pub(crate) struct ImageViewer {
     pub(crate) path: String,
     pub(crate) caption: String,
     pub(crate) sticker: bool,
+}
+
+/// The voice note that the microphone is keeping.
+pub(crate) struct RecordingState {
+    /// When the capture started: the clock of the composer counts from here.
+    pub(crate) started: Instant,
+    /// Whether the user already pressed send and the encoder is working.
+    pub(crate) finishing: bool,
+    /// The conversation where the note started: the note goes there even if
+    /// the user moves to another chat while the encoder finishes.
+    pub(crate) chat_id: String,
+    /// The user threw the note away: the file is deleted when it comes out
+    /// of the encoder, even if a `Stop` was already queued before the
+    /// `Cancel`.
+    pub(crate) discarded: bool,
+}
+
+impl RecordingState {
+    /// The length of the note so far, in seconds.
+    pub(crate) fn elapsed_seconds(&self) -> f32 {
+        self.started.elapsed().as_secs_f32()
+    }
+}
+
+/// The conversation that gets the note, or `None` when the note was thrown
+/// away before the encoder finished.
+fn note_target(state: Option<&RecordingState>) -> Option<&str> {
+    state
+        .filter(|state| !state.discarded)
+        .map(|state| state.chat_id.as_str())
 }
 
 /// What the user wrote in one conversation, and what it replies to.
@@ -702,6 +733,9 @@ pub(crate) struct Whatfast {
     /// The attachment that the user asked to open and that is not in the
     /// disk yet: it goes to the program of the system when it arrives.
     pub(crate) attachment_open_requested: Option<(String, String)>,
+    /// The attachment that the user asked to download: it is copied to the
+    /// folder of the downloads when the file arrives, without opening it.
+    pub(crate) attachment_save_requested: Option<(String, String)>,
     /// The width of the column of the chats, before the scale of the screen.
     pub(crate) sidebar_width: f32,
     /// Whether the column of the chats is hidden, so the conversation takes
@@ -715,6 +749,12 @@ pub(crate) struct Whatfast {
     pub(crate) voice_audio: VoiceAudio,
     /// Whether the tick that moves the wave of the voice note is running.
     pub(crate) voice_tick: bool,
+    /// The thread of the microphone that records the notes.
+    pub(crate) recorder: VoiceRecorder,
+    /// The note that is being recorded, when there is one.
+    pub(crate) recording: Option<RecordingState>,
+    /// Whether the tick that counts the recording is running.
+    pub(crate) recording_tick: bool,
     /// Whether the health of the local database is being checked.
     pub(crate) integrity_checking: bool,
     /// Whether the library of stickers is being loaded.
@@ -1028,12 +1068,16 @@ impl Whatfast {
             attachment_download_attempted: HashSet::new(),
             attachment_failures: HashMap::new(),
             attachment_open_requested: None,
+            attachment_save_requested: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hidden: false,
             sidebar_dragging: false,
             voice: VoiceState::default(),
             voice_audio: VoiceAudio::new(),
             voice_tick: false,
+            recorder: VoiceRecorder::new(),
+            recording: None,
+            recording_tick: false,
             integrity_checking: false,
             sticker_library_loading: false,
             newsletters_loading: false,
@@ -1066,6 +1110,9 @@ impl Whatfast {
         // from the file of the profile and not from the sidecar.
         this.store
             .set_favorite_chat_ids(favorites::load_favorites());
+        // The stars belong to the profile too: the linked device has no RPC
+        // for the star of WhatsApp.
+        this.store.set_starred_messages(starred::load_starred());
         this.request(
             rpc_request::Request::Hello(whatfast_protocol::HelloRequest {
                 desktop_version: env!("CARGO_PKG_VERSION").into(),
@@ -1422,9 +1469,13 @@ impl Whatfast {
                     chat_id,
                     message_id,
                 } => {
+                    let key = (chat_id.clone(), message_id.clone());
                     self.attachment_open_requested = None;
+                    // The arrow of the download waits for this file: a
+                    // download that never arrived must not save a later one.
+                    forget_attachment_request(&mut self.attachment_save_requested, &key);
                     self.attachment_failures.insert(
-                        (chat_id.clone(), message_id.clone()),
+                        key,
                         "Downloading the file timed out · Click to retry".into(),
                     );
                 }
@@ -1924,9 +1975,13 @@ impl Whatfast {
                 message_id,
             } = &pending
             {
+                let key = (chat_id.clone(), message_id.clone());
                 self.attachment_open_requested = None;
+                // Same as the timeout: the save that was waiting for this
+                // file is forgotten, so a later download does not save it.
+                forget_attachment_request(&mut self.attachment_save_requested, &key);
                 self.attachment_failures.insert(
-                    (chat_id.clone(), message_id.clone()),
+                    key,
                     if error.retryable {
                         "Couldn't download the file · Click to retry".into()
                     } else {
@@ -2319,6 +2374,7 @@ impl Whatfast {
                 let key = (chat_id.clone(), message_id.clone());
                 if response.local_path.is_empty() {
                     self.attachment_open_requested = None;
+                    self.attachment_save_requested = None;
                     self.attachment_failures
                         .insert(key, "That file is no longer available".into());
                 } else {
@@ -2354,6 +2410,28 @@ impl Whatfast {
                         } else {
                             self.open_file_with_the_system(&response.local_path, cx);
                         }
+                    }
+                    // The user pressed the arrow of the download before the
+                    // file was here: it goes to the folder now, without
+                    // opening it.
+                    if self.attachment_save_requested.as_ref() == Some(&key) {
+                        self.attachment_save_requested = None;
+                        let name =
+                            self.store.message(&message_id).and_then(|message| {
+                                match message.content.as_ref() {
+                                    Some(whatfast_protocol::message::Content::Attachment(
+                                        attachment,
+                                    )) => (!attachment.file_name.trim().is_empty())
+                                        .then(|| attachment.file_name.clone()),
+                                    _ => None,
+                                }
+                            });
+                        self.save_file_to_downloads(
+                            PathBuf::from(&response.local_path),
+                            name,
+                            window,
+                            cx,
+                        );
                     }
                 }
             }
@@ -4035,6 +4113,16 @@ impl Whatfast {
         // the reference drops them when the user moves to another chat.
         if switching_chat {
             self.pending_images.clear();
+            // The note belongs to the conversation where it started: leaving
+            // the chat drops it, the same way the reference does. One that is
+            // already being coded is kept and sent to its own conversation.
+            if self
+                .recording
+                .as_ref()
+                .is_some_and(|state| !state.finishing)
+            {
+                self.discard_voice_recording();
+            }
         }
         let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
         self.replying_to_message_id = draft.reply_to_message_id;
@@ -4198,6 +4286,10 @@ impl Whatfast {
         self.attachment_download_attempted.clear();
         self.attachment_failures.clear();
         self.attachment_open_requested = None;
+        self.attachment_save_requested = None;
+        // The state stays until the thread answers: a note that was already
+        // being coded is deleted when its file comes out, never sent.
+        self.discard_voice_recording();
         self.integrity_checking = false;
         self.sticker_library_loading = false;
         self.newsletters_loading = false;
@@ -4675,6 +4767,23 @@ impl Whatfast {
             self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
+        self.send_attachment_to(chat_id, path, kind, caption, voice_note);
+    }
+
+    /// Sends the note that the microphone finished coding to the conversation
+    /// where it started, not to the one that happens to be open now.
+    fn send_voice_note(&mut self, chat_id: String, path: PathBuf) {
+        self.send_attachment_to(chat_id, path, AttachmentKind::Audio, String::new(), true);
+    }
+
+    fn send_attachment_to(
+        &mut self,
+        chat_id: String,
+        path: PathBuf,
+        kind: AttachmentKind,
+        caption: String,
+        voice_note: bool,
+    ) {
         if self.store.connection != ConnectionState::Connected {
             self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
@@ -4692,6 +4801,146 @@ impl Whatfast {
                 voice_note,
             }),
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // The voice notes that the composer records
+    // ---------------------------------------------------------------------
+
+    /// Opens the microphone and starts keeping the note.
+    pub(crate) fn start_voice_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.is_some() {
+            return;
+        }
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
+            cx.notify();
+            return;
+        }
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
+            cx.notify();
+            return;
+        };
+        self.store.toast_error = None;
+        self.recorder.start();
+        self.recording = Some(RecordingState {
+            started: Instant::now(),
+            finishing: false,
+            chat_id,
+            discarded: false,
+        });
+        self.start_recording_tick(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the microphone and codes the note.
+    pub(crate) fn stop_voice_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.recording.as_mut() else {
+            return;
+        };
+        if state.finishing {
+            return;
+        }
+        state.finishing = true;
+        self.recorder.stop();
+        cx.notify();
+    }
+
+    /// Throws the note away without sending it.
+    pub(crate) fn cancel_voice_recording(&mut self, cx: &mut Context<Self>) {
+        self.discard_voice_recording();
+        cx.notify();
+    }
+
+    /// Marks the note as thrown away and closes the microphone. The state
+    /// stays until the thread answers, so a `Finished` that was already on
+    /// its way still finds the file and deletes it instead of sending it.
+    fn discard_voice_recording(&mut self) {
+        let Some(state) = self.recording.as_mut() else {
+            return;
+        };
+        if state.discarded {
+            return;
+        }
+        state.discarded = true;
+        self.recorder.cancel();
+    }
+
+    /// Reads what the thread of the microphone says and counts the clock.
+    pub(crate) fn tick_recording(&mut self, cx: &mut Context<Self>) {
+        while let Some(event) = self.recorder.try_recv() {
+            match event {
+                RecorderEvent::Started => {}
+                RecorderEvent::Finished { path, duration } => {
+                    let state = self.recording.take();
+                    let target = note_target(state.as_ref()).map(str::to_owned);
+                    match target {
+                        Some(chat_id) if duration >= MIN_DURATION_SECONDS => {
+                            self.send_voice_note(chat_id, path);
+                        }
+                        Some(_) => {
+                            let _ = std::fs::remove_file(&path);
+                            self.store.toast_error =
+                                Some(i18n::t("The voice note is too short").into());
+                        }
+                        // The note was thrown away while it was being coded:
+                        // the file is removed and nothing is sent.
+                        None => {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+                RecorderEvent::Failed(message) => {
+                    let discarded = self.recording.as_ref().is_some_and(|state| state.discarded);
+                    self.recording = None;
+                    if !discarded {
+                        self.store.toast_error = Some(message);
+                    }
+                }
+                RecorderEvent::Cancelled => {
+                    self.recording = None;
+                }
+            }
+        }
+        // The note of the reference stops on its own at fifteen minutes: the
+        // client keeps five, because the samples wait in memory.
+        let too_long = self.recording.as_ref().is_some_and(|state| {
+            !state.finishing && !state.discarded && state.elapsed_seconds() >= MAX_DURATION_SECONDS
+        });
+        if too_long {
+            self.stop_voice_recording(cx);
+        }
+        cx.notify();
+    }
+
+    /// Starts the tick that counts the recording, once per window.
+    fn start_recording_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_tick {
+            return;
+        }
+        self.recording_tick = true;
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            loop {
+                Timer::after(Duration::from_millis(100)).await;
+                let recording = window.update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        this.tick_recording(cx);
+                        let recording = this.recording.is_some();
+                        if !recording {
+                            this.recording_tick = false;
+                        }
+                        recording
+                    })
+                });
+                match recording {
+                    Ok(Ok(true)) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
     }
 
     /// Pega la imagen del portapapeles en la bandeja del compositor.
@@ -4877,18 +5126,17 @@ impl Whatfast {
     /// copy never overwrites a file: a number goes before the extension.
     pub(crate) fn save_message_attachment(
         &mut self,
+        chat_id: String,
         message_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) =
+        let Some(attachment) =
             self.store
                 .message(&message_id)
                 .and_then(|message| match message.content.as_ref() {
-                    Some(whatfast_protocol::message::Content::Attachment(attachment))
-                        if !attachment.local_path.is_empty() =>
-                    {
-                        Some(PathBuf::from(&attachment.local_path))
+                    Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
+                        Some(attachment.clone())
                     }
                     _ => None,
                 })
@@ -4897,14 +5145,65 @@ impl Whatfast {
             cx.notify();
             return;
         };
-        if !source.is_file() {
+        if !attachment.local_path.is_empty() && Path::new(&attachment.local_path).is_file() {
+            let name =
+                (!attachment.file_name.trim().is_empty()).then(|| attachment.file_name.clone());
+            self.save_file_to_downloads(PathBuf::from(&attachment.local_path), name, window, cx);
+            return;
+        }
+        // The file is not in the disk yet: the arrow asks for the download
+        // and the copy happens when the file arrives, without opening it.
+        let key = (chat_id.clone(), message_id.clone());
+        self.store
+            .set_message_attachment_path(&chat_id, &message_id, String::new());
+        self.attachment_failures.remove(&key);
+        self.attachment_download_attempted.remove(&key);
+        self.attachment_save_requested = Some(key);
+        self.load_message_attachment(chat_id, message_id);
+        cx.notify();
+    }
+
+    /// Saves one picture of the viewer into the folder of the downloads.
+    pub(crate) fn save_image_to_downloads(
+        &mut self,
+        path: String,
+        caption: String,
+        sticker: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if path.is_empty() || !Path::new(&path).is_file() {
             self.store.toast_error = Some(i18n::t("That file is no longer available").into());
             cx.notify();
             return;
         }
+        let stem = {
+            let caption = caption.trim();
+            if caption.is_empty() {
+                if sticker {
+                    "sticker".to_string()
+                } else {
+                    "photo".to_string()
+                }
+            } else {
+                caption.chars().take(60).collect::<String>()
+            }
+        };
+        self.save_file_to_downloads(PathBuf::from(path), Some(stem), window, cx);
+    }
+
+    /// Copies one file into the folder of the downloads, asking for it when
+    /// the settings do not name one.
+    fn save_file_to_downloads(
+        &mut self,
+        source: PathBuf,
+        suggested_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let configured = self.settings.download_dir.trim().to_string();
         if !configured.is_empty() {
-            self.copy_attachment_to(&source, Path::new(&configured), cx);
+            self.copy_attachment_to(&source, Path::new(&configured), suggested_name, window, cx);
             return;
         }
         let selected = cx.prompt_for_paths(PathPromptOptions {
@@ -4918,9 +5217,15 @@ impl Whatfast {
             let paths = selected.await.ok()?.ok()??;
             let directory = paths.into_iter().next()?;
             window
-                .update(|_window, cx| {
+                .update(|window, cx| {
                     view.update(cx, |this, cx| {
-                        this.copy_attachment_to(&source, &directory, cx);
+                        this.copy_attachment_to(
+                            &source,
+                            &directory,
+                            suggested_name.clone(),
+                            window,
+                            cx,
+                        );
                         cx.notify();
                     })
                 })
@@ -4930,45 +5235,114 @@ impl Whatfast {
     }
 
     /// Copies the file, with a number when the name is taken.
-    fn copy_attachment_to(&mut self, source: &Path, directory: &Path, cx: &mut Context<Self>) {
-        let Some(name) = source
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
+    ///
+    /// The copy runs on the executor of the background: a video of a few
+    /// hundred megabytes takes long enough to freeze the window if the bytes
+    /// travelled in the thread of the interface.
+    fn copy_attachment_to(
+        &mut self,
+        source: &Path,
+        directory: &Path,
+        suggested_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The name of the profile wins: the cache of the backend names the
+        // files by hash and the user expects the name of the document, or the
+        // caption of the picture. A name without an extension takes the one
+        // of the file that is copied.
+        let mut name = suggested_name
+            .as_deref()
+            .map(sanitize_file_name)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                source
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+        if let Some(name) = name.as_mut()
+            && Path::new(name.as_str()).extension().is_none()
+            && let Some(extension) = source.extension()
+            && !extension.is_empty()
+        {
+            name.push('.');
+            name.push_str(&extension.to_string_lossy());
+        }
+        let Some(name) = name else {
             self.store.toast_error = Some(i18n::t("The file could not be saved").into());
             return;
         };
-        let stem = source
+        let stem = Path::new(&name)
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| name.clone());
-        let extension = source
+        let extension = Path::new(&name)
             .extension()
             .map(|extension| format!(".{}", extension.to_string_lossy()))
             .unwrap_or_default();
-        let mut destination = directory.join(&name);
-        let mut counter = 1;
-        while destination.exists() {
-            destination = directory.join(format!("{stem} ({counter}){extension}"));
-            counter += 1;
-        }
-        match std::fs::copy(source, &destination) {
-            Ok(_) => {
-                self.store.toast_error = None;
-                self.store.toast_info = Some(i18n::t_args(
-                    "Saved to {path}",
-                    &[("path", &destination.display().to_string())],
-                ));
-                self.clear_toast_info_later(cx);
+        let source = source.to_path_buf();
+        let directory = directory.to_path_buf();
+        let copy = cx.background_spawn(async move {
+            // Three tries cover the double click: the second copy finds the
+            // name taken by the first one and only changes the number.
+            let mut counter = 1;
+            let mut last_error = None;
+            for _ in 0..3 {
+                let mut destination = directory.join(&name);
+                while destination.exists() {
+                    destination = directory.join(format!("{stem} ({counter}){extension}"));
+                    counter += 1;
+                }
+                // A copy that dies halfway leaves a `.part` file, never half
+                // of the destination: the rename is the instant that makes
+                // the file visible in the folder.
+                let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
+                let result = std::fs::copy(&source, &partial)
+                    .and_then(|_| std::fs::rename(&partial, &destination));
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&partial);
+                }
+                match result {
+                    Ok(()) => return Ok(destination),
+                    // Another copy of the same file won the name: the loop
+                    // picks the next one.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            Err(error) => {
-                self.store.toast_error = Some(format!(
-                    "{}: {error}",
-                    i18n::t("The file could not be saved")
-                ));
-            }
-        }
-        cx.notify();
+            Err(last_error.unwrap_or_else(|| std::io::Error::other("the name stayed taken")))
+        });
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let result = copy.await;
+            window
+                .update(|_window, cx| {
+                    view.update(cx, |this, cx| {
+                        match result {
+                            Ok(destination) => {
+                                this.store.toast_error = None;
+                                this.store.toast_info = Some(i18n::t_args(
+                                    "Saved to {path}",
+                                    &[("path", &destination.display().to_string())],
+                                ));
+                                this.clear_toast_info_later(cx);
+                            }
+                            Err(error) => {
+                                this.store.toast_error = Some(format!(
+                                    "{}: {error}",
+                                    i18n::t("The file could not be saved")
+                                ));
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok()
+                })
+                .ok()
+        })
+        .detach();
     }
 
     /// Takes the green notice out after a moment.
@@ -5590,24 +5964,44 @@ impl Whatfast {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let prepared = std::fs::create_dir_all(parent)
-            .map_err(|error| error.to_string())
-            .and_then(|()| crate::media_editor::apply_edit(&source, &plan, &destination));
-        match prepared {
-            Ok(()) => {
-                // The editor was opened over a picture of the tray: the
-                // edited one takes its place, with the options and the
-                // caption the user already chose.
-                if !self.pending_images.replace(&source, destination.clone()) {
-                    self.stage_images(vec![destination], window, cx);
-                } else {
-                    self.refresh_composer_placeholder(window, cx);
-                }
-            }
-            Err(error) => {
-                self.store.toast_error = Some(error);
-            }
-        }
+        // Decoding, rotating, cropping and encoding a twelve-megapixel photo
+        // takes hundreds of milliseconds: the pixels travel in the background
+        // so the window keeps painting while the edit is written.
+        let task_source = source.clone();
+        let edited = cx.background_spawn(async move {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    crate::media_editor::apply_edit(&task_source, &plan, &destination)
+                })?;
+            Ok::<std::path::PathBuf, String>(destination)
+        });
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let prepared = edited.await;
+            window
+                .update(|window, cx| {
+                    view.update(cx, |this, cx| {
+                        match prepared {
+                            Ok(destination) => {
+                                // The editor was opened over a picture of the
+                                // tray: the edited one takes its place, with
+                                // the options and the caption already chosen.
+                                if !this.pending_images.replace(&source, destination.clone()) {
+                                    this.stage_images(vec![destination], window, cx);
+                                } else {
+                                    this.refresh_composer_placeholder(window, cx);
+                                }
+                            }
+                            Err(error) => this.store.toast_error = Some(error),
+                        }
+                        cx.notify();
+                    })
+                    .ok()
+                })
+                .ok()
+        })
+        .detach();
     }
 
     // -----------------------------------------------------------------------
@@ -5631,10 +6025,11 @@ impl Whatfast {
             return;
         };
         let pinned = self.store.message_is_pinned(&chat_id, &message_id);
+        let starred = self.store.message_is_starred(&chat_id, &message_id);
         let scale = self.ui_scale;
         let view = cx.entity();
         let menu = cx.new(|_| {
-            MessageMenu::new(chat_id, &message, pinned, now_ms(), scale)
+            MessageMenu::new(chat_id, &message, pinned, starred, now_ms(), scale)
                 .at(position)
                 .on_action(move |action, window, cx| {
                     view.update(cx, |this, cx| {
@@ -5671,7 +6066,33 @@ impl Whatfast {
             }
             MessageAction::Pin => self.set_message_pin(message_id, true),
             MessageAction::Unpin => self.set_message_pin(message_id, false),
+            MessageAction::Star => self.set_message_star(chat_id, message_id, true, cx),
+            MessageAction::Unstar => self.set_message_star(chat_id, message_id, false, cx),
         }
+    }
+
+    /// Stars a message of this profile, or takes the star off it.
+    ///
+    /// WhatsApp stars through the app-state of the account and the linked
+    /// device does not expose that action: the star is kept in the file of
+    /// the profile, like the favorites of the conversations.
+    pub(crate) fn set_message_star(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        wanted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.message_is_starred(&chat_id, &message_id) != wanted {
+            self.store.toggle_starred_message(&chat_id, &message_id);
+        }
+        if let Err(error) = starred::save_starred(self.store.starred_messages()) {
+            self.store.toast_error = Some(format!(
+                "{}: {error}",
+                i18n::t("The starred messages could not be saved")
+            ));
+        }
+        cx.notify();
     }
 
     /// Opens the dialog to send a message to another conversation.
@@ -5993,6 +6414,53 @@ fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut App) {
     crate::tokens::apply_theme_scale(scale, window, cx);
 }
 
+/// Forgets the save that was waiting for one attachment, when its download
+/// failed: the next download of the same file must open it, not save it.
+fn forget_attachment_request(request: &mut Option<(String, String)>, key: &(String, String)) {
+    if request.as_ref() == Some(key) {
+        *request = None;
+    }
+}
+
+/// The name of a file that a download writes: the characters that the file
+/// systems of the three platforms refuse are replaced, and the spaces around
+/// the name go away.
+fn sanitize_file_name(name: &str) -> String {
+    let cleaned = name
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            character if character.is_control() => '_',
+            character => character,
+        })
+        .collect::<String>();
+    // Windows no crea un archivo con un punto o un espacio al final: el
+    // nombre se guarda sin ellos.
+    let cleaned = cleaned.trim_end_matches([' ', '.']);
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    // `CON`, `NUL` o `COM1` nombran un dispositivo en Windows, con cualquier
+    // extension: el nombre reservado no se puede usar como archivo.
+    let stem = cleaned
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    if reserved {
+        format!("_{cleaned}")
+    } else {
+        cleaned.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6025,6 +6493,62 @@ mod tests {
 
         assert_eq!(store.screen, Screen::Starting);
         assert!(store.fatal_error.is_none());
+    }
+
+    /// A note goes to the conversation where it started, even when the user
+    /// moved to another chat while the encoder was finishing; one that was
+    /// thrown away never gets a destination.
+    #[test]
+    fn a_note_goes_to_the_conversation_where_it_started() {
+        let state = RecordingState {
+            started: std::time::Instant::now(),
+            finishing: true,
+            chat_id: "chat-a".into(),
+            discarded: false,
+        };
+        assert_eq!(note_target(Some(&state)), Some("chat-a"));
+        assert_eq!(note_target(None), None);
+
+        let thrown_away = RecordingState {
+            discarded: true,
+            chat_id: "chat-b".into(),
+            ..state
+        };
+        assert_eq!(note_target(Some(&thrown_away)), None);
+    }
+
+    /// A download that failed must not leave a save waiting: the next time
+    /// the file arrives, it opens instead of going to the downloads folder.
+    #[test]
+    fn a_failed_download_forgets_the_save_that_was_waiting() {
+        let key = ("chat".to_string(), "message".to_string());
+        let mut waiting = Some(key.clone());
+        forget_attachment_request(&mut waiting, &key);
+        assert_eq!(waiting, None);
+
+        let mut another = Some(("chat".to_string(), "other".to_string()));
+        forget_attachment_request(&mut another, &key);
+        assert!(another.is_some());
+    }
+
+    /// The name of a download cannot carry the characters that the file
+    /// systems refuse, and it cannot be empty either.
+    #[test]
+    fn the_name_of_a_download_is_safe_for_the_disk() {
+        assert_eq!(sanitize_file_name("  agenda.pdf  "), "agenda.pdf");
+        assert_eq!(
+            sanitize_file_name("a/b\\c:d*e?f\"g<h>i|j.pdf"),
+            "a_b_c_d_e_f_g_h_i_j.pdf"
+        );
+        assert_eq!(sanitize_file_name("line\nbreak.txt"), "line_break.txt");
+        assert_eq!(sanitize_file_name("   "), "");
+        assert_eq!(sanitize_file_name("informe..."), "informe");
+        assert_eq!(sanitize_file_name("notas .txt"), "notas .txt");
+        assert_eq!(sanitize_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_file_name("nul"), "_nul");
+        assert_eq!(sanitize_file_name("LPT9.tar.gz"), "_LPT9.tar.gz");
+        assert_eq!(sanitize_file_name("COM0.txt"), "COM0.txt");
+        assert_eq!(sanitize_file_name("console.txt"), "console.txt");
     }
 
     /// A draft that edits a message is not empty: the message it edits is

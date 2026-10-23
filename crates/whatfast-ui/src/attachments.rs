@@ -129,7 +129,7 @@ fn format_speed(speed: f32) -> String {
 ///
 /// The details of the attachment leave the zero out, because there it means
 /// "no duration"; the player always shows the minute and the second.
-fn format_clock(seconds: f32) -> String {
+pub(crate) fn format_clock(seconds: f32) -> String {
     let total = seconds.max(0.0).round() as u32;
     format!("{}:{:02}", total / 60, total % 60)
 }
@@ -445,6 +445,7 @@ impl Whatfast {
         // The two listeners of the block need their own copy of the ids.
         let card_chat_id = message.chat_id.clone();
         let card_message_id = message.id.clone();
+        let save_chat_id = message.chat_id.clone();
         let save_message_id = message.id.clone();
         let error_chat_id = message.chat_id.clone();
         let error_message_id = message.id.clone();
@@ -506,9 +507,11 @@ impl Whatfast {
                                     .child(details),
                             ),
                     )
-                    .when(downloaded, |card| {
-                        // The file is on the disk: one click copies it to the
-                        // folder of the downloads, without opening it.
+                    .when(downloaded || attachment.downloadable, |card| {
+                        // The arrow always downloads the file into the folder
+                        // of the downloads, without opening it: a document, a
+                        // video, a PDF or any other file. When the file is
+                        // not in the disk yet it is fetched first.
                         card.child(
                             div()
                                 .id(("attachment-save", index))
@@ -524,18 +527,12 @@ impl Whatfast {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.save_message_attachment(
+                                        save_chat_id.clone(),
                                         save_message_id.clone(),
                                         window,
                                         cx,
                                     );
                                 })),
-                        )
-                    })
-                    .when(attachment.downloadable && !downloaded, |card| {
-                        card.child(
-                            Icon::new(WhatfastIcon::Download)
-                                .with_size(px(DOWNLOAD_SIZE * scale))
-                                .text_color(muted),
                         )
                     }),
             )

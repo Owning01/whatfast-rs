@@ -114,6 +114,65 @@ func TestAttachLinkPreviewStoresTheResolvedPreview(t *testing.T) {
 	}
 }
 
+// A page can answer after the user logged out. The preview belongs to the
+// account that left and must not recreate its message in the cleared store.
+func TestAttachLinkPreviewDoesNotWriteAfterTheAccountIsIsolated(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.linkPreviews = linkpreview.New(linkpreview.Options{})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-release
+		writer.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(writer, `<meta property="og:title" content="Old account story">`)
+	}))
+	defer server.Close()
+
+	chatID, _, err := productStore.EnsureConversation(ctx, "15551234567@s.whatsapp.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := domain.Message{
+		ID: "message-1", ChatJID: chatID, TransportJID: "15551234567@s.whatsapp.net", SenderJID: "15551234567@s.whatsapp.net",
+		Text: "look at " + server.URL + "/story", Timestamp: time.Now(), Kind: "text",
+	}
+	if err = productStore.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	client.attachLinkPreview(message)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the preview was never fetched")
+	}
+	// La cuenta se cierra mientras la pagina sigue sin contestar: la respuesta
+	// llega despues del cambio de generacion.
+	client.accepting.Store(false)
+	close(release)
+	client.Close()
+
+	stored, err := productStore.Message(ctx, chatID, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LinkPreview != nil {
+		t.Fatalf("the preview of the previous account came back: %+v", stored.LinkPreview)
+	}
+}
+
 func TestAttachLinkPreviewSkipsMessagesWithoutLinks(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()

@@ -1229,3 +1229,93 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
 - **Pendiente**: los errores de validacion de `whatfast-core` y los textos
   armados con `format!` siguen en ingles; el arrastre del ancho de la columna
   no se probo con mouse real (los clics sinteticos mandan un solo movimiento).
+
+## 2026-10-23 - Botones al pasar el cursor, stickers animados, estrellas, descargas y notas de voz
+
+- **Botones del mensaje**: la fila de la burbuja es un `group` y la barra de
+  responder / reaccionar / menu arranca en `opacity(0.)` y sube a 1 con
+  `group_hover`; asi el puntero puede bajar hasta los botones sin que se
+  vayan.
+- **Sticker animado**: `image_source_candidates` prefiere el archivo entero
+  (`local_path`) sobre el thumbnail cuando `ImageContent.animated`; GPUI solo
+  reproduce los cuadros si lee el WebP animado completo, y el thumbnail es un
+  solo cuadro. El visor abre el archivo completo cuando esta en disco.
+- **Estrella**: `whatfast-model/src/starred.rs` guarda el par chat + tabulador
+  + mensaje en `config/starred-messages`, con reemplazo atomico
+  (`NamedTempFile` + `persist`). El modelo expone `set_starred_messages`,
+  `message_is_starred` y `toggle_starred_message`. El menu suma "Star
+  message"/"Unstar message" y la burbuja pinta una estrella de acento al lado
+  de la hora. El dispositivo vinculado no tiene RPC de las estrellas de
+  WhatsApp (`bridge.proto`): la estrella es de este perfil, como los favoritos.
+- **Descargas**: la flecha de la tarjeta de un adjunto copia el archivo a la
+  carpeta de descargas (o pregunta una con el selector); el visor suma
+  "Download" para la foto o el sticker. `save_file_to_downloads` nunca
+  sobrescribe (" (1)", " (2)") y, si el archivo todavia no llego, el pedido
+  queda en `attachment_download_attempted` y la copia se hace cuando aparece.
+- **Nota de voz**: `recording.rs` abre el microfono con `cpal` en su propio
+  hilo (el handle del stream no es `Send`), codifica cuadros de 20 ms a
+  48 kHz mono con `opus-pure` (32 kbps) y escribe Ogg. El boton del microfono
+  del compositor pasa a "Recording 0:0N" con enviar y cancelar; menos de 0.4 s
+  no se manda. Al enviar se sube el archivo y se manda
+  `SendAttachmentRequest.voice_note`.
+- **Textos**: 10 claves nuevas (Download, Recording, Record/Send/Cancel the
+  voice note, Sending voice note…, Star/Unstar message, la nota corta, las
+  estrellas que no se pudieron guardar) en `en`, `es` y `zh`;
+  `scripts/idiomas.py --strict` da 100% (195 claves, 224 textos por idioma).
+- **Prueba**: 539 tests del workspace en verde (227 de `whatfast-ui`, 65 de
+  `whatfast-model`), `cargo fmt --all --check` limpio. El clippy del workspace
+  falla antes de llegar a la interfaz por tres lints nuevos de Rust 1.98 en
+  archivos que no toque (`collapsible_if` en `whatfast-core`,
+  `manual_is_multiple_of` en `whatfast-protocol` y
+  `chunks_exact_to_as_chunks` en `media_editor.rs`); permitiendo esos tres,
+  `cargo clippy --workspace --all-targets -- -D warnings` termina en 0.
+- **En la app** (`--fake-backend`, perfil en `/tmp/whatfast-verif`): capturas
+  en `capturas/nuevo/` (hover, menu, estrella, visor, descargas, grabacion);
+  los tres adjuntos quedaron en `downloads/` (`Photo 962.png`,
+  `vacaciones.mp4`, `informe.pdf`) y `config/starred-messages` conserva
+  `chat-1` + tab + `message-948`. Dos notas grabadas con el microfono real son
+  Ogg con `OpusHead` y 1,75 s (granulo 83832 a 48 kHz).
+- **Pendiente**: la visibilidad por `group_hover` y el envio de la nota no
+  tienen test automatico (se probaron en la app); la animacion del sticker
+  depende de que el backend guarde el WebP animado completo y no solo el
+  thumbnail, y no se probo contra una cuenta real de WhatsApp.
+
+## 2026-10-23 - Repaso de rendimiento y revision de los cambios
+
+- **Nota de voz al chat equivocado**: `RecordingState` ahora guarda el
+  `chat_id` donde empezo la nota y una marca `discarded`. `send_voice_note`
+  manda a ese chat, no al que este abierto; cambiar de conversacion descarta
+  la nota que todavia se esta grabando, pero deja terminar la que ya se esta
+  codificando. El archivo de una nota descartada se borra cuando el hilo
+  termina, aunque el `Stop` haya salido antes que el `Cancel`. Test
+  `a_note_goes_to_the_conversation_where_it_started`.
+- **Descarga sin congelar la ventana**: `copy_attachment_to` corre en
+  `cx.background_spawn` y copia a un archivo `.part` que despues renombra: una
+  copia que muere a la mitad no deja un archivo truncado con el nombre final.
+  Tres intentos cubren el doble clic que pelea por el mismo nombre. Medido en
+  esta maquina: 192 MB tardan 86 ms, cinco cuadros a 60 fps; un disco lento o
+  de red lo multiplica.
+- **Estrella sin allocations**: `starred_messages` paso de
+  `HashSet<(String, String)>` a `HashMap<String, HashSet<String>>`;
+  `message_is_starred` corre por mensaje y por cuadro y ya no arma dos
+  `String` para consultar. Microbenchmark de 2.000.000 de consultas: 259 ms
+  con el par clonado contra 111 ms con el mapa anidado (2,3x).
+- **Sticker animado que no se bajaba**: la lista de imagenes visibles solo
+  pedia la descarga cuando no habia thumbnail, asi que un sticker animado con
+  thumbnail y sin el WebP completo se quedaba en un cuadro. El helper
+  `image_needs_download` pide el archivo entero cuando `animated` y falta
+  `local_path`.
+- **Descarga fallida que guardaba despues**: el timeout y el error de
+  `MessageAttachment` limpiaban `attachment_open_requested` pero no
+  `attachment_save_requested`; una descarga posterior del mismo archivo lo
+  guardaba sin que el usuario lo hubiera pedido. `forget_attachment_request`
+  limpia el pedido y tiene test.
+- **Prueba**: 542 tests del workspace en verde (230 de `whatfast-ui`, 65 de
+  `whatfast-model`), `cargo fmt --all --check` limpio y clippy limpio con los
+  tres lints ajenos de Rust 1.98 permitidos. En la app, la descarga
+  asincrona de `vacaciones.mp4` creo `vacaciones (1).mp4` y mostro el aviso
+  "Saved to ..." (captura `capturas/review/03-download.png`).
+- **Pendiente**: la nota de cinco minutos guarda hasta 57 MB de muestras en
+  mono y 115 MB en estereo antes de codificar; las notas enviadas no se
+  borran de `data/voice-notes` (solo las descartadas); y `sanitize_file_name`
+  no cubre los nombres reservados de Windows (`CON`, `NUL`, `COM1`...).

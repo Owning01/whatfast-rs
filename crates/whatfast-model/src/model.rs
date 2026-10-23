@@ -135,6 +135,14 @@ pub struct Store {
     pub history_coverage: HashMap<String, whatfast_protocol::HistoryCoverage>,
     /// The pinned messages, one list per conversation.
     pub pinned_messages: HashMap<String, Vec<whatfast_protocol::PinnedMessage>>,
+    /// The messages the profile starred, by conversation and message id.
+    ///
+    /// The linked device does not expose the star of WhatsApp (it belongs to
+    /// the app-state of the account), so the star lives in the profile, the
+    /// same way the favorites of the conversations do. The conversation is
+    /// the outer key so a lookup borrows both ids instead of building a pair
+    /// of `String`s on every frame (`message_is_starred` runs per message).
+    starred_messages: HashMap<String, HashSet<String>>,
     /// The library of stickers, grouped in packs.
     pub sticker_packs: Vec<whatfast_protocol::StickerPack>,
     /// The statuses of the profile, grouped by their sender.
@@ -719,6 +727,40 @@ impl Store {
         self.pinned_messages
             .get(chat_id)
             .is_some_and(|pins| pins.iter().any(|pin| pin.message_id == message_id))
+    }
+
+    /// The messages the profile starred, grouped by conversation.
+    pub fn starred_messages(&self) -> &HashMap<String, HashSet<String>> {
+        &self.starred_messages
+    }
+
+    /// Replaces the starred messages, when the file of the profile is read.
+    pub fn set_starred_messages(&mut self, starred: HashMap<String, HashSet<String>>) {
+        self.starred_messages = starred;
+    }
+
+    /// Whether one message of one conversation is starred.
+    pub fn message_is_starred(&self, chat_id: &str, message_id: &str) -> bool {
+        self.starred_messages
+            .get(chat_id)
+            .is_some_and(|messages| messages.contains(message_id))
+    }
+
+    /// Stars or unstars one message. Returns the new state.
+    pub fn toggle_starred_message(&mut self, chat_id: &str, message_id: &str) -> bool {
+        if let Some(messages) = self.starred_messages.get_mut(chat_id) {
+            if messages.remove(message_id) {
+                if messages.is_empty() {
+                    self.starred_messages.remove(chat_id);
+                }
+                return false;
+            }
+            messages.insert(message_id.to_owned());
+            return true;
+        }
+        self.starred_messages
+            .insert(chat_id.to_owned(), HashSet::from([message_id.to_owned()]));
+        true
     }
 
     /// Keeps the library of stickers.
@@ -2239,6 +2281,20 @@ mod tests {
         assert!(!store.message_is_pinned("chat", "m2"));
         assert!(store.message_is_pinned("other", "m2"));
         assert!(store.pinned_messages("missing").is_empty());
+    }
+
+    #[test]
+    fn a_star_belongs_to_one_message_of_one_conversation() {
+        let mut store = Store::default();
+        assert!(!store.message_is_starred("chat", "m1"));
+        assert!(store.toggle_starred_message("chat", "m1"));
+        assert!(store.message_is_starred("chat", "m1"));
+        // The same id in another conversation is another message.
+        assert!(!store.message_is_starred("other", "m1"));
+        assert!(!store.toggle_starred_message("chat", "m1"));
+        assert!(!store.message_is_starred("chat", "m1"));
+        // The conversation leaves the map when its last star goes away.
+        assert!(!store.starred_messages().contains_key("chat"));
     }
 
     #[test]

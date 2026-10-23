@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Owning01/whatfast/backend/internal/domain"
 	searchutil "github.com/Owning01/whatfast/backend/internal/search"
 	"github.com/Owning01/whatfast/backend/internal/securefs"
 	"github.com/Owning01/whatfast/backend/internal/sqliteprivacy"
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
@@ -241,7 +241,11 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
+	// Every table that holds data of the account has to go, not only the ones
+	// of the conversations: a chat address left behind makes the next account
+	// write its messages under a chat that this clear deleted, and the
+	// channels, the polls and the pins of the account that left stay visible.
+	for _, statement := range []string{`DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM poll_votes`, `DELETE FROM polls`, `DELETE FROM pinned_messages`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chat_addresses`, `DELETE FROM chat_redirects`, `DELETE FROM newsletters`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}

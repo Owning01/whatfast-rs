@@ -120,8 +120,7 @@ fn is_alive(owner: &Owner) -> bool {
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    // SAFETY: the handle that the call returns is checked and closed right
-    // away, and the code of the exit is only read while the handle is open.
+    // SAFETY: the handle is checked and closed, and the exit code is read while it is open.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, owner.pid);
         if handle.is_null() {
@@ -154,8 +153,8 @@ fn program_of(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<String> 
     use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
     let mut buffer = [0u16; 260];
     let mut length = buffer.len() as u32;
-    // SAFETY: the buffer is wide enough for the path that the call writes,
-    // and the length is only used when the call says it wrote something.
+    // SAFETY: the call writes at most the units that the buffer holds, and the
+    // length is only read when the call says it wrote something.
     let leido =
         unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) != 0 };
     if !leido {

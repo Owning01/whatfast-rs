@@ -779,6 +779,58 @@ func TestInboundMessageJournalSurvivesRestartAndTracksRetry(t *testing.T) {
 	}
 }
 
+// A logout cannot leave the addresses or the tables of the account that left:
+// a new account that talks to the same contact would find the row of the old
+// conversation, write the message under a chat that no longer exists and the
+// conversation would never show up.
+func TestClearAccountDataForgetsEveryTableOfTheAccount(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	old := domain.Message{
+		ID: "old-message", ChatJID: "shared@s.whatsapp.net", SenderJID: "shared@s.whatsapp.net",
+		Text: "from the account that left", Timestamp: time.Now(), Kind: "text",
+	}
+	if err = s.ApplyMessage(ctx, old, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertNewsletter(ctx, "channel@newsletter", "Old channel"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetMessagePinned(ctx, old.ChatJID, old.ID, "me", time.Now(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ClearAccountData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"chat_addresses", "chat_redirects", "newsletters", "pinned_messages", "polls", "poll_votes"} {
+		var count int
+		if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d rows of the prior account", table, count)
+		}
+	}
+	fresh := domain.Message{
+		ID: "fresh-message", ChatJID: old.ChatJID, SenderJID: old.SenderJID,
+		Text: "from the account that stayed", Timestamp: time.Now().Add(time.Second), Kind: "text",
+	}
+	if err = s.ApplyMessage(ctx, fresh, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Chats(ctx, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].LastMessageID != fresh.ID {
+		t.Fatalf("the message of the new account landed outside a conversation: %+v", page.Items)
+	}
+}
+
 func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "client.db")

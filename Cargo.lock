@@ -4696,6 +4696,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "opus-pure"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de7c2ad44427a636b27bf0b03eb29e713775ba1b45ff31a0618c19ee5adb215"
+
+[[package]]
 name = "ordered-float"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8200,6 +8206,7 @@ version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-channel",
+ "cpal",
  "embed-resource",
  "emojis",
  "gpui",
@@ -8211,6 +8218,7 @@ dependencies = [
  "notify-rust",
  "ogg",
  "opus-decoder",
+ "opus-pure",
  "qrcode",
  "rodio",
  "serde_json",

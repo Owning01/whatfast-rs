@@ -2057,15 +2057,15 @@ func (c *Client) NewsletterMessages(ctx context.Context, jid string, limit int) 
 		}
 		content := extractMessageContent(post.Message, "newsletter")
 		items = append(items, domain.Message{
-			ID:          string(post.MessageID),
-			ChatJID:     jid,
+			ID:           string(post.MessageID),
+			ChatJID:      jid,
 			TransportJID: jid,
-			SenderJID:   parsed.String(),
-			Text:        content.text,
-			Kind:        content.kind,
-			Image:       content.image,
-			Attachment:  content.attachment,
-			Timestamp:   post.Timestamp,
+			SenderJID:    parsed.String(),
+			Text:         content.text,
+			Kind:         content.kind,
+			Image:        content.image,
+			Attachment:   content.attachment,
+			Timestamp:    post.Timestamp,
 		})
 	}
 	return items, nil
@@ -3059,15 +3059,15 @@ func secondsFromTimescale(duration, timescale uint32) uint32 {
 
 // EBML element identifiers used by the Matroska probe.
 const (
-	ebmlSegment      = 0x18538067
-	ebmlInfo         = 0x1549a966
+	ebmlSegment       = 0x18538067
+	ebmlInfo          = 0x1549a966
 	ebmlTimecodeScale = 0x2ad7b1
-	ebmlDuration     = 0x4489
-	ebmlTracks       = 0x1654ae6b
-	ebmlTrackEntry   = 0xae
-	ebmlVideo        = 0xe0
-	ebmlPixelWidth   = 0xb0
-	ebmlPixelHeight  = 0xba
+	ebmlDuration      = 0x4489
+	ebmlTracks        = 0x1654ae6b
+	ebmlTrackEntry    = 0xae
+	ebmlVideo         = 0xe0
+	ebmlPixelWidth    = 0xb0
+	ebmlPixelHeight   = 0xba
 )
 
 // ebmlElement is one EBML element.
@@ -6619,22 +6619,37 @@ func (c *Client) attachLinkPreview(message domain.Message) {
 	if rawURL == "" {
 		return
 	}
+	// The preview is resolved over the network, out of the reducer: an event
+	// that entered before a logout must not write a row of the old account
+	// after the clear. The generation tells whether the account changed while
+	// the page was being fetched.
+	generation := c.generation.Load()
+	if !c.accepting.Load() {
+		return
+	}
 	c.maintenanceWG.Add(1)
 	go func() {
 		defer c.maintenanceWG.Done()
 		preview, found := c.linkPreviews.Resolve(c.clientContext(), rawURL)
-		if !found {
+		if !found || c.generation.Load() != generation || !c.accepting.Load() {
 			return
 		}
-		c.applyLinkPreview(message, preview)
+		c.applyLinkPreview(generation, message, preview)
 	}()
 }
 
 // applyLinkPreview stores a resolved preview on an already persisted message
-// and notifies the desktop so the card is rendered.
-func (c *Client) applyLinkPreview(message domain.Message, preview linkpreview.Preview) {
+// and notifies the desktop so the card is rendered. The projection lock is the
+// barrier of the account clear: either the write happens before Logout takes
+// it, or the generation check sees the new account and drops it.
+func (c *Client) applyLinkPreview(generation uint64, message domain.Message, preview linkpreview.Preview) {
 	ctx, cancel := context.WithTimeout(c.clientContext(), 15*time.Second)
 	defer cancel()
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	if !c.accepting.Load() || c.generation.Load() != generation {
+		return
+	}
 	stored, err := c.store.Message(ctx, message.ChatJID, message.ID)
 	if err != nil {
 		c.logLinkPreviewWarning("load message for link preview", message, err)

@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -59,8 +59,8 @@ use crate::app::{
 use crate::emoji_recent;
 use crate::helpers::{
     StatusGlyph, avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
-    format_epoch_date, identity_hue, image_render_size, message_preview, message_status_glyph,
-    one_line, qr_canvas,
+    format_epoch_date, identity_hue, image_needs_download, image_render_size,
+    image_source_candidates, message_preview, message_status_glyph, one_line, qr_canvas,
 };
 use crate::rpc::PendingRequest;
 use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, split_url_token};
@@ -1214,40 +1214,40 @@ impl Whatfast {
                 ChatMenuEntry::Item(item) => *item,
             };
             let is_block = action == Some(ChatMenuAction::Block);
-            let enabled = action.is_some();
-            let color = if !enabled {
+            let color = if action.is_none() {
                 muted
             } else if is_block {
                 danger
             } else {
                 foreground
             };
-            let action = action.unwrap();
-            panel = panel.child(
-                div()
-                    .id(("chat-menu-item", index))
-                    .w_full()
-                    .px_3()
-                    .py(px(8.))
-                    .flex()
-                    .gap_3()
-                    .items_center()
-                    .text_sm()
-                    .text_color(color)
-                    .when(enabled, |row| {
-                        row.cursor_pointer().hover(move |style| style.bg(hover))
-                    })
-                    .when(enabled, |row| {
-                        row.on_click(cx.listener({
-                            let chat_id = chat_id.clone();
-                            move |this, _, window, cx| {
-                                this.run_chat_menu_action(action, chat_id.clone(), window, cx);
-                            }
-                        }))
-                    })
-                    .child(icon.with_size(px(16. * ui_scale)).text_color(color))
-                    .child(div().flex_1().truncate().text_color(color).child(label)),
-            );
+            // Las filas que la app todavia no puede hacer se dibujan apagadas
+            // y sin accion: no alcanza con que no tengan el clic, porque el
+            // menu se arma con las dos clases de fila.
+            let mut row = div()
+                .id(("chat-menu-item", index))
+                .w_full()
+                .px_3()
+                .py(px(8.))
+                .flex()
+                .gap_3()
+                .items_center()
+                .text_sm()
+                .text_color(color)
+                .child(icon.with_size(px(16. * ui_scale)).text_color(color))
+                .child(div().flex_1().truncate().text_color(color).child(label));
+            if let Some(action) = action {
+                row = row
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener({
+                        let chat_id = chat_id.clone();
+                        move |this, _, window, cx| {
+                            this.run_chat_menu_action(action, chat_id.clone(), window, cx);
+                        }
+                    }));
+            }
+            panel = panel.child(row);
         }
         // El fondo que cierra el menu con cualquier clic fuera de el.
         div()
@@ -2151,6 +2151,16 @@ impl Whatfast {
         let typing_line = self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
         let header_typing = typing_line.is_some();
         let composer_typing_line = typing_line.clone();
+        // La nota que el microfono esta guardando: el campo de escribir deja
+        // su lugar al reloj y a los botones de cancelar y mandar.
+        let recording = self.recording.as_ref();
+        let recording_active = recording.is_some();
+        let recording_finishing = recording.is_some_and(|state| state.finishing);
+        let recording_elapsed = recording.map_or(0.0, |state| state.elapsed_seconds());
+        // El boton de mandar solo esta cuando hay algo que mandar: sin texto
+        // ni fotos, la referencia pone el microfono en su lugar.
+        let composer_has_content =
+            !self.composer.read(cx).value().trim().is_empty() || !self.pending_images.is_empty();
         // port: the `conversationSubtitle` of the origin
         // (`tauri/src/components/Conversation.tsx`): the header says that the
         // tap opens the info of the contact or of the group. The reference
@@ -2477,8 +2487,7 @@ impl Whatfast {
                                         .filter_map(|index| this.store.messages.get(index))
                                         .filter_map(|message| match message.content.as_ref() {
                                             Some(proto::message::Content::Image(image))
-                                                if image.thumbnail_path.is_empty()
-                                                    && image.downloadable =>
+                                                if image_needs_download(image) =>
                                             {
                                                 Some((message.chat_id.clone(), message.id.clone()))
                                             }
@@ -2677,37 +2686,112 @@ impl Whatfast {
                                 .px_2()
                                 .gap_1()
                                 .items_center()
-                                .child(self.attachment_bar.clone())
-                                .child(
-                                    Button::new("emoji-picker")
-                                        .ghost()
-                                        .icon(WhatfastIcon::Smile)
-                                        .tooltip(i18n::t("Emoji"))
-                                        .disabled(!connected)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_composer_emoji();
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Input::new(&self.composer)
-                                        .appearance(false)
-                                        .disabled(!connected)
-                                        .flex_1(),
-                                )
-                                .child(
-                                    Button::new("send")
-                                        .primary()
-                                        // El boton cuenta las fotos que van a
-                                        // salir, como el de la referencia.
-                                        .label(crate::composer_attachments::send_label(
-                                            self.pending_images.len(),
-                                        ))
-                                        .disabled(!connected)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit_composer(window, cx)
-                                        })),
-                                ),
+                                .when(recording_active, |pill| {
+                                    let danger = cx.theme().danger;
+                                    let muted = cx.theme().muted_foreground;
+                                    pill.child(
+                                        div()
+                                            .flex_none()
+                                            .size(px(10. * self.ui_scale))
+                                            .rounded_full()
+                                            .bg(danger),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(danger)
+                                            .child(if recording_finishing {
+                                                i18n::t("Sending voice note…")
+                                            } else {
+                                                i18n::t("Recording")
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_sm()
+                                            .text_color(muted)
+                                            .child(attachments::format_clock(recording_elapsed)),
+                                    )
+                                    .child(div().flex_1())
+                                    .when(!recording_finishing, |pill| {
+                                        pill.child(
+                                            Button::new("cancel-voice-recording")
+                                                .ghost()
+                                                .icon(WhatfastIcon::Trash)
+                                                .tooltip(i18n::t("Cancel the voice note"))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_voice_recording(cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new("send-voice-recording")
+                                            .primary()
+                                            .icon(WhatfastIcon::Send)
+                                            .tooltip(i18n::t("Send the voice note"))
+                                            .disabled(recording_finishing)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.stop_voice_recording(cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .when(!recording_active, |pill| {
+                                    pill.child(self.attachment_bar.clone())
+                                        .child(
+                                            Button::new("emoji-picker")
+                                                .ghost()
+                                                .icon(WhatfastIcon::Smile)
+                                                .tooltip(i18n::t("Emoji"))
+                                                .disabled(!connected)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_composer_emoji();
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Input::new(&self.composer)
+                                                .appearance(false)
+                                                .disabled(!connected)
+                                                .flex_1(),
+                                        )
+                                        .when(composer_has_content, |pill| {
+                                            pill.child(
+                                                Button::new("send")
+                                                    .primary()
+                                                    // El boton cuenta las fotos que van a
+                                                    // salir, como el de la referencia.
+                                                    .label(crate::composer_attachments::send_label(
+                                                        self.pending_images.len(),
+                                                    ))
+                                                    .disabled(!connected)
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.submit_composer(window, cx)
+                                                        },
+                                                    )),
+                                            )
+                                        })
+                                        .when(!composer_has_content, |pill| {
+                                            pill.child(
+                                                Button::new("record-voice-note")
+                                                    .ghost()
+                                                    .icon(WhatfastIcon::Mic)
+                                                    .tooltip(i18n::t("Record a voice note"))
+                                                    .disabled(!connected)
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.start_voice_recording(window, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                        })
+                                }),
                         ),
                     ),
             )
@@ -4517,6 +4601,28 @@ impl Whatfast {
                                                 }
                                             })),
                                     )
+                                    // La foto se guarda en la carpeta de las
+                                    // descargas con el nombre de su epigrafe.
+                                    .child(
+                                        Button::new("download-viewed-image")
+                                            .small()
+                                            .label(i18n::t("Download"))
+                                            .on_click(cx.listener({
+                                                let path = path.clone();
+                                                let caption = caption.clone();
+                                                let sticker = viewer.sticker;
+                                                move |this, _, window, cx| {
+                                                    this.save_image_to_downloads(
+                                                        path.clone(),
+                                                        caption.clone(),
+                                                        sticker,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    )
                                     .child(
                                         Button::new("close-image-viewer")
                                             .small()
@@ -4724,6 +4830,11 @@ impl Whatfast {
         let first_reply_id = self.store.first_reply_id(&message.id).map(str::to_owned);
         let chat_id = message.chat_id.clone();
         let message_id = message.id.clone();
+        let starred = self.store.message_is_starred(&chat_id, &message_id);
+        // El nombre del grupo que muestra los botones del mensaje con solo
+        // pasarle el cursor por encima: la fila entera es el grupo, asi los
+        // botones siguen visibles cuando el puntero baja hasta ellos.
+        let actions_group = format!("message-actions-{}", message.id);
         let body_message_id = message.id.clone();
         let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
         let reply_action_message_id = message_id.clone();
@@ -4840,6 +4951,7 @@ impl Whatfast {
                             .id(("message-bubble", index))
                             .max_w(px(560.))
                             .gap_1()
+                            .group(actions_group.clone())
                             // El clic derecho sobre el mensaje abre el mismo
                             // menu del boton "...", donde esta el puntero.
                             .on_aux_click(cx.listener({
@@ -4998,13 +5110,22 @@ impl Whatfast {
                                         let media_name =
                                             if image.sticker { "sticker" } else { "photo" };
                                         let (image_width, image_height) = image_render_size(&image);
-                                        let image_path = image_row_path(&image).to_string();
+                                        let row_path = image_row_path(&image).to_string();
                                         let viewer_path = image_viewer_path(&image).to_string();
-                                        let image_is_cached = !image_path.is_empty()
-                                            && !viewer_path.is_empty()
-                                            && PathBuf::from(&image_path).is_file()
-                                            && PathBuf::from(&viewer_path).is_file();
-                                        let cached_path_missing = (!image_path.is_empty()
+                                        // El sticker animado se pinta desde el archivo
+                                        // entero: el thumbnail es un solo cuadro y con
+                                        // el no se mueve nada.
+                                        let image_path = image_source_candidates(
+                                            &image,
+                                            &row_path,
+                                            &viewer_path,
+                                        )
+                                        .into_iter()
+                                        .find(|path| !path.is_empty() && Path::new(*path).is_file())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                        let image_is_cached = !image_path.is_empty();
+                                        let cached_path_missing = (!row_path.is_empty()
                                             || !viewer_path.is_empty())
                                             && !image_is_cached;
                                         let retryable = image.downloadable
@@ -5022,6 +5143,14 @@ impl Whatfast {
                                         };
                                         let viewer_chat_id = message_image_chat_id.clone();
                                         let viewer_message_id = message_image_id.clone();
+                                        // The viewer opens the full file when it
+                                        // is in the disk, and the same file that
+                                        // the bubble paints when it is not.
+                                        let viewer_path = if PathBuf::from(&viewer_path).is_file() {
+                                            viewer_path.clone()
+                                        } else {
+                                            image_path.clone()
+                                        };
                                         let viewer_caption = image.caption.clone();
                                         let viewer_sticker = image.sticker;
                                         let retry_chat_id = message_image_chat_id.clone();
@@ -5163,6 +5292,13 @@ impl Whatfast {
                                                     &text,
                                                     cx,
                                                 ))
+                                                .when(starred, |row| {
+                                                    row.child(
+                                                        Icon::new(IconName::StarFill)
+                                                            .with_size(px(11. * scale))
+                                                            .text_color(cx.theme().accent),
+                                                    )
+                                                })
                                                 .child(
                                                     h_flex()
                                                         .flex_none()
@@ -5197,6 +5333,13 @@ impl Whatfast {
                                                 .justify_end()
                                                 .items_center()
                                                 .gap(px(3. * scale))
+                                                .when(starred, |row| {
+                                                    row.child(
+                                                        Icon::new(IconName::StarFill)
+                                                            .with_size(px(11. * scale))
+                                                            .text_color(cx.theme().accent),
+                                                    )
+                                                })
                                                 .child(
                                                     div()
                                                         .text_xs()
@@ -5285,6 +5428,13 @@ impl Whatfast {
                                 h_flex()
                                     .items_center()
                                     .gap_1()
+                                    // Los tres botones de la referencia (responder,
+                                    // reaccionar y el menu) solo aparecen cuando
+                                    // el puntero esta sobre el mensaje: con el
+                                    // grupo de la fila de arriba, el puntero
+                                    // puede bajar hasta ellos sin que se vayan.
+                                    .opacity(0.)
+                                    .group_hover(actions_group.clone(), |style| style.opacity(1.))
                                     .when(!meta_text.is_empty(), |footer| {
                                         footer.child(
                                             div()

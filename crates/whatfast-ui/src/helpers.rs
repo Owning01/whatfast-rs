@@ -40,6 +40,35 @@ pub(crate) fn image_render_size(image: &ImageContent) -> (Pixels, Pixels) {
     (px(source_width * scale), px(source_height * scale))
 }
 
+/// Whether the bubble has to ask the backend for the image.
+///
+/// A picture needs the download when it has no thumbnail yet. An animated
+/// sticker needs it even when the thumbnail is here: the full WebP is the
+/// file that moves, and the thumbnail is a single frame.
+pub(crate) fn image_needs_download(image: &ImageContent) -> bool {
+    image.downloadable
+        && (image.thumbnail_path.is_empty() || (image.animated && image.local_path.is_empty()))
+}
+
+/// The files that the bubble of an image tries, in order.
+///
+/// A picture is normally painted from the thumbnail that the backend keeps
+/// for the rows. An animated sticker has to be painted from the full file:
+/// the thumbnail is a single frame, and GPUI only plays the frames when it
+/// reads the animated WebP itself. The caller keeps the first path that is
+/// really in the disk.
+pub(crate) fn image_source_candidates<'a>(
+    image: &ImageContent,
+    row_path: &'a str,
+    viewer_path: &'a str,
+) -> [&'a str; 2] {
+    if image.animated && !viewer_path.is_empty() {
+        [viewer_path, row_path]
+    } else {
+        [row_path, viewer_path]
+    }
+}
+
 /// Collapses every run of whitespace — including the newlines carried by
 /// multi-line messages — into single spaces, so a title or preview always
 /// renders on one line. `truncate()` only sets `white-space: nowrap`, which
@@ -288,9 +317,70 @@ pub(crate) fn qr_canvas(code: QrCode) -> gpui::Div {
 
 #[cfg(test)]
 mod tests {
-    use whatfast_protocol::MessageStatus;
+    use whatfast_protocol::{ImageContent, MessageStatus};
 
-    use super::{StatusGlyph, message_status_glyph};
+    use super::{StatusGlyph, image_needs_download, image_source_candidates, message_status_glyph};
+
+    #[test]
+    fn an_animated_sticker_asks_for_the_full_file_even_with_a_thumbnail() {
+        let animated = ImageContent {
+            sticker: true,
+            animated: true,
+            local_path: String::new(),
+            thumbnail_path: "nota-thumb.webp".into(),
+            downloadable: true,
+            ..Default::default()
+        };
+        assert!(image_needs_download(&animated));
+        // The same sticker with the full file in the disk is done.
+        let cached = ImageContent {
+            local_path: "nota.webp".into(),
+            ..animated
+        };
+        assert!(!image_needs_download(&cached));
+        // A still picture with its thumbnail does not download again.
+        let still = ImageContent {
+            sticker: false,
+            animated: false,
+            local_path: String::new(),
+            thumbnail_path: "foto-thumb.jpg".into(),
+            downloadable: true,
+            ..Default::default()
+        };
+        assert!(!image_needs_download(&still));
+        // One without any cached file does.
+        let empty = ImageContent {
+            thumbnail_path: String::new(),
+            downloadable: true,
+            ..Default::default()
+        };
+        assert!(image_needs_download(&empty));
+    }
+
+    #[test]
+    fn an_animated_sticker_is_painted_from_the_full_file() {
+        let animated = ImageContent {
+            sticker: true,
+            animated: true,
+            local_path: "nota.webp".into(),
+            thumbnail_path: "nota-thumb.webp".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            image_source_candidates(&animated, "nota-thumb.webp", "nota.webp"),
+            ["nota.webp", "nota-thumb.webp"]
+        );
+        // A picture without movement keeps the small thumbnail for the row.
+        let still = ImageContent {
+            local_path: "foto.jpg".into(),
+            thumbnail_path: "foto-thumb.jpg".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            image_source_candidates(&still, "foto-thumb.jpg", "foto.jpg"),
+            ["foto-thumb.jpg", "foto.jpg"]
+        );
+    }
 
     #[test]
     fn every_state_of_a_message_has_its_glyph() {

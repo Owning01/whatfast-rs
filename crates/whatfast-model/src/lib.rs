@@ -15,6 +15,7 @@ pub mod favorites;
 pub mod model;
 pub mod paths;
 pub mod settings;
+pub mod starred;
 pub mod sticker;
 
 /// The geometry the model needs, reimplemented without GPUI.
