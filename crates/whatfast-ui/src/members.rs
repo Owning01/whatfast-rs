@@ -1,4 +1,4 @@
-﻿//! The panel of the members of a group, and the roster of its participants.
+//! The panel of the members of a group, and the roster of its participants.
 //!
 //! port: taken from the origin's `tauri/src/components/MemberPanel.tsx`,
 //! `ParticipantList.tsx` and `ParticipantRow.tsx`. The lengths come from the
@@ -19,6 +19,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::{
     Context, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -211,7 +212,7 @@ impl MemberPanel {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Loading membersÔÇª"),
+                        .child(i18n::t("Loading members…")),
                 )
                 .into_any_element()
         };
@@ -430,7 +431,7 @@ fn render_participant(
                         .font_weight(FontWeight::SEMIBOLD)
                         .truncate()
                         .child(if participant.is_me {
-                            "You".to_string()
+                            i18n::t("You").to_string()
                         } else {
                             name.clone()
                         }),

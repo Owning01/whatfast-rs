@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::{
     App, FontWeight, ObjectFit, ParentElement as _, Pixels, Styled as _, StyledImage as _, canvas,
@@ -16,6 +17,8 @@ use gpui_component::{ActiveTheme as _, Colorize as _, Icon, IconName, Sizable as
 use qrcode::{Color, QrCode};
 
 use whatfast_model::model::message_text;
+
+use crate::local_time::local_offset_minutes;
 use whatfast_protocol::{ConnectionState, ImageContent, Message, MessageStatus};
 
 /// The box an image occupies inside a message bubble.
@@ -139,9 +142,14 @@ pub(crate) fn avatar_element_of(
     }
 }
 
-/// Civil-date conversion (Howard Hinnant's algorithm). Renders a UTC date like
+/// Civil-date conversion (Howard Hinnant's algorithm). Renders a date like
 /// "12 Apr 2024" for the group "created" caption without a date dependency.
+///
+/// The date is the one of the machine: the offset of the zone of the instant
+/// goes in first, so a group created at 22:30 in Buenos Aires says the day it
+/// was created and not the next one, which is the day it has in UTC.
 pub(crate) fn format_epoch_date(timestamp_ms: i64) -> String {
+    let timestamp_ms = timestamp_ms + i64::from(local_offset_minutes(timestamp_ms)) * 60_000;
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -174,24 +182,46 @@ pub(crate) fn format_disappearing_timer(seconds: u32) -> String {
 
 /// The label of the connection state shown under the chat title.
 pub(crate) fn connection_label(connection: ConnectionState) -> &'static str {
-    match connection {
+    i18n::t(match connection {
         ConnectionState::Connected => "online",
         ConnectionState::Reconnecting => "reconnecting…",
         ConnectionState::Offline => "offline",
         ConnectionState::Connecting => "connecting…",
         _ => "local client",
-    }
+    })
 }
 
-/// The label of the delivery state of an outgoing message.
-pub(crate) fn message_status(status: MessageStatus) -> &'static str {
+/// The glyph that the reference draws for the delivery state of a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusGlyph {
+    /// The message is on its way: the clock of the reference.
+    Clock,
+    /// The server took it: one tick.
+    Single,
+    /// It reached the phone of the receiver: two ticks.
+    Double,
+    /// The receiver read it: the two ticks, in blue.
+    Read,
+    /// It did not go out: the warning of the reference.
+    Failed,
+}
+
+/// The glyph of the delivery state of an outgoing message.
+///
+/// `None` is a state that draws nothing: the messages of the other side and
+/// the ones the backend did not report.
+///
+/// port: the oracle wrote the state as a word (`sent`, `delivered`, `read`)
+/// under the bubble. The reference draws the ticks of WhatsApp instead, and
+/// the native client follows the reference.
+pub(crate) fn message_status_glyph(status: MessageStatus) -> Option<StatusGlyph> {
     match status {
-        MessageStatus::Pending => "sending",
-        MessageStatus::Sent => "sent",
-        MessageStatus::Delivered => "delivered",
-        MessageStatus::Read => "read",
-        MessageStatus::Failed => "failed",
-        _ => "",
+        MessageStatus::Pending => Some(StatusGlyph::Clock),
+        MessageStatus::Sent => Some(StatusGlyph::Single),
+        MessageStatus::Delivered => Some(StatusGlyph::Double),
+        MessageStatus::Read => Some(StatusGlyph::Read),
+        MessageStatus::Failed => Some(StatusGlyph::Failed),
+        _ => None,
     }
 }
 
@@ -254,4 +284,40 @@ pub(crate) fn qr_canvas(code: QrCode) -> gpui::Div {
             )
             .size_full(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use whatfast_protocol::MessageStatus;
+
+    use super::{StatusGlyph, message_status_glyph};
+
+    #[test]
+    fn every_state_of_a_message_has_its_glyph() {
+        assert_eq!(
+            message_status_glyph(MessageStatus::Pending),
+            Some(StatusGlyph::Clock)
+        );
+        assert_eq!(
+            message_status_glyph(MessageStatus::Sent),
+            Some(StatusGlyph::Single)
+        );
+        assert_eq!(
+            message_status_glyph(MessageStatus::Delivered),
+            Some(StatusGlyph::Double)
+        );
+        assert_eq!(
+            message_status_glyph(MessageStatus::Read),
+            Some(StatusGlyph::Read)
+        );
+        assert_eq!(
+            message_status_glyph(MessageStatus::Failed),
+            Some(StatusGlyph::Failed)
+        );
+    }
+
+    #[test]
+    fn a_state_without_a_glyph_draws_nothing() {
+        assert_eq!(message_status_glyph(MessageStatus::Unspecified), None);
+    }
 }

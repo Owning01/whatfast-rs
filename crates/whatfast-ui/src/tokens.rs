@@ -764,6 +764,32 @@ pub(crate) fn app_theme(appearance: ThemeAppearance) -> Theme {
         .unwrap_or_else(whatfast_core::theme::default_theme)
 }
 
+/// The theme of an id: a builtin one, a custom one, or the dark palette.
+///
+/// port: `availableThemes()` of the origin: the catalog of the core plus the
+/// themes of the profile. An id that is not there (a file of a newer release,
+/// a theme that was deleted) falls back to the palette of the app instead of
+/// leaving the window without colors.
+pub(crate) fn theme_by_id(id: &str, custom: &[Theme]) -> Theme {
+    if !id.is_empty() {
+        if let Some(theme) = custom.iter().find(|theme| theme.id == id) {
+            return theme.clone();
+        }
+        if let Some(theme) = whatfast_core::theme::builtin_themes()
+            .iter()
+            .find(|theme| theme.id == id)
+        {
+            return theme.clone();
+        }
+    }
+    app_theme(ThemeAppearance::Dark)
+}
+
+/// The color of one token of a theme, for the previews of the settings.
+pub(crate) fn token_color(theme: &Theme, token: ThemeToken) -> Rgba {
+    parse_color(theme.tokens.get(token)).unwrap_or_else(|| gpui::rgb(0x808080))
+}
+
 /// The colors of the bubbles of the messages.
 ///
 /// The theme of `gpui_component` has no colors for the bubbles, so the ones

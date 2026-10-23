@@ -17,10 +17,12 @@
 //! - `rpc`: the lifecycle of the requests towards the sidecar
 //! - `render`: the drawing of every panel
 //! - `attachments`: the card of a file that comes with a message
+//! - `composer_attachments`: the pictures that wait for the send button
 //! - `emoji_recent`: the emojis that the user used lately
 //! - `helpers`: the free functions used by the drawing
 //! - `icons`: the icon set of the web client
 //! - `instance`: the lock that keeps a single instance of the app
+//! - `local_time`: the offset of the local time zone, asked to the system
 //! - `media_editor`: the crop and the rotation of a picture
 //! - `members`: the panel of the members of a group
 //! - `message_actions`: the menu of a message, the forward, the poll and
@@ -45,15 +47,18 @@ use gpui_component::Root;
 mod app;
 mod attachments;
 mod audio;
+mod composer_attachments;
 mod emoji_recent;
 mod helpers;
 mod icons;
 mod instance;
+mod local_time;
 mod media_editor;
 mod members;
 mod message_actions;
 mod navrail;
 mod newsletters;
+mod notifications;
 mod render;
 mod rpc;
 mod statuses;
@@ -89,15 +94,27 @@ fn main() {
             ]);
             // The theme of Whatfast goes over the one of `gpui_component`: the
             // mode comes first, because `Theme::change` rewrites every color from
-            // the configuration of the mode.
-            let scale = whatfast_model::settings::load_ui_scale()
-                .map(tokens::normalized_ui_scale)
-                .unwrap_or(tokens::DEFAULT_UI_SCALE);
-            tokens::apply_theme(
-                &tokens::app_theme(whatfast_core::theme::ThemeAppearance::Dark),
-                scale,
+            // the configuration of the mode. The profile chooses the theme and
+            // the language before the window exists, so the first frame is
+            // already in the language and the colors of the user.
+            let settings = whatfast_model::settings::load();
+            let scale = tokens::normalized_ui_scale(settings.ui_scale);
+            let custom: Vec<whatfast_core::theme::Theme> = settings
+                .custom_themes
+                .iter()
+                .filter_map(whatfast_core::theme::normalize_theme)
+                .collect();
+            let theme = tokens::theme_by_id(&settings.theme_id, &custom);
+            gpui_component::Theme::change(
+                if theme.appearance == whatfast_core::theme::ThemeAppearance::Light {
+                    gpui_component::ThemeMode::Light
+                } else {
+                    gpui_component::ThemeMode::Dark
+                },
+                None,
                 cx,
             );
+            tokens::apply_theme(&theme, scale, cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
                 window_min_size: Some(size(px(480.), px(560.))),

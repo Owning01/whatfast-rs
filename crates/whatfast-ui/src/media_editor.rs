@@ -17,6 +17,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -665,14 +666,14 @@ impl MediaEditor {
                             .child(
                                 div()
                                     .font_weight(FontWeight::BOLD)
-                                    .child("Edit photo"),
+                                    .child(i18n::t("Edit photo")),
                             )
                             .child(
                                 Button::new("media-editor-close")
                                     .ghost()
                                     .small()
                                     .icon(WhatfastIcon::Close)
-                                    .tooltip("Cancel")
+                                    .tooltip(i18n::t("Cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cancel(cx);
                                     })),
@@ -690,28 +691,28 @@ impl MediaEditor {
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child("Drag on the picture to crop it. The preview shows exactly what will be sent."),
+                            .child(i18n::t("Drag on the picture to crop it. The preview shows exactly what will be sent.")),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .child(
                                 Button::new("media-editor-rotate-left")
-                                    .label("Rotate left")
+                                    .label(i18n::t("Rotate left"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.rotate_left(cx);
                                     })),
                             )
                             .child(
                                 Button::new("media-editor-rotate-right")
-                                    .label("Rotate right")
+                                    .label(i18n::t("Rotate right"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.rotate_right(cx);
                                     })),
                             )
                             .child(
                                 Button::new("media-editor-reset")
-                                    .label("Reset crop")
+                                    .label(i18n::t("Reset crop"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.reset_crop(cx);
                                     })),
@@ -723,7 +724,7 @@ impl MediaEditor {
                             .justify_end()
                             .child(
                                 Button::new("media-editor-cancel")
-                                    .label("Cancel")
+                                    .label(i18n::t("Cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cancel(cx);
                                     })),
@@ -957,7 +958,10 @@ fn rotate_picture(picture: &image::RgbaImage, rotation: Rotation) -> image::Rgba
 }
 
 /// The picture, as the buffer that GPUI paints.
-fn to_render_image(picture: &image::RgbaImage) -> gpui::RenderImage {
+///
+/// The tray of the composer reuses it for the thumbnails of the pictures
+/// that wait for the send button.
+pub(crate) fn to_render_image(picture: &image::RgbaImage) -> gpui::RenderImage {
     let (width, height) = picture.dimensions();
     let mut data = picture.as_raw().clone();
     // port: the renderer of GPUI expects the pixels in BGRA.

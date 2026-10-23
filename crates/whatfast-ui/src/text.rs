@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 use std::{collections::HashMap, fs, io::Read as _, path::Path, time::Instant};
+use whatfast_i18n as i18n;
 
 use whatfast_protocol::ChatParticipant;
 
@@ -133,7 +134,7 @@ pub(crate) fn encode_mentions(text: &str, mentions: &[MentionEntry]) -> (String,
 /// Whether a text message may be sent, and why not when it may not.
 pub(crate) fn validate_text_message(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
-        return Err("Type a message before sending".into());
+        return Err(i18n::t("Type a message before sending").into());
     }
     if text.len() > MAX_TEXT_BYTES {
         return Err(format!(
@@ -158,10 +159,10 @@ pub(crate) fn validate_image_message(path: &Path, caption: &str) -> Result<(), S
     let metadata =
         fs::metadata(path).map_err(|_| "The selected image cannot be read".to_string())?;
     if !metadata.is_file() || metadata.len() == 0 {
-        return Err("The selected image is not a non-empty file".into());
+        return Err(i18n::t("The selected image is not a non-empty file").into());
     }
     if metadata.len() > MAX_IMAGE_BYTES {
-        return Err("Image is larger than the 32 MiB limit".into());
+        return Err(i18n::t("Image is larger than the 32 MiB limit").into());
     }
     let mut file =
         fs::File::open(path).map_err(|_| "The selected image cannot be opened".to_string())?;
@@ -174,7 +175,7 @@ pub(crate) fn validate_image_message(path: &Path, caption: &str) -> Result<(), S
         || (read >= 6 && matches!(&header[..6], b"GIF87a" | b"GIF89a"))
         || (read >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP");
     if !supported {
-        return Err("Choose a JPEG, PNG, GIF, or WebP image".into());
+        return Err(i18n::t("Choose a JPEG, PNG, GIF, or WebP image").into());
     }
     Ok(())
 }

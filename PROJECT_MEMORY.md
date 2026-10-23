@@ -1108,3 +1108,124 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   el clic en el chip de otro suma la propia, como el cliente de WhatsApp. La
   lista de quienes reaccionaron queda en el boton derecho del mouse.
 - **Release**: `v0.2.2` en verde (windows y linux) e instalada en la maquina.
+
+## 2026-10-22 - Las fotos pegadas esperan el boton de mandar
+
+- **Sintoma**: pegar una foto con Ctrl+V la mandaba sola. La referencia de
+  WhatsApp Desktop la deja arriba del campo de escribir, con el borde verde
+  de la que esta elegida, la cruz para sacarla, el lapiz del recorte y el
+  cuadradito del `+` para sumar mas, y recien sale con el boton de mandar.
+- **Bandeja**: `crates/whatfast-ui/src/composer_attachments.rs` guarda las
+  fotos que esperan (`PendingImages`), con la miniatura ya cuadrada y
+  reducida a 124 px, y dibuja la tira. Entra entre la lista y el campo, asi
+  el campo no la tapa y la lista le hace lugar (79 px de alto con escala 1).
+- **Pegado y selector**: `Ctrl+V` guarda el mapa de bits en la carpeta
+  temporal y lo deja en la bandeja; el menu del clip abre el selector con
+  `multiple: true` y tambien las deja ahi. El lapiz abre el editor de siempre
+  y la foto recortada vuelve al mismo lugar de la tira.
+- **Envio**: el boton y el return llaman a `submit_composer`: si hay fotos
+  manda las fotos (la primera con el texto como epigrafe, como la
+  referencia) y si no, el texto. El campo dice "Add a caption…" mientras
+  hay fotos y vuelve a "Type a message" cuando la tira queda vacia.
+- **Bordes flotantes**: la barra de respuesta, la linea de "escribiendo", el
+  panel de emojis y la tira de stickers se corren lo que mide la bandeja
+  para no quedar tapados.
+- **Prueba**: 7 tests de la bandeja (alta, tope de 8, seleccion al sacar una,
+  reemplazo por la foto recortada, vaciado, alto y rotulo del boton). El
+  resto del workspace queda en 209 en verde y clippy limpio.
+- **Verificado en la app**: con `--fake-backend` y una foto en el
+  portapapeles, `capturas/bandeja-despues.png` muestra el borde verde en el
+  pie y `capturas/bandeja-enviada.png` ya no lo tiene despues del return.
+
+## 2026-10-22 - Las tildes del mensaje enviado
+
+- **Sintoma**: los mensajes propios no mostraban la tilde de WhatsApp: debajo
+  de la burbuja habia una palabra (`sent`, `delivered`, `read`) y con una
+  foto recien mandada no habia nada.
+- **Arreglo**: `helpers::message_status_glyph` traduce el estado del mensaje
+  al dibujo de la referencia (reloj mientras sale, una tilde para el enviado,
+  dos para el entregado, dos azules para el leido y el triangulo de aviso
+  para el fallido). La hora y la tilde van juntas al final del texto, dentro
+  de la burbuja; la foto o el sticker sin epigrafe llevan su propia linea
+  abajo a la derecha. La palabra del estado ya no se escribe.
+- **Azul**: `#53bdeb` en el tema oscuro y `#34b7f1` en el claro, los dos de
+  la referencia.
+- **Medida**: el ancho del texto descuenta los 18 px de la tilde, si no el
+  texto se le va encima.
+- **Prueba**: 2 tests del mapeo estado → dibujo. 211 tests en `whatfast-ui`
+  (503 en el workspace), clippy limpio. En la app con `--fake-backend` (los mensajes propios del demo estan
+  en `READ`) la captura `capturas/ticks.png` tiene 4 tildes azules de 15x9
+  px en el borde derecho de las burbujas.
+- **Pendiente**: la lista de chats no tiene la tilde porque el `Chat` del
+  protocolo no lleva el estado del ultimo mensaje, solo si es propio.
+
+## 2026-10-23 - La hora de la maquina, la foto en su tarjeta y los fijados
+
+- **Sintoma de la hora**: la lista de chats y las burbujas escribian la hora de
+  UTC. En Buenos Aires (UTC-3) un mensaje de las 23:38 salia a las 02:38, y un
+  mensaje de las 23:30 cambiaba de dia.
+- **Arreglo**: nuevo modulo `crates/whatfast-ui/src/local_time.rs`, que le
+  pregunta el desfasaje al sistema con el instante exacto (`GetTimeZoneInformationForYear`
+  + `SystemTimeToTzSpecificLocalTime` en Windows, `localtime_r` y `tm_gmtoff`
+  en unix) y lo guarda por hora de UTC. `whatfast-core` no puede saberlo (no
+  tiene base de zonas), asi que el desfasaje entra por parametro, como pide el
+  rulebook. Lo usan la burbuja, la lista, las pildoras de dia, los estados y
+  los canales.
+- **Reloj de la lista**: `chat_time_label` escribe el mensaje de hoy con el
+  mismo reloj de veinticuatro horas que la burbuja ("01:02" y no "01:02 AM"),
+  como la referencia. Los dias anteriores siguen con la palabra o la fecha.
+- **Sintoma de la foto**: el visor se pintaba a pantalla completa
+  (`absolute().inset_0()` de borde a borde) y tapaba toda la interfaz.
+- **Arreglo**: la foto se mira en una tarjeta centrada del 70% de la ventana
+  con tope de 1080x760 (`VIEWER_MAX_WIDTH`, `VIEWER_MAX_HEIGHT`), sobre un
+  fondo oscurecido que sigue mostrando la app; el clic en el fondo y `Escape`
+  la cierran, el clic dentro no.
+- **Barra de fijados**: los fijados ya se pedian al backend y se guardaban en
+  el modelo, pero no habia nada que los mostrara. Ahora hay una barra arriba
+  de la lista con el pin, quien fijo y el preview; el clic vuelve al mensaje.
+- **Prueba**: 4 tests del desfasaje (dentro del mundo, estable por hora, sin
+  panico antes de la epoca ni lejos en el futuro), 3 de la hora de la burbuja
+  con desfasajes fijos, 1 mas del reloj de 24 horas de los estados. 220 tests
+  en `whatfast-ui`, `cargo fmt --all --check` limpio, clippy de `whatfast-ui`
+  limpio. En la app con `--fake-backend`: la lista dice `01:02` y las burbujas
+  `23:38` con la hora local del equipo (`date` daba 00:53 -03), la tarjeta del
+  visor mide 985x630 en una ventana de 1475x950 y la barra de fijados aparece
+  al fijar "El viaje" (capturas en `capturas/verif/`).
+- **Ajeno**: `whatfast-model` no pasa el clippy del workspace por
+  `Density::from_str` (`clippy::should_implement_trait`), y `attachments.rs` /
+  `navrail.rs` tenian un `use` antes de `#![allow(dead_code)]` que no compila:
+  el `use` se movio debajo del atributo. Los dos son del trabajo de i18n que
+  corre en paralelo.
+
+## 2026-10-23 - Ajustes, notificaciones e interfaz en tres idiomas
+
+- **Ajustes completos**: `whatfast-model/src/settings.rs` guarda un JSON con
+  escala, idioma, tema, densidad (comoda/compacta), Enter envia, avisos y
+  previews, carpeta de descargas, vista partida, ahorro de bateria y los temas
+  propios. `serde(default)` completa un archivo viejo y el `settings` de una
+  sola linea se migra sin borrarlo.
+- **Idiomas**: crate `whatfast-i18n` con un JSON por idioma en `locales/`
+  (`en`, `es`, `zh`); el `build.rs` los descubre y los incrusta. La clave es la
+  frase en ingles, asi que una traduccion faltante cae al ingles. El idioma se
+  aplica antes de abrir la ventana y el panel de ajustes lo cambia en el acto.
+  `scripts/idiomas.py --strict` informa la cobertura (hoy 214 claves al 100%).
+- **Notificaciones**: `notify-rust` en un hilo propio (`notifications.rs`). Solo
+  suenan con la ventana inactiva, el chat sin silenciar y un mensaje de menos de
+  60 s; el ajuste de previews decide si el cuerpo lleva el texto.
+- **Temas propios**: el catalogo del core, duplicar el tema actual y editar el
+  color de acento con una paleta fija; se guardan como JSON dentro de los
+  ajustes, sin tocar el perfil de la cuenta.
+- **Guardar en carpeta**: la tarjeta de un adjunto ya descargado lleva el boton
+  que copia el archivo a la carpeta elegida (o pregunta una con el selector del
+  sistema). Nunca sobrescribe: agrega " (1)", " (2)". Un aviso verde de 4 s
+  confirma la ruta.
+- **Prueba**: 527 tests del workspace en verde, `cargo fmt --all` y
+  `scripts\lint.cmd -D warnings` limpios. Con `--fake-backend` y un perfil
+  aparte: ajustes en espanol y chino, densidad compacta, ahorro de bateria sin
+  wallpaper y la copia de `vacaciones.mp4` a la carpeta configurada.
+- **Trampa**: `StatefulInteractiveElement::tooltip` pide un closure; el tooltip
+  de texto es el de `Button`. `Density::from_str` se renombro a `from_value`
+  porque clippy lo confundia con `std::str::FromStr`.
+- **Pendiente**: los errores de validacion de `whatfast-core` y los textos
+  armados con `format!` siguen en ingles; el arrastre del ancho de la columna
+  no se probo con mouse real (los clics sinteticos mandan un solo movimiento).

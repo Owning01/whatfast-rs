@@ -1,4 +1,4 @@
-﻿//! The tray of the library of stickers.
+//! The tray of the library of stickers.
 //!
 //! port: taken from the origin's `tauri/src/components/StickerTray.tsx`. The
 //! lengths come from the stylesheet of the origin
@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -174,12 +175,16 @@ impl StickerTray {
 
         // The panel floats over the composer: a box with rounded corners, a
         // border and a shadow, as wide as the conversation, with a small gap
-        // over the composer.
+        // over the composer. The tray of the pictures of the composer lifts
+        // it, so the box never covers them.
         v_flex()
             .absolute()
             .left_0()
             .right_0()
-            .bottom(px((COMPOSER_HEIGHT + COMPOSER_GAP) * scale))
+            .bottom(
+                px((COMPOSER_HEIGHT + COMPOSER_GAP) * scale)
+                    + app.pending_images.tray_height(scale),
+            )
             .mx(px(8. * scale))
             .h(px(TRAY_HEIGHT * scale))
             .rounded(cx.theme().radius_lg)
@@ -408,7 +413,7 @@ impl StickerTray {
                         .w_full()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("No stickers found."),
+                        .child(i18n::t("No stickers found.")),
                 )
             })
     }
@@ -442,7 +447,7 @@ impl StickerTray {
                 div()
                     .text_xs()
                     .text_color(cx.theme().foreground)
-                    .child("Create"),
+                    .child(i18n::t("Create")),
             )
             .on_click(cx.listener(|app, _, window, cx| {
                 app.choose_sticker(window, cx);
@@ -462,7 +467,7 @@ impl StickerTray {
             .p(px(20.))
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child("No stickers yet.")
+            .child(i18n::t("No stickers yet."))
             .child(
                 "Stickers you have sent or received appear here, along with anything you have favourited."
             )
@@ -470,7 +475,7 @@ impl StickerTray {
                 Button::new("sticker-retry")
                     .secondary()
                     .small()
-                    .label("Retry")
+                    .label(i18n::t("Retry"))
                     .on_click(cx.listener(move |app, _, _, cx| {
                         state.borrow_mut().requested = false;
                         app.load_stickers();

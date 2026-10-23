@@ -29,23 +29,27 @@ use gpui::{
     Subscription, UniformListScrollHandle, WeakEntity, Window, actions, point, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Theme, ThemeMode, VirtualListScrollHandle,
+    Theme, ThemeMode, VirtualListScrollHandle,
     input::{InputEvent, InputState},
 };
 use smol::Timer;
 use uuid::Uuid;
+use whatfast_core::theme::{Theme as AppTheme, ThemeAppearance, ThemeToken};
+use whatfast_i18n as i18n;
 use whatfast_model::{
     emoji_picker::{EmojiCategory, filtered as filter_emojis},
     favorites,
     model::{CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
-    settings, sticker,
+    settings::{self, Density, Settings},
+    sticker,
 };
 use whatfast_protocol::{
     AttachmentKind, BackendEvent, Chat, ChatParticipant, ConnectionState, ContactSearchResult,
-    MessageSearchResult, RpcResponse, backend_event, rpc_request, rpc_response,
+    Message, MessageSearchResult, RpcResponse, backend_event, rpc_request, rpc_response,
 };
 
 use crate::audio::{VoiceAudio, VoiceState};
+use crate::composer_attachments::PendingImages;
 use crate::media_editor::{MediaEditor, MediaEditorEvent};
 use crate::members::MemberPanel;
 use crate::message_actions::{
@@ -54,6 +58,7 @@ use crate::message_actions::{
 };
 use crate::navrail::{LinkState, NavAction, NavRail};
 use crate::newsletters::NewsletterPanel;
+use crate::notifications::{Note, Notifier};
 use crate::rpc::{
     BridgeMessage, OutgoingAttachment, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY,
     RpcClient, RpcIncoming, TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
@@ -602,6 +607,10 @@ pub(crate) struct Whatfast {
     pub(crate) rpc: RpcClient,
     pub(crate) store: Store,
     pub(crate) composer: Entity<InputState>,
+    /// The pictures that the user pasted or picked and that wait for the
+    /// button of the send, the same way the reference shows them over the
+    /// field of the message.
+    pub(crate) pending_images: PendingImages,
     pub(crate) search_input: Entity<InputState>,
     pub(crate) search_query: String,
     pub(crate) search_results: SearchResults,
@@ -635,6 +644,25 @@ pub(crate) struct Whatfast {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
     pub(crate) ui_scale: f32,
+    /// The settings of the profile, as the file keeps them.
+    pub(crate) settings: Settings,
+    /// The air between rows and messages, mirrored for the hot path of the
+    /// drawing.
+    pub(crate) density: Density,
+    /// Whether a plain Enter sends the message.
+    pub(crate) enter_to_send: bool,
+    /// Whether the chat list stays beside the conversation.
+    pub(crate) split_view: bool,
+    /// Whether the wallpaper and the smooth scrolling are off.
+    pub(crate) battery_saver: bool,
+    /// The theme in use: a builtin id or the id of a custom one.
+    pub(crate) theme_id: String,
+    /// The themes the user made.
+    pub(crate) custom_themes: Vec<AppTheme>,
+    /// The custom theme whose colors are being edited.
+    pub(crate) editing_theme: Option<String>,
+    /// The queue of the toasts of the system.
+    pub(crate) notifier: Notifier,
     pub(crate) chat_scroll: UniformListScrollHandle,
     pub(crate) chat_smooth_scroll: SmoothScrollState,
     pub(crate) message_scroll: VirtualListScrollHandle,
@@ -741,8 +769,34 @@ impl Whatfast {
     /// Builds the application: the inputs, the subscriptions, the thread that
     /// reads from the backend and the sweep of the requests that time out.
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let ui_scale = load_ui_scale();
+        let mut settings = settings::load();
+        // The language of the file decides the first frame; an unknown code
+        // (a hand-edited file, a removed language) falls back to English.
+        if !i18n::set_language(&settings.language) {
+            i18n::set_language(i18n::DEFAULT_LANGUAGE);
+            settings.language = i18n::DEFAULT_LANGUAGE.to_string();
+        }
+        let ui_scale = normalized_ui_scale(settings.ui_scale);
+        settings.ui_scale = ui_scale;
+        // The custom themes are JSON in the settings file: they are
+        // normalized on the way in, so a hand-edited theme cannot paint a
+        // color that GPUI cannot parse.
+        let custom_themes: Vec<AppTheme> = settings
+            .custom_themes
+            .iter()
+            .filter_map(whatfast_core::theme::normalize_theme)
+            .collect();
+        tokens::apply_theme(
+            &tokens::theme_by_id(&settings.theme_id, &custom_themes),
+            ui_scale,
+            cx,
+        );
         apply_theme_scale(ui_scale, window, cx);
+        let density = settings.density;
+        let enter_to_send = settings.enter_to_send;
+        let split_view = settings.split_view;
+        let battery_saver = settings.battery_saver;
+        let theme_id = settings.theme_id.clone();
         let fake = std::env::args().any(|arg| arg == "--fake-backend")
             || std::env::var_os("WHATFAST_FAKE").is_some();
         let (rpc, startup_error) = match RpcClient::start(fake) {
@@ -752,15 +806,19 @@ impl Whatfast {
         let receiver = rpc.incoming();
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Type a message")
+                .placeholder(i18n::t("Type a message"))
+                // Enter is decided in the subscription: the input has no
+                // setter for this and the setting changes at runtime.
+                .submit_on_enter(false)
                 .clean_on_escape()
         });
-        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let emoji_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search emoji")));
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 // port: the placeholder of the origin
                 // (`tauri/src/lib/i18n.ts`, `sidebar.searchPlaceholder`).
-                .placeholder("Search or start a new chat")
+                .placeholder(i18n::t("Search or start a new chat"))
                 .clean_on_escape()
         });
         let focus_handle = cx.focus_handle();
@@ -811,8 +869,31 @@ impl Whatfast {
                         this.signal_typing(composing);
                         cx.notify();
                     }
-                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                        this.send_text(window, cx);
+                    if let InputEvent::PressEnter {
+                        secondary, shift, ..
+                    } = event
+                    {
+                        // Ctrl+Enter always sends. Otherwise the setting
+                        // decides: with Enter-to-send on, a plain Enter
+                        // sends; with it off, the Enter already inserted a
+                        // newline and only Ctrl+Enter sends.
+                        if *secondary || (this.enter_to_send && !*shift) {
+                            // The input inserts the newline before it emits
+                            // the event (`submit_on_enter(false)`), so the
+                            // newline of the submit is taken out before the
+                            // text goes to the conversation.
+                            let value = this.composer.read(cx).value().to_string();
+                            if let Some(trimmed) = value.strip_suffix('\n') {
+                                let trimmed = trimmed.to_string();
+                                this.composer
+                                    .update(cx, |input, cx| input.set_value(trimmed, window, cx));
+                            }
+                            // The pictures of the tray win over the text: the
+                            // return key sends them with the text as their
+                            // caption, the same way the button of the send
+                            // does.
+                            this.submit_composer(window, cx);
+                        }
                     }
                 }
             }),
@@ -876,6 +957,7 @@ impl Whatfast {
             rpc,
             store: Store::default(),
             composer,
+            pending_images: PendingImages::default(),
             search_input,
             search_query: String::new(),
             search_results: SearchResults::default(),
@@ -909,6 +991,15 @@ impl Whatfast {
             focus_handle,
             settings_open: false,
             ui_scale,
+            settings,
+            density,
+            enter_to_send,
+            split_view,
+            battery_saver,
+            theme_id,
+            custom_themes,
+            editing_theme: None,
+            notifier: Notifier::new(),
             chat_scroll: UniformListScrollHandle::new(),
             chat_smooth_scroll: SmoothScrollState::default(),
             message_scroll: VirtualListScrollHandle::new(),
@@ -1024,6 +1115,18 @@ impl Whatfast {
             self.stop_smooth_scroll(surface);
             return;
         };
+        if self.battery_saver {
+            // Without the inertia the wheel moves the list in one step: no
+            // frame every 16 ms while the fingers are not on the wheel.
+            let handle = self.smooth_scroll_handle(surface);
+            let offset = handle.offset();
+            let maximum = handle.max_offset().y;
+            let distance = delta.y * 20.0 * self.ui_scale;
+            let target_y = (offset.y + px(distance)).clamp(-maximum, px(0.));
+            handle.set_offset(point(offset.x, target_y));
+            cx.notify();
+            return;
+        }
         let Some(generation) = self
             .smooth_scroll_state_mut(surface)
             .push_wheel(delta.y, Instant::now())
@@ -1193,7 +1296,7 @@ impl Whatfast {
                         &message_id,
                         &client_reaction_id,
                     );
-                    self.store.toast_error = Some("Reaction timed out. Try again.".into());
+                    self.store.toast_error = Some(i18n::t("Reaction timed out. Try again.").into());
                 }
                 PendingRequest::MarkRead {
                     chat_id,
@@ -1201,11 +1304,13 @@ impl Whatfast {
                 } => {
                     self.store.restore_unread(&chat_id, previous_unread);
                     self.store.last_mark_read_id = None;
-                    self.store.toast_error = Some("Mark as read timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Mark as read timed out. Try again.").into());
                 }
                 PendingRequest::Messages { prepend: true, .. } => {
                     self.pending_prepend_anchor = None;
-                    self.store.toast_error = Some("Loading messages timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Loading messages timed out. Try again.").into());
                 }
                 PendingRequest::MessagesAfter { .. } => {
                     self.newer_load_failed = true;
@@ -1214,7 +1319,7 @@ impl Whatfast {
                 }
                 PendingRequest::Logout => {
                     self.confirming_logout = false;
-                    self.store.toast_error = Some("Logout timed out. Try again.".into());
+                    self.store.toast_error = Some(i18n::t("Logout timed out. Try again.").into());
                 }
                 PendingRequest::Search { .. } => {}
                 // Best-effort presence broadcast; peers expire it on their own.
@@ -1224,7 +1329,8 @@ impl Whatfast {
                     previous_pinned,
                 } => {
                     self.store.set_chat_pinned(&chat_id, previous_pinned);
-                    self.store.toast_error = Some("Pinning the chat timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Pinning the chat timed out. Try again.").into());
                 }
                 PendingRequest::SetChatArchive {
                     chat_id,
@@ -1241,14 +1347,16 @@ impl Whatfast {
                 } => {
                     self.store
                         .set_chat_muted(&chat_id, previous_muted, previous_mute_until_ms);
-                    self.store.toast_error = Some("Muting the chat timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Muting the chat timed out. Try again.").into());
                 }
                 PendingRequest::SetChatBlock {
                     chat_id,
                     previous_blocked,
                 } => {
                     self.store.set_chat_blocked(&chat_id, previous_blocked);
-                    self.store.toast_error = Some("Blocking the chat timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Blocking the chat timed out. Try again.").into());
                 }
                 PendingRequest::DeleteMessage {
                     chat_id,
@@ -1269,7 +1377,7 @@ impl Whatfast {
                     generation,
                 } => {
                     self.rollback_poll_vote(&chat_id, &poll_message_id, generation);
-                    self.store.toast_error = Some("The vote timed out. Try again.".into());
+                    self.store.toast_error = Some(i18n::t("The vote timed out. Try again.").into());
                 }
                 PendingRequest::EditMessage {
                     chat_id,
@@ -1292,7 +1400,8 @@ impl Whatfast {
                 PendingRequest::Reconnect => {
                     self.store.connection = ConnectionState::Offline;
                     self.store.connection_detail = "Reconnect failed".into();
-                    self.store.toast_error = Some("Reconnect timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Reconnect timed out. Try again.").into());
                 }
                 PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache => {
                     self.integrity_checking = false;
@@ -1320,7 +1429,8 @@ impl Whatfast {
                     );
                 }
                 _ => {
-                    self.store.toast_error = Some("Backend request timed out. Try again.".into());
+                    self.store.toast_error =
+                        Some(i18n::t("Backend request timed out. Try again.").into());
                 }
             }
         }
@@ -1481,7 +1591,7 @@ impl Whatfast {
             RpcIncoming::Response { pending, response } => {
                 self.handle_response(pending, response, window, cx)
             }
-            RpcIncoming::Event(event) => self.handle_event(event),
+            RpcIncoming::Event(event) => self.handle_event(event, window),
             RpcIncoming::Exited(error) => {
                 self.store.connection = ConnectionState::Failed;
                 self.store.connection_detail = error;
@@ -1489,7 +1599,7 @@ impl Whatfast {
                     Some("Backend stopped. Restart Whatfast to reconnect.".into());
             }
             RpcIncoming::Invalid => {
-                self.store.toast_error = Some("Ignored an invalid backend envelope".into())
+                self.store.toast_error = Some(i18n::t("Ignored an invalid backend envelope").into())
             }
             RpcIncoming::Ignore => {}
         }
@@ -1507,7 +1617,7 @@ impl Whatfast {
         cx: &mut Context<Self>,
     ) {
         let Some(result) = response.result else {
-            self.store.toast_error = Some("Backend returned an empty response".into());
+            self.store.toast_error = Some(i18n::t("Backend returned an empty response").into());
             return;
         };
         if let rpc_response::Result::Error(error) = result {
@@ -2398,13 +2508,44 @@ impl Whatfast {
                 }
             }
             (PendingRequest::Shutdown, rpc_response::Result::Shutdown(_)) => {
-                self.store.toast_error = Some("The local backend was asked to stop".into());
+                self.store.toast_error =
+                    Some(i18n::t("The local backend was asked to stop").into());
             }
             _ => {}
         }
     }
 
-    pub(crate) fn handle_event(&mut self, event: BackendEvent) {
+    /// Leaves a toast of the system when a message arrives in the background.
+    ///
+    /// The decision mirrors `tauri/src/lib/notification-policy.ts`: the
+    /// profile enables the toasts, the chat is not muted, the message is not
+    /// one of the user and neither the window nor the conversation is in
+    /// front. The history that the first sync brings is not news: only
+    /// recent messages are announced.
+    fn notify_message(&self, message: &Message, window: &Window) {
+        if !self.settings.notifications_enabled || !self.store.sync_complete || message.from_me {
+            return;
+        }
+        if now_ms().saturating_sub(message.timestamp_ms) > NOTIFICATION_MAX_AGE_MS {
+            return;
+        }
+        let Some(chat) = self.store.chat(&message.chat_id) else {
+            return;
+        };
+        let chat_in_front =
+            self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
+        // port: `shouldNotify` is falsy based: a muted chat, or a chat that
+        // the user is looking at, gets no toast.
+        if chat.muted || (window.is_window_active() && chat_in_front) {
+            return;
+        }
+        self.notifier.show(Note {
+            title: notification_title(chat, message),
+            body: notification_body(message, self.settings.notification_previews),
+        });
+    }
+
+    pub(crate) fn handle_event(&mut self, event: BackendEvent, window: &mut Window) {
         if event.sequence == 0 || event.sequence <= self.last_event_sequence {
             return;
         }
@@ -2535,6 +2676,9 @@ impl Whatfast {
             }
             Some(backend_event::Event::MessageUpserted(upsert)) => {
                 if let Some(message) = upsert.message {
+                    // A message that arrives while the window is in the
+                    // background leaves a toast, if the profile asks for it.
+                    self.notify_message(&message, window);
                     // The typed-out message arrived; drop the indicator now
                     // rather than waiting for the paused update or the TTL.
                     if !message.from_me
@@ -3221,33 +3365,75 @@ impl Whatfast {
         }
     }
 
-    pub(crate) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dark = cx.theme().is_dark();
-        let mode = if dark {
-            ThemeMode::Light
-        } else {
-            ThemeMode::Dark
-        };
-        Theme::change(mode, Some(window), cx);
-        // La paleta de WhatsApp va despues del modo: el boton del tema
-        // cambia entre el oscuro y el claro de la misma paleta.
-        let appearance = if dark {
-            whatfast_core::theme::ThemeAppearance::Light
-        } else {
-            whatfast_core::theme::ThemeAppearance::Dark
-        };
-        tokens::apply_theme(&tokens::app_theme(appearance), self.ui_scale, cx);
+    /// The theme in use, as the settings ask.
+    pub(crate) fn active_theme(&self) -> AppTheme {
+        tokens::theme_by_id(&self.theme_id, &self.custom_themes)
+    }
+
+    /// Copies the fields of the interface into the settings and stores them.
+    pub(crate) fn save_settings(&mut self) {
+        self.settings.ui_scale = self.ui_scale;
+        self.settings.density = self.density;
+        self.settings.enter_to_send = self.enter_to_send;
+        self.settings.split_view = self.split_view;
+        self.settings.battery_saver = self.battery_saver;
+        self.settings.theme_id = self.theme_id.clone();
+        self.settings.custom_themes = self
+            .custom_themes
+            .iter()
+            .filter_map(|theme| serde_json::to_value(theme).ok())
+            .collect();
+        if let Err(error) = settings::save(&self.settings) {
+            self.store.toast_error = Some(format!(
+                "{}: {error}",
+                i18n::t("Could not save the settings")
+            ));
+        }
+    }
+
+    /// Paints the active theme and measures the messages again.
+    pub(crate) fn apply_active_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = self.active_theme();
+        let light = theme.appearance == ThemeAppearance::Light;
+        Theme::change(
+            if light {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
+            },
+            Some(window),
+            cx,
+        );
+        tokens::apply_theme(&theme, self.ui_scale, cx);
         apply_theme_scale(self.ui_scale, window, cx);
+        self.store.invalidate_all_message_heights();
         cx.notify();
+    }
+
+    /// Chooses one theme of the catalog.
+    pub(crate) fn select_theme(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_id = id;
+        self.apply_active_theme(window, cx);
+        self.save_settings();
+    }
+
+    pub(crate) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The quick button walks between the two palettes of the app; the
+        // settings panel is the place for the rest of the catalog.
+        let light = self.active_theme().appearance == ThemeAppearance::Light;
+        let id = if light {
+            "whatsapp-dark"
+        } else {
+            "whatsapp-light"
+        };
+        self.select_theme(id.to_string(), window, cx);
     }
 
     pub(crate) fn set_ui_scale(&mut self, scale: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.ui_scale = normalized_ui_scale(scale);
         apply_theme_scale(self.ui_scale, window, cx);
         self.store.invalidate_all_message_heights();
-        if let Err(error) = save_ui_scale(self.ui_scale) {
-            self.store.toast_error = Some(format!("Could not save UI scale: {error}"));
-        }
+        self.save_settings();
         cx.notify();
     }
 
@@ -3258,6 +3444,201 @@ impl Whatfast {
         cx: &mut Context<Self>,
     ) {
         self.set_ui_scale(self.ui_scale + delta, window, cx);
+    }
+
+    /// Chooses the language of the interface.
+    pub(crate) fn set_language(
+        &mut self,
+        code: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !i18n::set_language(&code) {
+            return;
+        }
+        self.settings.language = code;
+        self.refresh_placeholders(window, cx);
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Rewrites the placeholders after a change of language.
+    ///
+    /// The placeholder is a value of the input, so it does not follow the
+    /// global language on its own.
+    pub(crate) fn refresh_placeholders(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(i18n::t("Type a message"), window, cx)
+        });
+        self.emoji_search.update(cx, |input, cx| {
+            input.set_placeholder(i18n::t("Search emoji"), window, cx)
+        });
+        self.search_input.update(cx, |input, cx| {
+            input.set_placeholder(i18n::t("Search or start a new chat"), window, cx)
+        });
+    }
+
+    /// The air between the rows of the list and the messages.
+    pub(crate) fn set_density(&mut self, density: Density, cx: &mut Context<Self>) {
+        if self.density == density {
+            return;
+        }
+        self.density = density;
+        self.store.invalidate_all_message_heights();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Whether a plain Enter sends the message.
+    pub(crate) fn set_enter_to_send(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.enter_to_send == enabled {
+            return;
+        }
+        self.enter_to_send = enabled;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Whether a message in the background shows a toast of the system.
+    pub(crate) fn set_notifications(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.notifications_enabled == enabled {
+            return;
+        }
+        self.settings.notifications_enabled = enabled;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Whether the toast includes the text of the message.
+    pub(crate) fn set_notification_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.notification_previews == enabled {
+            return;
+        }
+        self.settings.notification_previews = enabled;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Whether the chat list stays beside the conversation on narrow windows.
+    pub(crate) fn set_split_view(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.split_view == enabled {
+            return;
+        }
+        self.split_view = enabled;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Whether the wallpaper and the smooth scroll are off.
+    pub(crate) fn set_battery_saver(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.battery_saver == enabled {
+            return;
+        }
+        self.battery_saver = enabled;
+        if enabled {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
+            self.stop_smooth_scroll(ScrollSurface::ChatList);
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Sets the directory of "Save to folder"; `None` asks every time.
+    pub(crate) fn set_download_dir(&mut self, directory: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.settings.download_dir = directory
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Asks the user for the directory of the downloads.
+    pub(crate) fn choose_download_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(i18n::t("Choose the folder for the downloads").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let paths = selected.await.ok()?.ok()??;
+            let path = paths.into_iter().next()?;
+            window
+                .update(|_window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.set_download_dir(Some(path), cx);
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Makes a custom theme from the one in use, so the user can paint it.
+    pub(crate) fn create_custom_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut theme = self.active_theme();
+        let count = self.custom_themes.len() + 1;
+        let number = count.to_string();
+        theme.id = format!("custom-{}", Uuid::new_v4());
+        theme.name = i18n::t_args("My theme {count}", &[("count", &number)]);
+        // A theme of the user is not builtin: the catalog can edit or delete
+        // it, and the builtin ones stay read-only.
+        theme.builtin = None;
+        let id = theme.id.clone();
+        self.custom_themes.push(theme);
+        self.theme_id = id.clone();
+        self.editing_theme = Some(id);
+        self.apply_active_theme(window, cx);
+        self.save_settings();
+    }
+
+    /// Deletes one custom theme.
+    pub(crate) fn delete_custom_theme(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.custom_themes.retain(|theme| theme.id != id);
+        if self.theme_id == id {
+            // Back to the palette of the app, which always exists.
+            self.theme_id.clear();
+        }
+        if self.editing_theme.as_deref() == Some(id) {
+            self.editing_theme = None;
+        }
+        self.apply_active_theme(window, cx);
+        self.save_settings();
+    }
+
+    /// Paints the accent of a custom theme with one color of the palette.
+    pub(crate) fn set_theme_accent(
+        &mut self,
+        id: &str,
+        color: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hex = format!("#{color:06x}");
+        if let Some(theme) = self.custom_themes.iter_mut().find(|theme| theme.id == id) {
+            theme.tokens.set(ThemeToken::Accent, &hex);
+            theme
+                .tokens
+                .set(ThemeToken::AccentHover, &shade_color(color, 0.82));
+            theme
+                .tokens
+                .set(ThemeToken::AccentSoft, &rgba_color(color, 0.18));
+            theme
+                .tokens
+                .set(ThemeToken::AccentFg, accent_foreground(color));
+            theme.tokens.set(ThemeToken::QuoteBar, &hex);
+        }
+        if self.theme_id == id {
+            self.apply_active_theme(window, cx);
+        }
+        self.save_settings();
     }
 
     /// Changes the filter of the column of chats.
@@ -3644,15 +4025,24 @@ impl Whatfast {
         if self.store.chat(&chat_id).is_none() {
             return;
         }
+        // Volver a tocar la conversacion que ya esta abierta no vacia la
+        // bandeja: solo se vacia cuando el usuario se va a otra.
+        let switching_chat = self.store.selected_chat_id.as_deref() != Some(chat_id.as_str());
         self.show_chat_in_the_column(&chat_id);
         record_recent_chat(&mut self.recent_chat_ids, &chat_id);
         self.load_selected_chat(chat_id.clone());
+        // The pictures of the tray belong to the conversation that was open:
+        // the reference drops them when the user moves to another chat.
+        if switching_chat {
+            self.pending_images.clear();
+        }
         let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
         self.replying_to_message_id = draft.reply_to_message_id;
         self.composer.update(cx, |input, cx| {
             input.set_value(draft.text, window, cx);
             input.focus(window, cx);
         });
+        self.refresh_composer_placeholder(window, cx);
         // The strip of the open chats follows the recency history.
         self.sync_shell(cx);
     }
@@ -3841,11 +4231,11 @@ impl Whatfast {
         let draft_text = self.composer.read(cx).value().to_string();
         let text = draft_text.trim().to_string();
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         if let Err(error) = validate_text_message(&text) {
@@ -3909,6 +4299,11 @@ impl Whatfast {
         );
     }
 
+    /// Asks the user for one or more pictures and stages them in the tray of
+    /// the composer.
+    ///
+    /// The pictures do not go out here: they wait for the button of the send,
+    /// the same way the reference shows them over the field of the message.
     pub(crate) fn choose_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.store.connection != ConnectionState::Connected
             || self.store.selected_chat_id.is_none()
@@ -3918,21 +4313,181 @@ impl Whatfast {
         let selected = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
-            prompt: Some("Choose an image to send".into()),
+            multiple: true,
+            prompt: Some("Choose photos to send".into()),
         });
         let view = cx.entity();
         cx.spawn_in(window, async move |_, window| {
-            let path = selected.await.ok()?.ok()??.into_iter().next()?;
-            // The picture opens in the editor, the same way the web client
-            // does: the user crops and rotates it before it is sent.
+            let paths = selected.await.ok()?.ok()??;
             window
                 .update(|window, cx| {
-                    view.update(cx, |this, cx| this.open_media_editor(path, window, cx))
+                    view.update(cx, |this, cx| {
+                        this.stage_images(paths, window, cx);
+                        cx.notify();
+                    })
                 })
                 .ok()
         })
         .detach();
+    }
+
+    /// Puts one or more pictures in the tray of the composer, in order.
+    ///
+    /// The first picture that the tray refuses stops the batch: the user sees
+    /// why and the pictures that fit stay staged.
+    pub(crate) fn stage_images(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.selected_chat_id.is_none() {
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
+            return;
+        }
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
+            return;
+        }
+        // The toast of the batch is the first picture that the tray refused:
+        // the ones that fit stay staged.
+        let mut failure = None;
+        for path in paths {
+            if let Err(error) = self.pending_images.stage(path) {
+                failure = Some(error);
+                break;
+            }
+        }
+        self.store.toast_error = failure;
+        self.refresh_composer_placeholder(window, cx);
+    }
+
+    /// Puts the message of the composer out: the pictures of the tray when
+    /// there are any, the text otherwise.
+    pub(crate) fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_images.is_empty() {
+            self.send_text(window, cx);
+        } else {
+            self.send_pending_images(window, cx);
+        }
+    }
+
+    /// Sends the pictures of the tray, with the text of the composer as the
+    /// caption of the first one.
+    ///
+    /// port: the reference sends the pictures of a batch as one message with
+    /// one caption. The protocol of the sidecar sends one picture per call and
+    /// carries the caption inside each one, so the caption travels with the
+    /// first picture and the rest go without it.
+    pub(crate) fn send_pending_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
+            return;
+        };
+        if self.store.connection != ConnectionState::Connected {
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
+            return;
+        }
+        let draft_text = self.composer.read(cx).value().to_string();
+        let caption = draft_text.trim().to_string();
+        // Every picture is checked before the first one goes out: a refused
+        // picture leaves the whole tray in place.
+        for image in self.pending_images.images() {
+            if let Err(error) = validate_image_message(&image.path, &caption) {
+                self.store.toast_error = Some(error);
+                return;
+            }
+        }
+        let pending = self.pending_images.take_all();
+        self.store.toast_error = None;
+        let reply_to_message_id = self.replying_to_message_id.clone();
+        self.mention_picker = None;
+        // Delivering the message clears the composing indicator for peers.
+        self.typing_signal = None;
+        self.clear_active_draft();
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.refresh_composer_placeholder(window, cx);
+        for (index, image) in pending.into_iter().enumerate() {
+            let caption = if index == 0 {
+                caption.clone()
+            } else {
+                String::new()
+            };
+            let reply_to_message_id = if index == 0 {
+                reply_to_message_id.clone()
+            } else {
+                None
+            };
+            self.request(
+                rpc_request::Request::SendImage(whatfast_protocol::SendImageRequest {
+                    client_message_id: Uuid::new_v4().to_string(),
+                    chat_id: chat_id.clone(),
+                    image_path: image.path.to_string_lossy().into_owned(),
+                    caption,
+                    reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+                    reply_to_chat_id: String::new(),
+                }),
+                PendingRequest::SendImage {
+                    // port: the same quirk as in `send_text`.
+                    chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
+                    draft_text: draft_text.clone(),
+                    reply_to_message_id,
+                },
+            );
+        }
+    }
+
+    /// Puts the options of one picture of the tray in front.
+    pub(crate) fn select_pending_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.pending_images.select(index);
+        cx.notify();
+    }
+
+    /// Drops one picture of the tray.
+    pub(crate) fn remove_pending_image(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_images.remove(index);
+        self.refresh_composer_placeholder(window, cx);
+    }
+
+    /// Opens the editor over one picture of the tray: the crop and the
+    /// rotation, the same options of the reference.
+    pub(crate) fn edit_pending_image(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .pending_images
+            .get(index)
+            .map(|image| image.path.clone())
+        else {
+            return;
+        };
+        self.open_media_editor(path, window, cx);
+    }
+
+    /// The field of the message says what the next message is: the text or
+    /// the caption of the pictures of the tray.
+    pub(crate) fn refresh_composer_placeholder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = if self.pending_images.is_empty() {
+            i18n::t("Type a message")
+        } else {
+            i18n::t("Add a caption…")
+        };
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx)
+        });
     }
 
     pub(crate) fn choose_sticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3982,49 +4537,6 @@ impl Whatfast {
         .detach();
     }
 
-    pub(crate) fn send_image(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
-            return;
-        };
-        if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
-            return;
-        }
-        let draft_text = self.composer.read(cx).value().to_string();
-        let caption = draft_text.trim().to_string();
-        if let Err(error) = validate_image_message(&path, &caption) {
-            self.store.toast_error = Some(error);
-            return;
-        }
-        self.store.toast_error = None;
-        let reply_to_message_id = self.replying_to_message_id.clone();
-        self.clear_active_draft();
-        self.composer
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.request(
-            rpc_request::Request::SendImage(whatfast_protocol::SendImageRequest {
-                client_message_id: Uuid::new_v4().to_string(),
-                chat_id,
-                image_path: path.to_string_lossy().into_owned(),
-                caption,
-                reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
-                reply_to_chat_id: String::new(),
-            }),
-            PendingRequest::SendImage {
-                // port: the same quirk as in `send_text`.
-                chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
-                draft_text,
-                reply_to_message_id,
-            },
-        );
-    }
-
     pub(crate) fn send_sticker(
         &mut self,
         prepared: sticker::PreparedSticker,
@@ -4032,7 +4544,7 @@ impl Whatfast {
         reply_to_message_id: Option<String>,
     ) {
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         self.store.toast_error = None;
@@ -4160,11 +4672,11 @@ impl Whatfast {
         voice_note: bool,
     ) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         self.store.toast_error = None;
@@ -4182,7 +4694,10 @@ impl Whatfast {
         );
     }
 
-    /// Pega la imagen del portapapeles en la conversacion abierta.
+    /// Pega la imagen del portapapeles en la bandeja del compositor.
+    ///
+    /// La foto no sale sola: queda esperando el boton de mandar, con la cruz
+    /// para sacarla y el lapiz para recortarla, como en la referencia.
     ///
     /// Devuelve `true` cuando el portapapeles tenia una imagen: el texto
     /// sigue el camino normal del campo de escritura.
@@ -4201,7 +4716,7 @@ impl Whatfast {
             return false;
         };
         if image.bytes.len() as u64 > MAX_IMAGE_BYTES {
-            self.store.toast_error = Some("The pasted image is too big".into());
+            self.store.toast_error = Some(i18n::t("The pasted image is too big").into());
             return true;
         }
         // El portapapeles de Windows entrega el mapa de bits como BMP, que
@@ -4213,7 +4728,8 @@ impl Whatfast {
             gpui::ImageFormat::Webp => (image.bytes.clone(), "webp"),
             _ => {
                 let Ok(decoded) = image::load_from_memory(&image.bytes) else {
-                    self.store.toast_error = Some("The pasted image could not be read".into());
+                    self.store.toast_error =
+                        Some(i18n::t("The pasted image could not be read").into());
                     return true;
                 };
                 let mut png = Vec::new();
@@ -4221,7 +4737,8 @@ impl Whatfast {
                     .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
                     .is_err()
                 {
-                    self.store.toast_error = Some("The pasted image could not be read".into());
+                    self.store.toast_error =
+                        Some(i18n::t("The pasted image could not be read").into());
                     return true;
                 }
                 (png, "png")
@@ -4231,15 +4748,15 @@ impl Whatfast {
         // imagen del portapapeles se guarda en la carpeta temporal.
         let directory = std::env::temp_dir().join("whatfast-pegado");
         if std::fs::create_dir_all(&directory).is_err() {
-            self.store.toast_error = Some("The pasted image could not be saved".into());
+            self.store.toast_error = Some(i18n::t("The pasted image could not be saved").into());
             return true;
         }
         let path = directory.join(format!("pegado-{}.{}", Uuid::new_v4(), extension));
         if std::fs::write(&path, &bytes).is_err() {
-            self.store.toast_error = Some("The pasted image could not be saved".into());
+            self.store.toast_error = Some(i18n::t("The pasted image could not be saved").into());
             return true;
         }
-        self.send_image(path, window, cx);
+        self.stage_images(vec![path], window, cx);
         true
     }
 
@@ -4353,6 +4870,119 @@ impl Whatfast {
         cx.open_url(&url);
     }
 
+    /// Copies an attachment that is already on the disk into the folder of the
+    /// downloads.
+    ///
+    /// When the settings do not name a folder, the system asks for one. The
+    /// copy never overwrites a file: a number goes before the extension.
+    pub(crate) fn save_message_attachment(
+        &mut self,
+        message_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) =
+            self.store
+                .message(&message_id)
+                .and_then(|message| match message.content.as_ref() {
+                    Some(whatfast_protocol::message::Content::Attachment(attachment))
+                        if !attachment.local_path.is_empty() =>
+                    {
+                        Some(PathBuf::from(&attachment.local_path))
+                    }
+                    _ => None,
+                })
+        else {
+            self.store.toast_error = Some(i18n::t("That file is no longer available").into());
+            cx.notify();
+            return;
+        };
+        if !source.is_file() {
+            self.store.toast_error = Some(i18n::t("That file is no longer available").into());
+            cx.notify();
+            return;
+        }
+        let configured = self.settings.download_dir.trim().to_string();
+        if !configured.is_empty() {
+            self.copy_attachment_to(&source, Path::new(&configured), cx);
+            return;
+        }
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(i18n::t("Choose the folder for the downloads").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let paths = selected.await.ok()?.ok()??;
+            let directory = paths.into_iter().next()?;
+            window
+                .update(|_window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.copy_attachment_to(&source, &directory, cx);
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Copies the file, with a number when the name is taken.
+    fn copy_attachment_to(&mut self, source: &Path, directory: &Path, cx: &mut Context<Self>) {
+        let Some(name) = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            self.store.toast_error = Some(i18n::t("The file could not be saved").into());
+            return;
+        };
+        let stem = source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        let extension = source
+            .extension()
+            .map(|extension| format!(".{}", extension.to_string_lossy()))
+            .unwrap_or_default();
+        let mut destination = directory.join(&name);
+        let mut counter = 1;
+        while destination.exists() {
+            destination = directory.join(format!("{stem} ({counter}){extension}"));
+            counter += 1;
+        }
+        match std::fs::copy(source, &destination) {
+            Ok(_) => {
+                self.store.toast_error = None;
+                self.store.toast_info = Some(i18n::t_args(
+                    "Saved to {path}",
+                    &[("path", &destination.display().to_string())],
+                ));
+                self.clear_toast_info_later(cx);
+            }
+            Err(error) => {
+                self.store.toast_error = Some(format!(
+                    "{}: {error}",
+                    i18n::t("The file could not be saved")
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Takes the green notice out after a moment.
+    fn clear_toast_info_later(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_secs(4)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.store.toast_info = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     // ---------------------------------------------------------------------
     // The library of stickers
     // ---------------------------------------------------------------------
@@ -4366,15 +4996,15 @@ impl Whatfast {
     /// Sends one sticker of the library to the open conversation.
     pub(crate) fn send_sticker_from_library(&mut self, sticker_id: String) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         if sticker_id.trim().is_empty() {
-            self.store.toast_error = Some("That sticker is no longer available".into());
+            self.store.toast_error = Some(i18n::t("That sticker is no longer available").into());
             return;
         }
         self.store.toast_error = None;
@@ -4400,7 +5030,7 @@ impl Whatfast {
         target_chat_id: String,
     ) {
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         self.store.toast_error = None;
@@ -4524,11 +5154,11 @@ impl Whatfast {
         selectable_options_count: u32,
     ) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
         if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
         self.store.toast_error = None;
@@ -4919,7 +5549,7 @@ impl Whatfast {
             match event {
                 MediaEditorEvent::Applied(edit) => {
                     this.media_editor = None;
-                    this.send_edited_picture(edit.clone(), window, cx);
+                    this.stage_edited_picture(edit.clone(), window, cx);
                 }
                 MediaEditorEvent::Cancelled => {
                     this.media_editor = None;
@@ -4932,8 +5562,12 @@ impl Whatfast {
         self.sync_shell(cx);
     }
 
-    /// Writes the picture the user edited and sends it.
-    fn send_edited_picture(
+    /// Writes the picture the user edited and puts it back in the tray, in
+    /// the place of the picture it came from.
+    ///
+    /// The edited picture does not go out on its own: the tray keeps it until
+    /// the user presses send.
+    fn stage_edited_picture(
         &mut self,
         edit: crate::media_editor::MediaEdit,
         window: &mut Window,
@@ -4960,7 +5594,16 @@ impl Whatfast {
             .map_err(|error| error.to_string())
             .and_then(|()| crate::media_editor::apply_edit(&source, &plan, &destination));
         match prepared {
-            Ok(()) => self.send_image(destination, window, cx),
+            Ok(()) => {
+                // The editor was opened over a picture of the tray: the
+                // edited one takes its place, with the options and the
+                // caption the user already chose.
+                if !self.pending_images.replace(&source, destination.clone()) {
+                    self.stage_images(vec![destination], window, cx);
+                } else {
+                    self.refresh_composer_placeholder(window, cx);
+                }
+            }
             Err(error) => {
                 self.store.toast_error = Some(error);
             }
@@ -5089,7 +5732,7 @@ impl Whatfast {
     /// Opens the form of a poll.
     pub(crate) fn open_poll_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.store.selected_chat_id.is_none() {
-            self.store.toast_error = Some("Choose a conversation before sending".into());
+            self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         }
         let view = cx.entity();
@@ -5188,6 +5831,43 @@ fn report_failed_request(store: &mut Store, request: anyhow::Result<u64>) {
     }
 }
 
+/// The colors of the accent that the custom themes offer.
+pub(crate) const ACCENT_SWATCHES: [u32; 10] = [
+    0x25d366, 0x00a884, 0x0a84ff, 0x7c4dff, 0xe91e63, 0xff5722, 0xf59e0b, 0x10b981, 0x06b6d4,
+    0x64748b,
+];
+
+/// One color of the palette, darkened by a factor: the hover of the accent.
+fn shade_color(color: u32, factor: f32) -> String {
+    let red = (((color >> 16) & 0xff) as f32 * factor).round() as u32;
+    let green = (((color >> 8) & 0xff) as f32 * factor).round() as u32;
+    let blue = ((color & 0xff) as f32 * factor).round() as u32;
+    format!("#{red:02x}{green:02x}{blue:02x}")
+}
+
+/// One color of the palette, with an alpha: the soft fill of the accent.
+fn rgba_color(color: u32, alpha: f32) -> String {
+    format!(
+        "rgba({}, {}, {}, {alpha})",
+        (color >> 16) & 0xff,
+        (color >> 8) & 0xff,
+        color & 0xff
+    )
+}
+
+/// The color of the text that sits on top of the accent.
+fn accent_foreground(color: u32) -> &'static str {
+    let red = ((color >> 16) & 0xff) as f32 / 255.0;
+    let green = ((color >> 8) & 0xff) as f32 / 255.0;
+    let blue = (color & 0xff) as f32 / 255.0;
+    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    if luminance > 0.55 {
+        "#000000"
+    } else {
+        "#ffffff"
+    }
+}
+
 /// The current instant, in milliseconds of the epoch.
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -5195,6 +5875,104 @@ fn now_ms() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0)
+}
+
+/// How old a message can be and still be announced: the history of the sync
+/// is older than this, and a notification for it would be noise.
+const NOTIFICATION_MAX_AGE_MS: i64 = 60_000;
+
+/// The title of the toast: the chat, the sender or the phone number.
+///
+/// port: `notificationTitle` of `tauri/src/lib/notification-policy.ts`.
+fn notification_title(chat: &Chat, message: &Message) -> String {
+    for candidate in [
+        chat.title.as_str(),
+        message.sender_name.as_str(),
+        chat.phone_number.as_str(),
+    ] {
+        if !candidate.is_empty() {
+            return candidate.to_string();
+        }
+    }
+    i18n::t("New WhatsApp message").to_string()
+}
+
+/// The body of the toast: the text of the message or the kind of content.
+///
+/// port: `notificationBody` of `tauri/src/lib/notification-policy.ts`, with
+/// the labels translated and the same cut at 180 characters.
+fn notification_body(message: &Message, show_preview: bool) -> String {
+    if !show_preview {
+        return i18n::t("New message").to_string();
+    }
+    let mut body = i18n::t("Message").to_string();
+    if message.revoked {
+        body = i18n::t("This message was deleted").to_string();
+    } else if let Some(content) = message.content.as_ref() {
+        use whatfast_protocol::message::Content;
+        body = match content {
+            Content::Text(text) => text.text.clone(),
+            Content::Image(image) => {
+                if !image.caption.is_empty() {
+                    image.caption.clone()
+                } else if image.sticker {
+                    i18n::t("Sticker").to_string()
+                } else {
+                    i18n::t("Photo").to_string()
+                }
+            }
+            Content::Attachment(attachment) => {
+                for candidate in [
+                    attachment.caption.as_str(),
+                    attachment.file_name.as_str(),
+                    attachment.kind.as_str(),
+                ] {
+                    if !candidate.is_empty() {
+                        return candidate.to_string();
+                    }
+                }
+                i18n::t("Attachment").to_string()
+            }
+            Content::Contacts(contacts) => {
+                if contacts.contacts.len() == 1 {
+                    contacts
+                        .contacts
+                        .first()
+                        .map(|contact| contact.display_name.clone())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| i18n::t("Contact").to_string())
+                } else {
+                    i18n::t_args(
+                        "{count} contacts",
+                        &[("count", &contacts.contacts.len().to_string())],
+                    )
+                }
+            }
+            Content::Location(location) => {
+                if !location.name.is_empty() {
+                    location.name.clone()
+                } else if !location.address.is_empty() {
+                    location.address.clone()
+                } else {
+                    i18n::t("Location").to_string()
+                }
+            }
+            Content::Unsupported(unsupported) => {
+                if !unsupported.fallback_text.is_empty() {
+                    unsupported.fallback_text.clone()
+                } else if !unsupported.type_name.is_empty() {
+                    unsupported.type_name.clone()
+                } else {
+                    i18n::t("Message").to_string()
+                }
+            }
+            Content::Poll(_) => i18n::t("Message").to_string(),
+        };
+    }
+    if body.chars().count() > 180 {
+        body = body.chars().take(179).collect::<String>() + "\u{2026}";
+    }
+    body
 }
 
 /// The scale the profile stored, or the default one.

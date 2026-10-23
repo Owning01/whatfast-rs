@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -134,7 +135,7 @@ impl NavAction {
     /// port: the labels of the oracle: "Chats", `titlebar.quickSearch`,
     /// `titlebar.privacy` and `titlebar.settings`.
     pub(crate) fn label(self) -> &'static str {
-        match self {
+        i18n::t(match self {
             NavAction::Chats => "Chats",
             NavAction::Search => "Quick search (Ctrl+K)",
             NavAction::States => "States",
@@ -142,7 +143,7 @@ impl NavAction {
             NavAction::Archived => "Archived",
             NavAction::Privacy => "Privacy architecture",
             NavAction::Settings => "Settings",
-        }
+        })
     }
 }
 

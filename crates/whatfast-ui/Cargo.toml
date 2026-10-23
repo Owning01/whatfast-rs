@@ -16,6 +16,7 @@ embed-resource = "3.0.11"
 anyhow.workspace = true
 async-channel.workspace = true
 whatfast-core = { path = "../whatfast-core" }
+whatfast-i18n = { path = "../whatfast-i18n" }
 whatfast-model = { path = "../whatfast-model" }
 whatfast-protocol = { path = "../whatfast-protocol" }
 # The GPUI stack comes from the Zed repository. Do NOT add `rev = ...` here:
@@ -45,6 +46,11 @@ rodio = { version = "0.23.0", default-features = false, features = [
 qrcode = { version = "0.14", default-features = false }
 smol = "2"
 uuid = { version = "1.18", features = ["v4"] }
+# The custom themes of the profile are JSON inside the settings file.
+serde_json = "1.0"
+# The toasts of the system when a message arrives in the background: the
+# same call paints on the notification center of each platform.
+notify-rust = "4.18"
 
 # The dialog of the system for the messages that happen before there is a
 # window, and the check of the process that holds the lock of the instance:
@@ -53,6 +59,7 @@ uuid = { version = "1.18", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_System_Time",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -450,7 +451,7 @@ impl MessageMenu {
                             handler(action, window, cx);
                         }
                     })
-                    .child(item.label),
+                    .child(i18n::t(item.label)),
             );
         }
 
@@ -618,7 +619,8 @@ impl ForwardPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search chats")));
         let field = search_input.clone();
         let subscription = cx.subscribe_in(&search_input, window, move |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
@@ -837,7 +839,11 @@ impl ForwardPicker {
                     .bg(theme.background)
                     .shadow_lg()
                     .gap_2()
-                    .child(div().font_weight(FontWeight::BOLD).child("Forward message"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(i18n::t("Forward message")),
+                    )
                     .child(
                         div()
                             .mt(px(FORWARD_SEARCH_MARGIN_TOP))
@@ -854,11 +860,13 @@ impl ForwardPicker {
                         h_flex()
                             .justify_end()
                             .gap_2()
-                            .child(Button::new("forward-cancel").label("Cancel").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.cancel(window, cx);
-                                }),
-                            ))
+                            .child(
+                                Button::new("forward-cancel")
+                                    .label(i18n::t("Cancel"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel(window, cx);
+                                    })),
+                            )
                             .child(
                                 Button::new("forward-confirm")
                                     .primary()
@@ -1096,7 +1104,8 @@ impl std::fmt::Debug for PollComposer {
 impl PollComposer {
     /// The form of a poll.
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let question_input = cx.new(|cx| InputState::new(window, cx).placeholder("Question"));
+        let question_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Question")));
         let field = question_input.clone();
         let question_subscription =
             cx.subscribe_in(&question_input, window, move |this, _, event, _, cx| {
@@ -1220,7 +1229,7 @@ impl PollComposer {
     fn push_option(&mut self, window: &mut Window, cx: &mut Context<Self>, value: String) {
         let id = self.next_option_id;
         self.next_option_id += 1;
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Option"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Option")));
         input.update(cx, |input, cx| {
             input.set_value(value, window, cx);
         });
@@ -1275,7 +1284,11 @@ impl PollComposer {
             .bg(theme.popover)
             .shadow_lg()
             .text_color(theme.popover_foreground)
-            .child(div().font_weight(FontWeight::BOLD).child("Create a poll"))
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .child(i18n::t("Create a poll")),
+            )
             .child(Input::new(&self.question_input).w_full())
             .child(options)
             .child(
@@ -1286,7 +1299,7 @@ impl PollComposer {
                     .child(
                         Checkbox::new("poll-multiple")
                             .checked(self.form.multiple())
-                            .label("Allow multiple answers")
+                            .label(i18n::t("Allow multiple answers"))
                             .on_click(cx.listener(|this, checked, _, cx| {
                                 this.form.set_multiple(*checked);
                                 cx.notify();
@@ -1297,14 +1310,16 @@ impl PollComposer {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(Button::new("poll-add-option").label("Add option").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.add_option(window, cx);
-                        }),
-                    ))
+                    .child(
+                        Button::new("poll-add-option")
+                            .label(i18n::t("Add option"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_option(window, cx);
+                            })),
+                    )
                     .child(
                         Button::new("poll-cancel")
-                            .label("Cancel")
+                            .label(i18n::t("Cancel"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.cancel(window, cx);
                             })),
@@ -1312,7 +1327,7 @@ impl PollComposer {
                     .child(
                         Button::new("poll-create")
                             .primary()
-                            .label("Create poll")
+                            .label(i18n::t("Create poll"))
                             .disabled(!self.can_create())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create(window, cx);
@@ -1661,7 +1676,7 @@ impl AttachmentBar {
                             this.choose(kind, window, cx);
                             cx.notify();
                         }))
-                        .child(item.label),
+                        .child(i18n::t(item.label)),
                 );
             }
             // The things the app can do that are not files: the picture of

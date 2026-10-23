@@ -32,7 +32,8 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `crates/whatfast-core/` | Lógica pura. 25 módulos declarados en `src/lib.rs`. |
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte (`transport.rs`) + backend de demostración (`fake.rs`). |
 | `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `favorites`, `sticker`, `emoji_picker`. Cero GPUI en su árbol de dependencias. |
-| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales), `instance.rs` (el lock de instancia única), `attachments.rs` (la tarjeta de un archivo adjunto y el reproductor de la nota de voz), `audio.rs` (la decodificacion y la salida de sonido del sistema), `ubicaciones.rs` (la tarjeta de un lugar y la de un contacto), `emoji_recent.rs` (los emojis usados lately). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
+| `crates/whatfast-i18n/` | Los textos de la interfaz. Un JSON por idioma en `locales/` (`en`, `es`, `zh`); el `build.rs` los descubre y los incrusta. La clave es la frase en inglés: una traducción faltante cae al inglés. Agregar un idioma es agregar `locales/<código>.json`. |
+| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales), `instance.rs` (el lock de instancia única), `local_time.rs` (el desfasaje de la zona horaria, preguntado al sistema), `attachments.rs` (la tarjeta de un archivo adjunto y el reproductor de la nota de voz), `composer_attachments.rs` (la bandeja de las fotos que esperan el boton de mandar), `notifications.rs` (el hilo que manda los avisos al sistema), `audio.rs` (la decodificacion y la salida de sonido del sistema), `ubicaciones.rs` (la tarjeta de un lugar y la de un contacto), `emoji_recent.rs` (los emojis usados lately). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
 | `backend/` | El sidecar en Go (módulo `github.com/Owning01/whatfast/backend`). |
 | `proto/bridge.proto` | Copia del contrato v21 del origen. |
 | `assets/icons/` | Los iconos de Whatfast (los mismos del cliente de Tauri). |
@@ -54,6 +55,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `docs/referencia/` | Las capturas de WhatsApp Desktop que mandaste, con el índice de lo que muestra cada una y el estado de cada vista. |
 | `docs/plataformas.md` | La guía de instalación de las tres plataformas: los paquetes, las dependencias del sistema y cómo compilar cada una. |
 | `scripts/funcionalidad.py` | Cuenta los RPC que pide la interfaz y los componentes del cliente web que tiene equivalentes. Sale con 1 si falta algo. |
+| `scripts/idiomas.py` | Informe de las claves que usa la interfaz contra cada archivo de idioma; `--strict` sale con 1 si falta una traducción. |
 | `.github/workflows/ci.yml` | Tests, lint y juez de paridad en cada push. Las acciones van fijadas a un commit. |
 | `.github/workflows/release.yml` | Los paquetes de las tres plataformas: el `.zip` y el instalador de Windows (con su `sha256`), el `.tar.gz` de Linux con el `.desktop` y los iconos, y el `Whatfast.app` de macOS (arm64 y x64). Al lanzarlo a mano, `omitir_macos` deja la corrida en Windows y Linux. |
 | `web/` + `firebase.json` + `.firebaserc` | El sitio publicado en `https://what-fast.web.app` (proyecto de Firebase `what-fast`). `firebase.json` lleva los encabezados de seguridad y la CSP; la CSP depende del hash del `<script>` de `web/index.html`. |
@@ -89,6 +91,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `python scripts\dependency-map.py` | Regenera el inventario F1. |
 | `python scripts\parity.py` | Corre el juez de paridad F2 (sale con 1 si algo falta). |
 | `python scripts\funcionalidad.py` | La puerta de "igual que el cliente web": 50/50 RPC y 21/21 componentes. |
+| `python scripts\idiomas.py` | La cobertura de cada idioma; `--strict` falla si falta una clave. |
 
 ## Baseline y meta
 
@@ -122,7 +125,7 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | B-U9 | la barra de chats como en la referencia: `ChatFilter`, conversaciones ocultas, favoritos locales, estados y canales en su propia vista | cerrado | 153/153 |
 
 **Paridad del oráculo: 153/153 (100 %) + 45 tests de caracterización.
-288 tests en verde en el workspace; clippy limpio.**
+527 tests en verde en el workspace; clippy limpio.**
 
 ## Medido (release, 20/10/2026)
 

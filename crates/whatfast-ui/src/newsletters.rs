@@ -20,6 +20,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -41,6 +42,7 @@ use whatfast_protocol::{Message, Newsletter, message::Content};
 
 use crate::app::Whatfast;
 use crate::helpers::{avatar_element, one_line};
+use crate::local_time::local_offset_minutes;
 
 /// The side of the avatar of the header, in pixels, before the scale.
 pub(crate) const HEADER_AVATAR_SIZE: f32 = 41.0;
@@ -150,11 +152,13 @@ fn now_ms() -> i64 {
 
 /// The time of a message.
 ///
-/// port: `formatTime` of the origin. The zone of the machine is not
-/// available in this crate (there is no library of dates), so the hour is
-/// the one of UTC.
+/// port: `formatTime` of the origin. The hour is the one of the machine, and
+/// the zone is asked to the system for the instant of the message.
 fn message_time(timestamp_ms: i64) -> String {
-    format_time(LocalTimestamp::new(timestamp_ms, 0), DateLocale::EnUs)
+    format_time(
+        LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms)),
+        DateLocale::EnUs,
+    )
 }
 
 /// The panel of the newsletters.
@@ -179,22 +183,22 @@ impl NewsletterPanel {
         let state = Rc::new(RefCell::new(NewsletterPanelState::default()));
         let invite_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Paste the invite link of the channel")
+                .placeholder(i18n::t("Paste the invite link of the channel"))
                 .clean_on_escape()
         });
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Channel name")
+                .placeholder(i18n::t("Channel name"))
                 .clean_on_escape()
         });
         let description_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Description (optional)")
+                .placeholder(i18n::t("Description (optional)"))
                 .clean_on_escape()
         });
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search channels")
+                .placeholder(i18n::t("Search channels"))
                 .clean_on_escape()
         });
 
@@ -367,7 +371,7 @@ impl NewsletterPanel {
                                                 .bg(cx.theme().accent.opacity(0.12))
                                                 .text_color(cx.theme().accent)
                                                 .text_xs()
-                                                .child("local"),
+                                                .child(i18n::t("local")),
                                         )
                                     })
                                     .child(
@@ -419,7 +423,7 @@ impl NewsletterPanel {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child("Search channels to follow"),
+                    .child(i18n::t("Search channels to follow")),
             )
             .children(
                 SUGGESTED_CHANNELS
@@ -483,7 +487,7 @@ impl NewsletterPanel {
                                 .primary()
                                 .rounded(px(9999.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .label("Follow")
+                                .label(i18n::t("Follow"))
                                 .on_click(cx.listener(
                                     move |_app, _, _, cx| {
                                         state.borrow_mut().subscribe_open = true;
@@ -514,7 +518,7 @@ impl NewsletterPanel {
                     .primary()
                     .small()
                     .icon(Icon::new(IconName::Plus))
-                    .label("Follow")
+                    .label(i18n::t("Follow"))
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         state.borrow_mut().subscribe_open = true;
                         cx.notify();
@@ -525,7 +529,7 @@ impl NewsletterPanel {
                     .secondary()
                     .small()
                     .icon(Icon::new(IconName::Plus))
-                    .label("New local channel")
+                    .label(i18n::t("New local channel"))
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         create_state.borrow_mut().create_open = true;
                         cx.notify();
@@ -552,7 +556,7 @@ impl NewsletterPanel {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Channel"),
+                        .child(i18n::t("Channel")),
                 );
         };
         let jid = newsletter.jid.clone();
@@ -609,7 +613,7 @@ impl NewsletterPanel {
                                                 .bg(cx.theme().accent.opacity(0.12))
                                                 .text_color(cx.theme().accent)
                                                 .text_xs()
-                                                .child("local"),
+                                                .child(i18n::t("local")),
                                         )
                                     })
                                     .when(muted, |row| {
@@ -621,7 +625,7 @@ impl NewsletterPanel {
                                                 .bg(cx.theme().accent.opacity(0.12))
                                                 .text_color(cx.theme().accent)
                                                 .text_xs()
-                                                .child("muted"),
+                                                .child(i18n::t("muted")),
                                         )
                                     }),
                             )
@@ -689,7 +693,7 @@ impl NewsletterPanel {
                 .justify_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("Loading channel postsÔÇª");
+                .child(i18n::t("Loading channel posts…"));
         }
         if posts.is_empty() {
             return v_flex()
@@ -700,7 +704,7 @@ impl NewsletterPanel {
                 .justify_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("This channel has no posts yet.");
+                .child(i18n::t("This channel has no posts yet."));
         }
         v_flex()
             .id("newsletter-posts")
@@ -754,7 +758,7 @@ impl NewsletterPanel {
                     .primary()
                     .small()
                     .icon(Icon::new(IconName::Plus))
-                    .label("Follow")
+                    .label(i18n::t("Follow"))
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         state.borrow_mut().subscribe_open = true;
                         cx.notify();
@@ -765,7 +769,7 @@ impl NewsletterPanel {
                     .secondary()
                     .small()
                     .icon(Icon::new(IconName::Plus))
-                    .label("New local channel")
+                    .label(i18n::t("New local channel"))
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         create_state.borrow_mut().create_open = true;
                         cx.notify();
@@ -801,13 +805,15 @@ impl NewsletterPanel {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Follow a channel"),
+                            .child(i18n::t("Follow a channel")),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Paste the invite link of the channel you want to follow."),
+                            .child(i18n::t(
+                                "Paste the invite link of the channel you want to follow.",
+                            )),
                     )
                     .child(Input::new(&self.invite_input).w_full())
                     .child(
@@ -818,7 +824,7 @@ impl NewsletterPanel {
                                 Button::new("newsletter-subscribe-cancel")
                                     .secondary()
                                     .small()
-                                    .label("Cancel")
+                                    .label(i18n::t("Cancel"))
                                     .on_click(cx.listener(move |_app, _, _, cx| {
                                         state.borrow_mut().subscribe_open = false;
                                         cx.notify();
@@ -828,7 +834,7 @@ impl NewsletterPanel {
                                 Button::new("newsletter-subscribe-confirm")
                                     .primary()
                                     .small()
-                                    .label("Follow")
+                                    .label(i18n::t("Follow"))
                                     .disabled(key.trim().is_empty())
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         let key = invite.read(cx).value().to_string();
@@ -869,13 +875,15 @@ impl NewsletterPanel {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("New local channel"),
+                            .child(i18n::t("New local channel")),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Stored in memory only; a linked device has no channel RPC."),
+                            .child(i18n::t(
+                                "Stored in memory only; a linked device has no channel RPC.",
+                            )),
                     )
                     .child(Input::new(&self.name_input).w_full())
                     .child(Input::new(&self.description_input).w_full())
@@ -887,7 +895,7 @@ impl NewsletterPanel {
                                 Button::new("newsletter-create-cancel")
                                     .secondary()
                                     .small()
-                                    .label("Cancel")
+                                    .label(i18n::t("Cancel"))
                                     .on_click(cx.listener(move |_app, _, _, cx| {
                                         cancel_state.borrow_mut().create_open = false;
                                         cx.notify();
@@ -897,7 +905,7 @@ impl NewsletterPanel {
                                 Button::new("newsletter-create-confirm")
                                     .primary()
                                     .small()
-                                    .label("Create")
+                                    .label(i18n::t("Create"))
                                     .disabled(name.trim().is_empty())
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         let name = name_input.read(cx).value().to_string();

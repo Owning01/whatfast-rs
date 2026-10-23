@@ -1,4 +1,4 @@
-﻿//! The strip of the statuses of the contacts, and the viewer of one status.
+//! The strip of the statuses of the contacts, and the viewer of one status.
 //!
 //! port: taken from the origin's `tauri/src/components/StatusStrip.tsx`. The
 //! lengths come from the stylesheet of the origin (`tauri/src/styles.css`,
@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+use whatfast_i18n as i18n;
 
 use gpui::{
     AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
@@ -43,6 +44,7 @@ use whatfast_protocol::{
 
 use crate::app::Whatfast;
 use crate::icons::WhatfastIcon;
+use crate::local_time::local_offset_minutes;
 use crate::tokens::parse_color;
 
 /// How long a status stays open before the viewer moves to the next one.
@@ -359,11 +361,14 @@ fn now_ms() -> i64 {
 
 /// The time of a message.
 ///
-/// port: `formatTime` of the origin. The zone of the machine is not
-/// available in this crate (there is no library of dates), so the hour is
-/// the one of UTC.
+/// port: `formatTime` of the origin. The hour is the one of the machine, and
+/// the zone is asked to the system because a zone with daylight saving time
+/// does not have the same offset in every month.
 fn message_time(timestamp_ms: i64) -> String {
-    format_time(LocalTimestamp::new(timestamp_ms, 0), DateLocale::EnUs)
+    format_time(
+        LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms)),
+        DateLocale::EnUs,
+    )
 }
 
 /// The time of a status, the way the reference writes it in the list.
@@ -372,8 +377,8 @@ fn message_time(timestamp_ms: i64) -> String {
 /// writes the day of a message (`formatDay` and `formatTime`). The hour
 /// goes in the 24 hour clock, like in the reference: "Today at 12:45".
 fn status_time(timestamp_ms: i64, now_ms: i64) -> String {
-    let value = LocalTimestamp::new(timestamp_ms, 0);
-    let now = LocalTimestamp::new(now_ms, 0);
+    let value = LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms));
+    let now = LocalTimestamp::new(now_ms, local_offset_minutes(now_ms));
     let day = format_day(value, now, DateLocale::EnUs);
     let hour = status_hour(timestamp_ms);
     if day == "Today" {
@@ -384,11 +389,20 @@ fn status_time(timestamp_ms: i64, now_ms: i64) -> String {
 
 /// The hour of a status in the 24 hour clock.
 ///
-/// The zone of the machine is not available in this crate (there is no
-/// library of dates), so the hour is the one of UTC, the same way the day
-/// of [`status_time`] is.
+/// The hour is the one of the machine, so the offset of the zone of the
+/// instant is added before the hour of the day is taken: a status of 22:10 in
+/// Buenos Aires is not the 01:10 of the next day, which is its hour in UTC.
 fn status_hour(timestamp_ms: i64) -> String {
-    let minutes = (timestamp_ms / 60_000).rem_euclid(24 * 60);
+    status_hour_at(timestamp_ms, local_offset_minutes(timestamp_ms))
+}
+
+/// The hour of a status in the 24 hour clock, at a known offset.
+///
+/// The offset is a parameter so the test can fix it: the answer of
+/// [`local_offset_minutes`] is the zone of the machine that runs it.
+fn status_hour_at(timestamp_ms: i64, utc_offset_minutes: i32) -> String {
+    let local = timestamp_ms + i64::from(utc_offset_minutes) * 60_000;
+    let minutes = (local / 60_000).rem_euclid(24 * 60);
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
@@ -408,7 +422,7 @@ impl StatusStrip {
         let state = Rc::new(RefCell::new(StatusStripState::new()));
         let text_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Write a text statusÔÇª")
+                .placeholder(i18n::t("Write a text status…"))
                 .clean_on_escape()
         });
         let colors = state.clone();
@@ -477,14 +491,16 @@ impl StatusStrip {
                     .text_size(px(PANEL_TITLE_SIZE * scale))
                     .font_weight(FontWeight::NORMAL)
                     .text_color(cx.theme().foreground)
-                    .child("Share status"),
+                    .child(i18n::t("Share status")),
             )
             .child(
                 div()
                     .text_size(px(15. * scale))
                     .text_color(muted)
                     .text_center()
-                    .child("Share photos, videos and text that disappear after 24 hours."),
+                    .child(i18n::t(
+                        "Share photos, videos and text that disappear after 24 hours.",
+                    )),
             )
             .child(
                 // Los dos botones son redondos y llevan el dibujo adentro;
@@ -640,13 +656,13 @@ impl StatusStrip {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child("My status"),
+                                            .child(i18n::t("My status")),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(muted)
-                                            .child("Click to add a status update"),
+                                            .child(i18n::t("Click to add a status update")),
                                     ),
                             ),
                     ),
@@ -661,7 +677,7 @@ impl StatusStrip {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child("RECENT"),
+                    .child(i18n::t("RECENT")),
             );
             for (index, group) in groups.iter().enumerate() {
                 list = list.child(self.render_status_row(group, index, scale, cx));
@@ -839,7 +855,7 @@ impl StatusStrip {
                 Button::new("status-post")
                     .secondary()
                     .small()
-                    .label("Post")
+                    .label(i18n::t("Post"))
                     .disabled(text.trim().is_empty())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         let text = input.read(cx).value().to_string();
@@ -1663,10 +1679,15 @@ mod tests {
     #[test]
     fn the_hour_of_a_status_goes_in_the_twenty_four_hour_clock() {
         // The reference writes "Today at 12:45", not "Today at 12:45 PM".
-        assert_eq!(status_hour(0), "00:00");
-        assert_eq!(status_hour(45 * 60_000), "00:45");
-        assert_eq!(status_hour(12 * 3_600_000 + 45 * 60_000), "12:45");
-        assert_eq!(status_hour(23 * 3_600_000 + 5 * 60_000), "23:05");
+        assert_eq!(status_hour_at(0, 0), "00:00");
+        assert_eq!(status_hour_at(45 * 60_000, 0), "00:45");
+        assert_eq!(status_hour_at(12 * 3_600_000 + 45 * 60_000, 0), "12:45");
+        assert_eq!(status_hour_at(23 * 3_600_000 + 5 * 60_000, 0), "23:05");
+        // The hour of the machine is the hour of the zone of the instant:
+        // the 12:45 of UTC is the 09:45 of Buenos Aires.
+        assert_eq!(status_hour_at(12 * 3_600_000 + 45 * 60_000, -180), "09:45");
+        // A status close to midnight moves to the day of the zone.
+        assert_eq!(status_hour_at(23 * 3_600_000 + 5 * 60_000, 120), "01:05");
     }
 
     #[test]

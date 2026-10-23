@@ -118,6 +118,8 @@ pub struct Store {
     pub newer_activity: bool,
     pub fatal_error: Option<String>,
     pub toast_error: Option<String>,
+    /// A short notice of something that went well, in the green of the theme.
+    pub toast_info: Option<String>,
     pub last_mark_read_id: Option<String>,
     /// The progress of the synchronization of the account.
     ///

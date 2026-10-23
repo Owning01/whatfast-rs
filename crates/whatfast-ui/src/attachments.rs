@@ -28,6 +28,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use whatfast_i18n as i18n;
 
 use whatfast_model::model::message_text;
 use whatfast_protocol as proto;
@@ -179,14 +180,14 @@ pub(crate) fn format_duration(seconds: u32) -> String {
 /// port: `attachmentLabel` of `tauri/src/components/MessageBubble.tsx`.
 pub(crate) fn attachment_label(attachment: &proto::AttachmentContent) -> &'static str {
     if attachment.voice_note {
-        return "Voice message";
+        return i18n::t("Voice message");
     }
-    match attachment.kind.as_str() {
+    i18n::t(match attachment.kind.as_str() {
         "video" if attachment.animated => "GIF",
         "video" => "Video",
         "audio" => "Audio",
         _ => "Document",
-    }
+    })
 }
 
 /// The name that the card of one attachment shows.
@@ -444,6 +445,7 @@ impl Whatfast {
         // The two listeners of the block need their own copy of the ids.
         let card_chat_id = message.chat_id.clone();
         let card_message_id = message.id.clone();
+        let save_message_id = message.id.clone();
         let error_chat_id = message.chat_id.clone();
         let error_message_id = message.id.clone();
         // port: the background of the card is the color of the text of the
@@ -504,6 +506,31 @@ impl Whatfast {
                                     .child(details),
                             ),
                     )
+                    .when(downloaded, |card| {
+                        // The file is on the disk: one click copies it to the
+                        // folder of the downloads, without opening it.
+                        card.child(
+                            div()
+                                .id(("attachment-save", index))
+                                .p(px(4. * scale))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hovered))
+                                .child(
+                                    Icon::new(WhatfastIcon::Download)
+                                        .with_size(px(DOWNLOAD_SIZE * scale))
+                                        .text_color(muted),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.save_message_attachment(
+                                        save_message_id.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    })
                     .when(attachment.downloadable && !downloaded, |card| {
                         card.child(
                             Icon::new(WhatfastIcon::Download)
