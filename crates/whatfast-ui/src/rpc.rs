@@ -124,6 +124,15 @@ pub(crate) enum PendingRequest {
         previous_unread: u32,
     },
     Logout,
+    // v22 calls: control plane and the audio pump. The audio requests are
+    // fire-and-forget by contract; a timeout on them is a dropped frame,
+    // not an error toast.
+    CallPlace,
+    CallAccept,
+    CallReject,
+    CallHangup,
+    CallMute,
+    CallAudio,
     /// The progress of the synchronization of the account.
     SyncStatus,
     /// Asks WhatsApp for more history of one conversation.
@@ -289,6 +298,12 @@ impl PendingRequest {
             | Self::ForwardMessage { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
+            | Self::CallPlace
+            | Self::CallAccept
+            | Self::CallReject
+            | Self::CallHangup
+            | Self::CallMute
+            | Self::CallAudio
             | Self::SetMessagePin { .. }
             | Self::CreatePoll { .. }
             | Self::VotePoll { .. }

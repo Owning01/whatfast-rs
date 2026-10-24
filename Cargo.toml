@@ -6,10 +6,11 @@ members = [
     "crates/whatfast-model",
     "crates/whatfast-protocol",
     "crates/whatfast-ui",
+    "crates/whatfast-wa",
 ]
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 # 1.88 is the floor of `opus-pure`, the pure-Rust encoder of the voice notes
 # (`whatfast-ui`): the rest of the workspace compiles with less.

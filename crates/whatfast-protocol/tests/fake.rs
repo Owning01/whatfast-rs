@@ -418,7 +418,11 @@ fn fake_live_pair_matches_backend_event_order() {
     let chat = chat.chat.unwrap();
     assert_eq!(message.timestamp_ms, chat.last_message_timestamp_ms);
     assert_eq!(chat.unread_count, 1);
-    assert!(chat.last_message_preview.contains("Live message 7"));
+    assert!(
+        chat.last_message_preview.contains("pizzería"),
+        "the preview is the text of the live message: {}",
+        chat.last_message_preview
+    );
 }
 
 #[test]
@@ -499,11 +503,8 @@ fn fake_dataset_is_deterministic() {
     // The index zero is a group: the origin decides the kind with a
     // multiple of five, and zero is a multiple of five.
     assert_eq!(chat.kind, whatfast_protocol::ChatKind::Group as i32);
-    assert_eq!(chat.title, "Weekend plans 0");
-    assert_eq!(
-        chat.last_message_preview,
-        "This is virtualized conversation number 0"
-    );
+    assert_eq!(chat.title, "Familia Bazán 🏡");
+    assert_eq!(chat.last_message_preview, "Listo, ahí te aviso 👍");
     // The time of the fake is the real one: the history of the chat goes
     // back from now.
     assert!(chat.last_message_timestamp_ms > 1_700_000_000_000);
@@ -517,15 +518,15 @@ fn fake_dataset_is_deterministic() {
     let direct = fake_chat(1);
     assert_eq!(direct.id, "chat-1");
     assert_eq!(direct.kind, whatfast_protocol::ChatKind::Direct as i32);
-    assert_eq!(direct.title, "Fast friend 1");
-    assert_eq!(direct.phone_number, "+15550000001");
-    assert_eq!(direct.contact_name, "Fast friend 1");
-    assert_eq!(direct.push_name, "Friend 1");
+    assert_eq!(direct.title, "Bruno Salazar");
+    assert_eq!(direct.phone_number, "+54 9 381 550-102");
+    assert_eq!(direct.contact_name, "Bruno Salazar");
+    assert_eq!(direct.push_name, "Bruno ⚽");
     assert!(direct.pinned);
 
     let group = fake_chat(5);
     assert_eq!(group.kind, whatfast_protocol::ChatKind::Group as i32);
-    assert_eq!(group.title, "Weekend plans 5");
+    assert_eq!(group.title, "Fútbol de los martes ⚽");
     assert_eq!(group.phone_number, "");
     assert_eq!(group.contact_name, "");
     assert_eq!(group.push_name, "");
@@ -533,14 +534,16 @@ fn fake_dataset_is_deterministic() {
 
     let unread = fake_chat(7);
     assert_eq!(unread.unread_count, 4);
-    assert_eq!(unread.title, "Fast friend 7");
+    assert_eq!(unread.title, "Santiago Maldonado");
 
     let message = fake_message("chat-0", 1, Path::new("unused"));
     assert_eq!(message.id, "message-1");
     assert_eq!(message.chat_id, "chat-0");
-    assert_eq!(message.sender_id, "friend@s.whatsapp.net");
-    assert_eq!(message.sender_name, "Fast friend");
-    assert_eq!(message.sender_phone_number, "+15551234567");
+    // The chat is a group: the member that signs is the one the stride of
+    // the message picks, with the JID and the phone of the roster.
+    assert_eq!(message.sender_id, "549381550104@s.whatsapp.net");
+    assert_eq!(message.sender_name, "Facundo Ibarra");
+    assert_eq!(message.sender_phone_number, "+54 9 381 550-104");
     assert!(!message.from_me);
     // The time of the fake is the real one: the history goes back from
     // now, a message every minute and a half.
@@ -554,7 +557,7 @@ fn fake_dataset_is_deterministic() {
     let Some(whatfast_protocol::message::Content::Text(text)) = &message.content else {
         panic!("the message of the dataset is text");
     };
-    assert_eq!(text.text, "Fast native message 1");
+    assert_eq!(text.text, "¡Hola! ¿Cómo andás?");
     assert!(text.link_preview.is_none());
     assert!(message.reactions.is_empty());
     assert_eq!(message.reply_to_message_id, "");
@@ -565,7 +568,7 @@ fn fake_dataset_is_deterministic() {
     };
     assert_eq!(
         long_text.text,
-        "A longer message 9\nwith a second line to exercise variable-height virtualization 🐈"
+        "Te paso el dato del cumple 🎉\nSábado, desde las 21\nEn lo de Male (Av. Alem 1234)\nTraé hielo si podés 🧊"
     );
 
     let preview = fake_message("chat-0", 13, Path::new("unused"));
@@ -576,14 +579,15 @@ fn fake_dataset_is_deterministic() {
         .link_preview
         .as_ref()
         .expect("the link preview");
-    assert_eq!(preview_link.url, "https://example.com/whatfast");
-    assert_eq!(preview_link.title, "Whatfast link preview");
+    assert_eq!(preview_link.url, "https://www.lagaceta.com.ar/");
+    assert_eq!(preview_link.title, "La Gaceta — Las noticias de Tucumán");
     assert_eq!(preview.reply_to_message_id, "message-12");
 
     let reaction = fake_message("chat-0", 11, Path::new("unused"));
     assert_eq!(reaction.reactions.len(), 1);
     assert_eq!(reaction.reactions[0].emoji, "🐈");
     assert_eq!(reaction.reactions[0].message_id, "message-11");
+    assert_eq!(reaction.reactions[0].sender_name, "Matías Aráoz");
 }
 
 #[test]
@@ -724,21 +728,24 @@ fn fake_search_and_newsletter_are_deterministic() {
 
     let rpc_response::Result::SearchLocal(search) =
         harness.ask(rpc_request::Request::SearchLocal(SearchLocalRequest {
-            query: "fast friend 1".into(),
+            query: "bruno".into(),
         }))
     else {
         panic!("the search failed");
     };
     assert!(!search.contacts.is_empty());
     assert_eq!(search.contacts[0].chat_id, "chat-1");
-    assert_eq!(search.contacts[0].contact_jid, "15550000001@s.whatsapp.net");
+    assert_eq!(
+        search.contacts[0].contact_jid,
+        "549381550102@s.whatsapp.net"
+    );
     // A query of three characters or more also brings the messages of the
     // last page of the dataset.
     assert_eq!(search.messages.len(), 20);
 
     let rpc_response::Result::SearchLocal(search) =
         harness.ask(rpc_request::Request::SearchLocal(SearchLocalRequest {
-            query: "fast native".into(),
+            query: "mate".into(),
         }))
     else {
         panic!("the search failed");
@@ -755,7 +762,7 @@ fn fake_search_and_newsletter_are_deterministic() {
     };
     let newsletter = newsletter.newsletter.expect("the newsletter of the answer");
     assert_eq!(newsletter.jid, "123456789012@newsletter");
-    assert_eq!(newsletter.name, "Channel 123456789012345678901234");
+    assert_eq!(newsletter.name, "Canal 123456789012345678901234");
 }
 
 #[test]
@@ -769,7 +776,7 @@ fn fake_handshake_answers_the_hello_of_the_protocol() {
     };
     assert_eq!(hello.backend_version, "fake-0.1");
     assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
-    assert_eq!(hello.protocol_version, 21);
+    assert_eq!(hello.protocol_version, 22);
 }
 
 #[test]

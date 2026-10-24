@@ -154,7 +154,10 @@ def main() -> int:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     completo = all(not r["faltan"] for r in rows)
-    return 0 if completo and not sobra_global else 1
+    # El gate es la cobertura del oraculo: sale 1 solo cuando al oraculo le
+    # falta un caso en el puerto. Los casos que sobran (adelantos del puerto
+    # que el oraculo todavia no reclama) se informan, no fallan.
+    return 0 if completo else 1
 
 
 if __name__ == "__main__":

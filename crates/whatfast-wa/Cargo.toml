@@ -1,0 +1,42 @@
+[package]
+name = "whatfast-wa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sidecar that owns the WhatsApp session (linking, messaging, calls) and serves it over the Whatfast bridge."
+
+[dependencies]
+anyhow.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# The queues between the blocking pipe threads and the async loop, the same
+# runtime-agnostic FIFO the protocol transport uses.
+async-channel.workspace = true
+# The generated Envelope types and framing constants of the bridge contract.
+whatfast-protocol = { path = "../whatfast-protocol" }
+# The RPC loop is a Tokio runtime: whatsapp-rust's transport and voip stack
+# are async, and the store, the client and later the calls all live on it.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
+# The sidecar's own chats.db. Bundled: the binary carries its SQLite, the
+# same way the Go sidecar carried modernc's.
+rusqlite = { version = "0.40", features = ["bundled"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+# The profile lock is an exclusive OS lock held for the process lifetime, so a
+# crashed sidecar releases it without leaving a stale file behind.
+fs4 = "0.13"
+# WhatsApp protocol library: pairing, encryption, history sync, media, and the
+# voip stack (MLOW signaling, the sans-IO media engine with Opus, and the
+# native UDP relay transport). Pinned to the exact revision the migration was
+# started against, on the `voip-video-timing` branch that carries the video
+# FEC and capture-timing changes; re-pin deliberately, never floating.
+whatsapp-rust = { git = "https://github.com/crmne/whatsapp-rust", rev = "94f7c1376f8f6a77c55d85570a260600ad27de0b", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
+# The protocol core the library is built on, from the same revision. The
+# client's event stream and the device-props override live here.
+wacore = { git = "https://github.com/crmne/whatsapp-rust", rev = "94f7c1376f8f6a77c55d85570a260600ad27de0b" }
+
+[dev-dependencies]
+# The smoke test speaks the same generated Envelope types the desktop uses.
+whatfast-protocol = { path = "../whatfast-protocol" }

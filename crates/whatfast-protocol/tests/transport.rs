@@ -239,31 +239,31 @@ mod fake {
     pub fn fake_chat(id: usize) -> Chat {
         Chat {
             id: format!("chat-{id}"),
-            kind: if id % 5 == 0 {
+            kind: if id.is_multiple_of(5) {
                 ChatKind::Group as i32
             } else {
                 ChatKind::Direct as i32
             },
-            title: if id % 5 == 0 {
+            title: if id.is_multiple_of(5) {
                 format!("Weekend plans {id}")
             } else {
                 format!("Fast friend {id}")
             },
             last_message_preview: format!("This is virtualized conversation number {id}"),
             last_message_timestamp_ms: 1_900_000_000_000 - id as i64,
-            unread_count: (id % 7 == 0) as u32 * ((id % 4) + 1) as u32,
+            unread_count: (id.is_multiple_of(7)) as u32 * ((id % 4) + 1) as u32,
             pinned: id < 3,
-            phone_number: if id % 5 != 0 {
+            phone_number: if !id.is_multiple_of(5) {
                 format!("+1555{id:07}")
             } else {
                 String::new()
             },
-            contact_name: if id % 5 != 0 {
+            contact_name: if !id.is_multiple_of(5) {
                 format!("Fast friend {id}")
             } else {
                 String::new()
             },
-            push_name: if id % 5 != 0 {
+            push_name: if !id.is_multiple_of(5) {
                 format!("Friend {id}")
             } else {
                 String::new()

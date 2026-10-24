@@ -2,8 +2,8 @@
 
 Cliente de escritorio de WhatsApp, rápido y chico. No es una página web
 empaquetada: es una **app nativa escrita en Rust** que dibuja con GPUI
-(sin webview, sin DOM, sin motor de navegador), con un motor en Go que habla
-el protocolo de dispositivos vinculados.
+(sin webview, sin DOM, sin motor de navegador), con un sidecar en Rust que
+habla el protocolo de dispositivos vinculados.
 
 ![Lista de chats de Whatfast](docs/screenshots/01-lista-de-chats.png)
 
@@ -32,14 +32,18 @@ el protocolo de dispositivos vinculados.
 - **Interfaz nativa en Rust (GPUI)**: dibuja directamente. No hay webview, no
   hay DOM, no hay Chromium.
 - **Dominio en Rust puro** (`whatfast-core`): 25 módulos sin una sola
-  dependencia de la interfaz, con los 153 casos de prueba del cliente
-  anterior portados uno por uno.
-- **Sidecar en Go** (`whatsmeow`) como único dueño de la conexión, el
-  historial, los medios y las bases de datos.
-- **Paridad con el cliente web**: pide los **50 RPC** del sidecar y tiene los
+  dependencia de la interfaz, con los casos de prueba del cliente anterior
+  portados uno por uno (204 en total).
+- **Sidecar en Rust** (`whatfast-wa`, sobre `whatsapp-rust`) como único dueño
+  de la conexión, el historial, los medios, las llamadas y las bases de datos.
+  Desde 0.2.6 ya no hay Go en la app.
+- **Llamadas de voz** entre dispositivos vinculados: suena y se habla por el
+  mismo sidecar; el audio cruza el puente en frames crudos y la app no toca
+  ningún servicio extra.
+- **Paridad con el cliente web**: pide los **56 RPC** del sidecar y tiene los
   **21 componentes** de la app web (la columna de iconos, el strip de pestañas,
-  el panel de newsletters, la vista de los estados, el panel de miembros, la
-  bandeja de stickers, el editor de imagen, el menú del mensaje, el reenvío,
+  el panel de newsletters, la vista de los estados, el panel de miembros,
+  la bandeja de stickers, el editor de imagen, el menú del mensaje, el reenvío,
   las encuestas y el clip de adjuntos). Lo comprueba
   `python scripts\funcionalidad.py`.
 
@@ -47,7 +51,9 @@ La interfaz nunca ve tus credenciales: el QR, el token del dispositivo y las
 bases de datos viven en el sidecar, y la interfaz habla con él por RPC
 tipados con protobuf.
 
-Todo el historial es **local** (SQLite: `session.db` y `client.db`).
+Todo el historial es **local** (SQLite: `chats.db` para los datos,
+`session.db` para las claves de la sesión y `media/` para el cache de
+medios descargados).
 
 ---
 
@@ -129,7 +135,7 @@ celdas quedan sin medir y se explican por estructura.
 | | **Whatfast (nativo)** | **Whatfast (webview)** | **WhatsApp Web** | **App de Windows** |
 |---|---|---|---|---|
 | Motor de render | **GPUI (Rust), ninguno** | WebView2 del sistema | el de tu navegador | Chromium propio (Electron) |
-| Descarga para instalar | **36,1 MB** (12,4 la app + 23,7 el sidecar) | 33,1 MB | 0 (es una página) | trae su propio Chromium |
+| Descarga para instalar | **27,7 MB** (15,1 la app + 12,6 el sidecar, desde 0.2.6) | 33,1 MB | 0 (es una página) | trae su propio Chromium |
 | JS que baja el cliente | **0 KB** | 411 KB (127 KB con gzip) | **5.948 KB** solo la pantalla de login | — |
 | Ventana visible | 0,84 s | **0,25 s** | — | — |
 | UI lista (lista de chats) | ~1,0 s | 1,16 s | — | — |
@@ -176,11 +182,11 @@ Explorador o desde un instalador no hay consola y no aparecen.
 5. **El historial es tuyo y es local.** SQLite en tu disco, con control de
    acceso y borrado explícito al desloguear.
 6. **El render nunca ve tus credenciales.** El token del dispositivo y las
-   bases de datos viven en el sidecar Go; la interfaz solo recibe lo que el
+   bases de datos viven en el sidecar; la interfaz solo recibe lo que el
    RPC le pide.
-7. **El dominio está verificado.** Los 153 casos de prueba del cliente
-   anterior están portados a Rust y un juez de paridad los compara uno por
-   uno: `scripts\parity.py` da **153/153**.
+7. **El dominio está verificado.** Los casos de prueba del cliente anterior
+   están portados a Rust y un juez de paridad los compara uno por uno:
+   `scripts\parity.py` da **123/123 del oráculo (100 %)**.
 
 ---
 
@@ -202,8 +208,9 @@ Explorador o desde un instalador no hay consola y no aparecen.
 - **La interfaz está en inglés.** El cliente web trae el diccionario en
   inglés y en español; la app nativa solo tiene inglés (que es el idioma
   por defecto del cliente web también).
-- **Sin llamadas.** El protocolo de dispositivos vinculados no expone
-  señalización de VoIP: la app te avisa en vez de fingir una llamada.
+- **Las llamadas son de voz.** La de video queda para cuando el lado de la
+  señal la traiga. Y como la app no cancela el eco todavía, en llamada
+  conviene usar auriculares.
 - **El historial viejo hay que pedirlo.** WhatsApp no da un total de por
   vida, así que la app no puede prometer un porcentaje: te dice cuántos
   mensajes tiene guardados y te da el botón para pedir más.
@@ -222,8 +229,8 @@ Explorador o desde un instalador no hay consola y no aparecen.
 | `whatfast-core` | El dominio: formato de mensajes, reacciones, sincronización, tema, notas de voz, recortes. Sin dependencias de la interfaz. |
 | `whatfast-protocol` | El contrato (protobuf), el transporte (framing, ciclo de vida de los pedidos, clasificación de la salida) y el backend de demostración. |
 | `whatfast-model` | El modelo de datos: chats, mensajes, borradores, avatares, stickers, rutas. Sin GPUI: se testea sin abrir una ventana. |
+| `whatfast-wa` | El sidecar: la sesión de WhatsApp sobre `whatsapp-rust`, el historial, los medios y las llamadas. |
 | `whatfast-ui` | La interfaz: GPUI, sin webview. |
-| `backend/` | El sidecar en Go. |
 
 La regla de las capas: **el dominio no sabe que existe una interfaz**. Por
 eso `whatfast-core` y `whatfast-model` se prueban sin levantar una ventana, y
@@ -245,8 +252,13 @@ dependencias y las trampas de cada sistema, está en
 
 En los tres casos la app son **dos ejecutables**: la interfaz y el sidecar
 `whatfast-backend`. El sidecar tiene que quedar al lado de la interfaz, o
-apuntado desde la variable `WHATFAST_BACKEND`. La cuenta se vincula una sola
-vez, con el QR de **WhatsApp → Dispositivos vinculados**.
+apuntado desde la variable `WHATFAST_BACKEND`. La cuenta se vincula con el
+QR de **WhatsApp → Dispositivos vinculados**.
+
+Si venís de una versión 0.2.5 o anterior (sidecar Go), la 0.2.6 pide
+vincular de nuevo: el nuevo sidecar guarda las claves de la sesión en su
+propia base y no lee las del Go. Los chats viejos quedan en el disco y el
+historial vuelve a bajar del teléfono en la primera sincronización.
 
 ### Windows, desde el código
 
@@ -279,8 +291,9 @@ demostración trae 10.000 chats simulados:
 dist\whatfast.exe --fake-backend
 ```
 
-El backend real es el sidecar en Go: el binario tiene que estar al lado del
-ejecutable de la interfaz, o en la variable `WHATFAST_BACKEND`.
+El backend real es el sidecar en Rust (`whatfast-wa` compilado como
+`whatfast-backend`): el binario tiene que estar al lado del ejecutable de
+la interfaz, o en la variable `WHATFAST_BACKEND`.
 
 ### El logo
 
@@ -300,7 +313,6 @@ tareas y el alt-tab muestran el logo sin hacer nada más.
 ### El toolchain
 
 - Rust estable (el `rust-toolchain.toml` lo fija).
-- Go 1.25 o superior, solo para el sidecar.
 
 Los wrappers de `scripts/` resuelven el directorio de compilaciones
 compartido, así que varios worktrees no llenan el disco con una copia de la
@@ -330,7 +342,7 @@ El sidecar habla un protocolo propio: protobuf enmarcado (4 bytes big-endian
 de longitud + payload) sobre stdin/stdout.
 
 - El contrato está en [`proto/bridge.proto`](proto/bridge.proto).
-- El mapeo de los 50 RPC y de los 56 comandos del cliente web está en
+- El mapeo de los 56 RPC y de los 56 comandos del cliente web está en
   [`docs/api-mapping.md`](docs/api-mapping.md).
 - La paridad con el cliente de origen está en [`docs/oracle.md`](docs/oracle.md).
 

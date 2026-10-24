@@ -756,11 +756,11 @@ fn parse_special_url(scheme: &str, rest: &str) -> Option<ParsedUrl> {
         href.push('@');
     }
     href.push_str(&host);
-    if let Some(port) = port {
-        if Some(port) != default_port(scheme) {
-            href.push(':');
-            href.push_str(&port.to_string());
-        }
+    if let Some(port) = port
+        && Some(port) != default_port(scheme)
+    {
+        href.push(':');
+        href.push_str(&port.to_string());
     }
     href.push_str(&path);
     if let Some(query) = query {

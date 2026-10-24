@@ -1356,3 +1356,134 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
   ese texto en el portapapeles; un arrastre entre mensajes pinta la seleccion
   en los tres.
 - **Release**: v0.2.5.
+
+## 2026-10-23 - La demo del backend falso es gente de verdad
+
+- **Pedido**: los contactos del ejemplo eran "Fast friend N" con mensajes
+  "Fast native message N", avatares degradados y un tono de 440 Hz: la
+  presentación no se parecia a un WhatsApp real. El dueño pidió nombres de
+  personas reales, fotos de perfil, fotos en el chat y un audio de prueba
+  reproducible.
+- **Cambio**: el dataset de `fake.rs` es ahora una demo del noroeste
+  argentino, sigue determinista (el indice decide todo) y sigue siendo el
+  oraculo:
+  - `PEOPLE`: nomina de 24 personas con nombre y apellido, push name con
+    emoji y telefono con formato real (+54 9 381 550-xxx). Los chats de
+    mas alla de la nomina combinan dos bancos de nombres (FIRSTS/LASTS).
+  - `GROUPS`: 10 grupos con nombre y descripcion ("Familia Bazan", "Futbol
+    de los martes"). Los participantes de un grupo salen de la nomina y el
+    "yo" de la demo (Octavio Gonzalez) es miembro de todos.
+  - Los mensajes alternan "yo" (banco MY_TEXTS) con la persona del chat
+    (THEIR_TEXTS), todos en espanol con emojis. El mensaje largo del zancado
+    de 9 invita a un cumpleanos en 4 lineas. La preview de la previa de un
+    link es La Gaceta (diario de Tucuman).
+  - `art`: modulo nuevo que pinta los PNG a mano (sin `image`). Los
+    avatares son retratos (rostro con ojos, cejas, sonrisa, rubor, cuatro
+    cortes de pelo, 5 tonos de piel) y los de grupo son tres personas. Las
+    fotos del zancado de 37 son 8 escenas (atardecer, cafe, gato, cerro,
+    ciudad de noche, pizza, flores, playa) y la caption de cada foto nombra
+    su escena (PHOTO_CAPTIONS).
+  - `wav`: el tono de 440 Hz es ahora una cancion (arpegios C-G-Am-F con
+    bajo, 32 notas, ~10 s) y la nota de voz es un tarareo con vibrato
+    (~9 s), ambas PCM WAV mono 16 bits a 22050 Hz. El reproductor en linea
+    de la UI las decodifica con rodio.
+  - Los eventos en vivo llegan de miembros del grupo familiar con textos de
+    LIVE_TEXTS; los estados son de Paulina Teran y Renata Mendoza; los
+    canales son "Whatfast Novedades" y "Futbol de Primera" con posts
+    propios.
+- **Decision**: D5 del RULEBOOK queda "no": el nombre "Fast friend N" ya no
+  es el oraculo; `tests/fake.rs` afirma la nomina nueva. El espejo del
+  dataset de `tests/transport.rs` no se toca (es contracto de transporte,
+  no app data).
+- **Prueba**: cargo test --workspace en verde; la demo con --fake-backend
+  muestra la agenda con retratos, fotos de escenas en el chat y el audio
+  se reproduce.
+
+## 2026-10-23 — Sidecar Rust whatfast-wa (ola 0 de la migración Go→Rust)
+
+- Decisión: migrar el sidecar de Go/whatsmeow a Rust/whatsapp-rust para traer llamadas (el stack `voip` exige que la sesión viva ahí). Sin doble vinculación; el usuario re-vincula una vez el día del swap. Del fork crmne solo se consume la librería, sin copiar código de zapfast.
+- Qué cambió: crate `crates/whatfast-wa` (main/bridge/server, flags `--stdio --data-dir --log-file` idénticos al Go, lock de perfil con fs4, `not_implemented` honesto por RPC), miembro nuevo del workspace, `MIGRATION.md` con las olas 1-5, el AGENTS.md de opencode pegado como global en `~/.zcode/AGENTS.md` (EQUIPO + memoria de proyecto), línea nueva en `PROJECT_MAP.md`.
+- Evidencia: `cargo check --workspace` en 0; `cargo test -p whatfast-wa` 3/3 (handshake+estado+shutdown, pre-hello rechazado, segundo backend rechazado). El árbol completo de whatsapp-rust con `voip` compila en Windows con rustc 1.98.
+- Trampa: `fs4::try_lock_exclusive` devuelve `Ok(false)` cuando el lock está tomado, no `Err`. `prost` expone el oneof como campo `body`, no como campo por mensaje.
+- Coordinación: el `fake.rs` de whatfast-protocol estaba a medio editar por otra sesión (dataset del norte argentino) y no compilaba; le corregí solo la anotación `[(f32, [(f32,f32,f32); 3]); 3]` en la línea del array `ranges` de la escena de montañas. Nada más de ese WIP se tocó.
+- Pendiente: ola 1 (store SQLite + `StartPairing` con QR + eventos `PairingQr`/`ConnectionChanged` + `GetAuthState` real). Orden completo en `crates/whatfast-wa/MIGRATION.md`.
+
+## 2026-10-23 — Plan operativo completo de la migración del sidecar
+
+- Corrección del dueño confirmada con evidencia: whatsapp-rust tiene paridad con whatsmeow para todo lo que el Go usa. Inventario verificado en el fuente del fork (cache cargo, rev 94f7c13): `features/` con newsletter, reaction, stickers, status, polls, pictures, presence, chat_actions, blocking, contacts, groups, call_log; `EventKind` con los ~15 eventos que el Go consume más `IncomingCall`/`CallLog*`.
+- Qué cambió: `crates/whatfast-wa/MIGRATION.md` dejó de ser un esquema y pasó a ser el plan operativo completo (reglas, mapa de recursos, tabla de correspondencia whatsmeow→whatsapp-rust, arquitectura de archivos, olas 1-5 con RPCs/eventos/gates, día del swap, trampas).
+- Evidencia: superficie whatsmeow extraída de `client.go` (`.wa.*` + `events.*`); API del fork verificada función por función (`send_message`, `pair_with_qr_code`, `upload`/`download`, `send_reaction`, `edit_message`, `voip`); store Go: 20 tablas en `internal/store/store.go`.
+- Pendiente: ejecutar ola 1 (sesión + QR) siguiendo el plan.
+
+## 2026-10-23 — Ejecución de la migración: olas 1 y 2 (base) del sidecar Rust
+
+- Ola 1 completa en código: `session.rs` (Bot del fork + estado de conexión por eventos), QR vía `Event::PairingQrCode`, StartPairing/Reconnect/Logout reales, eventos `ConnectionChanged`/`PairingQr`/`BackendProblem` por el pipe. Gate pendiente: escanear el QR con un teléfono real.
+- Ola 2 base: `db.rs` (las 20 tablas del Go, idioma SQL idéntico; puntero de último mensaje recalculado como el Go), `ingest.rs` (clasificación de contenido fiel a `domainMessage`: 20+ tipos, edits/revokes por ProtocolMessage, history sync parseado del `LazyHistorySync`), `wire.rs` (filas→protos del bridge). RPCs vivos: ListChats (cursor opaco), ListMessages/After/Around, OpenMessageWindow (con first_unread), MarkRead, SetTyping.
+- Evidencia: `cargo test -p whatfast-wa` 9/9 (4 smoke de pipe + 5 de store); `cargo build --workspace` 0; 0 warnings. El crate pasó a lib+bin para que los tests ejerciten la librería.
+- Trampas: sqlite del fork necesita la feature `sqlite-storage-bundled` explícita al depender de `wacore` directo (el link pide sqlite3.lib del sistema si no); los protos del fork usan `MessageField` con `as_option()` solo en algunos niveles (key.id es Option plano); `Event::Reaction` NO existe: las reacciones llegan dentro de los envelopes de mensaje (`reaction_message`/`enc_reaction_message`).
+- Pendiente: cerrar ola 2 (SearchLocal, sync status, coverage/integrity, journal de outbound, history on-demand, reacciones encriptadas vía `decrypt_reaction_with_secret` + `backend().get_msg_secret`), luego olas 3-5 según `MIGRATION.md`.
+
+## 2026-10-23 - La pagina publica muestra la demo nueva (y tres bugs de la UI abajo)
+
+- **Pedido**: actualizar `https://what-fast.web.app` con la demo realista y
+  publicarla.
+- **Capturas**: las 15 de `web/assets/` se regeneraron con
+  `scripts/captura-frontal.ps1`, `capturas.ps1` y `captura-estados.ps1` sobre
+  el binario nuevo. Coordenadas de esta vuelta: fila del grupo (150,230),
+  clip (589,916), emoji (630,916), cabecera (900,86), chevron de filtros
+  (469,136), item Grupos (600,289), fila de tema con panel scrolleado
+  (355,484) y (355,420) para volver a oscuro. La ventana va forzada a cliente
+  1475x950 en los tres guiones: la app recuerda el ultimo tamano y sin eso
+  las capturas salen de medidas distintas.
+- **Bugs de la UI encontrados y arreglados** (todos bloqueaban capturas y
+  afectan al usuario real):
+  1. El clip del compositor no abria su menu con el clic sintetico: quedo
+     como div crudo y la seleccion de texto de ventana (commit 16af95c) se
+     come el press que ningun componente reclama. Paso a `Button` ghost como
+     el de los emojis (`message_actions.rs`).
+  2. El panel de Ajustes no scrolleaba con la rueda: sin `track_scroll` ni
+     listener, el catalogo de temas quedaba inalcanzable bajo el doblez.
+     Copiado el patron de ChatInfo (`ScrollSurface::Settings` nuevo en
+     `app.rs`).
+  3. `web/index.html` no llamaba nunca a `render()` al cargar: las zonas del
+     recorrido no existian hasta el primer clic, y el primer clic no tenia
+     donde caer. La verificacion del 2026-10-22 uso `browser.evaluate` y la
+     salteo. Agregado `render(currentView)` al final del script.
+- **CSP**: el hash del script inline rompia con cada cambio (el valor
+  publicado ya no coincidia ni con el HEAD). El script paso a `web/app.js`
+  externo y la CSP a `script-src 'self'`: no hay hashes que mantener.
+- **i18n**: quedaban cadenas duras en ingles; hoy la cobertura da 100% en
+  en/es/zh (`idiomas.py`): panel de info de grupo y contacto, menu contextual
+  del chat, acciones del menu de adjuntos, temporizador efimero, titulo del
+  panel de emojis y favoritos. `web/app.js` no toca el gate de idiomas.
+- **Publicacion**: `firebase deploy --only hosting`; verificado en el
+  navegador: carga sin bloqueos, 9 zonas del recorrido activas al cargar y
+  el tour completo cambia de vista con las capturas nuevas.
+
+## 2026-10-23 — Migración: olas 3 y 5-sidecar completadas, proto v22
+
+- Ola 3: `send.rs` (SendText idempotente vía outgoing_requests, reacciones/ediciones/borrados con `MessageRef`, receipts con `mark_as_read`, tipeo con `chatstate()`), `media.rs` (SendImage con upload del fork + sniff PNG/JPEG). RPCs vivos: 9 de envío.
+- Ola 5 sidecar: `bridge.proto` v22 (CallOffer/CallUpdate/CallEnded/CallAudio eventos; CallPlace/Accept/Reject/Hangup/Mute/CallAudio RPCs), `calls.rs` (una llamada viva, offers pendientes, mute con ceros en el borde, audio 16 kHz mono i16 por el bridge como bytes), watcher de fases (RelayAllocated→connecting, MediaConnected→active, wait_ended→ended). PROTOCOL_VERSION 21→22 (Go congelado falla con unsupported_protocol, esperado).
+- Ola 2-resto: SearchLocal (grupos rankeados + mensajes ≥3 runes), GetSyncStatus real (fase/contadores por chunk), reacciones encriptadas resueltas async con `decrypt_reaction_with_secret` + secrets del backend, SetChatPin/Archive/Mute/Block (store local, eventos ChatUpserted).
+- Evidencia: `cargo check --workspace` 0 errores; `cargo test -p whatfast-wa` 9/9; 0 warnings.
+- Trampas: el match de eventos de `whatfast-ui/src/app.rs` es exhaustivo — los eventos nuevos del proto rompen el build del UI hasta darles brazo (hoy ignorados, overlay pendiente); `fake.rs` necesitó los 6 brazos nuevos para el demo.
+- Pendiente: UI de llamadas (overlay GPUI + botones Phone/Video del header + cpal/rodio lado escritorio + AEC sonora), stickers/adjuntos/encuestas/forward, coverage/integrity, history on-demand, journals, newsletters/avatares/ChatInfo.
+
+## 2026-10-24 — Migración completa: olas 3b, 4 y 5b (UI de llamadas)
+
+- Ola 4: tabla `contacts` (push names aprendidos de cada mensaje y del history sync), títulos con la regla del Go (contacto>negocio>push>nombre>dígitos), backfill de nombres de grupo por `fetch_metadata` con pausa de 250 ms, GetChatInfo con participantes/admins, avatares con caché determinista (`avatar-<fnv>.jpg`) y marcador `not-set` para privacidad, ListNewsletters desde la tabla local.
+- Ola 3b: columna `payload` en messages (bytes wire del proto), SendAttachment (video/audio/documento con voice_note), SendSticker (WebP con sniff VP8X), CreatePoll (`client.polls().create`), ForwardMessage (replay del payload con `forward_message`), SendStickerFromLibrary por hash. VotePoll sigue not_implemented (PollRef::new es pub(crate)).
+- Ola 5b: `whatfast_model::CallState` en el Store, `call_audio.rs` (captura cpal con remuestreo lineal a 16 kHz mono, mute por ceros, playout rodio a f32), App con acciones call_place/accept/reject/hangup/mute, brazos de eventos (CallOffer muestra barra, CallUpdate activa audio, CallEnded corta, CallAudioOut toca), pump GPUI de 20 ms que manda CallAudio, barra overlay con contestar/rechazar/mutear/cortar, botón Phone en el header de chats directos.
+- Evidencia: `cargo build --workspace` ok, `cargo test -p whatfast-wa` 9/9, 0 errores. handle_event ahora recibe cx (necesario para spawn del pump).
+- Trampas: GPUI Div no tiene z_index (usar .relative().occlude()); rodio 0.23 SamplesBuffer pide NonZeroU16/NonZeroU32; `let view = cx.entity()` aparece en varios loops del app.rs — no renombrarlos a ciegas; los heredocs con backslashes corrompen Rust — usar Edit.
+- Pendiente conocido: VotePoll, coverage/integrity, history on-demand, journals de outbound, video de llamadas, AEC (sonora), keys de i18n nuevas (caen al inglés por diseño). La validación real (QR + llamada con un teléfono) es el gate del usuario.
+
+## 2026-10-24 — Medios entrantes, release 0.2.6 y swap de los builds
+
+- Medios entrantes: `media.rs::fetch_message_media` descarga y desencripta el adjunto o la imagen de un mensaje con `DownloadParams::encrypted` + `client.download_to_writer` (streaming a archivo, no RAM), cache `media-<fnv><ext>` en `data_dir\media`, setters `set_media_local_path`/`set_image_local_path` en db.rs. RPCs `GetMessageAttachment` y `GetMessageImage` ya no responden `not_implemented`: el video, el audio y el documento se abren con el reproductor del sistema y la foto baja a resolución completa en el visor. Falta el recovery de referencias vencidas por app-state que tenía el Go (responde `not_found` honesto).
+- Verificación del puente: probe por pipe (Hello→HelloResponse 0.2.5/v22, pre-Hello→`handshake_required`, el proceso vive) contra debug y release; el test de humo de bridge_smoke ya cubría el resto.
+- Release: `scripts/build.cmd` y `build.sh` ya no compilan Go — un solo `cargo build --release -p whatfast-ui -p whatfast-wa` y copian `whatfast-wa(.exe)` como `whatfast-backend(.exe)` a `dist\`. `release.yml` ídem en los tres OS (sin setup-go); `ci.yml` suma `whatfast-wa` al job de lógica.
+- CI preexistente arreglado: 15 lints de clippy 1.98 en `whatfast-core` (collapsible_if con let-chains, `--fix` mecánico) y el gate de `parity.py` que contradecía su docstring (fallaba por tests de spoiler que el oráculo no reclama; ahora solo falla si falta un caso del oráculo).
+- Evidencia: 557 tests del workspace en verde, clippy limpio, `parity.py` exit 0, `funcionalidad.py` exit 0, build release local 15,1 MB (ui) + 12,6 MB (wa).
+- Trampa: el heredoc de bash vuelve a cortar código Rust a mitad — escribirlo siempre con Edit/Write.
+- Pendiente: la app instalada pide re-vincular por QR al pasar del sidecar Go (las claves viven en bases distintas); remeasure de RAM con el sidecar Rust.

@@ -46,15 +46,6 @@
       ]
     },
     {
-      "modulo": "media-crop",
-      "oracle": 20,
-      "ok": 20,
-      "faltan": [],
-      "en": [
-        "media_crop.rs"
-      ]
-    },
-    {
       "modulo": "notification-routing",
       "oracle": 7,
       "ok": 7,
@@ -181,24 +172,6 @@
       ]
     },
     {
-      "modulo": "voice-note",
-      "oracle": 3,
-      "ok": 3,
-      "faltan": [],
-      "en": [
-        "voice_note.rs"
-      ]
-    },
-    {
-      "modulo": "whatsapp-formatting-spoiler",
-      "oracle": 7,
-      "ok": 7,
-      "faltan": [],
-      "en": [
-        "whatsapp_formatting.rs"
-      ]
-    },
-    {
       "modulo": "whatsapp-formatting",
       "oracle": 7,
       "ok": 7,
@@ -217,10 +190,18 @@
       ]
     }
   ],
-  "total_oracle": 153,
-  "total_ok": 153,
+  "total_oracle": 123,
+  "total_ok": 123,
   "paridad_pct": 100.0,
-  "sobran": [],
+  "sobran": [
+    "parses_a_spoiler_delimited_by_double_pipes (whatsapp_formatting.rs)",
+    "keeps_the_text_around_a_spoiler_unstyled (whatsapp_formatting.rs)",
+    "parses_several_spoilers_in_the_same_message (whatsapp_formatting.rs)",
+    "a_spoiler_inherits_and_composes_with_the_other_inline_styles (whatsapp_formatting.rs)",
+    "a_spoiler_keeps_links_and_mentions_atomic (whatsapp_formatting.rs)",
+    "keeps_malformed_spoilers_as_literal_text (whatsapp_formatting.rs)",
+    "a_spoiler_does_not_leak_into_the_next_line (whatsapp_formatting.rs)"
+  ],
   "caracterizacion": [
     "sort_chats_puts_pinned_first_then_the_newest_then_the_id (app_helpers.rs)",
     "sort_chats_breaks_the_tie_with_the_locale_collation_of_the_ids (app_helpers.rs)",
@@ -253,6 +234,26 @@
     "remember_recent_chat_caps_the_history_at_ten_entries (app_helpers.rs)",
     "clone_draft_copies_the_draft_and_its_mentions (app_helpers.rs)",
     "draft_is_empty_only_accepts_a_draft_without_content (app_helpers.rs)",
+    "a_reversed_drag_becomes_a_positive_rectangle_anchored_at_the_dragged_corner (media_crop.rs)",
+    "a_rectangle_that_leaves_the_source_is_clamped_to_its_bounds (media_crop.rs)",
+    "a_rectangle_entirely_outside_the_source_collapses_to_one_pixel_at_the_origin (media_crop.rs)",
+    "a_crop_never_covers_less_than_one_pixel (media_crop.rs)",
+    "non_finite_rectangle_components_never_leak_into_the_result (media_crop.rs)",
+    "a_broken_source_size_is_a_programming_error (media_crop.rs)",
+    "rotating_by_a_quarter_turn_swaps_the_image_dimensions (media_crop.rs)",
+    "the_same_crop_maps_to_the_four_expected_rectangles_in_the_rotated_space (media_crop.rs)",
+    "the_rotated_crop_stays_inside_the_rotated_canvas_for_every_angle (media_crop.rs)",
+    "a_quarter_turn_is_the_bounding_box_of_the_four_rotated_corners (media_crop.rs)",
+    "rotating_a_crop_and_rotating_it_back_returns_the_original_rectangle (media_crop.rs)",
+    "the_plan_outputs_the_size_of_the_rotated_crop (media_crop.rs)",
+    "a_plan_over_the_whole_image_outputs_the_whole_rotated_image (media_crop.rs)",
+    "a_plan_normalises_the_requested_crop_before_rotating_it (media_crop.rs)",
+    "a_scaled_crop_survives_the_trip_back_to_the_original_image (media_crop.rs)",
+    "a_scaled_crop_is_clamped_to_the_target_size (media_crop.rs)",
+    "the_canvas_transform_offsets_the_crop_and_scales_it_onto_the_canvas (media_crop.rs)",
+    "only_a_crop_that_fits_the_source_is_valid (media_crop.rs)",
+    "rotating_advances_a_quarter_turn_clockwise (media_crop.rs)",
+    "any_number_of_degrees_parses_into_the_nearest_quarter_turn (media_crop.rs)",
     "the_time_of_a_day_follows_the_captured_format_of_the_locale (message_format.rs)",
     "the_time_of_a_day_follows_the_offset_of_the_time_zone (message_format.rs)",
     "the_chat_time_of_a_day_follows_the_captured_format_of_the_locale (message_format.rs)",
@@ -266,6 +267,9 @@
     "the_duration_of_a_voice_note_follows_the_captured_values (message_format.rs)",
     "the_countdown_of_a_disappearing_message_follows_the_captured_values (message_format.rs)",
     "the_label_of_a_connection_follows_the_captured_values (message_format.rs)",
-    "the_safe_http_url_of_a_value_follows_the_captured_values (message_format.rs)"
+    "the_safe_http_url_of_a_value_follows_the_captured_values (message_format.rs)",
+    "only_ogg_opus_recordings_are_push_to_talk_voice_notes (voice_note.rs)",
+    "webm_opus_to_ogg_opus_passes_through_existing_oggs_data (voice_note.rs)",
+    "webm_opus_to_ogg_opus_converts_webm_simpleblocks_into_valid_ogg_opus_container (voice_note.rs)"
   ]
 }

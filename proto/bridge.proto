@@ -69,6 +69,14 @@ message RpcRequest {
     SetChatArchiveRequest set_chat_archive = 48;
     SetChatMuteRequest set_chat_mute = 49;
     SetChatBlockRequest set_chat_block = 50;
+    // v22: calls. The audio rides the bridge as raw little-endian i16
+    // frames of the engine clock (16 kHz mono, ~60 ms).
+    CallPlaceRequest call_place = 51;
+    CallAcceptRequest call_accept = 52;
+    CallRejectRequest call_reject = 53;
+    CallHangupRequest call_hangup = 54;
+    CallMuteRequest call_mute = 55;
+    CallAudioRequest call_audio = 56;
   }
 }
 
@@ -126,6 +134,12 @@ message RpcResponse {
     SetChatArchiveResponse set_chat_archive = 57;
     SetChatMuteResponse set_chat_mute = 58;
     SetChatBlockResponse set_chat_block = 59;
+    CallPlaceResponse call_place = 60;
+    CallAcceptResponse call_accept = 61;
+    CallRejectResponse call_reject = 62;
+    CallHangupResponse call_hangup = 63;
+    CallMuteResponse call_mute = 64;
+    CallAudioResponse call_audio = 65;
   }
 }
 
@@ -150,6 +164,11 @@ message BackendEvent {
     PinnedMessagesChanged pinned_messages_changed = 22;
     SyncStatusChanged sync_status_changed = 23;
     HistoryCoverageChanged history_coverage_changed = 24;
+    // v22: calls.
+    CallOffer call_offer = 25;
+    CallUpdate call_update = 26;
+    CallEnded call_ended = 27;
+    CallAudio call_audio_out = 28;
   }
 }
 
@@ -1018,3 +1037,70 @@ message SendAttachmentRequest {
 }
 
 message SendAttachmentResponse { Message message = 1; }
+
+// ---------------------------------------------------------------------------
+// Calls (v22)
+// ---------------------------------------------------------------------------
+
+message CallPlaceRequest {
+  // The conversation's transport jid (a direct chat).
+  string chat_id = 1;
+  // True asks for video; the first wave carries voice only and answers
+  // `video_unsupported` when set.
+  bool video = 2;
+}
+
+message CallPlaceResponse {
+  // The call id WhatsApp assigned. Empty when the place was refused.
+  string call_id = 1;
+}
+
+message CallAcceptRequest { string call_id = 1; }
+message CallAcceptResponse {}
+
+message CallRejectRequest { string call_id = 1; }
+message CallRejectResponse {}
+
+message CallHangupRequest { string call_id = 1; }
+message CallHangupResponse {}
+
+message CallMuteRequest {
+  string call_id = 1;
+  bool muted = 2;
+}
+message CallMuteResponse {}
+
+// One microphone frame from the desktop: little-endian i16, 16 kHz mono.
+// Fire-and-forget by contract: the response carries nothing, and the
+// backend drops late frames rather than queueing them.
+message CallAudioRequest {
+  string call_id = 1;
+  bytes pcm = 2;
+}
+message CallAudioResponse {}
+
+message CallOffer {
+  string call_id = 1;
+  string chat_id = 2;
+  bool video = 3;
+}
+
+message CallUpdate {
+  string call_id = 1;
+  // placing, dialing, ringing, incoming, connecting, active, ended
+  string phase = 2;
+  string detail = 3;
+  bool muted = 4;
+}
+
+message CallEnded {
+  string call_id = 1;
+  // rejected, busy, timeout, remote, local, failed
+  string reason = 2;
+}
+
+// One speaker frame toward the desktop: little-endian i16, 16 kHz mono.
+message CallAudio {
+  string call_id = 1;
+  bytes pcm = 2;
+}

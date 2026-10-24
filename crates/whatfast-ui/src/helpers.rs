@@ -198,14 +198,14 @@ pub(crate) fn format_epoch_date(timestamp_ms: i64) -> String {
 /// The human label of a disappearing-messages timer.
 pub(crate) fn format_disappearing_timer(seconds: u32) -> String {
     match seconds {
-        0 => "Off".into(),
-        86_400 => "24 hours".into(),
-        604_800 => "7 days".into(),
-        7_776_000 => "90 days".into(),
-        s if s % 86_400 == 0 => format!("{} days", s / 86_400),
-        s if s % 3_600 == 0 => format!("{} hours", s / 3_600),
-        s if s % 60 == 0 => format!("{} minutes", s / 60),
-        s => format!("{s} seconds"),
+        0 => i18n::t("Off").into(),
+        86_400 => i18n::t("24 hours").into(),
+        604_800 => i18n::t("7 days").into(),
+        7_776_000 => i18n::t("90 days").into(),
+        s if s % 86_400 == 0 => i18n::t("{n} days").replace("{n}", &(s / 86_400).to_string()),
+        s if s % 3_600 == 0 => i18n::t("{n} hours").replace("{n}", &(s / 3_600).to_string()),
+        s if s % 60 == 0 => i18n::t("{n} minutes").replace("{n}", &(s / 60).to_string()),
+        s => i18n::t("{n} seconds").replace("{n}", &s.to_string()),
     }
 }
 

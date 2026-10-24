@@ -99,10 +99,10 @@ fn strip_poll_heading(heading: &str) -> &str {
         return heading;
     };
     // port: the `(?: results)?` group is optional and greedy.
-    if let Some(after_space) = rest.strip_prefix(' ') {
-        if let Some(after_results) = strip_prefix_ignore_case(after_space, "results") {
-            rest = after_results;
-        }
+    if let Some(after_space) = rest.strip_prefix(' ')
+        && let Some(after_results) = strip_prefix_ignore_case(after_space, "results")
+    {
+        rest = after_results;
     }
     let rest = rest.trim_start_matches(is_js_whitespace);
     let rest = rest.strip_prefix(':').unwrap_or(rest);

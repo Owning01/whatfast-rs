@@ -27,27 +27,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: backend/go.sum
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             . -> target
-      - name: el sidecar en Go
-        run: |
-          cd backend
-          go build -trimpath -ldflags "-s -w" -o bin\whatfast-backend.exe .\cmd\whatfast-backend
-          cd ..
-      - name: la interfaz en release
-        run: cargo build --release -p whatfast-ui
+      - name: el sidecar y la interfaz en release
+        run: cargo build --release -p whatfast-ui -p whatfast-wa
       - name: armar el paquete
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist\icons | Out-Null
           Copy-Item target\release\whatfast-ui.exe dist\whatfast.exe
-          Copy-Item backend\bin\whatfast-backend.exe dist\whatfast-backend.exe
+          Copy-Item target\release\whatfast-wa.exe dist\whatfast-backend.exe
           Copy-Item assets\icons\32x32.png,assets\icons\128x128.png,assets\icons\128x128@2x.png,assets\icons\icon.ico,assets\icons\icon.icns dist\icons\
           Compress-Archive -Path dist\* -DestinationPath whatfast-windows.zip
           Get-ChildItem dist\whatfast.exe,dist\whatfast-backend.exe | ForEach-Object { "{0} {1:N0} bytes" -f $_.Name, $_.Length }
@@ -121,10 +112,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: backend/go.sum
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
@@ -144,20 +131,14 @@ jobs:
             libwayland-dev libx11-xcb-dev \
             libasound2-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev
-      - name: el sidecar en Go
-        run: |
-          cd backend
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
-          cd ..
-      - name: la interfaz en release
-        run: cargo build --release -p whatfast-ui
+      - name: el sidecar y la interfaz en release
+        run: cargo build --release -p whatfast-ui -p whatfast-wa
       - name: armar el paquete
         run: |
           set -euo pipefail
           mkdir -p dist
           install -m755 target/release/whatfast-ui dist/whatfast
-          install -m755 backend/bin/whatfast-backend dist/whatfast-backend
-
+          install -m755 target/release/whatfast-wa dist/whatfast-backend
           # La entrada de escritorio y los iconos, en el arbol que espera
           # freedesktop: share/applications y share/icons/hicolor/<tamano>/apps.
           install -Dm644 assets/linux/whatfast.desktop dist/share/applications/whatfast.desktop
@@ -251,23 +232,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: backend/go.sum
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             . -> target
           key: ${{ matrix.target }}
-      - name: el sidecar en Go
-        run: |
-          set -euo pipefail
-          cd backend
-          CGO_ENABLED=0 GOOS=darwin GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
-      - name: la interfaz en release
-        run: cargo build --release -p whatfast-ui --target ${{ matrix.target }}
+      - name: el sidecar y la interfaz en release
+        run: cargo build --release -p whatfast-ui -p whatfast-wa --target ${{ matrix.target }}
       - name: armar el Whatfast.app
         run: |
           set -euo pipefail
@@ -284,7 +255,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
           install -m755 "target/${{ matrix.target }}/release/whatfast-ui" "$app/Contents/MacOS/whatfast"
-          install -m755 backend/bin/whatfast-backend "$app/Contents/MacOS/whatfast-backend"
+          install -m755 "target/${{ matrix.target }}/release/whatfast-wa" "$app/Contents/MacOS/whatfast-backend"
           install -m644 assets/icons/icon.icns "$app/Contents/Resources/icon.icns"
 
           sed "s/__VERSION__/$version/g" assets/macos/Info.plist > "$app/Contents/Info.plist"

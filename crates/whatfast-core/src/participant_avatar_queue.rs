@@ -517,10 +517,9 @@ impl ParticipantAvatarQueue {
         if let Some(index) = self
             .entry_index(&request.participant_id)
             .filter(|index| self.entries[*index].request_id == request.request_id)
+            && self.entries[index].subscribers.is_empty()
         {
-            if self.entries[index].subscribers.is_empty() {
-                self.entries.remove(index);
-            }
+            self.entries.remove(index);
         }
         decision
     }

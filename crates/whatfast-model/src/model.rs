@@ -97,8 +97,23 @@ pub enum Screen {
     Fatal,
 }
 
+/// One phone call the desktop is party to. The phase strings are the
+/// sidecar's contract: placing, dialing, ringing, incoming, connecting,
+/// active, ended.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CallState {
+    pub call_id: String,
+    pub chat_id: String,
+    pub phase: String,
+    pub muted: bool,
+    /// True when the call came from the peer: the overlay shows answer and
+    /// decline instead of mute and hang up.
+    pub incoming: bool,
+}
+
 #[derive(Default)]
 pub struct Store {
+    pub call: Option<CallState>,
     pub screen: Screen,
     pub connection: whatfast_protocol::ConnectionState,
     pub connection_detail: String,

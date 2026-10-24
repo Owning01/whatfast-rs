@@ -223,7 +223,7 @@ fn to_locale_string(value: u32, locale: SyncLocale) -> String {
     for (index, digit) in bytes.iter().enumerate() {
         // port: the separator goes before the digit that starts a group of
         // three, counted from the right.
-        if index > 0 && (bytes.len() - index) % 3 == 0 {
+        if index > 0 && (bytes.len() - index).is_multiple_of(3) {
             grouped.push_str(separator);
         }
         grouped.push(*digit as char);

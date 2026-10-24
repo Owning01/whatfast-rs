@@ -33,6 +33,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
 };
 use smol::Timer;
+use std::sync::Arc;
 use uuid::Uuid;
 use whatfast_core::theme::{Theme as AppTheme, ThemeAppearance, ThemeToken};
 use whatfast_i18n as i18n;
@@ -159,6 +160,7 @@ pub(crate) enum ScrollSurface {
     Search,
     Messages,
     ChatInfo,
+    Settings,
 }
 
 /// Adds a short inertial tail to discrete mouse-wheel input. Precise pixel
@@ -637,6 +639,12 @@ impl ReactionDetails {
 pub(crate) struct Whatfast {
     pub(crate) rpc: RpcClient,
     pub(crate) store: Store,
+    /// The live call's audio pipes: the microphone stream and the playout
+    /// sink. Both exist only while a call is connected.
+    call_capture: Option<crate::call_audio::Capture>,
+    call_playback: Option<Arc<crate::call_audio::Playback>>,
+    /// The id whose audio the pump task is carrying.
+    call_audio_id: Option<String>,
     pub(crate) composer: Entity<InputState>,
     /// The pictures that the user pasted or picked and that wait for the
     /// button of the send, the same way the reference shows them over the
@@ -700,6 +708,8 @@ pub(crate) struct Whatfast {
     pub(crate) message_smooth_scroll: SmoothScrollState,
     pub(crate) chat_info_scroll: ScrollHandle,
     pub(crate) chat_info_smooth_scroll: SmoothScrollState,
+    pub(crate) settings_scroll: ScrollHandle,
+    pub(crate) settings_smooth_scroll: SmoothScrollState,
     pub(crate) scroll_to_bottom_generation: Option<u64>,
     pub(crate) last_event_sequence: u64,
     pub(crate) pending_prepend_anchor: Option<(String, Point<Pixels>)>,
@@ -1004,6 +1014,9 @@ impl Whatfast {
         let mut this = Self {
             rpc,
             store: Store::default(),
+            call_capture: None,
+            call_playback: None,
+            call_audio_id: None,
             composer,
             pending_images: PendingImages::default(),
             search_input,
@@ -1054,6 +1067,8 @@ impl Whatfast {
             message_smooth_scroll: SmoothScrollState::default(),
             chat_info_scroll: ScrollHandle::new(),
             chat_info_smooth_scroll: SmoothScrollState::default(),
+            settings_scroll: ScrollHandle::new(),
+            settings_smooth_scroll: SmoothScrollState::default(),
             scroll_to_bottom_generation: None,
             last_event_sequence: 0,
             pending_prepend_anchor: None,
@@ -1141,6 +1156,7 @@ impl Whatfast {
             ScrollSurface::Search => &mut self.search_smooth_scroll,
             ScrollSurface::Messages => &mut self.message_smooth_scroll,
             ScrollSurface::ChatInfo => &mut self.chat_info_smooth_scroll,
+            ScrollSurface::Settings => &mut self.settings_smooth_scroll,
         }
     }
 
@@ -1150,6 +1166,7 @@ impl Whatfast {
             ScrollSurface::Search => self.search_scroll.base_handle().clone(),
             ScrollSurface::Messages => self.message_scroll.base_handle().clone(),
             ScrollSurface::ChatInfo => self.chat_info_scroll.clone(),
+            ScrollSurface::Settings => self.settings_scroll.clone(),
         }
     }
 
@@ -1650,7 +1667,7 @@ impl Whatfast {
             RpcIncoming::Response { pending, response } => {
                 self.handle_response(pending, response, window, cx)
             }
-            RpcIncoming::Event(event) => self.handle_event(event, window),
+            RpcIncoming::Event(event) => self.handle_event(event, window, cx),
             RpcIncoming::Exited(error) => {
                 self.store.connection = ConnectionState::Failed;
                 self.store.connection_detail = error;
@@ -2631,7 +2648,170 @@ impl Whatfast {
         });
     }
 
-    pub(crate) fn handle_event(&mut self, event: BackendEvent, window: &mut Window) {
+    // ------------------------------------------------------------------
+    // Calls (v22)
+    // ------------------------------------------------------------------
+
+    /// Places a voice call to the selected conversation.
+    pub(crate) fn call_place(&mut self, chat_id: String) {
+        if self.store.call.is_some() {
+            return;
+        }
+        self.store.call = Some(whatfast_model::model::CallState {
+            chat_id: chat_id.clone(),
+            phase: "placing".into(),
+            ..whatfast_model::model::CallState::default()
+        });
+        self.request(
+            rpc_request::Request::CallPlace(whatfast_protocol::CallPlaceRequest {
+                chat_id,
+                video: false,
+            }),
+            PendingRequest::CallPlace,
+        );
+    }
+
+    pub(crate) fn call_accept(&mut self) {
+        let Some(call) = self.store.call.clone() else {
+            return;
+        };
+        let mut call = call;
+        call.phase = "connecting".into();
+        self.request(
+            rpc_request::Request::CallAccept(whatfast_protocol::CallAcceptRequest {
+                call_id: call.call_id,
+            }),
+            PendingRequest::CallAccept,
+        );
+    }
+
+    pub(crate) fn call_reject(&mut self) {
+        let Some(call) = self.store.call.take() else {
+            return;
+        };
+        self.request(
+            rpc_request::Request::CallReject(whatfast_protocol::CallRejectRequest {
+                call_id: call.call_id,
+            }),
+            PendingRequest::CallReject,
+        );
+    }
+
+    pub(crate) fn call_hangup(&mut self) {
+        let Some(call) = self.store.call.clone() else {
+            return;
+        };
+        self.request(
+            rpc_request::Request::CallHangup(whatfast_protocol::CallHangupRequest {
+                call_id: call.call_id,
+            }),
+            PendingRequest::CallHangup,
+        );
+        self.store.call = None;
+        self.stop_call_audio();
+    }
+
+    pub(crate) fn call_toggle_mute(&mut self) {
+        let Some(call) = self.store.call.clone() else {
+            return;
+        };
+        let muted = !call.muted;
+        self.request(
+            rpc_request::Request::CallMute(whatfast_protocol::CallMuteRequest {
+                call_id: call.call_id.clone(),
+                muted,
+            }),
+            PendingRequest::CallMute,
+        );
+        if let Some(live) = self.store.call.as_mut()
+            && live.call_id == call.call_id
+        {
+            live.muted = muted;
+        }
+        if let Some(capture) = &self.call_capture {
+            capture.set_muted(muted);
+        }
+    }
+
+    /// Opens the microphone and the speaker for the live call, and starts
+    /// the pump task that carries the microphone frames to the bridge.
+    fn start_call_audio(&mut self, call_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.call_capture.is_some() {
+            return; // already flowing
+        }
+        let capture = match crate::call_audio::Capture::open() {
+            Ok(capture) => capture,
+            Err(error) => {
+                self.store.toast_error =
+                    Some(i18n::t("The microphone could not open for the call.").into());
+                eprintln!("call audio: {error}");
+                return;
+            }
+        };
+        let playback = match crate::call_audio::Playback::open() {
+            Ok(playback) => Arc::new(playback),
+            Err(error) => {
+                self.store.toast_error =
+                    Some(i18n::t("The speaker could not open for the call.").into());
+                eprintln!("call audio: {error}");
+                return;
+            }
+        };
+        self.call_playback = Some(Arc::clone(&playback));
+        self.call_capture = Some(capture);
+        self.call_audio_id = Some(call_id.to_owned());
+        let _view = cx.entity();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                Timer::after(std::time::Duration::from_millis(20)).await;
+                let Ok(live) = this.update(cx, |app, _| {
+                    let Some(call_id) = app.call_audio_id.clone() else {
+                        return false;
+                    };
+                    // The frames are drained into an owned list first, so
+                    // the mutable borrow of the app ends before the sends.
+                    let mut batch: Vec<Vec<u8>> = Vec::new();
+                    if let Some(capture) = app.call_capture.as_ref() {
+                        while let Some(frame) = capture.try_take() {
+                            batch.push(frame.iter().flat_map(|s| s.to_le_bytes()).collect());
+                        }
+                    }
+                    for pcm in batch {
+                        app.request(
+                            rpc_request::Request::CallAudio(whatfast_protocol::CallAudioRequest {
+                                call_id: call_id.clone(),
+                                pcm,
+                            }),
+                            PendingRequest::CallAudio,
+                        );
+                    }
+                    app.call_capture.is_some()
+                }) else {
+                    return; // the window closed
+                };
+                if !live {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn stop_call_audio(&mut self) {
+        self.call_audio_id = None;
+        self.call_capture = None; // dropping closes the microphone and ends the pump
+        if let Some(playback) = &self.call_playback {
+            playback.flush();
+        }
+        self.call_playback = None;
+    }
+
+    pub(crate) fn handle_event(
+        &mut self,
+        event: BackendEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if event.sequence == 0 || event.sequence <= self.last_event_sequence {
             return;
         }
@@ -2852,6 +3032,66 @@ impl Whatfast {
                     self.store.fatal_error = Some(problem.message);
                 } else {
                     self.store.toast_error = Some(problem.message);
+                }
+            }
+            // v22 calls: the offer rings the overlay, the updates move the
+            // phase, and the audio frames ride to the speaker.
+            Some(backend_event::Event::CallOffer(offer)) => {
+                // One call at a time, also on the desktop: a second offer
+                // while one is up rings busy on the phone anyway.
+                if self.store.call.is_none() {
+                    self.store.call = Some(whatfast_model::model::CallState {
+                        call_id: offer.call_id,
+                        chat_id: offer.chat_id,
+                        phase: "incoming".into(),
+                        muted: false,
+                        incoming: true,
+                    });
+                    self.notifier.show(Note {
+                        title: i18n::t("Incoming WhatsApp call").into(),
+                        body: i18n::t("Open Whatfast to answer.").into(),
+                    });
+                }
+            }
+            Some(backend_event::Event::CallUpdate(update)) => {
+                if let Some(call) = self.store.call.as_mut()
+                    && call.call_id == update.call_id
+                {
+                    call.phase = update.phase.clone();
+                    if update.phase == "active" {
+                        self.start_call_audio(&update.call_id, window, cx);
+                    }
+                    cx.notify();
+                }
+            }
+            Some(backend_event::Event::CallEnded(ended)) => {
+                if self
+                    .store
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.call_id == ended.call_id)
+                {
+                    self.store.call = None;
+                }
+                self.stop_call_audio();
+                cx.notify();
+            }
+            Some(backend_event::Event::CallAudioOut(audio)) => {
+                if let Some(playback) = &self.call_playback
+                    && audio.call_id
+                        == self
+                            .store
+                            .call
+                            .as_ref()
+                            .map(|call| call.call_id.clone())
+                            .unwrap_or_default()
+                {
+                    let frame: Vec<i16> = audio
+                        .pcm
+                        .chunks_exact(2)
+                        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    playback.play(frame);
                 }
             }
             None => {}

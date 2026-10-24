@@ -104,10 +104,10 @@ pub fn find_active_emoji_shortcode(text: &str, caret: usize) -> Option<ActiveEmo
 
     if start > 0 {
         // port: the original reads the character before the colon.
-        if let Some(boundary) = text[..start].chars().next_back() {
-            if !is_token_boundary(boundary) {
-                return None;
-            }
+        if let Some(boundary) = text[..start].chars().next_back()
+            && !is_token_boundary(boundary)
+        {
+            return None;
         }
     }
 

@@ -25,8 +25,9 @@ use crate::{
     BackendEvent, Envelope, RpcRequest, RpcResponse, ShutdownRequest, envelope, rpc_request,
 };
 
-/// The protocol version this client speaks (the sidecar's v21 contract).
-pub const PROTOCOL_VERSION: u32 = 21;
+/// The protocol version this client speaks (the sidecar's v22 contract:
+/// the calls wave).
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The biggest frame the client reads or writes.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;

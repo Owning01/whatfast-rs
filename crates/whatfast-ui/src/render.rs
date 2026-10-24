@@ -257,6 +257,19 @@ impl Whatfast {
             // The column of icons is the left edge of the window: it is the
             // navigation of the web client, the same way.
             .child(self.nav_rail.clone())
+            // La barra de la llamada, arriba de todo: aparece con una
+            // llamada viva y convive con lo que se este viendo.
+            .when_some(self.store.call.clone(), |root, call| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .left_1_2()
+                        .relative()
+                        .occlude()
+                        .child(render_call_bar(self, &call, cx)),
+                )
+            })
             .when(show_sidebar, |root| {
                 root.child(div().relative().h_full().flex_none().child(if states_open {
                     // The states are their own view: they take the place of
@@ -1087,9 +1100,9 @@ impl Whatfast {
             ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Mute),
                 if chat.muted {
-                    "Unmute notifications"
+                    i18n::t("Unmute notifications")
                 } else {
-                    "Mute notifications"
+                    i18n::t("Mute notifications")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Bell),
@@ -1112,9 +1125,9 @@ impl Whatfast {
             ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Favorite),
                 if is_favorite {
-                    "Remove from favorites"
+                    i18n::t("Remove from favorites")
                 } else {
-                    "Add to favorites"
+                    i18n::t("Add to favorites")
                 }
                 .into(),
                 Icon::new(IconName::Heart),
@@ -1291,9 +1304,9 @@ impl Whatfast {
             (
                 ChatContextAction::Pin,
                 if chat.pinned {
-                    "Unpin chat"
+                    i18n::t("Unpin chat")
                 } else {
-                    "Pin chat"
+                    i18n::t("Pin chat")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Pin),
@@ -1301,9 +1314,9 @@ impl Whatfast {
             (
                 ChatContextAction::Mute,
                 if chat.muted {
-                    "Unmute notifications"
+                    i18n::t("Unmute notifications")
                 } else {
-                    "Mute notifications"
+                    i18n::t("Mute notifications")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Bell),
@@ -1311,9 +1324,9 @@ impl Whatfast {
             (
                 ChatContextAction::Archive,
                 if chat.archived {
-                    "Unarchive chat"
+                    i18n::t("Unarchive chat")
                 } else {
-                    "Archive chat"
+                    i18n::t("Archive chat")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Archive),
@@ -1321,9 +1334,9 @@ impl Whatfast {
             (
                 ChatContextAction::Favorite,
                 if is_favorite {
-                    "Remove from favorites"
+                    i18n::t("Remove from favorites")
                 } else {
-                    "Add to favorites"
+                    i18n::t("Add to favorites")
                 }
                 .into(),
                 Icon::new(if is_favorite {
@@ -1339,9 +1352,9 @@ impl Whatfast {
                     ChatContextAction::MarkUnread
                 },
                 if chat.unread_count > 0 {
-                    "Mark as read"
+                    i18n::t("Mark as read")
                 } else {
-                    "Mark as unread"
+                    i18n::t("Mark as unread")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::CheckDouble),
@@ -2371,14 +2384,29 @@ impl Whatfast {
                             ),
                     )
                     // Los botones de la derecha de la cabecera: el de la
-                    // columna de los chats cuando esta escondida, el buscador
-                    // y el menu de la conversacion. Las llamadas y las
-                    // videollamadas no estan: el backend todavia no las tiene,
-                    // asi que no se dibujan.
+                    // columna de los chats cuando esta escondida, el del
+                    // llamado, el buscador y el menu de la conversacion.
+                    // Las llamadas son de voz: el icono de video queda para
+                    // cuando el video llegue.
                     .child(
                         h_flex()
                             .flex_none()
                             .gap_1()
+                            .when(!is_group, |row| {
+                                row.child(
+                                    Button::new("call-chat")
+                                        .small()
+                                        .icon(WhatfastIcon::Phone)
+                                        .tooltip(i18n::t("Voice call"))
+                                        .on_click(cx.listener({
+                                            let chat_id = header_chat_id.clone();
+                                            move |this, _, _, cx| {
+                                                this.call_place(chat_id.clone());
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                            })
                             .when(self.sidebar_hidden, |row| {
                                 row.child(
                                     Button::new("show-sidebar")
@@ -2905,7 +2933,7 @@ impl Whatfast {
         // The title of the section: the one of the reference when the
         // category is the one of all, the name of the category otherwise.
         let label: &'static str = if selected == EmojiCategory::All {
-            "Smileys and people"
+            i18n::t("Smileys and people")
         } else {
             selected.label()
         };
@@ -3922,6 +3950,15 @@ impl Whatfast {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
+                            .track_scroll(&self.settings_scroll)
+                            .on_scroll_wheel(cx.listener(|this, event, window, cx| {
+                                this.handle_smooth_scroll_input(
+                                    ScrollSurface::Settings,
+                                    event,
+                                    window,
+                                    cx,
+                                );
+                            }))
                             .px_5()
                             .pt_3()
                             .pb_6()
@@ -4037,9 +4074,14 @@ impl Whatfast {
         };
 
         let subtitle = if let Some(info) = info.as_ref().filter(|_| is_group) {
-            format!("Group · {} members", info.participant_count)
+            format!(
+                "{} · {} {}",
+                i18n::t("Group"),
+                info.participant_count,
+                i18n::t("members")
+            )
         } else if is_group {
-            "Group".to_string()
+            i18n::t("Group").to_string()
         } else {
             chat.as_ref()
                 .map(|chat| chat.phone_number.clone())
@@ -4116,54 +4158,67 @@ impl Whatfast {
         if let Some(info) = info {
             if !is_group {
                 if !info.about.is_empty() {
-                    body = body.child(section("About", info.about.clone()));
+                    body = body.child(section(i18n::t("About"), info.about.clone()));
                 }
                 if let Some(chat) = chat.as_ref() {
                     if !chat.phone_number.is_empty() {
-                        body = body.child(section("Phone", chat.phone_number.clone()));
+                        body = body.child(section(i18n::t("Phone"), chat.phone_number.clone()));
                     }
                     if !info.verified_name.is_empty() {
-                        body = body.child(section("Verified business", info.verified_name.clone()));
+                        body = body.child(section(
+                            i18n::t("Verified business"),
+                            info.verified_name.clone(),
+                        ));
                     }
                     if !chat.business_name.is_empty() && chat.business_name != chat.title {
-                        body = body.child(section("Business name", chat.business_name.clone()));
+                        body = body.child(section(
+                            i18n::t("Business name"),
+                            chat.business_name.clone(),
+                        ));
                     }
                     if !chat.push_name.is_empty() && chat.push_name != chat.title {
-                        body = body.child(section("Profile name", format!("~{}", chat.push_name)));
+                        body = body.child(section(
+                            i18n::t("Profile name"),
+                            format!("~{}", chat.push_name),
+                        ));
                     }
                 }
             } else {
                 let description = if info.description.is_empty() {
-                    "No description".to_string()
+                    i18n::t("No description").to_string()
                 } else {
                     info.description.clone()
                 };
-                body = body.child(section("Description", description));
+                body = body.child(section(i18n::t("Description"), description));
                 if info.created_at_ms > 0 {
-                    let mut created = format!("Created {}", format_epoch_date(info.created_at_ms));
+                    let mut created = format!(
+                        "{} {}",
+                        i18n::t("Created"),
+                        format_epoch_date(info.created_at_ms)
+                    );
                     if !info.created_by.is_empty() {
-                        created.push_str(&format!(" by {}", info.created_by));
+                        created.push_str(&format!(" {} {}", i18n::t("by"), info.created_by));
                     }
                     body = body.child(div().text_xs().text_color(muted).child(created));
                 }
                 if info.disappearing_timer_seconds > 0 {
                     body = body.child(section(
-                        "Disappearing messages",
+                        i18n::t("Disappearing messages"),
                         format_disappearing_timer(info.disappearing_timer_seconds),
                     ));
                 }
                 let mut notes: Vec<&'static str> = Vec::new();
                 if info.is_community {
-                    notes.push("Community group");
+                    notes.push(i18n::t("Community group"));
                 }
                 if info.announce_only {
-                    notes.push("Only admins can send messages");
+                    notes.push(i18n::t("Only admins can send messages"));
                 }
                 if info.locked {
-                    notes.push("Only admins can edit group info");
+                    notes.push(i18n::t("Only admins can edit group info"));
                 }
                 if info.join_approval_required {
-                    notes.push("Admins approve new members");
+                    notes.push(i18n::t("Admins approve new members"));
                 }
                 if !notes.is_empty() {
                     body =
@@ -4174,9 +4229,11 @@ impl Whatfast {
                 if !info.participants.is_empty() {
                     const MAX_MEMBER_ROWS: usize = 200;
                     let mut members = v_flex().gap_1().child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} members", info.participant_count)),
+                        div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                            "{} {}",
+                            info.participant_count,
+                            i18n::t("members")
+                        )),
                     );
                     for (index, participant) in
                         info.participants.iter().take(MAX_MEMBER_ROWS).enumerate()
@@ -4196,9 +4253,9 @@ impl Whatfast {
                         let member_avatar =
                             avatar_element(&display_name, member_avatar_path, px(32.), cx);
                         let badge = if participant.is_super_admin {
-                            Some("Owner")
+                            Some(i18n::t("Owner"))
                         } else if participant.is_admin {
-                            Some("Admin")
+                            Some(i18n::t("Admin"))
                         } else {
                             None
                         };
@@ -4313,9 +4370,9 @@ impl Whatfast {
                             IconName::Star
                         })
                         .label(if is_favorite {
-                            "Remove from favorites"
+                            i18n::t("Remove from favorites")
                         } else {
-                            "Add to favorites"
+                            i18n::t("Add to favorites")
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_favorite(chat_id.clone(), cx);
@@ -4324,7 +4381,7 @@ impl Whatfast {
                 );
             }
             if !info.address.is_empty() {
-                body = body.child(section("WhatsApp address", info.address.clone()));
+                body = body.child(section(i18n::t("WhatsApp address"), info.address.clone()));
             }
         }
 
@@ -4362,9 +4419,9 @@ impl Whatfast {
                             .border_b_1()
                             .border_color(border)
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(if is_group {
-                                "Group info"
+                                i18n::t("Group info")
                             } else {
-                                "Contact info"
+                                i18n::t("Contact info")
                             }))
                             .child(Button::new("close-chat-info").label("×").on_click(
                                 cx.listener(|this, _, _, cx| {
@@ -6303,4 +6360,79 @@ mod tests {
         assert_eq!(bubble_time_label(0, -180), "21:00");
         assert_eq!(bubble_time_label(0, 0), "00:00");
     }
+}
+
+/// La barra de una llamada viva: fase, silencio y cortar; o contestar y
+/// rechazar cuando suena una entrante.
+fn render_call_bar(
+    _this: &mut Whatfast,
+    call: &whatfast_model::model::CallState,
+    cx: &mut gpui::Context<Whatfast>,
+) -> gpui::AnyElement {
+    use gpui::{black, white};
+    let phase_label: SharedString = match call.phase.as_str() {
+        "placing" => i18n::t("Calling…").into(),
+        "dialing" => i18n::t("Calling…").into(),
+        "ringing" => i18n::t("Ringing…").into(),
+        "incoming" => i18n::t("Incoming call").into(),
+        "connecting" => i18n::t("Connecting…").into(),
+        "active" => i18n::t("In call").into(),
+        other => other.to_owned().into(),
+    };
+    let theme = cx.theme().clone();
+    let pill = h_flex()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .shadow_lg()
+        .bg(black().opacity(0.85))
+        .text_color(white())
+        .child(Icon::new(WhatfastIcon::Phone))
+        .child(phase_label);
+    let pill = if call.incoming && call.phase == "incoming" {
+        pill.child(
+            Button::new("call-answer")
+                .small()
+                .label(i18n::t("Answer"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.call_accept();
+                    cx.notify();
+                })),
+        )
+        .child(
+            Button::new("call-decline")
+                .small()
+                .label(i18n::t("Decline"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.call_reject();
+                    cx.notify();
+                })),
+        )
+    } else {
+        pill.child(
+            Button::new("call-mute")
+                .small()
+                .label(if call.muted {
+                    SharedString::from(i18n::t("Unmute"))
+                } else {
+                    SharedString::from(i18n::t("Mute"))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.call_toggle_mute();
+                    cx.notify();
+                })),
+        )
+        .child(
+            Button::new("call-hangup")
+                .small()
+                .label(i18n::t("Hang up"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.call_hangup();
+                    cx.notify();
+                })),
+        )
+    };
+    let _ = theme;
+    pill.into_any_element()
 }

@@ -13,7 +13,7 @@
 //! (indices and hashes, no clock and no randomness), so the visual QA of the
 //! native UI has a stable reference.
 //!
-//! Two decisions of this port:
+//! Three decisions of this port:
 //!
 //! - The crate does not invent paths: the media of the fake (the photos and
 //!   the audio) is written under the profile directory the binary resolved
@@ -21,6 +21,11 @@
 //! - The photos are written by a small PNG encoder of this module instead of
 //!   by the `image` crate, because the crate may not add a dependency that
 //!   is not authorized. The pixels are the ones of the origin.
+//! - The dataset is a demonstration of the north of Argentina (decision
+//!   asked by the owner, 2026-10): a roster of people with real names,
+//!   avatars painted as portraits, photos painted as scenes, messages in
+//!   Spanish and melodies instead of a plain tone. The dataset stays
+//!   deterministic and the oracle tests follow the roster.
 
 use std::{
     collections::HashMap,
@@ -36,18 +41,19 @@ use std::{
 
 use crate::transport::{BridgeMessage, PROTOCOL_VERSION};
 use crate::{
-    AttachmentContent, AttachmentKind, AuthStateResponse, BackendEvent, Chat, ChatKind,
-    ChatParticipant, ChatUpserted, ConnectionState, Envelope, GetChatHistoryCoverageResponse,
-    GetChatInfoResponse, GetHistoryOverviewResponse, GetIntegrityStatusResponse,
-    GetMessageAttachmentResponse, GetMessageImageResponse, HelloResponse, HistoryCoverage,
-    HistoryCoverageChanged, HistoryCoverageState, HistoryOverview, ImageContent, IntegrityStatus,
-    LinkPreview, ListChatsResponse, ListMessagesAfterResponse, ListMessagesAroundResponse,
-    ListMessagesResponse, ListNewsletterMessagesResponse, ListNewslettersResponse,
-    ListPinnedMessagesResponse, ListStatusesResponse, ListStickersResponse, Message,
-    MessageSearchResult, MessageStatus, MessageUpserted, Newsletter, OpenContactResponse,
-    OpenMessageWindowResponse, PinnedMessage, PinnedMessagesChanged, PollContent, PollOption,
-    PollVoter, Reaction, RpcError, RpcRequest, RpcResponse, SearchLocalResponse,
-    SendAttachmentResponse, SendImageResponse, SendReactionResponse,
+    AttachmentContent, AttachmentKind, AuthStateResponse, BackendEvent, CallAcceptResponse,
+    CallAudioResponse, CallHangupResponse, CallMuteResponse, CallPlaceResponse, CallRejectResponse,
+    Chat, ChatKind, ChatParticipant, ChatUpserted, ConnectionState, Envelope,
+    GetChatHistoryCoverageResponse, GetChatInfoResponse, GetHistoryOverviewResponse,
+    GetIntegrityStatusResponse, GetMessageAttachmentResponse, GetMessageImageResponse,
+    HelloResponse, HistoryCoverage, HistoryCoverageChanged, HistoryCoverageState, HistoryOverview,
+    ImageContent, IntegrityStatus, LinkPreview, ListChatsResponse, ListMessagesAfterResponse,
+    ListMessagesAroundResponse, ListMessagesResponse, ListNewsletterMessagesResponse,
+    ListNewslettersResponse, ListPinnedMessagesResponse, ListStatusesResponse,
+    ListStickersResponse, Message, MessageSearchResult, MessageStatus, MessageUpserted, Newsletter,
+    OpenContactResponse, OpenMessageWindowResponse, PinnedMessage, PinnedMessagesChanged,
+    PollContent, PollOption, PollVoter, Reaction, RpcError, RpcRequest, RpcResponse,
+    SearchLocalResponse, SendAttachmentResponse, SendImageResponse, SendReactionResponse,
     SendStickerFromLibraryResponse, SendStickerResponse, SendTextResponse, Sticker, StickerPack,
     SubscribeNewsletterResponse, SyncPhase, SyncStatus, TextContent, backend_event, envelope,
     message as proto_message, rpc_request, rpc_response,
@@ -89,6 +95,491 @@ const AUDIO_FILE: &str = "cancion.wav";
 
 /// The name of the voice note of the dataset.
 const VOICE_NOTE_FILE: &str = "nota-de-voz.wav";
+
+// ============================================================================
+// The roster of the demonstration
+//
+// The first screens of the list are people and groups of the north of
+// Argentina, with the phones of a demonstration (the prefix 5501 does not
+// exist: it plays the role of the 555 of the fiction of the United States).
+// The chats beyond the roster combine the two pools of names, so every row
+// of the ten thousand still reads like a real conversation.
+// ============================================================================
+
+/// A person of the roster.
+struct Person {
+    /// The name the contact is saved with.
+    name: &'static str,
+    /// The push name: the one the person wrote on their phone.
+    push: &'static str,
+    /// The phone in the format the interface shows.
+    phone: &'static str,
+    /// The digits of the JID, without the domain.
+    digits: &'static str,
+}
+
+/// The roster of the direct conversations.
+const PEOPLE: [Person; 24] = [
+    Person {
+        name: "Martina Ferreyra",
+        push: "Marti ♡",
+        phone: "+54 9 381 550-101",
+        digits: "549381550101",
+    },
+    Person {
+        name: "Bruno Salazar",
+        push: "Bruno ⚽",
+        phone: "+54 9 381 550-102",
+        digits: "549381550102",
+    },
+    Person {
+        name: "Lucía Cabrera",
+        push: "Luci ✿",
+        phone: "+54 9 381 550-103",
+        digits: "549381550103",
+    },
+    Person {
+        name: "Facundo Ibarra",
+        push: "Facu 🍕",
+        phone: "+54 9 381 550-104",
+        digits: "549381550104",
+    },
+    Person {
+        name: "Camila Rojas",
+        push: "Cami 🌻",
+        phone: "+54 9 381 550-105",
+        digits: "549381550105",
+    },
+    Person {
+        name: "Nicolás Villalba",
+        push: "Nico 🎸",
+        phone: "+54 9 381 550-106",
+        digits: "549381550106",
+    },
+    Person {
+        name: "Valentina Paz",
+        push: "Vale 📚",
+        phone: "+54 9 381 550-107",
+        digits: "549381550107",
+    },
+    Person {
+        name: "Santiago Maldonado",
+        push: "Santi 🏍️",
+        phone: "+54 9 381 550-108",
+        digits: "549381550108",
+    },
+    Person {
+        name: "Isabela Correa",
+        push: "Isa 🎨",
+        phone: "+54 9 381 550-109",
+        digits: "549381550109",
+    },
+    Person {
+        name: "Matías Aráoz",
+        push: "Mati 🐧",
+        phone: "+54 9 381 550-110",
+        digits: "549381550110",
+    },
+    Person {
+        name: "Julieta Ocampo",
+        push: "Juli 🐱",
+        phone: "+54 9 381 550-111",
+        digits: "549381550111",
+    },
+    Person {
+        name: "Tomás Chávez",
+        push: "Tomás 🎮",
+        phone: "+54 9 381 550-112",
+        digits: "549381550112",
+    },
+    Person {
+        name: "Agustina Vera",
+        push: "Agus 💃",
+        phone: "+54 9 381 550-113",
+        digits: "549381550113",
+    },
+    Person {
+        name: "Ramiro Nieva",
+        push: "Rama 🛠️",
+        phone: "+54 9 381 550-114",
+        digits: "549381550114",
+    },
+    Person {
+        name: "Elena Bazán",
+        push: "Elena ☕",
+        phone: "+54 9 381 550-115",
+        digits: "549381550115",
+    },
+    Person {
+        name: "Joaquín Zavalía",
+        push: "Joaco 🏀",
+        phone: "+54 9 381 550-116",
+        digits: "549381550116",
+    },
+    Person {
+        name: "Paulina Terán",
+        push: "Pau 🌙",
+        phone: "+54 9 381 550-117",
+        digits: "549381550117",
+    },
+    Person {
+        name: "Ignacio Colombres",
+        push: "Nacho 🎧",
+        phone: "+54 9 381 550-118",
+        digits: "549381550118",
+    },
+    Person {
+        name: "Delfina Soria",
+        push: "Delfi 🦋",
+        phone: "+54 9 381 550-119",
+        digits: "549381550119",
+    },
+    Person {
+        name: "Marcos Padilla",
+        push: "Marcos 🥓",
+        phone: "+54 9 381 550-120",
+        digits: "549381550120",
+    },
+    Person {
+        name: "Catalina Ruiz",
+        push: "Cata 🎤",
+        phone: "+54 9 381 550-121",
+        digits: "549381550121",
+    },
+    Person {
+        name: "Lautaro Benítez",
+        push: "Lauti 🚴",
+        phone: "+54 9 381 550-122",
+        digits: "549381550122",
+    },
+    Person {
+        name: "Renata Mendoza",
+        push: "Renata 🌷",
+        phone: "+54 9 381 550-123",
+        digits: "549381550123",
+    },
+    Person {
+        name: "Gonzalo Ledesma",
+        push: "Gonza 🍟",
+        phone: "+54 9 381 550-124",
+        digits: "549381550124",
+    },
+];
+
+/// The groups of the first screens of the list.
+const GROUPS: [&str; 10] = [
+    "Familia Bazán 🏡",
+    "Fútbol de los martes ⚽",
+    "Amigas del gimnasio 💪",
+    "Cumple de Bruno 🎉",
+    "5° 3° — Ex alumnos 🎓",
+    "Asado del finde 🥩",
+    "Coordi del trabajo 📋",
+    "Vecinos del 3°B 🏢",
+    "Viaje a Tafí 2026 🏔️",
+    "Mates y cine 🎬🧉",
+];
+
+/// The description of each group of the pool.
+const GROUP_DESCRIPTIONS: [&str; 10] = [
+    "La familia, para coordinar cumpleaños y asados 🏡",
+    "Se juega los martes a las 21, el que falta paga las medias ⚽",
+    "Turno de las 7 de la mañana, frases motivacionales prohibidas 💪",
+    "Para organizar el cumple de Bruno, sugerencias bienvenidas 🎉",
+    "El grupo del colegio, puros recuerdos 🎓",
+    "El asado del finde: cada uno trae lo suyo 🥩",
+    "Avisos del trabajo, solo en horario laboral 📋",
+    "Los vecinos del 3°B, temas del edificio 🏢",
+    "Ahorramos para Tafí del Valle, la lista de gastos vive acá 🏔️",
+    "Cine en mi casa el jueves, traigan pochoclos 🎬",
+];
+
+/// First names of the conversations beyond the roster.
+const FIRSTS: [&str; 20] = [
+    "Micaela",
+    "Emiliano",
+    "Belén",
+    "Franco",
+    "Antonella",
+    "Leandro",
+    "Josefina",
+    "Bautista",
+    "Milagros",
+    "Esteban",
+    "Antonina",
+    "Salvador",
+    "Pilar",
+    "Alfredo",
+    "Guadalupe",
+    "Aníbal",
+    "Amparo",
+    "Benjamín",
+    "Cristina",
+    "Alvaro",
+];
+
+/// Last names of the conversations beyond the roster.
+const LASTS: [&str; 20] = [
+    "Peredo",
+    "Garmendia",
+    "Luna",
+    "Quinteros",
+    "Moyano",
+    "Alurralde",
+    "Piossek",
+    "Gramajo",
+    "Bulacio",
+    "Cruz",
+    "Alderete",
+    "Pereyra",
+    "Zamora",
+    "Avellaneda",
+    "Ríos",
+    "Leguizamón",
+    "Ordoñez",
+    "Frías",
+    "Noguera",
+    "Vergara",
+];
+
+/// The messages the demonstration sends as you.
+const MY_TEXTS: [&str; 14] = [
+    "Listo, ahí te aviso 👍",
+    "Jajaja no puede ser 😂",
+    "Perfecto, gracias!",
+    "Dale, nos vemos a las 8 entonces",
+    "Te paso la dirección en un rato",
+    "Ya salí de la oficina 🚗",
+    "Buenísimo 😄",
+    "Charlamos mañana que me voy a dormir 😴",
+    "No te olvides de traer el mate 🧉",
+    "Ok, entendido",
+    "Marchando 🫡",
+    "¿Cuánto les quedó por el alquiler?",
+    "¡Feliz cumple! 🎂🎉",
+    "¿Te queda lugar en el auto?",
+];
+
+/// The messages the demonstration answers with.
+const THEIR_TEXTS: [&str; 14] = [
+    "¡Hola! ¿Cómo andás?",
+    "¿Viste el gol de anoche? Insolente 😱",
+    "Mañana hay reunión a las 10, ¿estás?",
+    "Mirá esta foto que me pasó mi hermana 😍",
+    "¿Y el asado del finde se hace o no?",
+    "Recién llego a casa 🏠",
+    "Tengo una noticia para contarles 👀",
+    "¿Me pasás el número de ese mecánico?",
+    "Qué calor que hace hoy 🥵",
+    "Ya le dije que sí, no insistas jaja",
+    "Estoy por salir, ¿necesitás algo?",
+    "Gracias por ayer de verdad 🙏",
+    "Se cortó la luz acá otra vez 💡",
+    "Dale, estoy con eso 📚",
+];
+
+/// The long message of the stride of nine: several lines to exercise the
+/// variable-height virtualization.
+const LONG_TEXT: &str = "Te paso el dato del cumple 🎉\nSábado, desde las 21\nEn lo de Male (Av. Alem 1234)\nTraé hielo si podés 🧊";
+
+/// The texts the live loop streams into the first chat.
+const LIVE_TEXTS: [&str; 8] = [
+    "¿Alguno vio la llave del quincho?",
+    "Ya estoy llegando, cinco minutos ⏱️",
+    "Jajaja mirá lo que encontré 😂",
+    "Mañana llevan los mates, yo pongo el azúcar 🧉",
+    "Se suspende por lluvia ☔ aviso por acá",
+    "Gracias por el aguante de ayer ❤️",
+    "¿Alguien tiene el número de la pizzería?",
+    "¡Buen finde gente! 🎉",
+];
+
+/// The posts of the channels of the demonstration.
+const CHANNEL_POSTS: [&str; 6] = [
+    "📊 Resumen de la semana: lo que no te podés perder",
+    "🎉 Ya estamos sorteando dos entradas entre los suscriptores",
+    "🆕 Nueva nota: cómo hacer que tu app abra en un parpadeo",
+    "❓ Hilo de consultas abierto, pregunten lo que quieran",
+    "🎁 Beneficio de siempre: 20% en la librería del centro",
+    "📸 Detrás de escena de la última actualización",
+];
+
+/// The about texts of the direct contacts.
+const ABOUT_TEXTS: [&str; 3] = [
+    "¡Hola! Estoy usando Whatfast.",
+    "Disponible 📱",
+    "Dejá el mensaje que en un rato contesto 📝",
+];
+
+/// The verified names of the business contacts.
+const VERIFIED_TEXTS: [&str; 3] = ["Panadería La Espiga", "Vivero El Patio", "Librería Nazca"];
+
+/// The captions of the photos of the dataset, one per scene: the caption of
+/// a photo and the scene it paints come from the same table.
+const PHOTO_CAPTIONS: [&str; 8] = [
+    "Atardecer en el dique 🌅",
+    "Cafecito de la mañana ☕",
+    "La michi de la vecina 😺",
+    "Vista desde el cerro 🏔️",
+    "Noche en San Miguel 🌃",
+    "La pizza de anoche 🍕",
+    "Flores del patio 🌸",
+    "Tardeo en la playa 🏖️",
+];
+
+/// The "you" of the demonstration: the user the profile belongs to.
+const ME_NAME: &str = "Octavio González";
+
+/// The phone of the "you" of the demonstration.
+const ME_PHONE: &str = "+54 9 381 550-100";
+
+/// The digits of the JID of the "you" of the demonstration.
+const ME_DIGITS: &str = "549381550100";
+
+/// Whether the chat of the index is a group.
+fn is_group_id(id: usize) -> bool {
+    id.is_multiple_of(5)
+}
+
+/// The group index of a chat id.
+fn group_index(id: usize) -> usize {
+    id / 5
+}
+
+/// The title of the direct conversation of the index.
+///
+/// The first chats take the people of the roster; the ones beyond combine
+/// the pools with strides coprime to the pool size, so two adjacent chats
+/// never share a last name.
+fn direct_title(id: usize) -> String {
+    if id < PEOPLE.len() {
+        PEOPLE[id].name.into()
+    } else {
+        format!(
+            "{} {}",
+            FIRSTS[(id * 11 + 3) % FIRSTS.len()],
+            LASTS[(id * 13 + 7) % LASTS.len()]
+        )
+    }
+}
+
+/// The push name of the direct conversation of the index.
+fn direct_push(id: usize) -> String {
+    if id < PEOPLE.len() {
+        PEOPLE[id].push.into()
+    } else {
+        FIRSTS[(id * 11 + 3) % FIRSTS.len()].into()
+    }
+}
+
+/// The phone of the direct conversation of the index.
+fn direct_phone(id: usize) -> String {
+    if id < PEOPLE.len() {
+        PEOPLE[id].phone.into()
+    } else {
+        format!("+54 9 381 6{:05}", id % 100_000)
+    }
+}
+
+/// The digits of the JID of the direct conversation of the index.
+fn direct_digits(id: usize) -> String {
+    if id < PEOPLE.len() {
+        PEOPLE[id].digits.into()
+    } else {
+        format!("5493816{:05}", id % 100_000)
+    }
+}
+
+/// The title of the group of the index.
+fn group_title(group: usize) -> String {
+    if group < GROUPS.len() {
+        GROUPS[group].into()
+    } else {
+        match group % 3 {
+            0 => format!("Familia {}", LASTS[(group / 3) % LASTS.len()]),
+            1 => format!("{} y amigos", FIRSTS[(group / 3) % FIRSTS.len()]),
+            _ => format!("Grupo de {}", FIRSTS[(group * 7) % FIRSTS.len()]),
+        }
+    }
+}
+
+/// The description of the group of the index.
+fn group_description(group: usize) -> String {
+    if group < GROUP_DESCRIPTIONS.len() {
+        GROUP_DESCRIPTIONS[group].into()
+    } else {
+        "Grupo de coordinación.".into()
+    }
+}
+
+/// A member of a group: the roster gives the people, the group only decides
+/// where the window of the roster starts.
+fn group_member(group: usize, index: usize) -> &'static Person {
+    &PEOPLE[(group * 7 + index * 3) % PEOPLE.len()]
+}
+
+/// The chat id as the number it carries, when it carries one.
+fn chat_number(chat_id: &str) -> Option<usize> {
+    chat_id
+        .strip_prefix("chat-")
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+/// Who signs the messages of a chat that are not yours.
+///
+/// In a group the members take turns by message; in a direct conversation
+/// the person of the chat signs them all.
+struct Sender {
+    name: String,
+    phone: String,
+    jid: String,
+}
+
+/// Resolve who signs a message of a chat: a member of the group or the
+/// person of the direct conversation.
+fn chat_sender(chat_id: &str, message_id: usize) -> Sender {
+    let Some(id) = chat_number(chat_id) else {
+        let person = &PEOPLE[1];
+        return Sender {
+            name: person.name.into(),
+            phone: person.phone.into(),
+            jid: format!("{}@s.whatsapp.net", person.digits),
+        };
+    };
+    let person = if is_group_id(id) {
+        group_member(group_index(id), message_id % 12)
+    } else if id < PEOPLE.len() {
+        &PEOPLE[id]
+    } else {
+        // The conversations beyond the roster have no Person: their sender
+        // carries the same name the title carries.
+        return Sender {
+            name: direct_title(id),
+            phone: direct_phone(id),
+            jid: format!("{}@s.whatsapp.net", direct_digits(id)),
+        };
+    };
+    Sender {
+        name: person.name.into(),
+        phone: person.phone.into(),
+        jid: format!("{}@s.whatsapp.net", person.digits),
+    }
+}
+
+/// The text of a message of the dataset: the pool depends on the sender.
+fn message_text(id: usize) -> &'static str {
+    if id.is_multiple_of(2) {
+        MY_TEXTS[(id / 2) % MY_TEXTS.len()]
+    } else {
+        THEIR_TEXTS[(id / 2) % THEIR_TEXTS.len()]
+    }
+}
+
+/// The caption of the photo of the dataset: the photo index decides the
+/// scene, and the caption matches the scene.
+fn photo_caption(id: usize) -> &'static str {
+    PHOTO_CAPTIONS[(id / 37) % PHOTO_CAPTIONS.len()]
+}
 
 /// How many participants a group has in the performance fixture.
 const PERF_PARTICIPANTS: usize = 1_000;
@@ -478,7 +969,7 @@ pub fn fake_loop(
                         (chat.title.to_lowercase().contains(&query)
                             || chat.phone_number.contains(&query))
                         .then_some(crate::ContactSearchResult {
-                            contact_jid: format!("1555{id:07}@s.whatsapp.net"),
+                            contact_jid: format!("{}@s.whatsapp.net", direct_digits(id)),
                             chat_id: chat.id,
                             display_name: chat.title,
                             secondary_name: chat.push_name,
@@ -488,7 +979,7 @@ pub fn fake_loop(
                     .take(8)
                     .collect();
                 let groups = (0..40)
-                    .filter(|id| id % 5 == 0)
+                    .filter(|id: &usize| id.is_multiple_of(5))
                     .map(fake_chat)
                     .filter(|chat| chat.title.to_lowercase().contains(&query))
                     .take(6)
@@ -501,9 +992,14 @@ pub fn fake_loop(
                                 chat_id: chat.id.clone(),
                                 message_id: format!("message-{id}"),
                                 chat_title: chat.title.clone(),
-                                sender_name: if id % 2 == 0 { "You" } else { "Fast friend" }.into(),
+                                sender_name: if id.is_multiple_of(2) {
+                                    "Vos"
+                                } else {
+                                    PEOPLE[1].name
+                                }
+                                .into(),
                                 timestamp_ms: id as i64,
-                                snippet: format!("Fast native message {id} matching {query}"),
+                                snippet: format!("“{}” — coincide con “{query}”", message_text(id)),
                                 kind: "text".into(),
                                 archived: chat.archived,
                                 chat: Some(chat),
@@ -520,9 +1016,19 @@ pub fn fake_loop(
                     messages,
                 })
             }
-            Some(rpc_request::Request::OpenContact(_request)) => {
-                let mut chat = fake_chat(10_001);
-                chat.title = "New WhatsApp contact".into();
+            Some(rpc_request::Request::OpenContact(request)) => {
+                // The contact of the JID opens its chat: the roster answers
+                // by the digits of the JID, the way the real sidecar does.
+                let digits = request.contact_jid.split('@').next().unwrap_or("");
+                let known = PEOPLE.iter().position(|person| person.digits == digits);
+                let chat = match known {
+                    Some(person) => fake_chat(person),
+                    None => {
+                        let mut chat = fake_chat(10_001);
+                        chat.title = "Nuevo contacto".into();
+                        chat
+                    }
+                };
                 rpc_response::Result::OpenContact(OpenContactResponse { chat: Some(chat) })
             }
             Some(rpc_request::Request::ListMessagesAround(request)) => {
@@ -543,17 +1049,31 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::GetChatAvatar(request)) => {
-                let seed = chat_seed(&request.chat_id);
-                let picture = ensure_fake_avatar(&profile_dir, seed);
+                // The avatar of a person is their portrait; the one of a
+                // group is the bunch of people it is made of.
+                let picture = match chat_number(&request.chat_id) {
+                    Some(id) if is_group_id(id) => {
+                        ensure_fake_group_avatar(&profile_dir, group_index(id))
+                    }
+                    Some(id) => ensure_fake_avatar(&profile_dir, id % PEOPLE.len()),
+                    None => {
+                        let seed = chat_seed(&request.chat_id);
+                        ensure_fake_avatar(&profile_dir, seed % PEOPLE.len())
+                    }
+                };
                 rpc_response::Result::GetChatAvatar(crate::GetChatAvatarResponse {
                     chat_id: request.chat_id,
                     avatar_path: picture.to_string_lossy().into_owned(),
                 })
             }
             Some(rpc_request::Request::GetParticipantAvatar(request)) => {
+                // Every participant carries the face of the roster: stable
+                // for their JID, the way a real profile photo is.
+                let seed = chat_seed(&request.participant_id) % PEOPLE.len();
+                let picture = ensure_fake_avatar(&profile_dir, seed);
                 rpc_response::Result::GetParticipantAvatar(crate::GetParticipantAvatarResponse {
                     participant_id: request.participant_id,
-                    avatar_path: String::new(),
+                    avatar_path: picture.to_string_lossy().into_owned(),
                 })
             }
             Some(rpc_request::Request::GetChatInfo(request)) => {
@@ -564,19 +1084,36 @@ pub fn fake_loop(
                     .unwrap_or(0);
                 let chat = fake_chat(id);
                 let group = chat.kind == ChatKind::Group as i32;
+                let group_number = group_index(id);
                 let participants: Vec<ChatParticipant> = if group {
                     (0..if performance_fixture {
                         PERF_PARTICIPANTS
                     } else {
                         12
                     })
-                        .map(|index| ChatParticipant {
-                            participant_id: format!("1555{index:07}@s.whatsapp.net"),
-                            display_name: format!("Fast friend {index}"),
-                            phone_number: format!("+1555{index:07}"),
-                            is_admin: index < 2,
-                            is_super_admin: index == 0,
-                            is_me: index == 3,
+                        .map(|index| {
+                            if index == 3 {
+                                // The "you" of the demonstration is a member
+                                // of every group, like a real account.
+                                ChatParticipant {
+                                    participant_id: format!("{ME_DIGITS}@s.whatsapp.net"),
+                                    display_name: ME_NAME.into(),
+                                    phone_number: ME_PHONE.into(),
+                                    is_admin: false,
+                                    is_super_admin: false,
+                                    is_me: true,
+                                }
+                            } else {
+                                let member = group_member(group_number, index);
+                                ChatParticipant {
+                                    participant_id: format!("{}@s.whatsapp.net", member.digits),
+                                    display_name: member.name.into(),
+                                    phone_number: member.phone.into(),
+                                    is_admin: index < 2,
+                                    is_super_admin: index == 0,
+                                    is_me: false,
+                                }
+                            }
                         })
                         .collect()
                 } else {
@@ -584,28 +1121,28 @@ pub fn fake_loop(
                 };
                 rpc_response::Result::GetChatInfo(GetChatInfoResponse {
                     address: if group {
-                        format!("1234567890-{id}@g.us")
+                        format!("1203630{id:05}@g.us")
                     } else {
-                        format!("1555{id:07}@s.whatsapp.net")
+                        format!("{}@s.whatsapp.net", direct_digits(id))
                     },
                     about: if group {
                         String::new()
                     } else {
-                        "Hey there! I am using Whatfast.".into()
+                        ABOUT_TEXTS[id % ABOUT_TEXTS.len()].into()
                     },
                     verified_name: if !group && id % 3 == 0 {
-                        format!("Whatfast Business {id}")
+                        format!("{} {id}", VERIFIED_TEXTS[(id / 3) % VERIFIED_TEXTS.len()])
                     } else {
                         String::new()
                     },
                     description: if group {
-                        format!("Planning the weekend, one message at a time. Group {id}.")
+                        group_description(group_number)
                     } else {
                         String::new()
                     },
                     created_at_ms: if group { 1_712_345_678_000 } else { 0 },
                     created_by: if group {
-                        "Fast friend 0".into()
+                        group_member(group_number, 0).name.into()
                     } else {
                         String::new()
                     },
@@ -703,40 +1240,26 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::ListStatuses(_)) => {
+                // The states of two people of the roster, with their phones.
                 let mut statuses = Vec::new();
-                for (group_index, sender) in [
-                    ("maya@s.whatsapp.net", "Maya Nair"),
-                    ("priya@s.whatsapp.net", "Priya Nair"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let (sender_id, sender_name) = sender;
+                for (index, person) in [&PEOPLE[16], &PEOPLE[22]].into_iter().enumerate() {
                     let messages = (0..2)
-                        .map(|index| {
+                        .map(|message_index| {
                             let mut message = fake_message(
                                 "status@broadcast",
-                                1_500 - group_index * 50 - index,
+                                1_500 - index * 50 - message_index,
                                 &profile_dir,
                             );
-                            message.sender_id = sender_id.to_string();
-                            message.sender_name = sender_name.to_string();
-                            message.sender_phone_number = if group_index == 0 {
-                                "5493811000001".into()
-                            } else {
-                                "5493811000002".into()
-                            };
+                            message.sender_id = format!("{}@s.whatsapp.net", person.digits);
+                            message.sender_name = person.name.into();
+                            message.sender_phone_number = person.phone.into();
                             message
                         })
                         .collect();
                     statuses.push(crate::StatusGroup {
-                        sender_id: sender_id.to_string(),
-                        sender_name: sender_name.to_string(),
-                        sender_phone_number: if group_index == 0 {
-                            "5493811000001".into()
-                        } else {
-                            "5493811000002".into()
-                        },
+                        sender_id: format!("{}@s.whatsapp.net", person.digits),
+                        sender_name: person.name.into(),
+                        sender_phone_number: person.phone.into(),
                         messages,
                     });
                 }
@@ -754,7 +1277,7 @@ pub fn fake_loop(
                 rpc_response::Result::SubscribeNewsletter(SubscribeNewsletterResponse {
                     newsletter: Some(Newsletter {
                         jid: jid.clone(),
-                        name: format!("Channel {display_key}"),
+                        name: format!("Canal {display_key}"),
                         subscribed_at_ms: 1_900_000_000_000,
                         muted: false,
                     }),
@@ -765,13 +1288,13 @@ pub fn fake_loop(
                     newsletters: vec![
                         Newsletter {
                             jid: "news@newsletter".into(),
-                            name: "Whatfast News".into(),
+                            name: "Whatfast Novedades 📢".into(),
                             subscribed_at_ms: 1_900_000_000_000,
                             muted: false,
                         },
                         Newsletter {
                             jid: "dev@newsletter".into(),
-                            name: "Whatfast Dev".into(),
+                            name: "Fútbol de Primera ⚽".into(),
                             subscribed_at_ms: 1_890_000_000_000,
                             muted: false,
                         },
@@ -779,12 +1302,23 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::ListNewsletterMessages(request)) => {
+                let channel = match request.jid.as_str() {
+                    "news@newsletter" => "Whatfast Novedades 📢",
+                    "dev@newsletter" => "Fútbol de Primera ⚽",
+                    _ => "Canal",
+                };
                 let messages = (0..8)
                     .map(|index| {
                         let mut message = fake_message(&request.jid, 1_000 - index, &profile_dir);
                         message.chat_id = request.jid.clone();
                         message.sender_id = request.jid.clone();
-                        message.sender_name = "Channel".into();
+                        message.sender_name = channel.into();
+                        // A channel posts announcements, not chat: the post
+                        // replaces the text of the dataset.
+                        message.content = Some(proto_message::Content::Text(TextContent {
+                            text: CHANNEL_POSTS[index % CHANNEL_POSTS.len()].into(),
+                            link_preview: None,
+                        }));
                         message
                     })
                     .collect();
@@ -1085,6 +1619,28 @@ pub fn fake_loop(
                 rpc_response::Result::Shutdown(crate::ShutdownResponse {})
             }
             None => continue,
+            // v22 calls: the demonstration answers the control plane so the
+            // interface can exercise the flow without a linked device.
+            Some(rpc_request::Request::CallPlace(_)) => {
+                rpc_response::Result::CallPlace(CallPlaceResponse {
+                    call_id: "fake-call".into(),
+                })
+            }
+            Some(rpc_request::Request::CallAccept(_)) => {
+                rpc_response::Result::CallAccept(CallAcceptResponse {})
+            }
+            Some(rpc_request::Request::CallReject(_)) => {
+                rpc_response::Result::CallReject(CallRejectResponse {})
+            }
+            Some(rpc_request::Request::CallHangup(_)) => {
+                rpc_response::Result::CallHangup(CallHangupResponse {})
+            }
+            Some(rpc_request::Request::CallMute(_)) => {
+                rpc_response::Result::CallMute(CallMuteResponse {})
+            }
+            Some(rpc_request::Request::CallAudio(_)) => {
+                rpc_response::Result::CallAudio(CallAudioResponse {})
+            }
         };
         if incoming
             .send_blocking(BridgeMessage::Envelope(Box::new(Envelope {
@@ -1244,18 +1800,19 @@ fn fake_file_size(file_path: &str) -> u64 {
         .unwrap_or_default()
 }
 
-/// Materialize a tiny real PCM WAV once per profile so fake-mode audio and
+/// Materialize a real PCM WAV once per profile so fake-mode audio and
 /// voice notes have a playable file to point the inline player at. The file
 /// lives under the managed media tree, which is the only path the asset
 /// protocol serves.
 pub fn ensure_fake_audio(profile_dir: &Path) -> PathBuf {
-    ensure_fake_audio_named(profile_dir, "fake-audio.wav")
+    ensure_fake_audio_named(profile_dir, AUDIO_FILE)
 }
 
 /// Materialize a real PCM WAV with the name that the dataset uses.
 ///
-/// The wave is the same tone of the fake: a playable file that the inline
-/// player of the interface can open without another dependency.
+/// The song is the audio of the dataset and the hum is the voice note: two
+/// melodies, playable by the reader of the system and by the inline player
+/// of the interface, written without another dependency.
 pub fn ensure_fake_audio_named(profile_dir: &Path, name: &str) -> PathBuf {
     let media_dir = profile_dir.join("media");
     let path = media_dir.join(name);
@@ -1265,7 +1822,11 @@ pub fn ensure_fake_audio_named(profile_dir: &Path, name: &str) -> PathBuf {
     if ensure_media_dir(&media_dir).is_err() {
         return path;
     }
-    let wav = wav::encode_tone(8_000, 2, 440.0);
+    let wav = if name == VOICE_NOTE_FILE {
+        wav::encode_hum()
+    } else {
+        wav::encode_song()
+    };
     if std::fs::write(&path, wav).is_ok() {
         let _ = restrict_permissions(&path);
     }
@@ -1354,8 +1915,26 @@ fn fake_attachment_content(
                 720,
                 false,
             ),
-            FakeAttachment::Audio => ("audio", "", "audio/wav", AUDIO_FILE, 2, 0, 0, false),
-            FakeAttachment::VoiceNote => ("audio", "", "audio/wav", VOICE_NOTE_FILE, 2, 0, 0, true),
+            FakeAttachment::Audio => (
+                "audio",
+                "",
+                "audio/wav",
+                AUDIO_FILE,
+                wav::song_seconds(),
+                0,
+                0,
+                false,
+            ),
+            FakeAttachment::VoiceNote => (
+                "audio",
+                "",
+                "audio/wav",
+                VOICE_NOTE_FILE,
+                wav::hum_seconds(),
+                0,
+                0,
+                true,
+            ),
         };
     proto_message::Content::Attachment(AttachmentContent {
         kind: kind.into(),
@@ -1397,13 +1976,13 @@ fn fake_attachment_of(id: usize) -> Option<FakeAttachment> {
     if id == 0 {
         return None;
     }
-    if id % DOCUMENT_EVERY == 0 {
+    if id.is_multiple_of(DOCUMENT_EVERY) {
         Some(FakeAttachment::Document)
-    } else if id % VIDEO_EVERY == 0 {
+    } else if id.is_multiple_of(VIDEO_EVERY) {
         Some(FakeAttachment::Video)
-    } else if id % AUDIO_EVERY == 0 {
+    } else if id.is_multiple_of(AUDIO_EVERY) {
         Some(FakeAttachment::Audio)
-    } else if id % VOICE_NOTE_EVERY == 0 {
+    } else if id.is_multiple_of(VOICE_NOTE_EVERY) {
         Some(FakeAttachment::VoiceNote)
     } else {
         None
@@ -1414,12 +1993,15 @@ fn fake_attachment_of(id: usize) -> Option<FakeAttachment> {
 /// viewer, gallery) is exercised by the fake backend instead of showing an
 /// endless loading placeholder.
 ///
-/// The origin drew the gradient with the `image` crate and wrote it as a
-/// PNG. The pixels here are the same ones; the container is written by the
-/// PNG encoder of this module, because the crate may not depend on `image`.
+/// The origin drew one gradient for every photo. Here every photo is a
+/// scene: the caption and the scene come from the same table, so the
+/// message "Atardecer en el dique" carries a sunset.
 pub fn ensure_fake_image(profile_dir: &Path, seed: usize) -> PathBuf {
     let media_dir = profile_dir.join("media");
-    let path = media_dir.join(format!("fake-image-{seed}.png"));
+    // The v2 in the name keeps the media of the previous dataset (the
+    // gradients of the origin) from shadowing the new art in profiles that
+    // already ran the old fake: the media is written once per profile.
+    let path = media_dir.join(format!("fake-image-v2-{seed}.png"));
     if path.exists() {
         return path;
     }
@@ -1427,7 +2009,8 @@ pub fn ensure_fake_image(profile_dir: &Path, seed: usize) -> PathBuf {
         return path;
     }
     let (width, height) = (320_u32, 240_u32);
-    let pixels = fake_image_pixels(seed, width, height);
+    let scene = art::Scene::of_index((seed / 37) % PHOTO_CAPTIONS.len());
+    let pixels = art::scene(scene, seed, width, height);
     let png = png::encode_rgb(width, height, &pixels);
     if std::fs::write(&path, png).is_ok() {
         let _ = restrict_permissions(&path);
@@ -1438,12 +2021,12 @@ pub fn ensure_fake_image(profile_dir: &Path, seed: usize) -> PathBuf {
 /// The picture of the avatar of a conversation.
 ///
 /// The reference draws a photo in the row of every conversation, so the
-/// backend of the demonstration gives one to each chat: a square picture
-/// with a gradient of its own, the same way the pictures of the messages
-/// are made.
+/// backend of the demonstration gives one to each chat: the portrait of the
+/// person of the roster, painted by the art of this module. The seed is the
+/// person, not the chat: the same face for the same person everywhere.
 pub fn ensure_fake_avatar(profile_dir: &Path, seed: usize) -> PathBuf {
     let media_dir = profile_dir.join("media");
-    let path = media_dir.join(format!("fake-avatar-{seed}.png"));
+    let path = media_dir.join(format!("fake-avatar-v2-{seed}.png"));
     if path.exists() {
         return path;
     }
@@ -1451,7 +2034,27 @@ pub fn ensure_fake_avatar(profile_dir: &Path, seed: usize) -> PathBuf {
         return path;
     }
     let (width, height) = (128_u32, 128_u32);
-    let pixels = fake_avatar_pixels(seed, width, height);
+    let pixels = art::portrait(seed, width, height);
+    let png = png::encode_rgb(width, height, &pixels);
+    if std::fs::write(&path, png).is_ok() {
+        let _ = restrict_permissions(&path);
+    }
+    path
+}
+
+/// The picture of the avatar of a group: the bunch of people it is made
+/// of, the way a group photo is.
+pub fn ensure_fake_group_avatar(profile_dir: &Path, seed: usize) -> PathBuf {
+    let media_dir = profile_dir.join("media");
+    let path = media_dir.join(format!("fake-avatar-group-{seed}.png"));
+    if path.exists() {
+        return path;
+    }
+    if ensure_media_dir(&media_dir).is_err() {
+        return path;
+    }
+    let (width, height) = (128_u32, 128_u32);
+    let pixels = art::group(seed, width, height);
     let png = png::encode_rgb(width, height, &pixels);
     if std::fs::write(&path, png).is_ok() {
         let _ = restrict_permissions(&path);
@@ -1471,52 +2074,903 @@ fn chat_seed(chat_id: &str) -> usize {
         })
 }
 
-/// The pixels of the picture of the avatar: a gradient with a spot of light.
-fn fake_avatar_pixels(seed: usize, width: u32, height: u32) -> Vec<u8> {
-    let base = [
-        (seed as u8).wrapping_mul(53).wrapping_add(64),
-        (seed as u8).wrapping_mul(29).wrapping_add(92),
-        (seed as u8).wrapping_mul(71).wrapping_add(48),
-    ];
-    let center_x = 0.3 + ((seed % 7) as f32) * 0.06;
-    let center_y = 0.35 + ((seed % 5) as f32) * 0.07;
-    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        let fy = y as f32 / height as f32;
-        for x in 0..width {
-            let fx = x as f32 / width as f32;
-            // El degradado va del color de base al oscuro en una diagonal.
-            let f = ((fx + fy) / 2.0).min(1.0);
-            // Y una mancha clara, como una foto con luz.
-            let dx = fx - center_x;
-            let dy = fy - center_y;
-            let light = (1.0 - (dx * dx + dy * dy) * 5.0).max(0.0);
-            pixels.push(((base[0] as f32) * (1.0 - f) + 24.0 * f + 60.0 * light).min(255.0) as u8);
-            pixels.push(((base[1] as f32) * (1.0 - f) + 30.0 * f + 52.0 * light).min(255.0) as u8);
-            pixels.push(((base[2] as f32) * (1.0 - f) + 38.0 * f + 44.0 * light).min(255.0) as u8);
-        }
-    }
-    pixels
-}
+/// The drawings of the demonstration: the portraits of the avatars and the
+/// scenes of the photos, painted pixel by pixel with the encoders of this
+/// module (the crate may not depend on `image`).
+///
+/// Everything is flat color and gradients with a pinch of grain: the style
+/// of an avatar illustration, deterministic in the seed like the rest of
+/// the dataset.
+mod art {
+    /// An RGB color.
+    type Rgb = [u8; 3];
 
-/// The pixels of the picture of a seed: the gradient of the origin.
-fn fake_image_pixels(seed: usize, width: u32, height: u32) -> Vec<u8> {
-    let base = [
-        (seed as u8).wrapping_mul(37).wrapping_add(58),
-        (seed as u8).wrapping_mul(91).wrapping_add(36),
-        (seed as u8).wrapping_mul(53).wrapping_add(74),
-    ];
-    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        let fy = y as f32 / height as f32;
-        for x in 0..width {
-            let fx = x as f32 / width as f32;
-            pixels.push((base[0] as f32 * (1.0 - fy) + 30.0 * fy) as u8);
-            pixels.push((base[1] as f32 * (1.0 - fx) + 26.0 * fx) as u8);
-            pixels.push((base[2] as f32 * (1.0 - (fx + fy) / 2.0) + 40.0 * (fx + fy) / 2.0) as u8);
+    /// The scenes a photo of the dataset can be.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Scene {
+        /// A sunset over the water, with the sun going down behind hills.
+        Sunset,
+        /// A cup of coffee on a wooden table, with steam over it.
+        Coffee,
+        /// A cat sleeping on a couch.
+        Cat,
+        /// Green mountains under a blue sky.
+        Mountains,
+        /// The buildings of downtown at night, with lit windows.
+        City,
+        /// A pizza on its board.
+        Pizza,
+        /// Flowers of the patio.
+        Flowers,
+        /// A beach at the afternoon, with a palm.
+        Beach,
+    }
+
+    impl Scene {
+        /// The scene of the photo of the dataset: the table of captions and
+        /// the enum share the order.
+        pub(super) fn of_index(index: usize) -> Self {
+            match index % 8 {
+                0 => Self::Sunset,
+                1 => Self::Coffee,
+                2 => Self::Cat,
+                3 => Self::Mountains,
+                4 => Self::City,
+                5 => Self::Pizza,
+                6 => Self::Flowers,
+                _ => Self::Beach,
+            }
         }
     }
-    pixels
+
+    /// A canvas of RGB pixels.
+    pub(super) struct Canvas {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    }
+
+    impl Canvas {
+        /// A canvas of the size of the picture, black before painting.
+        pub(super) fn new(width: u32, height: u32) -> Self {
+            Self {
+                width,
+                height,
+                pixels: vec![0; (width as usize) * (height as usize) * 3],
+            }
+        }
+
+        /// Paint one pixel, ignoring the ones outside the canvas.
+        fn set(&mut self, x: i32, y: i32, color: Rgb) {
+            if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                return;
+            }
+            let offset = ((y as u32 * self.width + x as u32) * 3) as usize;
+            self.pixels[offset..offset + 3].copy_from_slice(&color);
+        }
+
+        /// Paint one pixel over what is already there, by an alpha.
+        fn blend(&mut self, x: i32, y: i32, color: Rgb, alpha: f32) {
+            if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                return;
+            }
+            let offset = ((y as u32 * self.width + x as u32) * 3) as usize;
+            for (channel, tone) in color.iter().enumerate() {
+                let old = f32::from(self.pixels[offset + channel]);
+                let new = f32::from(*tone);
+                let mixed = old * (1.0 - alpha) + new * alpha;
+                self.pixels[offset + channel] = mixed.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        /// Paint an axis-aligned rectangle.
+        pub(super) fn fill_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Rgb) {
+            let y_from = y0.floor().max(0.0) as i32;
+            let y_to = y1.ceil().min(self.height as f32) as i32;
+            let x_from = x0.floor().max(0.0) as i32;
+            let x_to = x1.ceil().min(self.width as f32) as i32;
+            for y in y_from..y_to {
+                for x in x_from..x_to {
+                    self.set(x, y, color);
+                }
+            }
+        }
+
+        /// Paint a filled circle.
+        pub(super) fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Rgb) {
+            self.fill_ellipse(cx, cy, radius, radius, color);
+        }
+
+        /// Paint a circle over what is already there, by an alpha.
+        pub(super) fn blend_circle(
+            &mut self,
+            cx: f32,
+            cy: f32,
+            radius: f32,
+            color: Rgb,
+            alpha: f32,
+        ) {
+            for y in ((cy - radius).floor() as i32)..=(cy + radius).ceil() as i32 {
+                for x in ((cx - radius).floor() as i32)..=(cx + radius).ceil() as i32 {
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    if dx * dx + dy * dy <= radius * radius {
+                        self.blend(x, y, color, alpha);
+                    }
+                }
+            }
+        }
+
+        /// Paint a filled ellipse.
+        pub(super) fn fill_ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, color: Rgb) {
+            for y in ((cy - ry).floor() as i32)..=(cy + ry).ceil() as i32 {
+                for x in ((cx - rx).floor() as i32)..=(cx + rx).ceil() as i32 {
+                    let dx = (x as f32 - cx) / rx;
+                    let dy = (y as f32 - cy) / ry;
+                    if dx * dx + dy * dy <= 1.0 {
+                        self.set(x, y, color);
+                    }
+                }
+            }
+        }
+
+        /// Paint the whole canvas with a vertical gradient.
+        pub(super) fn vertical_gradient(&mut self, top: Rgb, bottom: Rgb) {
+            for y in 0..self.height {
+                let t = y as f32 / self.height as f32;
+                let color = mix(top, bottom, t);
+                for x in 0..self.width {
+                    self.set(x as i32, y as i32, color);
+                }
+            }
+        }
+
+        /// Paint the whole canvas with a horizontal gradient.
+        #[allow(dead_code)]
+        pub(super) fn horizontal_gradient(&mut self, left: Rgb, right: Rgb) {
+            for x in 0..self.width {
+                let t = x as f32 / self.width as f32;
+                let color = mix(left, right, t);
+                for y in 0..self.height {
+                    self.set(x as i32, y as i32, color);
+                }
+            }
+        }
+
+        /// The pixels of the canvas, row by row, RGB.
+        pub(super) fn into_pixels(self) -> Vec<u8> {
+            self.pixels
+        }
+
+        /// Add film grain: a pinch of noise so the flat colors read like a
+        /// photo instead of a vector drawing.
+        pub(super) fn grain(&mut self, seed: usize, amount: u8) {
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let hash = x.wrapping_mul(0x9e37_79b1)
+                        ^ y.wrapping_mul(0x85eb_ca77)
+                        ^ ((seed as u32).wrapping_mul(0xc2b2_ae3d).rotate_left(13));
+                    let span = u32::from(amount) * 2 + 1;
+                    let delta = (hash % span) as i32 - i32::from(amount);
+                    let offset = ((y * self.width + x) * 3) as usize;
+                    for channel in 0..3 {
+                        let value = i32::from(self.pixels[offset + channel]) + delta;
+                        self.pixels[offset + channel] = value.clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A range of hills: its base height and the bells of its peaks.
+    type Ridge = (f32, [(f32, f32, f32); 3]);
+
+    /// The linear mix of two colors.
+    fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+        let t = t.clamp(0.0, 1.0);
+        [
+            (f32::from(a[0]) * (1.0 - t) + f32::from(b[0]) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            (f32::from(a[1]) * (1.0 - t) + f32::from(b[1]) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            (f32::from(a[2]) * (1.0 - t) + f32::from(b[2]) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+        ]
+    }
+
+    /// The skin tones of the roster, from the lightest to the darkest.
+    const SKINS: [Rgb; 5] = [
+        [245, 218, 190],
+        [231, 194, 159],
+        [207, 163, 122],
+        [175, 126, 88],
+        [148, 101, 69],
+    ];
+
+    /// The hair colors, natural ones and one dyed red for the fun of it.
+    const HAIRS: [Rgb; 6] = [
+        [43, 32, 27],
+        [22, 20, 20],
+        [93, 62, 37],
+        [138, 100, 58],
+        [72, 72, 78],
+        [164, 64, 52],
+    ];
+
+    /// The colors of the shirts.
+    const SHIRTS: [Rgb; 7] = [
+        [66, 122, 190],
+        [48, 148, 114],
+        [201, 122, 54],
+        [122, 82, 152],
+        [188, 74, 84],
+        [72, 130, 178],
+        [94, 96, 106],
+    ];
+
+    /// The soft colors of the background of a portrait.
+    const BACKDROPS: [Rgb; 8] = [
+        [214, 232, 222],
+        [232, 224, 208],
+        [216, 226, 238],
+        [238, 218, 222],
+        [224, 216, 234],
+        [218, 234, 224],
+        [236, 226, 210],
+        [210, 224, 230],
+    ];
+
+    /// Paint one bust (head, neck and shoulders) at a place, with the face
+    /// of the seed and the size of `radius`. The details scale with the
+    /// radius, so the same drawing serves the avatar of a person and the
+    /// three small heads of a group.
+    fn bust(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, seed: usize) {
+        let skin = SKINS[seed % SKINS.len()];
+        let skin_shadow = mix(skin, [0, 0, 0], 0.18);
+        let hair = HAIRS[(seed / 5) % HAIRS.len()];
+        let shirt = SHIRTS[(seed * 3) % SHIRTS.len()];
+        // The haircut: a cap for everyone, and one of three extras.
+        let style = (seed / 7) % 4;
+        // The hair that falls behind the head, for the long haircut.
+        if style == 1 {
+            canvas.fill_circle(cx, cy, radius * 1.16, hair);
+            canvas.fill_rect(
+                cx - radius * 1.12,
+                cy,
+                cx - radius * 0.82,
+                cy + radius * 3.1,
+                hair,
+            );
+            canvas.fill_rect(
+                cx + radius * 0.82,
+                cy,
+                cx + radius * 1.12,
+                cy + radius * 3.1,
+                hair,
+            );
+        }
+        // Shoulders: a wide ellipse that enters from below.
+        canvas.fill_ellipse(cx, cy + radius * 2.7, radius * 1.75, radius * 1.9, shirt);
+        // Neck.
+        canvas.fill_rect(
+            cx - radius * 0.3,
+            cy + radius * 0.72,
+            cx + radius * 0.3,
+            cy + radius * 1.9,
+            skin_shadow,
+        );
+        // Head.
+        canvas.fill_circle(cx, cy, radius, skin);
+        // The bun of the third haircut.
+        if style == 2 {
+            canvas.fill_circle(cx, cy - radius * 1.18, radius * 0.42, hair);
+        }
+        // The cap of hair: a disc a bit higher, then the face again on top,
+        // which leaves the fringe. The bald haircut keeps almost none.
+        let cap_scale = if style == 3 { 1.04 } else { 1.14 };
+        canvas.fill_circle(cx, cy - radius * 0.22, radius * cap_scale, hair);
+        canvas.fill_circle(cx, cy + radius * 0.04, radius * 1.0, skin);
+        // Ears.
+        canvas.fill_circle(cx - radius, cy + radius * 0.08, radius * 0.16, skin);
+        canvas.fill_circle(cx + radius, cy + radius * 0.08, radius * 0.16, skin);
+        // Eyes.
+        let eye = [40, 34, 30];
+        canvas.fill_circle(cx - radius * 0.34, cy + radius * 0.02, radius * 0.09, eye);
+        canvas.fill_circle(cx + radius * 0.34, cy + radius * 0.02, radius * 0.09, eye);
+        // Eyebrows: thin arcs a bit above the eyes.
+        let brow = mix(hair, [0, 0, 0], 0.15);
+        canvas.fill_rect(
+            cx - radius * 0.52,
+            cy - radius * 0.30,
+            cx - radius * 0.18,
+            cy - radius * 0.23,
+            brow,
+        );
+        canvas.fill_rect(
+            cx + radius * 0.18,
+            cy - radius * 0.30,
+            cx + radius * 0.52,
+            cy - radius * 0.23,
+            brow,
+        );
+        // The smile: a short parabola under the eyes, corners up.
+        let step = radius * 0.03;
+        let mut dx = -radius * 0.30;
+        while dx <= radius * 0.30 {
+            let dy = radius * 0.46 - dx * dx / (radius * 0.60);
+            canvas.set((cx + dx) as i32, (cy + dy) as i32, eye);
+            canvas.set((cx + dx) as i32, (cy + dy + 1.0) as i32, eye);
+            dx += step.max(1.0);
+        }
+        // Blush.
+        canvas.blend_circle(
+            cx - radius * 0.52,
+            cy + radius * 0.22,
+            radius * 0.16,
+            [232, 124, 116],
+            0.30,
+        );
+        canvas.blend_circle(
+            cx + radius * 0.52,
+            cy + radius * 0.22,
+            radius * 0.16,
+            [232, 124, 116],
+            0.30,
+        );
+    }
+
+    /// The portrait of the avatar of a person.
+    pub(super) fn portrait(seed: usize, width: u32, height: u32) -> Vec<u8> {
+        let mut canvas = Canvas::new(width, height);
+        let backdrop = BACKDROPS[seed % BACKDROPS.len()];
+        canvas.vertical_gradient(mix(backdrop, [255, 255, 255], 0.25), backdrop);
+        let w = width as f32;
+        let h = height as f32;
+        bust(&mut canvas, w * 0.5, h * 0.46, w * 0.24, seed);
+        canvas.grain(seed, 3);
+        canvas.into_pixels()
+    }
+
+    /// The avatar of a group: three people together, the way a group photo
+    /// is.
+    pub(super) fn group(seed: usize, width: u32, height: u32) -> Vec<u8> {
+        let mut canvas = Canvas::new(width, height);
+        let backdrop = BACKDROPS[(seed + 3) % BACKDROPS.len()];
+        canvas.vertical_gradient(mix(backdrop, [255, 255, 255], 0.25), backdrop);
+        let w = width as f32;
+        let h = height as f32;
+        bust(&mut canvas, w * 0.30, h * 0.58, w * 0.17, seed * 3 + 1);
+        bust(&mut canvas, w * 0.70, h * 0.58, w * 0.17, seed * 5 + 2);
+        bust(&mut canvas, w * 0.50, h * 0.44, w * 0.20, seed * 7 + 3);
+        canvas.grain(seed, 3);
+        canvas.into_pixels()
+    }
+
+    /// The pixels of a photo of the dataset: the scene, painted.
+    pub(super) fn scene(kind: Scene, seed: usize, width: u32, height: u32) -> Vec<u8> {
+        let mut canvas = Canvas::new(width, height);
+        match kind {
+            Scene::Sunset => sunset(&mut canvas, seed),
+            Scene::Coffee => coffee(&mut canvas, seed),
+            Scene::Cat => cat(&mut canvas, seed),
+            Scene::Mountains => mountains(&mut canvas, seed),
+            Scene::City => city(&mut canvas, seed),
+            Scene::Pizza => pizza(&mut canvas, seed),
+            Scene::Flowers => flowers(&mut canvas, seed),
+            Scene::Beach => beach(&mut canvas, seed),
+        }
+        canvas.grain(seed + 1, 5);
+        canvas.into_pixels()
+    }
+
+    /// The silhouette of a mountain range: for every column, the height is
+    /// the sum of a few bell curves, so the ridge rolls like a real one.
+    ///
+    /// The base and the rises are fractions of the canvas height; the
+    /// centers and the widths of the bells are pixels, and the return is a
+    /// row of the canvas.
+    fn ridge(canvas: &Canvas, x: f32, base: f32, bells: &[(f32, f32, f32)]) -> f32 {
+        let mut height = base;
+        for &(center, width, rise) in bells {
+            let dx = (x - center) / width;
+            height -= rise * (-dx * dx).exp();
+        }
+        height.clamp(0.0, 1.0) * canvas.height as f32
+    }
+
+    /// Fill a column from a height to the bottom of the canvas.
+    fn column_from(canvas: &mut Canvas, x: i32, from_y: f32, color: Rgb) {
+        for y in from_y.round().max(0.0) as i32..canvas.height as i32 {
+            canvas.set(x, y, color);
+        }
+    }
+
+    /// The sunset: the sky goes from violet to orange, the sun touches the
+    /// water and the hills keep the last light.
+    fn sunset(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        let water = h * 0.76;
+        for y in 0..canvas.height {
+            let t = y as f32 / water;
+            let color = mix(
+                mix([46, 26, 74], [214, 94, 58], t * t),
+                [247, 171, 89],
+                t * t * t,
+            );
+            for x in 0..canvas.width {
+                canvas.set(x as i32, y as i32, color);
+            }
+        }
+        let sun_x = w * (0.62 + (seed % 3) as f32 * 0.06);
+        let sun_y = water * 0.78;
+        for radius in [64.0, 46.0, 34.0] {
+            canvas.blend_circle(sun_x, sun_y, radius, [255, 196, 120], 0.22);
+        }
+        canvas.fill_circle(sun_x, sun_y, 26.0, [255, 224, 156]);
+        // The water, with the reflection of the sun as a wavy column.
+        for y in water as i32..canvas.height as i32 {
+            let depth = (y as f32 - water) / (h - water);
+            for x in 0..canvas.width {
+                let color = mix([58, 36, 80], [30, 18, 44], depth);
+                canvas.set(x as i32, y, color);
+            }
+        }
+        for y in water as i32..canvas.height as i32 {
+            let ripple = ((y as f32 * 0.7 + (seed % 5) as f32) * 0.35).sin() * 4.0;
+            let half = 26.0 - (y - water as i32) as f32 * 0.18;
+            if half > 0.0 {
+                for x in ((sun_x - half + ripple) as i32)..=((sun_x + half + ripple) as i32) {
+                    let alpha = 0.55 - (y - water as i32) as f32 * 0.02;
+                    if alpha > 0.0 {
+                        canvas.blend(x, y, [255, 206, 130], alpha);
+                    }
+                }
+            }
+        }
+        // Two ranges of hills, one behind the other.
+        let far = [
+            (w * 0.25, w * 0.30, 0.13),
+            (w * 0.78, w * 0.38, 0.11),
+            (w * 1.25, w * 0.30, 0.10),
+        ];
+        let near = [
+            (w * 0.05, w * 0.26, 0.10),
+            (w * 0.60, w * 0.32, 0.14),
+            (w * 1.10, w * 0.28, 0.09),
+        ];
+        for x in 0..canvas.width as i32 {
+            column_from(canvas, x, ridge(canvas, x as f32, 0.68, &far), [72, 48, 96]);
+        }
+        for x in 0..canvas.width as i32 {
+            column_from(
+                canvas,
+                x,
+                ridge(canvas, x as f32, 0.80, &near),
+                [40, 26, 58],
+            );
+        }
+    }
+
+    /// The coffee: a cup on a wooden table, with steam over it.
+    fn coffee(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        canvas.vertical_gradient([238, 228, 214], [216, 202, 184]);
+        let table = h * 0.66;
+        for y in table as i32..canvas.height as i32 {
+            let t = (y as f32 - table) / (h - table);
+            let color = mix([150, 106, 62], [112, 76, 44], t);
+            for x in 0..canvas.width {
+                canvas.set(x as i32, y, color);
+            }
+        }
+        // The grain of the wood: darker lines that follow the table.
+        for i in 0..6 {
+            let y = table + (i as f32 + 0.5) * (h - table) / 6.0;
+            for x in 0..canvas.width as i32 {
+                let wave = ((x as f32 * 0.11 + i as f32 * 3.0 + (seed % 4) as f32).sin() * 2.0)
+                    .round() as i32;
+                canvas.set(x, y as i32 + wave, [96, 64, 36]);
+            }
+        }
+        let cx = w * 0.44;
+        let cy = h * 0.47 + (seed % 3) as f32 * 4.0;
+        // Saucer.
+        canvas.fill_ellipse(cx, cy + 26.0, 74.0, 20.0, [232, 226, 216]);
+        // Cup and coffee, seen from above and a bit to the side.
+        canvas.fill_ellipse(cx, cy, 58.0, 40.0, [246, 242, 236]);
+        canvas.fill_ellipse(cx, cy, 47.0, 31.0, [92, 58, 34]);
+        canvas.fill_ellipse(cx, cy - 4.0, 40.0, 25.0, [118, 78, 46]);
+        // The handle of the cup.
+        for angle in (-70..=70).step_by(6) {
+            let rad = angle as f32 * std::f32::consts::PI / 180.0;
+            let x = cx + 58.0 + rad.cos() * -14.0;
+            let y = cy + rad.sin() * 20.0;
+            canvas.fill_circle(x, y, 6.5, [246, 242, 236]);
+        }
+        // The steam: two wavy threads over the cup.
+        for thread in 0..2 {
+            let base_x = cx - 12.0 + thread as f32 * 22.0;
+            for step in 0..40 {
+                let t = step as f32 / 40.0;
+                let x = base_x + ((t * 6.0 + thread as f32 + (seed % 3) as f32).sin()) * 7.0;
+                let y = cy - 46.0 - t * 64.0;
+                canvas.blend_circle(x, y, 3.4 - t * 1.6, [255, 255, 255], 0.34 * (1.0 - t));
+            }
+        }
+    }
+
+    /// The cat: sleeping on the couch, curled up with the tail around.
+    fn cat(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        let couch = if seed.is_multiple_of(2) {
+            [96, 108, 138]
+        } else {
+            [126, 96, 108]
+        };
+        canvas.vertical_gradient(mix(couch, [255, 255, 255], 0.30), couch);
+        let seat = h * 0.64;
+        canvas.fill_rect(0.0, seat, w, h, mix(couch, [0, 0, 0], 0.22));
+        canvas.fill_rect(
+            0.0,
+            seat - 6.0,
+            w,
+            seat + 4.0,
+            mix(couch, [255, 255, 255], 0.12),
+        );
+        let fur = if seed.is_multiple_of(3) {
+            [222, 184, 136]
+        } else {
+            [236, 226, 218]
+        };
+        let fur_dark = mix(fur, [90, 66, 50], 0.45);
+        let cx = w * 0.52;
+        let cy = seat - 26.0;
+        // The body, curled up.
+        canvas.fill_ellipse(cx - 26.0, cy + 12.0, 62.0, 34.0, fur);
+        // The tail around the body.
+        for step in 0..44 {
+            let t = step as f32 / 44.0;
+            let angle = std::f32::consts::PI * (0.15 + t * 0.95);
+            let x = cx - 26.0 + angle.cos() * (58.0 + t * 4.0);
+            let y = cy + 14.0 + angle.sin() * (26.0 + t * 3.0);
+            canvas.fill_circle(x, y, 9.0 - t * 3.0, fur_dark);
+        }
+        // The head over the body.
+        canvas.fill_circle(cx + 34.0, cy - 10.0, 30.0, fur);
+        // The ears.
+        for side in [-1.0, 1.0] {
+            let ear_x = cx + 34.0 + side * 17.0;
+            let ear_y = cy - 34.0;
+            canvas.fill_circle(ear_x, ear_y, 8.0, fur);
+            canvas.fill_circle(
+                ear_x + side * 2.0,
+                ear_y + 2.0,
+                4.5,
+                mix(fur, [200, 120, 120], 0.5),
+            );
+        }
+        // The stripes of the fur.
+        for i in 0..4 {
+            let x = cx - 64.0 + i as f32 * 26.0;
+            canvas.fill_ellipse(x, cy - 12.0, 5.0, 16.0, fur_dark);
+        }
+        // Closed eyes and nose: the cat sleeps.
+        let ink = [64, 48, 40];
+        for side in [-1.0, 1.0] {
+            for dx in -6..=6 {
+                let dy = (dx * dx) as f32 / 10.0;
+                canvas.set(
+                    (cx + 34.0 + side * 12.0 + dx as f32) as i32,
+                    (cy - 10.0 + dy) as i32,
+                    ink,
+                );
+            }
+        }
+        canvas.fill_circle(cx + 34.0, cy + 1.0, 3.0, [212, 116, 110]);
+        // Whiskers.
+        for side in [-1.0, 1.0] {
+            for i in 0..3 {
+                let y = cy - 2.0 + i as f32 * 6.0;
+                canvas.set(
+                    (cx + 34.0 + side * (36.0 + i as f32 * 3.0)) as i32,
+                    y as i32,
+                    ink,
+                );
+                canvas.set(
+                    (cx + 34.0 + side * (38.0 + i as f32 * 3.0)) as i32,
+                    y as i32 + 2,
+                    ink,
+                );
+            }
+        }
+        // A cushion under the cat.
+        canvas.fill_ellipse(
+            cx - 20.0,
+            seat + 6.0,
+            84.0,
+            16.0,
+            mix(couch, [255, 255, 255], 0.2),
+        );
+    }
+
+    /// The mountains: three ranges, one behind the other, under a blue sky.
+    fn mountains(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        canvas.vertical_gradient([168, 206, 238], [232, 242, 248]);
+        canvas.blend_circle(w * 0.82, h * 0.16, 30.0, [255, 244, 200], 0.85);
+        let ranges: [Ridge; 3] = [
+            (
+                0.62,
+                [
+                    (w * 0.30, w * 0.34, 0.22),
+                    (w * 0.95, w * 0.40, 0.18),
+                    (w * 1.45, w * 0.34, 0.20),
+                ],
+            ),
+            (
+                0.74,
+                [
+                    (w * 0.10, w * 0.30, 0.18),
+                    (w * 0.62, w * 0.36, 0.22),
+                    (w * 1.20, w * 0.32, 0.16),
+                ],
+            ),
+            (
+                0.88,
+                [
+                    (w * 0.38, w * 0.42, 0.16),
+                    (w * 0.98, w * 0.46, 0.13),
+                    (w * -0.10, w * 0.40, 0.12),
+                ],
+            ),
+        ];
+        let colors = [
+            ([148, 172, 200], [220, 230, 240]),
+            ([104, 132, 160], [196, 212, 226]),
+            ([74, 104, 82], [130, 158, 118]),
+        ];
+        let seed_offset = (seed % 4) as f32 * 0.015;
+        for (index, (base, bells)) in ranges.iter().enumerate() {
+            let base = base + seed_offset * (index as f32 + 1.0);
+            for x in 0..canvas.width as i32 {
+                let top = ridge(canvas, x as f32, base, bells);
+                for y in top.round() as i32..canvas.height as i32 {
+                    let t =
+                        ((y as f32 - top) / (canvas.height as f32 - top).max(1.0)).clamp(0.0, 1.0);
+                    let color = mix(colors[index].0, colors[index].1, t);
+                    canvas.set(x, y, color);
+                }
+            }
+        }
+    }
+
+    /// The city at night: buildings with lit windows under a crescent moon.
+    fn city(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        canvas.vertical_gradient([10, 14, 34], [52, 40, 84]);
+        // The stars: a deterministic scatter of small dots.
+        for i in 0..40 {
+            let x = (i as u32).wrapping_mul(97 + (seed as u32 % 13)) % canvas.width;
+            let y = (i as u32).wrapping_mul(61 + (seed as u32 % 7)) % (canvas.height / 3);
+            if !(i + seed).is_multiple_of(3) {
+                canvas.set(x as i32, y as i32, [224, 228, 244]);
+            }
+        }
+        // The moon: a disc with another disc taken out of it.
+        let moon_x = w * 0.78;
+        let moon_y = h * 0.18;
+        canvas.fill_circle(moon_x, moon_y, 20.0, [244, 240, 220]);
+        canvas.fill_circle(moon_x + 9.0, moon_y - 5.0, 17.0, [16, 20, 44]);
+        // The buildings: bands of heights, with windows on a grid.
+        let mut x = 4.0;
+        let mut index = 0;
+        while x < w {
+            let width = 26.0 + ((index as u32 * 31 + seed as u32) % 22) as f32;
+            let top = h * (0.30 + (((index as u32 * 53 + seed as u32) % 40) as f32 / 100.0));
+            let tone = 26 + ((index as u32 * 17 + seed as u32) % 14) as u8;
+            let body = [tone, tone + 6, tone + 22];
+            canvas.fill_rect(x, top, x + width, h, body);
+            // The lit windows: a third of the grid, deterministic.
+            let mut wy = top + 8.0;
+            while wy < h - 10.0 {
+                let mut wx = x + 6.0;
+                while wx < x + width - 6.0 {
+                    let lit = ((wx as u32 * 7 + wy as u32 * 13 + seed as u32) % 5) < 2;
+                    let color = if lit {
+                        [252, 222, 138]
+                    } else {
+                        [tone - 6, tone, tone + 14]
+                    };
+                    canvas.fill_rect(wx, wy, wx + 5.0, wy + 6.0, color);
+                    wx += 11.0;
+                }
+                wy += 13.0;
+            }
+            x += width + 5.0;
+            index += 1;
+        }
+    }
+
+    /// The pizza: on its wooden board, with pepperoni and basil.
+    fn pizza(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        canvas.vertical_gradient([242, 234, 222], [220, 208, 190]);
+        canvas.fill_ellipse(w * 0.5, h * 0.52, w * 0.46, h * 0.42, [172, 122, 74]);
+        canvas.fill_ellipse(w * 0.5, h * 0.52, w * 0.44, h * 0.40, [200, 150, 98]);
+        canvas.fill_ellipse(w * 0.5, h * 0.52, w * 0.36, h * 0.32, [232, 190, 130]);
+        canvas.fill_ellipse(w * 0.5, h * 0.52, w * 0.33, h * 0.29, [244, 216, 150]);
+        // Pepperoni.
+        let pepperoni = [
+            (-0.18, -0.12),
+            (0.14, -0.16),
+            (-0.02, 0.06),
+            (0.20, 0.12),
+            (-0.22, 0.14),
+            (0.02, -0.02),
+            (-0.06, 0.20),
+        ];
+        for (dx, dy) in pepperoni {
+            canvas.fill_circle(w * (0.5 + dx), h * (0.52 + dy), w * 0.038, [186, 58, 46]);
+            canvas.fill_circle(w * (0.5 + dx), h * (0.52 + dy), w * 0.030, [206, 78, 60]);
+        }
+        // Basil.
+        for (dx, dy) in [(0.08, -0.05), (-0.12, 0.08), (0.16, -0.18), (-0.02, 0.18)] {
+            canvas.fill_ellipse(
+                w * (0.5 + dx),
+                h * (0.52 + dy),
+                w * 0.020,
+                w * 0.013,
+                [84, 140, 66],
+            );
+        }
+        // A knife next to the board, for the scale of a real photo.
+        let knife_y = h * 0.92;
+        canvas.fill_rect(
+            w * 0.12,
+            knife_y - 4.0,
+            w * 0.52,
+            knife_y + 4.0,
+            [208, 210, 214],
+        );
+        canvas.fill_rect(
+            w * 0.52,
+            knife_y - 6.0,
+            w * 0.70,
+            knife_y + 6.0,
+            [88, 60, 38],
+        );
+        if seed.is_multiple_of(2) {
+            canvas.fill_circle(w * 0.5, h * 0.52, w * 0.05, [244, 216, 150]);
+        }
+    }
+
+    /// The flowers of the patio: three of them, each with its petals.
+    fn flowers(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        canvas.vertical_gradient([206, 224, 190], [168, 198, 158]);
+        // The wall behind, with its bricks.
+        for y in (0..canvas.height).step_by(18) {
+            for x in 0..canvas.width {
+                canvas.set(
+                    x as i32,
+                    y as i32,
+                    mix([168, 198, 158], [255, 255, 255], 0.10),
+                );
+            }
+        }
+        let blooms = [
+            (w * 0.26, h * 0.70, [222, 88, 96]),
+            (w * 0.52, h * 0.46, [240, 180, 70]),
+            (w * 0.78, h * 0.74, [158, 96, 186]),
+        ];
+        for (index, &(x, y, petal)) in blooms.iter().enumerate() {
+            // The stem.
+            for t in 0..40 {
+                let ty = y + t as f32 * (h * 0.008);
+                let tx = x
+                    + ((t as f32 * 0.18 + index as f32 * 2.0 + (seed % 3) as f32).sin())
+                        * w
+                        * 0.006;
+                canvas.fill_circle(tx, ty, w * 0.008, [72, 128, 66]);
+            }
+            // The petals around the center.
+            for petal_index in 0..6 {
+                let angle = std::f32::consts::TAU * petal_index as f32 / 6.0 + index as f32 * 0.5;
+                canvas.fill_circle(
+                    x + angle.cos() * w * 0.052,
+                    y + angle.sin() * w * 0.052,
+                    w * 0.034,
+                    petal,
+                );
+            }
+            canvas.fill_circle(x, y, w * 0.026, [250, 214, 92]);
+            // A couple of leaves on the stem.
+            canvas.fill_ellipse(
+                x - w * 0.05,
+                y + h * 0.10,
+                w * 0.040,
+                w * 0.018,
+                [88, 148, 76],
+            );
+            canvas.fill_ellipse(
+                x + w * 0.05,
+                y + h * 0.18,
+                w * 0.040,
+                w * 0.018,
+                [88, 148, 76],
+            );
+        }
+    }
+
+    /// The beach: the sea, the sand and a palm at the left.
+    fn beach(canvas: &mut Canvas, seed: usize) {
+        let w = canvas.width as f32;
+        let h = canvas.height as f32;
+        let horizon = h * 0.44;
+        for y in 0..canvas.height {
+            let t = y as f32 / horizon.max(1.0);
+            let color = mix([110, 190, 226], [196, 232, 244], t.min(1.0));
+            for x in 0..canvas.width {
+                canvas.set(x as i32, y as i32, color);
+            }
+        }
+        canvas.blend_circle(w * 0.80, h * 0.16, 26.0, [255, 246, 200], 0.9);
+        for radius in [40.0, 54.0] {
+            canvas.blend_circle(w * 0.80, h * 0.16, radius, [255, 246, 200], 0.20);
+        }
+        // The sea, with a lighter line where it meets the sand.
+        for y in horizon as i32..(h * 0.66) as i32 {
+            let t = (y as f32 - horizon) / (h * 0.22);
+            let color = mix([36, 148, 164], [92, 196, 200], t);
+            for x in 0..canvas.width {
+                canvas.set(x as i32, y, color);
+            }
+        }
+        for x in 0..canvas.width as i32 {
+            let wave = ((x as f32 * 0.09 + (seed % 6) as f32).sin() * 3.0).round() as i32;
+            canvas.set(x, h as i32 * 66 / 100 + wave, [230, 246, 248]);
+        }
+        // The sand.
+        for y in (h * 0.66) as i32..canvas.height as i32 {
+            let t = (y as f32 - h * 0.66) / (h * 0.34);
+            let color = mix([238, 216, 168], [216, 188, 138], t);
+            for x in 0..canvas.width {
+                canvas.set(x as i32, y, color);
+            }
+        }
+        // The palm: a trunk that bends and five leaves at the top.
+        let top_x = w * 0.17;
+        let top_y = h * 0.10;
+        for t in 0..30 {
+            let t = t as f32 / 30.0;
+            let x = w * 0.08 + t * (top_x - w * 0.08);
+            let y = h * 0.72 - t * (h * 0.62);
+            canvas.fill_circle(x + t * t * 8.0, y, 9.0 - t * 4.0, [110, 78, 48]);
+        }
+        for index in 0..5 {
+            let angle = std::f32::consts::PI * (0.15 + index as f32 * 0.18);
+            for t in 0..26 {
+                let t = t as f32 / 26.0;
+                let reach = w * 0.16 * t;
+                let droop = t * t * h * 0.10;
+                let x = top_x + angle.cos() * reach;
+                let y = top_y + angle.sin() * reach * 0.4 + droop;
+                canvas.fill_circle(x, y, 7.0 - t * 4.5, [58, 128, 74]);
+            }
+        }
+        // A coconut.
+        canvas.fill_circle(top_x + 6.0, top_y + 12.0, 6.0, [94, 62, 38]);
+    }
 }
 
 /// Create the media tree of the profile, private to its owner.
@@ -1610,16 +3064,20 @@ pub fn fake_live_event_pair(
     counter: u64,
     timestamp_ms: i64,
 ) -> (backend_event::Event, backend_event::Event) {
+    // The live message lands on the first chat, a group: a member that is
+    // not you writes, the way a real conversation wakes up.
+    let member = group_member(0, ((counter.saturating_sub(1)) % 12) as usize);
+    let text = LIVE_TEXTS[((counter.saturating_sub(1)) % LIVE_TEXTS.len() as u64) as usize];
     let message = Message {
         id: format!("live-{counter}"),
         chat_id: "chat-0".into(),
-        sender_id: "friend@s.whatsapp.net".into(),
-        sender_name: "Fast friend".into(),
-        sender_phone_number: "+15551234567".into(),
+        sender_id: format!("{}@s.whatsapp.net", member.digits),
+        sender_name: member.name.into(),
+        sender_phone_number: member.phone.into(),
         timestamp_ms,
         status: MessageStatus::Delivered as i32,
         content: Some(proto_message::Content::Text(TextContent {
-            text: format!("Live message {counter} streamed into the bottom of the chat"),
+            text: text.into(),
             link_preview: None,
         })),
         ..Default::default()
@@ -1674,34 +3132,37 @@ pub fn fixture_chat(chat_id: &str, settings: Option<&Chat>) -> Chat {
 }
 
 pub fn fake_chat(id: usize) -> Chat {
+    let group = is_group_id(id);
     Chat {
         id: format!("chat-{id}"),
-        kind: if id % 5 == 0 {
+        kind: if group {
             ChatKind::Group as i32
         } else {
             ChatKind::Direct as i32
         },
-        title: if id % 5 == 0 {
-            format!("Weekend plans {id}")
+        title: if group {
+            group_title(group_index(id))
         } else {
-            format!("Fast friend {id}")
+            direct_title(id)
         },
-        last_message_preview: format!("This is virtualized conversation number {id}"),
+        // The preview is a message of the conversation, the one the row
+        // would show: the pool depends on the sender, like the messages.
+        last_message_preview: message_text(id).into(),
         last_message_timestamp_ms: fake_timestamp_ms(id),
-        unread_count: (id % 7 == 0) as u32 * ((id % 4) + 1) as u32,
+        unread_count: (id.is_multiple_of(7)) as u32 * ((id % 4) + 1) as u32,
         pinned: id < 3,
-        phone_number: if id % 5 != 0 {
-            format!("+1555{id:07}")
+        phone_number: if !group {
+            direct_phone(id)
         } else {
             String::new()
         },
-        contact_name: if id % 5 != 0 {
-            format!("Fast friend {id}")
+        contact_name: if !group {
+            direct_title(id)
         } else {
             String::new()
         },
-        push_name: if id % 5 != 0 {
-            format!("Friend {id}")
+        push_name: if !group {
+            direct_push(id)
         } else {
             String::new()
         },
@@ -1742,34 +3203,34 @@ fn fake_timestamp_ms(id: usize) -> i64 {
 /// A message of the dataset.
 ///
 /// Every field is decided by the index of the message: the sender, the
-/// content, the photo, the reaction and the quote.
+/// content, the photo, the reaction and the quote. The senders are the
+/// people of the roster: in a group the members take turns, in a direct
+/// conversation the person of the chat signs the half that is not yours.
 pub fn fake_message(chat_id: &str, id: usize, profile_dir: &Path) -> Message {
+    let sender = chat_sender(chat_id, id);
+    let from_me = id.is_multiple_of(2);
     Message {
         id: format!("message-{id}"),
         chat_id: chat_id.into(),
-        sender_id: if id % 2 == 0 {
-            "me@s.whatsapp.net"
+        sender_id: if from_me {
+            "me@s.whatsapp.net".into()
         } else {
-            "friend@s.whatsapp.net"
-        }
-        .into(),
-        sender_name: if id % 2 == 0 { "You" } else { "Fast friend" }.into(),
-        sender_phone_number: if id % 2 == 0 {
-            String::new()
-        } else {
-            "+15551234567".into()
+            sender.jid
         },
-        from_me: id % 2 == 0,
+        sender_name: if from_me { "You".into() } else { sender.name },
+        sender_phone_number: if from_me { String::new() } else { sender.phone },
+        from_me,
         timestamp_ms: fake_timestamp_ms(id),
         status: MessageStatus::Read as i32,
-        content: Some(if id % 37 == 0 && id > 0 {
+        content: Some(if id.is_multiple_of(37) && id > 0 {
             // A real picture on disk, so the media path (thumbnail, full
             // viewer, gallery) is exercised by the fake backend instead of
-            // showing an endless loading placeholder.
+            // showing an endless loading placeholder. The caption names the
+            // scene the picture paints.
             let picture = ensure_fake_image(profile_dir, id);
             let path = picture.to_string_lossy().into_owned();
             proto_message::Content::Image(ImageContent {
-                caption: format!("Photo {id}"),
+                caption: photo_caption(id).into(),
                 mime_type: "image/png".into(),
                 local_path: path.clone(),
                 thumbnail_path: path,
@@ -1788,36 +3249,38 @@ pub fn fake_message(chat_id: &str, id: usize, profile_dir: &Path) -> Message {
             fake_attachment_content(attachment, profile_dir)
         } else {
             proto_message::Content::Text(TextContent {
-                text: if id % 9 == 0 {
-                    format!(
-                        "A longer message {id}\nwith a second line to exercise variable-height virtualization 🐈"
-                    )
+                text: if id.is_multiple_of(9) {
+                    LONG_TEXT
                 } else {
-                    format!("Fast native message {id}")
-                },
-                link_preview: (id % 13 == 0).then(|| LinkPreview {
-                    url: "https://example.com/whatfast".into(),
-                    title: "Whatfast link preview".into(),
-                    description: "OpenGraph metadata supplied by the fake backend".into(),
+                    message_text(id)
+                }
+                .into(),
+                link_preview: (id.is_multiple_of(13)).then(|| LinkPreview {
+                    url: "https://www.lagaceta.com.ar/".into(),
+                    title: "La Gaceta — Las noticias de Tucumán".into(),
+                    description: "El diario de Tucumán, actualizado durante todo el día.".into(),
                     ..Default::default()
                 }),
             })
         }),
-        reactions: if id % 11 == 0 {
+        reactions: if id.is_multiple_of(11) {
+            // The reaction of the friend of the chat on the message: the
+            // same person that signs the conversation.
+            let reactor = chat_sender(chat_id, 11);
             vec![Reaction {
                 chat_id: chat_id.into(),
                 message_id: format!("message-{id}"),
-                sender_id: "friend@s.whatsapp.net".into(),
+                sender_id: reactor.jid,
                 emoji: "🐈".into(),
                 timestamp_ms: id as i64,
-                sender_name: "Fast friend".into(),
-                sender_phone_number: "+15551234567".into(),
+                sender_name: reactor.name,
+                sender_phone_number: reactor.phone,
                 ..Default::default()
             }]
         } else {
             Vec::new()
         },
-        reply_to_message_id: if id > 0 && id % 13 == 0 {
+        reply_to_message_id: if id > 0 && id.is_multiple_of(13) {
             format!("message-{}", id - 1)
         } else {
             String::new()
@@ -2084,17 +3547,184 @@ mod png {
 /// A small PCM WAV writer: the fake needs a real audio file on disk and the
 /// crate may not depend on an encoder.
 ///
-/// The wave is mono of sixteen bits with a tone of the given frequency: it
-/// is a file that every player of the system opens.
+/// The two waves of the dataset are melodies instead of a plain tone: a
+/// song of arpeggios for the audio message and a hum with vibrato for the
+/// voice note. Both are mono of sixteen bits at 22 050 hertz: files that
+/// every player of the system opens and that the inline player of the
+/// interface really plays.
 mod wav {
-    /// Write a mono PCM WAV with a tone of the given frequency.
-    pub fn encode_tone(sample_rate: u32, seconds: u32, hertz: f32) -> Vec<u8> {
-        let samples = (sample_rate * seconds) as usize;
-        let mut data = Vec::with_capacity(samples * 2);
-        for index in 0..samples {
-            let time = index as f32 / sample_rate as f32;
-            let value = (time * hertz * std::f32::consts::TAU).sin() * 0.25;
-            data.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
+    /// The sample rate of both melodies.
+    const SAMPLE_RATE: u32 = 22_050;
+
+    /// The tempo of the song, in seconds per eighth note.
+    const SONG_BEAT: f32 = 0.3125;
+
+    /// The tempo of the hum, in seconds per beat.
+    const HUM_BEAT: f32 = 0.35;
+
+    /// The frequency of a note, in semitones from the A4 of 440 hertz.
+    fn hz(semi: f32) -> f32 {
+        440.0 * (2.0f32).powf(semi / 12.0)
+    }
+
+    /// One note of a melody: when it starts and how long it lasts in beats,
+    /// its pitch in semitones from A4, how loud it is and whether the
+    /// pitch wobbles like a voice.
+    struct Note {
+        start: f32,
+        beats: f32,
+        semi: f32,
+        gain: f32,
+        vibrato: bool,
+    }
+
+    /// The notes of the song: four chords of arpeggio (C, G, Am, F) and a
+    /// bass that sustains each one.
+    fn song_notes() -> Vec<Note> {
+        const TRIADS: [[f32; 3]; 4] = [
+            [-9.0, -5.0, -2.0],   // C:  C4, E4, G4
+            [-14.0, -10.0, -7.0], // G:  G3, B3, D4
+            [-12.0, -9.0, -5.0],  // Am: A3, C4, E4
+            [-16.0, -12.0, -9.0], // F:  F3, A3, C4
+        ];
+        const BASSES: [f32; 4] = [-21.0, -26.0, -24.0, -28.0];
+        const PATTERN: [usize; 8] = [0, 1, 2, 1, 0, 1, 2, 1];
+        let mut notes = Vec::with_capacity(32);
+        for (chord, triad) in TRIADS.iter().enumerate() {
+            let start = chord as f32 * 8.0;
+            notes.push(Note {
+                start,
+                beats: 8.0,
+                semi: BASSES[chord],
+                gain: 0.13,
+                vibrato: false,
+            });
+            for (eighth, note) in PATTERN.iter().enumerate() {
+                notes.push(Note {
+                    start: start + eighth as f32,
+                    beats: 1.0,
+                    semi: triad[*note],
+                    gain: 0.20,
+                    vibrato: false,
+                });
+            }
+        }
+        notes
+    }
+
+    /// The notes of the voice note: a hum with vibrato, the phrase of a
+    /// tune every ear knows, the way one hums into a voice message.
+    fn hum_notes() -> Vec<Note> {
+        const PHRASE: [(f32, f32); 16] = [
+            (-5.0, 1.0),
+            (-7.0, 1.0),
+            (-9.0, 1.0),
+            (-7.0, 1.0),
+            (-5.0, 1.0),
+            (-5.0, 1.0),
+            (-5.0, 2.0),
+            (-7.0, 1.0),
+            (-7.0, 1.0),
+            (-7.0, 2.0),
+            (-5.0, 1.0),
+            (-2.0, 1.0),
+            (-2.0, 2.0),
+            (-5.0, 1.0),
+            (-7.0, 1.0),
+            (-9.0, 4.0),
+        ];
+        let mut start = 0.0_f32;
+        PHRASE
+            .iter()
+            .map(|&(semi, beats)| {
+                let note = Note {
+                    start,
+                    beats,
+                    semi,
+                    gain: 0.24,
+                    vibrato: true,
+                };
+                start += beats;
+                note
+            })
+            .collect()
+    }
+
+    /// Render the notes into samples: every note adds its wave with an
+    /// envelope over the others, and the sum is normalized so nothing
+    /// clips. The melody lasts exactly the whole seconds the card of the
+    /// attachment declares, so the player and the message agree.
+    fn render(notes: &[Note], beat: f32) -> Vec<f32> {
+        let total = seconds(notes, beat) as usize * SAMPLE_RATE as usize;
+        let mut mix = vec![0.0_f32; total];
+        for note in notes {
+            let start_at = (note.start * beat * SAMPLE_RATE as f32).round() as usize;
+            let length = (note.beats * beat * SAMPLE_RATE as f32).round() as usize;
+            let frequency = hz(note.semi);
+            let duration = note.beats * beat;
+            let mut phase = 0.0_f32;
+            for index in 0..length {
+                let time = index as f32 / SAMPLE_RATE as f32;
+                let wobble = if note.vibrato {
+                    1.0 + 0.006 * (std::f32::consts::TAU * 5.5 * time).sin()
+                } else {
+                    1.0
+                };
+                phase += std::f32::consts::TAU * frequency * wobble / SAMPLE_RATE as f32;
+                let attack = (time / 0.012).min(1.0);
+                let release = ((duration - time) / 0.09).clamp(0.0, 1.0);
+                let envelope = attack * release * (1.0 - 0.30 * time / duration);
+                let wave = phase.sin() + 0.45 * (2.0 * phase).sin() + 0.18 * (3.0 * phase).sin();
+                mix[start_at + index] += wave * envelope * note.gain;
+            }
+        }
+        let loudest = mix
+            .iter()
+            .fold(0.0_f32, |top, sample| top.max(sample.abs()));
+        if loudest > 0.0 {
+            let scale = 0.82 / loudest;
+            for sample in &mut mix {
+                *sample *= scale;
+            }
+        }
+        mix
+    }
+
+    /// The seconds a melody lasts, for the card of the attachment.
+    fn seconds(notes: &[Note], beat: f32) -> u32 {
+        let end = notes
+            .iter()
+            .map(|note| note.start + note.beats)
+            .fold(0.0_f32, f32::max);
+        (end * beat).ceil() as u32
+    }
+
+    /// The song of the audio message.
+    pub fn encode_song() -> Vec<u8> {
+        pcm(&render(&song_notes(), SONG_BEAT))
+    }
+
+    /// The seconds the song lasts.
+    pub fn song_seconds() -> u32 {
+        seconds(&song_notes(), SONG_BEAT)
+    }
+
+    /// The hum of the voice note.
+    pub fn encode_hum() -> Vec<u8> {
+        pcm(&render(&hum_notes(), HUM_BEAT))
+    }
+
+    /// The seconds the hum lasts.
+    pub fn hum_seconds() -> u32 {
+        seconds(&hum_notes(), HUM_BEAT)
+    }
+
+    /// Wrap the samples in the container of a mono PCM WAV.
+    fn pcm(samples: &[f32]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            let value = (sample * i16::MAX as f32) as i16;
+            data.extend_from_slice(&value.to_le_bytes());
         }
         let mut out = Vec::with_capacity(44 + data.len());
         out.extend_from_slice(b"RIFF");
@@ -2104,8 +3734,8 @@ mod wav {
         out.extend_from_slice(&16u32.to_le_bytes());
         out.extend_from_slice(&1u16.to_le_bytes());
         out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&sample_rate.to_le_bytes());
-        out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        out.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
         out.extend_from_slice(&2u16.to_le_bytes());
         out.extend_from_slice(&16u16.to_le_bytes());
         out.extend_from_slice(b"data");
@@ -2292,5 +3922,56 @@ mod tests {
                 "the message {id} carries the photo and a file"
             );
         }
+    }
+
+    #[test]
+    fn the_audio_of_the_dataset_is_a_playable_melody() {
+        let profile = profile_dir("melodies");
+        let song = ensure_fake_audio_named(&profile, AUDIO_FILE);
+        let bytes = std::fs::read(&song).expect("the song of the fake");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        // The header: 22 050 hertz, mono, sixteen bits.
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            22_050
+        );
+        let frames = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) / 2;
+        assert_eq!(frames / 22_050, wav::song_seconds());
+
+        let hum = ensure_fake_audio_named(&profile, VOICE_NOTE_FILE);
+        let bytes = std::fs::read(&hum).expect("the voice note of the fake");
+        let frames = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) / 2;
+        assert_eq!(frames / 22_050, wav::hum_seconds());
+    }
+
+    #[test]
+    fn the_captions_of_the_photos_name_the_scenes() {
+        // The caption of a photo and the scene it paints come from the same
+        // table: the caption of a sunset never paints a pizza. The first
+        // photo of the dataset is the message 37, the second scene of the
+        // table.
+        assert_eq!(photo_caption(37), "Cafecito de la mañana ☕");
+        assert_eq!(photo_caption(37 * 6), "Flores del patio 🌸");
+        // The eighth photo is the first scene again: the table cycles with
+        // the photo index.
+        assert_eq!(photo_caption(37 * 8), "Atardecer en el dique 🌅");
+    }
+
+    #[test]
+    fn the_titles_of_the_first_chats_are_people_and_groups() {
+        // The first screens of the list read like a real agenda: the family
+        // group first, then the people of the roster.
+        assert_eq!(fake_chat(0).title, "Familia Bazán 🏡");
+        assert_eq!(fake_chat(1).title, "Bruno Salazar");
+        assert_eq!(fake_chat(5).title, "Fútbol de los martes ⚽");
+        assert_eq!(fake_chat(9).title, "Matías Aráoz");
+        // Beyond the roster the names still combine like real ones.
+        let beyond = fake_chat(101);
+        assert!(
+            beyond.title.contains(' '),
+            "the title beyond the roster is a full name: {}",
+            beyond.title
+        );
     }
 }

@@ -290,21 +290,21 @@ fn parse_inline(
     let mut index: usize = 0;
 
     while index < source.len() {
-        if starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index) {
-            if let Some(link) = read_http_url(source, index) {
-                flush_plain(&mut output, &source[plain_start..index], styles, context);
-                push_segment(
-                    &mut output,
-                    WhatsAppInlineSegment::Link {
-                        text: link.text,
-                        href: link.href,
-                        styles: styles.to_vec(),
-                    },
-                );
-                index = link.end;
-                plain_start = index;
-                continue;
-            }
+        if (starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index))
+            && let Some(link) = read_http_url(source, index)
+        {
+            flush_plain(&mut output, &source[plain_start..index], styles, context);
+            push_segment(
+                &mut output,
+                WhatsAppInlineSegment::Link {
+                    text: link.text,
+                    href: link.href,
+                    styles: styles.to_vec(),
+                },
+            );
+            index = link.end;
+            plain_start = index;
+            continue;
         }
 
         let code_delimiter = if starts_with_at(source, "```", index) {
@@ -315,67 +315,68 @@ fn parse_inline(
             ""
         };
         let code_delimiter_length = code_delimiter.chars().count();
-        if code_delimiter_length > 0 && is_opening_delimiter(source, index, code_delimiter_length) {
-            if let Some(closing) = find_closing_multi_char_delimiter(
+        if code_delimiter_length > 0
+            && is_opening_delimiter(source, index, code_delimiter_length)
+            && let Some(closing) = find_closing_multi_char_delimiter(
                 source,
                 index + code_delimiter_length,
                 code_delimiter,
-            ) {
-                flush_plain(&mut output, &source[plain_start..index], styles, context);
-                let text: String = source[index + code_delimiter_length..closing]
-                    .iter()
-                    .collect();
-                let mut nested_styles = styles.to_vec();
-                nested_styles.push(if code_delimiter == "```" {
-                    WhatsAppInlineStyle::Monospace
-                } else {
-                    WhatsAppInlineStyle::InlineCode
-                });
-                push_segment(
-                    &mut output,
-                    WhatsAppInlineSegment::Text {
-                        text,
-                        styles: nested_styles,
-                    },
-                );
-                index = closing + code_delimiter_length;
-                plain_start = index;
-                continue;
-            }
+            )
+        {
+            flush_plain(&mut output, &source[plain_start..index], styles, context);
+            let text: String = source[index + code_delimiter_length..closing]
+                .iter()
+                .collect();
+            let mut nested_styles = styles.to_vec();
+            nested_styles.push(if code_delimiter == "```" {
+                WhatsAppInlineStyle::Monospace
+            } else {
+                WhatsAppInlineStyle::InlineCode
+            });
+            push_segment(
+                &mut output,
+                WhatsAppInlineSegment::Text {
+                    text,
+                    styles: nested_styles,
+                },
+            );
+            index = closing + code_delimiter_length;
+            plain_start = index;
+            continue;
         }
 
         // `||spoiler||` hides its content until the reader reveals it. It is a
         // two-character delimiter, so it follows the same opening/closing rules
         // as the code delimiters.
-        if starts_with_at(source, "||", index) && is_opening_delimiter(source, index, 2) {
-            if let Some(closing) = find_closing_multi_char_delimiter(source, index + 2, "||") {
-                flush_plain(&mut output, &source[plain_start..index], styles, context);
-                let inner = &source[index + 2..closing];
-                let nested_styles = push_style(styles, WhatsAppInlineStyle::Spoiler);
-                for segment in parse_inline(inner, context, &nested_styles) {
-                    push_segment(&mut output, segment);
-                }
-                index = closing + 2;
-                plain_start = index;
-                continue;
+        if starts_with_at(source, "||", index)
+            && is_opening_delimiter(source, index, 2)
+            && let Some(closing) = find_closing_multi_char_delimiter(source, index + 2, "||")
+        {
+            flush_plain(&mut output, &source[plain_start..index], styles, context);
+            let inner = &source[index + 2..closing];
+            let nested_styles = push_style(styles, WhatsAppInlineStyle::Spoiler);
+            for segment in parse_inline(inner, context, &nested_styles) {
+                push_segment(&mut output, segment);
             }
+            index = closing + 2;
+            plain_start = index;
+            continue;
         }
 
         let delimiter = source[index];
-        if let Some(style) = delimiter_styles(delimiter) {
-            if is_opening_delimiter(source, index, 1) {
-                if let Some(closing) = find_closing_style_delimiter(source, index + 1, delimiter) {
-                    flush_plain(&mut output, &source[plain_start..index], styles, context);
-                    let inner = &source[index + 1..closing];
-                    let nested_styles = push_style(styles, style);
-                    for segment in parse_inline(inner, context, &nested_styles) {
-                        push_segment(&mut output, segment);
-                    }
-                    index = closing + 1;
-                    plain_start = index;
-                    continue;
-                }
+        if let Some(style) = delimiter_styles(delimiter)
+            && is_opening_delimiter(source, index, 1)
+            && let Some(closing) = find_closing_style_delimiter(source, index + 1, delimiter)
+        {
+            flush_plain(&mut output, &source[plain_start..index], styles, context);
+            let inner = &source[index + 1..closing];
+            let nested_styles = push_style(styles, style);
+            for segment in parse_inline(inner, context, &nested_styles) {
+                push_segment(&mut output, segment);
             }
+            index = closing + 1;
+            plain_start = index;
+            continue;
         }
 
         index += 1;
@@ -395,21 +396,21 @@ fn append_lexical_segments(
     let mut index: usize = 0;
 
     while index < source.len() {
-        if starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index) {
-            if let Some(link) = read_http_url(source, index) {
-                flush_text(output, &source[plain_start..index], styles);
-                push_segment(
-                    output,
-                    WhatsAppInlineSegment::Link {
-                        text: link.text,
-                        href: link.href,
-                        styles: styles.to_vec(),
-                    },
-                );
-                index = link.end;
-                plain_start = index;
-                continue;
-            }
+        if (starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index))
+            && let Some(link) = read_http_url(source, index)
+        {
+            flush_text(output, &source[plain_start..index], styles);
+            push_segment(
+                output,
+                WhatsAppInlineSegment::Link {
+                    text: link.text,
+                    href: link.href,
+                    styles: styles.to_vec(),
+                },
+            );
+            index = link.end;
+            plain_start = index;
+            continue;
         }
 
         if let Some(mention) = read_mention(source, index, &context.mentions) {
@@ -436,17 +437,15 @@ fn append_lexical_segments(
 fn find_closing_style_delimiter(source: &[char], start: usize, delimiter: char) -> Option<usize> {
     let mut index = start;
     while index < source.len() {
-        if starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index) {
-            if let Some(link) = read_http_url(source, index) {
-                let possible_closing = link.end.saturating_sub(1);
-                if link.text.ends_with(delimiter)
-                    && is_closing_delimiter(source, possible_closing, 1)
-                {
-                    return Some(possible_closing);
-                }
-                index = link.end;
-                continue;
+        if (starts_with_at(source, "http://", index) || starts_with_at(source, "https://", index))
+            && let Some(link) = read_http_url(source, index)
+        {
+            let possible_closing = link.end.saturating_sub(1);
+            if link.text.ends_with(delimiter) && is_closing_delimiter(source, possible_closing, 1) {
+                return Some(possible_closing);
             }
+            index = link.end;
+            continue;
         }
         if source[index] == delimiter && is_closing_delimiter(source, index, 1) {
             return Some(index);
@@ -521,10 +520,10 @@ struct LinkMatch {
 
 fn read_http_url(source: &[char], index: usize) -> Option<LinkMatch> {
     let before = character_at(source, index.wrapping_sub(1));
-    if let Some(value) = before {
-        if is_word_character(value) || value == '@' || value == '_' {
-            return None;
-        }
+    if let Some(value) = before
+        && (is_word_character(value) || value == '@' || value == '_')
+    {
+        return None;
     }
 
     let matched = match_http_url(&source[index..])?;
@@ -689,15 +688,14 @@ fn push_segment(output: &mut Vec<WhatsAppInlineSegment>, segment: WhatsAppInline
         ) => previous == current,
         _ => false,
     };
-    if merge {
-        if let (
+    if merge
+        && let (
             Some(WhatsAppInlineSegment::Text { text: previous, .. }),
             WhatsAppInlineSegment::Text { text: current, .. },
         ) = (output.last_mut(), &segment)
-        {
-            previous.push_str(current);
-            return;
-        }
+    {
+        previous.push_str(current);
+        return;
     }
     output.push(segment);
 }
@@ -914,11 +912,11 @@ fn parse_url(raw: &str) -> Option<ParsedUrl> {
         // password is not empty.
         if !user.is_empty() || password.is_some_and(|password| !password.is_empty()) {
             href.push_str(&encode_userinfo(user));
-            if let Some(password) = password {
-                if !password.is_empty() {
-                    href.push(':');
-                    href.push_str(&encode_userinfo(password));
-                }
+            if let Some(password) = password
+                && !password.is_empty()
+            {
+                href.push(':');
+                href.push_str(&encode_userinfo(password));
             }
             href.push('@');
         }

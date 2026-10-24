@@ -1646,32 +1646,22 @@ impl AttachmentBar {
     pub(crate) fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.scale;
         let theme = cx.theme();
-        let foreground = theme.foreground;
-        let muted = theme.muted_foreground;
         let hover = theme.muted;
         let radius = theme.radius;
 
+        // The button is the one of the component and not a raw div: the
+        // selection of the window text starts a selection drag on every
+        // press that a component does not claim, and the click of a raw div
+        // never arrives (the rail buttons live the same story).
         let mut bar = h_flex().items_center().gap_2().relative().child(
-            div()
-                .id("attachment-button")
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(ATTACHMENT_ICON_SIZE * 2.))
-                .rounded(radius)
-                .cursor_pointer()
-                .text_color(if self.enabled { foreground } else { muted })
-                .opacity(if self.enabled { 1.0 } else { 0.5 })
-                .when(self.enabled, |button| {
-                    button
-                        .hover(|style| style.bg(hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_open(!this.open);
-                            cx.notify();
-                        }))
-                })
-                .aria_label("Attach")
-                .child(Icon::new(WhatfastIcon::Attach).with_size(px(ATTACHMENT_ICON_SIZE * scale))),
+            Button::new("attachment-button")
+                .ghost()
+                .icon(WhatfastIcon::Attach)
+                .disabled(!self.enabled)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_open(!this.open);
+                    cx.notify();
+                })),
         );
 
         if self.open {
@@ -1734,7 +1724,7 @@ impl AttachmentBar {
                             this.report(action.clone(), window, cx);
                             cx.notify();
                         }))
-                        .child(label),
+                        .child(i18n::t(label)),
                 );
             }
             bar = bar.child(menu);

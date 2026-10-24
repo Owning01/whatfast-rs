@@ -5,10 +5,11 @@
 #  Hermano de scripts/build.cmd. Deja en dist/ los dos ejecutables que forman
 #  la aplicacion:
 #    whatfast            la interfaz nativa (GPUI, Rust)
-#    whatfast-backend    el sidecar en Go (la sesion de WhatsApp)
+#    whatfast-backend    el sidecar en Rust (la sesion de WhatsApp)
 #
-#  El sidecar va al lado porque la interfaz lo busca ahi cuando no esta
-#  definida la variable WHATFAST_BACKEND.
+#  El sidecar se compila del paquete whatfast-wa y se copia con el nombre
+#  whatfast-backend porque asi lo busca la interfaz cuando no esta definida
+#  la variable WHATFAST_BACKEND.
 #
 #  Se puede correr desde cualquier carpeta:
 #    scripts/build.sh
@@ -39,33 +40,22 @@ else
 fi
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
-for tool in cargo go; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "FALLO: falta $tool en el PATH" >&2
-        echo "       cargo: https://rustup.rs   go: https://go.dev/dl/" >&2
-        exit 1
-    fi
-done
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "FALLO: falta cargo en el PATH" >&2
+    echo "       cargo: https://rustup.rs" >&2
+    exit 1
+fi
 
-echo "[1/4] compilando el sidecar en Go ..."
-mkdir -p backend/bin
-# CGO_ENABLED=0: el sidecar no usa nada nativo (la base es modernc.org/sqlite,
-# que es Go puro). Asi el binario sale estatico y no depende de libc.
-(
-    cd backend
-    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/whatfast-backend ./cmd/whatfast-backend
-)
+echo "[1/3] compilando la interfaz y el sidecar en modo release ..."
+cargo build --release -p whatfast-ui -p whatfast-wa --config "build.rustc-wrapper=''"
 
-echo "[2/4] compilando la interfaz en modo release ..."
-cargo build --release -p whatfast-ui --config "build.rustc-wrapper=''"
-
-echo "[3/4] armando dist/ ..."
+echo "[2/3] armando dist/ ..."
 mkdir -p dist
 cp -f "$TARGET_DIR/release/whatfast-ui" dist/whatfast
-cp -f backend/bin/whatfast-backend dist/whatfast-backend
+cp -f "$TARGET_DIR/release/whatfast-wa" dist/whatfast-backend
 chmod +x dist/whatfast dist/whatfast-backend
 
-echo "[4/4] copiando los iconos ..."
+echo "[3/3] copiando los iconos ..."
 mkdir -p dist/icons
 for icon in 32x32.png 64x64.png 128x128.png 128x128@2x.png icon.png; do
     if [ -f "assets/icons/$icon" ]; then
