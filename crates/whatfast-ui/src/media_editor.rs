@@ -965,7 +965,7 @@ pub(crate) fn to_render_image(picture: &image::RgbaImage) -> gpui::RenderImage {
     let (width, height) = picture.dimensions();
     let mut data = picture.as_raw().clone();
     // port: the renderer of GPUI expects the pixels in BGRA.
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let buffer = image::RgbaImage::from_raw(width, height, data)

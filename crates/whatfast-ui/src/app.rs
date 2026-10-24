@@ -3088,8 +3088,10 @@ impl Whatfast {
                 {
                     let frame: Vec<i16> = audio
                         .pcm
-                        .chunks_exact(2)
-                        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| i16::from_le_bytes(*pair))
                         .collect();
                     playback.play(frame);
                 }

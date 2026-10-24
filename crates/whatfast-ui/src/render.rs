@@ -6311,57 +6311,6 @@ fn message_html(text: &str) -> String {
     html
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{bubble_time_label, message_html};
-
-    #[test]
-    fn the_html_of_a_message_escapes_the_markup() {
-        assert_eq!(
-            message_html("<b> & \"x\""),
-            "<p>&lt;b&gt; &amp; &quot;x&quot;</p>"
-        );
-    }
-
-    #[test]
-    fn the_html_of_a_message_keeps_one_paragraph_per_line() {
-        assert_eq!(message_html("uno\ndos"), "<p>uno</p><p>dos</p>");
-    }
-
-    #[test]
-    fn the_html_of_a_message_wraps_the_links_in_anchors() {
-        assert_eq!(
-            message_html("ver https://example.com ahora"),
-            "<p>ver <a href=\"https://example.com\">https://example.com</a> ahora</p>"
-        );
-    }
-
-    #[test]
-    fn the_hour_of_a_bubble_is_the_hour_of_the_zone_of_the_offset() {
-        // The 15:45 of UTC is the 12:45 of Buenos Aires.
-        let instant = 15 * 3_600_000 + 45 * 60_000;
-        assert_eq!(bubble_time_label(instant, 0), "15:45");
-        assert_eq!(bubble_time_label(instant, -180), "12:45");
-        assert_eq!(bubble_time_label(instant, 120), "17:45");
-    }
-
-    #[test]
-    fn an_hour_close_to_midnight_moves_to_the_day_of_the_zone() {
-        // The 02:10 of UTC is the 23:10 of the day before in Buenos Aires,
-        // and the 04:10 of the same day in Berlin.
-        let instant = 2 * 3_600_000 + 10 * 60_000;
-        assert_eq!(bubble_time_label(instant, -180), "23:10");
-        assert_eq!(bubble_time_label(instant, 120), "04:10");
-    }
-
-    #[test]
-    fn the_hour_of_a_bubble_before_the_epoch_is_the_one_of_the_zone() {
-        // The epoch is midnight of UTC, so the day before in Buenos Aires.
-        assert_eq!(bubble_time_label(0, -180), "21:00");
-        assert_eq!(bubble_time_label(0, 0), "00:00");
-    }
-}
-
 /// La barra de una llamada viva: fase, silencio y cortar; o contestar y
 /// rechazar cuando suena una entrante.
 fn render_call_bar(
@@ -6435,4 +6384,55 @@ fn render_call_bar(
     };
     let _ = theme;
     pill.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bubble_time_label, message_html};
+
+    #[test]
+    fn the_html_of_a_message_escapes_the_markup() {
+        assert_eq!(
+            message_html("<b> & \"x\""),
+            "<p>&lt;b&gt; &amp; &quot;x&quot;</p>"
+        );
+    }
+
+    #[test]
+    fn the_html_of_a_message_keeps_one_paragraph_per_line() {
+        assert_eq!(message_html("uno\ndos"), "<p>uno</p><p>dos</p>");
+    }
+
+    #[test]
+    fn the_html_of_a_message_wraps_the_links_in_anchors() {
+        assert_eq!(
+            message_html("ver https://example.com ahora"),
+            "<p>ver <a href=\"https://example.com\">https://example.com</a> ahora</p>"
+        );
+    }
+
+    #[test]
+    fn the_hour_of_a_bubble_is_the_hour_of_the_zone_of_the_offset() {
+        // The 15:45 of UTC is the 12:45 of Buenos Aires.
+        let instant = 15 * 3_600_000 + 45 * 60_000;
+        assert_eq!(bubble_time_label(instant, 0), "15:45");
+        assert_eq!(bubble_time_label(instant, -180), "12:45");
+        assert_eq!(bubble_time_label(instant, 120), "17:45");
+    }
+
+    #[test]
+    fn an_hour_close_to_midnight_moves_to_the_day_of_the_zone() {
+        // The 02:10 of UTC is the 23:10 of the day before in Buenos Aires,
+        // and the 04:10 of the same day in Berlin.
+        let instant = 2 * 3_600_000 + 10 * 60_000;
+        assert_eq!(bubble_time_label(instant, -180), "23:10");
+        assert_eq!(bubble_time_label(instant, 120), "04:10");
+    }
+
+    #[test]
+    fn the_hour_of_a_bubble_before_the_epoch_is_the_one_of_the_zone() {
+        // The epoch is midnight of UTC, so the day before in Buenos Aires.
+        assert_eq!(bubble_time_label(0, -180), "21:00");
+        assert_eq!(bubble_time_label(0, 0), "00:00");
+    }
 }

@@ -67,6 +67,7 @@ jobs:
             libxcb1-dev libxcb-xkb-dev libxau-dev libxdmcp-dev \
             libwayland-dev libx11-xcb-dev \
             libssl-dev libvulkan1 libglib2.0-dev libzstd-dev \
+            libasound2-dev \
             xvfb
       - uses: Swatinem/rust-cache@v2
       - name: fmt

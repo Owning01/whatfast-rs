@@ -781,7 +781,7 @@ mod tests {
     /// True when the command has all of its arguments.
     fn has_all_the_arguments(command: char, numbers: usize) -> bool {
         let expected = arguments(command).unwrap_or(0);
-        expected == 0 || numbers % expected == 0
+        expected == 0 || numbers.is_multiple_of(expected)
     }
 
     /// True when the letter is the exponent of the number that is being read.

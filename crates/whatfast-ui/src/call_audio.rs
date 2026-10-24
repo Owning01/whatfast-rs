@@ -51,7 +51,7 @@ impl Capture {
             carry: std::sync::Mutex::new(Vec::new()),
             position: std::sync::atomic::AtomicU64::new(0),
         });
-        let config: StreamConfig = supported.clone().into();
+        let config: StreamConfig = supported.into();
         let format = supported.sample_format();
         let stream = match format {
             SampleFormat::F32 => {
@@ -145,7 +145,7 @@ where
     T: cpal::SizedSample + IntoSample<i16>,
 {
     device.build_input_stream(
-        config.clone(),
+        config,
         move |samples: &[T], _: &cpal::InputCallbackInfo| {
             let converted: Vec<i16> = samples.iter().map(|sample| sample.into_sample()).collect();
             state.accept(&converted, &frames);

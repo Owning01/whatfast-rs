@@ -94,6 +94,9 @@ pub struct Session {
     pub(crate) client: Arc<Client>,
     /// The call registry: one live call, the offers still ringing.
     pub calls: Arc<crate::calls::Calls>,
+    /// The read-only window over the phone's identity data: the agenda
+    /// names and the LID↔phone map of the fork's session database.
+    pub identity: Arc<crate::identity::Identity>,
     /// Taken by [`Session::shutdown`]; `None` afterwards.
     handle: Mutex<Option<BotHandle>>,
     pub state: Arc<SessionState>,
@@ -133,10 +136,12 @@ impl Session {
             .any(|device| device.linked);
         let client_slot = Arc::new(OnceLock::new());
         let calls = Arc::new(crate::calls::Calls::new());
+        let identity = Arc::new(crate::identity::Identity::open(data_dir));
         let pump = EventPump {
             events,
             state: Arc::new(SessionState::new(paired, String::new())),
             store,
+            identity: Arc::clone(&identity),
             client: Arc::clone(&client_slot),
             calls: Arc::clone(&calls),
         };
@@ -162,6 +167,7 @@ impl Session {
         Ok(Arc::new(Self {
             client,
             calls,
+            identity,
             handle: Mutex::new(Some(handle)),
             state,
         }))
@@ -247,6 +253,9 @@ struct EventPump {
     store: Arc<Store>,
     /// The call registry, shared with the session: offers ring from here.
     calls: Arc<crate::calls::Calls>,
+    /// The phone's identity data (agenda names, LID↔phone map), shared with
+    /// the session: the canonical chat of every event resolves through it.
+    identity: Arc<crate::identity::Identity>,
     /// Filled by [`Session::start`] the moment the client exists: encrypted
     /// reactions need the message secrets only the client's backend has.
     client: Arc<OnceLock<Arc<Client>>>,
@@ -259,6 +268,17 @@ impl EventPump {
             // event is the right move, and quiet.
             tracing::debug!("event dropped: the bridge is closing");
         }
+    }
+
+    /// Runs the identity reconciliation off the event thread: it writes in
+    /// bulk and the live events must not queue behind it.
+    fn spawn_reconcile(&self) {
+        let store = Arc::clone(&self.store);
+        let identity = Arc::clone(&self.identity);
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            crate::reconcile::reconcile(&store, &identity, &events).await;
+        });
     }
 
     /// Writes a history-sync chunk into the store and announces it. The
@@ -281,7 +301,7 @@ impl EventPump {
         let mut chats: u64 = 0;
         let mut messages: u64 = 0;
         for conversation in &conversations {
-            match crate::ingest::store_conversation(&self.store, conversation) {
+            match crate::ingest::store_conversation(&self.store, &self.identity, conversation) {
                 Ok((event, stored)) => {
                     chats += 1;
                     messages += stored;
@@ -291,6 +311,15 @@ impl EventPump {
                     tracing::warn!("a history conversation failed to store: {error}");
                 }
             }
+        }
+        let complete = !on_demand
+            && conversations
+                .iter()
+                .any(|conversation| conversation.end_of_history_transfer);
+        if complete {
+            // The history is where the twins are born: once it lands, the
+            // reconciliation folds whatever it split.
+            self.spawn_reconcile();
         }
         if on_demand {
             tracing::info!("on-demand history: chats={chats} messages={messages}");
@@ -356,6 +385,9 @@ impl EventHandler for EventPump {
                         self.events.clone(),
                     );
                 }
+                // The twins the earlier sessions left behind and the agenda
+                // names both settle here, before the history re-lands them.
+                self.spawn_reconcile();
             }
             Event::Disconnected(reason) => {
                 let detail = format!("{reason:?}");
@@ -410,16 +442,27 @@ impl EventHandler for EventPump {
                 crate::ingest::spawn_enc_reactions(
                     Arc::clone(&self.store),
                     Arc::clone(&self.client),
+                    Arc::clone(&self.identity),
                     self.events.clone(),
                     batch,
                 );
-                let (events, _ingested) = crate::ingest::apply_event(&self.store, &event);
+                let (events, _ingested) =
+                    crate::ingest::apply_event(&self.store, &self.identity, &event);
                 for backend_event in events {
                     self.push(backend_event);
                 }
             }
+            Event::ContactUpdate(update) => {
+                // The phone renamed or saved a contact: the agenda copy in
+                // the fork's database is authoritative, so the names refresh
+                // and the chats that changed announce themselves.
+                let jid = update.jid.to_non_ad_string();
+                tracing::debug!("contact update for {jid}");
+                self.spawn_reconcile();
+            }
             other => {
-                let (events, _ingested) = crate::ingest::apply_event(&self.store, other);
+                let (events, _ingested) =
+                    crate::ingest::apply_event(&self.store, &self.identity, other);
                 for backend_event in events {
                     self.push(backend_event);
                 }

@@ -774,14 +774,20 @@ pub fn history_conversations(parsed: &wa::HistorySync) -> Vec<HistoryConversatio
 /// Persists one conversation and answers with the wire events for it.
 pub fn store_conversation(
     store: &Store,
+    identity: &crate::identity::Identity,
     conversation: &HistoryConversation,
 ) -> rusqlite::Result<(BackendEvent, u64)> {
-    store.ensure_chat(&conversation.jid, &conversation.jid)?;
+    // The history may key one person by the hidden identity while the live
+    // messages arrive by phone number: both fold into the one chat.
+    let (canonical, _folds) = crate::reconcile::canonical_chat(store, identity, &conversation.jid);
+    store.ensure_chat(&canonical, &conversation.jid)?;
     let mut stored = 0u64;
     let mut newest = 0i64;
     for message in &conversation.messages {
         newest = newest.max(message.timestamp);
-        if store.insert_message(message)? {
+        let mut row = message.clone();
+        row.chat_jid = canonical.clone();
+        if store.insert_message(&row)? {
             stored += 1;
         }
     }
@@ -789,12 +795,12 @@ pub fn store_conversation(
         store.write(|conn| {
             conn.execute(
                 "UPDATE chats SET unread_count=MAX(unread_count,?1) WHERE jid=?2",
-                rusqlite::params![conversation.unread as i64, conversation.jid],
+                rusqlite::params![conversation.unread as i64, canonical],
             )?;
             Ok(())
         })?;
     }
-    let chat = store.chat(&conversation.jid)?.unwrap_or_default();
+    let chat = store.chat(&canonical)?.unwrap_or_default();
     Ok((chat_upserted(chat), stored))
 }
 
@@ -851,7 +857,9 @@ pub fn store_receipt(store: &Store, receipt: &Receipt) -> rusqlite::Result<Vec<B
     let Some(status) = receipt_status(&receipt.r#type) else {
         return Ok(Vec::new());
     };
-    let chat_jid = jid_text(&receipt.source.chat);
+    let chat_jid = store
+        .resolve_chat_id(&jid_text(&receipt.source.chat))
+        .unwrap_or_else(|_| jid_text(&receipt.source.chat));
     let mut events = Vec::new();
     for message_id in &receipt.message_ids {
         let id = message_id.to_string();
@@ -877,7 +885,9 @@ pub fn store_receipt(store: &Store, receipt: &Receipt) -> rusqlite::Result<Vec<B
 
 /// Applies a typing state and answers with the wire event.
 pub fn store_chat_presence(store: &Store, presence: &ChatPresenceUpdate) -> Option<BackendEvent> {
-    let chat_jid = jid_text(&presence.source.chat);
+    let chat_jid = store
+        .resolve_chat_id(&jid_text(&presence.source.chat))
+        .unwrap_or_else(|_| jid_text(&presence.source.chat));
     let _ = store; // transient state: nothing to persist
     let (typing, recording) = match presence.state {
         ChatActivity::Typing => (true, false),
@@ -907,14 +917,18 @@ pub fn store_chat_presence(store: &Store, presence: &ChatPresenceUpdate) -> Opti
 /// form, `enc_reaction_message` encrypted with the parent message's secret.
 /// An encrypted reaction whose parent is unknown is logged and dropped; the
 /// repair wave will replay those from the journal.
-pub fn apply_event(store: &Store, event: &Event) -> (Vec<BackendEvent>, Vec<Ingested>) {
+pub fn apply_event(
+    store: &Store,
+    identity: &crate::identity::Identity,
+    event: &Event,
+) -> (Vec<BackendEvent>, Vec<Ingested>) {
     match event {
         Event::Messages(batch) => {
             let mut events = Vec::new();
             for inbound in batch.iter() {
                 // Reactions first: they are envelopes, not content, and must
                 // not land in the messages table as empty rows.
-                if reaction_from_inbound(store, inbound, &mut events) {
+                if reaction_from_inbound(store, identity, inbound, &mut events) {
                     continue;
                 }
                 // Learn the sender's push name from the envelope: this is
@@ -929,8 +943,15 @@ pub fn apply_event(store: &Store, event: &Event) -> (Vec<BackendEvent>, Vec<Inge
                 let Some(item) = inbound_to_row(inbound, "") else {
                     continue;
                 };
-                let chat = item.chat.clone();
-                let message = item.message.clone();
+                let mut chat = item.chat.clone();
+                let mut message = item.message.clone();
+                // One person, one chat: the hidden-identity jid of the
+                // envelope folds into the phone-number chat when the
+                // identity map knows the pair.
+                let (canonical, _folds) =
+                    crate::reconcile::canonical_chat(store, identity, &chat.jid);
+                message.chat_jid = canonical.clone();
+                chat.jid = canonical;
                 store.ensure_chat(&chat.jid, &chat.preferred_jid).ok();
                 if store.insert_message(&message).unwrap_or(false) {
                     let mut fresh = store
@@ -976,12 +997,14 @@ pub fn apply_event(store: &Store, event: &Event) -> (Vec<BackendEvent>, Vec<Inge
 /// the parent message's secret, which the store answers asynchronously.
 fn reaction_from_inbound(
     store: &Store,
+    identity: &crate::identity::Identity,
     inbound: &InboundMessage,
     events: &mut Vec<BackendEvent>,
 ) -> bool {
     let content = &inbound.message;
     let info = &inbound.info;
-    let chat_jid = jid_text(&info.source.chat);
+    let (canonical, _folds) =
+        crate::reconcile::canonical_chat(store, identity, &jid_text(&info.source.chat));
     let sender_jid = jid_text(&info.source.sender.to_non_ad());
     let from_me = info.source.is_from_me;
     let now = crate::db::now_ms();
@@ -994,7 +1017,7 @@ fn reaction_from_inbound(
             .unwrap_or_default();
         let emoji = reaction.text.clone().unwrap_or_default();
         apply_reaction(
-            store, events, chat_jid, target, sender_jid, emoji, from_me, now,
+            store, events, canonical, target, sender_jid, emoji, from_me, now,
         );
         return true;
     }
@@ -1062,6 +1085,7 @@ fn preview_of(message: &MessageRow) -> String {
 pub fn spawn_enc_reactions(
     store: std::sync::Arc<Store>,
     client_slot: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<whatsapp_rust::client::Client>>>,
+    identity: std::sync::Arc<crate::identity::Identity>,
     events: async_channel::Sender<BackendEvent>,
     batch: &wacore::types::events::MessageBatch,
 ) {
@@ -1083,7 +1107,9 @@ pub fn spawn_enc_reactions(
     };
     tokio::spawn(async move {
         for inbound in pending {
-            if let Err(error) = apply_enc_reaction(&store, &client, &events, &inbound).await {
+            if let Err(error) =
+                apply_enc_reaction(&store, &client, &identity, &events, &inbound).await
+            {
                 tracing::warn!("an encrypted reaction failed to decrypt: {error}");
             }
         }
@@ -1093,6 +1119,7 @@ pub fn spawn_enc_reactions(
 async fn apply_enc_reaction(
     store: &Store,
     client: &whatsapp_rust::client::Client,
+    identity: &crate::identity::Identity,
     events: &async_channel::Sender<BackendEvent>,
     inbound: &InboundMessage,
 ) -> anyhow::Result<()> {
@@ -1101,7 +1128,10 @@ async fn apply_enc_reaction(
         return Ok(());
     };
     let info = &inbound.info;
+    // The secrets live under the jid the envelope carried; the reaction
+    // itself belongs to the canonical chat the conversation lives in.
     let chat_jid = jid_text(&info.source.chat);
+    let (canonical, _folds) = crate::reconcile::canonical_chat(store, identity, &chat_jid);
     let reactor = jid_text(&info.source.sender.to_non_ad());
     let key = enc.target_message_key.as_option();
     let target = key
@@ -1154,7 +1184,7 @@ async fn apply_enc_reaction(
     apply_reaction(
         store,
         &mut out,
-        chat_jid,
+        canonical,
         target,
         reactor,
         emoji,

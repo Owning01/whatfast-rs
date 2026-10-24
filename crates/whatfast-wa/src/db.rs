@@ -926,14 +926,23 @@ impl Store {
 
     /// Learns (or refreshes) one contact's presentation fields. Empty values
     /// never erase known ones, the Go's rule.
+    /// Learns one contact's names, never erasing what it already knows.
+    /// Answers whether any name actually changed.
     pub fn learn_contact(
         &self,
         jid: &str,
         contact_name: &str,
         push_name: &str,
         business_name: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<bool> {
         self.write(|conn| {
+            let before: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT contact_name,push_name,business_name FROM contacts WHERE jid=?1",
+                    [jid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
             conn.execute(
                 "INSERT INTO contacts(jid,contact_name,push_name,business_name,phone_number,updated_at)
                  VALUES(?1,?2,?3,?4,'',?5)
@@ -944,7 +953,14 @@ impl Store {
                    updated_at=excluded.updated_at",
                 rusqlite::params![jid, contact_name, push_name, business_name, now_ms()],
             )?;
-            Ok(())
+            let after: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT contact_name,push_name,business_name FROM contacts WHERE jid=?1",
+                    [jid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            Ok(before != after)
         })
     }
 
@@ -973,6 +989,170 @@ impl Store {
         self.write(|conn| {
             conn.execute("UPDATE chats SET name=?1 WHERE jid=?2", params![name, jid])?;
             Ok(())
+        })
+    }
+
+    /// The canonical chat of one jid: the redirect table first, then the
+    /// address table, then the jid itself.
+    pub fn resolve_chat_id(&self, jid: &str) -> rusqlite::Result<String> {
+        self.read(|conn| {
+            let redirected: Option<String> = conn
+                .query_row(
+                    "SELECT new_chat_jid FROM chat_redirects WHERE old_chat_jid=?1",
+                    [jid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(redirected) = redirected {
+                return Ok(redirected);
+            }
+            conn.query_row(
+                "SELECT chat_jid FROM chat_addresses WHERE jid=?1",
+                [jid],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|address| address.unwrap_or_else(|| jid.to_owned()))
+        })
+    }
+
+    /// Registers one address form under its chat, keeping the previous
+    /// mapping when the two disagree.
+    ///
+    /// Returns the pair of the old and the new canonical chat when the
+    /// registration moved an existing conversation: the caller merges them.
+    pub fn adopt_address(
+        &self,
+        address: &str,
+        chat_jid: &str,
+    ) -> rusqlite::Result<Option<(String, String)>> {
+        self.write(|conn| {
+            let previous: Option<String> = conn
+                .query_row(
+                    "SELECT chat_jid FROM chat_addresses WHERE jid=?1",
+                    [address],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            conn.execute(
+                "INSERT INTO chat_addresses(jid,chat_jid,last_seen_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(jid) DO UPDATE SET chat_jid=excluded.chat_jid,last_seen_at=excluded.last_seen_at",
+                params![address, chat_jid, now_ms()],
+            )?;
+            Ok(match previous {
+                Some(old) if old != chat_jid => Some((old, chat_jid.to_owned())),
+                _ => None,
+            })
+        })
+    }
+
+    /// Folds the loser chat into the winner: messages, reactions, polls,
+    /// votes, pins, sends and display flags move over, both addresses point
+    /// at the winner, and the loser's jid redirects to it forever.
+    ///
+    /// The caller creates the winner chat first (`ensure_chat`), so there is
+    /// always a row to fold into.
+    ///
+    /// port: the trimmed version of `MergeChats` of the Go store — the
+    /// journal tables it also carried are not ported.
+    pub fn merge_chats(&self, winner: &str, loser: &str) -> rusqlite::Result<()> {
+        self.write(|conn| {
+            // The display flags of the loser survive only when the winner
+            // never set them; the pointer is recomputed at the end.
+            conn.execute(
+                "UPDATE chats SET
+                   name=CASE WHEN name='' THEN (SELECT name FROM chats WHERE jid=?2) ELSE name END,
+                   muted_until=max(muted_until,(SELECT muted_until FROM chats WHERE jid=?2)),
+                   archived=max(archived,(SELECT archived FROM chats WHERE jid=?2)),
+                   pinned=max(pinned,(SELECT pinned FROM chats WHERE jid=?2)),
+                   blocked=max(blocked,(SELECT blocked FROM chats WHERE jid=?2))
+                 WHERE jid=?1",
+                params![winner, loser],
+            )?;
+            for table in [
+                "reactions",
+                "polls",
+                "poll_votes",
+                "pinned_messages",
+                "outgoing_requests",
+            ] {
+                conn.execute(
+                    &format!("UPDATE OR IGNORE {table} SET chat_jid=?1 WHERE chat_jid=?2"),
+                    params![winner, loser],
+                )?;
+                conn.execute(
+                    &format!("DELETE FROM {table} WHERE chat_jid=?1"),
+                    params![loser],
+                )?;
+            }
+            conn.execute(
+                "UPDATE OR IGNORE messages SET chat_jid=?1 WHERE chat_jid=?2",
+                params![winner, loser],
+            )?;
+            conn.execute("DELETE FROM messages WHERE chat_jid=?1", params![loser])?;
+            conn.execute(
+                "UPDATE chat_addresses SET chat_jid=?1 WHERE chat_jid=?2",
+                params![winner, loser],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO chat_redirects(old_chat_jid,new_chat_jid) VALUES(?1,?2)",
+                params![loser, winner],
+            )?;
+            conn.execute(
+                "UPDATE chat_redirects SET new_chat_jid=?1 WHERE new_chat_jid=?2",
+                params![winner, loser],
+            )?;
+            conn.execute("DELETE FROM chats WHERE jid=?1", params![loser])?;
+            Ok(())
+        })?;
+        self.refresh_chat_pointer(winner)
+    }
+
+    /// Recomputes the last-message pointer of one chat from its rows.
+    pub fn refresh_chat_pointer(&self, jid: &str) -> rusqlite::Result<()> {
+        self.write(|conn| {
+            conn.execute(
+                "UPDATE chats SET
+                   last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+                   last_message_text=COALESCE((SELECT text FROM messages WHERE chat_jid=?1 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+                   last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 ORDER BY timestamp DESC,id DESC LIMIT 1),last_message_at),
+                   last_message_from_me=COALESCE((SELECT from_me FROM messages WHERE chat_jid=?1 ORDER BY timestamp DESC,id DESC LIMIT 1),last_message_from_me)
+                 WHERE jid=?1",
+                params![jid],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every chat jid that carries one of the given addresses, so a
+    /// reconciliation pass can find the twins the ingest created.
+    pub fn chats_of_addresses(&self, addresses: &[String]) -> rusqlite::Result<Vec<String>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = addresses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        self.read(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT DISTINCT chat_jid FROM chat_addresses WHERE jid IN ({placeholders})"
+            ))?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(addresses.iter()), |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Every chat row that lives under a hidden-identity jid: the inputs of
+    /// the reconciliation pass.
+    pub fn lid_chats(&self) -> rusqlite::Result<Vec<String>> {
+        self.read(|conn| {
+            let mut statement = conn.prepare("SELECT jid FROM chats WHERE jid LIKE '%@lid'")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 

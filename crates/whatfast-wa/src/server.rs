@@ -130,8 +130,13 @@ impl Server {
 
     async fn dispatch(
         &mut self,
-        request: Option<rpc_request::Request>,
+        mut request: Option<rpc_request::Request>,
     ) -> Result<Handled, Failure> {
+        // The desktop may still hold a jid a merge retired: every request
+        // that names a chat speaks the canonical jid from here on.
+        if let Some(request) = request.as_mut() {
+            normalize_chat_id(request, &self.store);
+        }
         match request {
             Some(rpc_request::Request::Hello(hello)) => {
                 if hello.minimum_protocol_version > PROTOCOL_VERSION
@@ -1381,5 +1386,55 @@ fn request_name(request: &rpc_request::Request) -> String {
     match debug.split('(').next() {
         Some(name) if !name.is_empty() => name.to_owned(),
         _ => "request".to_owned(),
+    }
+}
+
+/// Points one request's chat id at the canonical chat: the address and
+/// redirect tables decide, and an unknown jid passes through untouched.
+///
+/// Requests whose chat is not their subject (the participant avatar keys on
+/// the participant, the newsletter list has none) keep their own fields.
+fn normalize_chat_id(request: &mut rpc_request::Request, store: &Store) {
+    let field = match request {
+        rpc_request::Request::ListMessages(r) => &mut r.chat_id,
+        rpc_request::Request::ListMessagesAround(r) => &mut r.chat_id,
+        rpc_request::Request::ListMessagesAfter(r) => &mut r.chat_id,
+        rpc_request::Request::OpenMessageWindow(r) => &mut r.chat_id,
+        rpc_request::Request::SendText(r) => &mut r.chat_id,
+        rpc_request::Request::SendReaction(r) => &mut r.chat_id,
+        rpc_request::Request::EditMessage(r) => &mut r.chat_id,
+        rpc_request::Request::DeleteMessage(r) => &mut r.chat_id,
+        rpc_request::Request::MarkRead(r) => &mut r.chat_id,
+        rpc_request::Request::SetTyping(r) => &mut r.chat_id,
+        rpc_request::Request::SendImage(r) => &mut r.chat_id,
+        rpc_request::Request::SendAttachment(r) => &mut r.chat_id,
+        rpc_request::Request::SendSticker(r) => &mut r.chat_id,
+        rpc_request::Request::SendStickerFromLibrary(r) => &mut r.chat_id,
+        rpc_request::Request::CreatePoll(r) => &mut r.chat_id,
+        rpc_request::Request::ForwardMessage(r) => {
+            if let Ok(canonical) = store.resolve_chat_id(&r.target_chat_id) {
+                r.target_chat_id = canonical;
+            }
+            if let Ok(canonical) = store.resolve_chat_id(&r.source_chat_id) {
+                r.source_chat_id = canonical;
+            }
+            return;
+        }
+        rpc_request::Request::GetMessageImage(r) => &mut r.chat_id,
+        rpc_request::Request::GetMessageAttachment(r) => &mut r.chat_id,
+        rpc_request::Request::GetChatInfo(r) => &mut r.chat_id,
+        rpc_request::Request::GetChatAvatar(r) => &mut r.chat_id,
+        rpc_request::Request::SetChatPin(r) => &mut r.chat_id,
+        rpc_request::Request::SetChatArchive(r) => &mut r.chat_id,
+        rpc_request::Request::SetChatMute(r) => &mut r.chat_id,
+        rpc_request::Request::SetChatBlock(r) => &mut r.chat_id,
+        rpc_request::Request::CallPlace(r) => &mut r.chat_id,
+        _ => return,
+    };
+    if field.is_empty() {
+        return;
+    }
+    if let Ok(canonical) = store.resolve_chat_id(field) {
+        *field = canonical;
     }
 }

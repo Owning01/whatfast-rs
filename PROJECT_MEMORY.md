@@ -1487,3 +1487,14 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
 - Evidencia: 557 tests del workspace en verde, clippy limpio, `parity.py` exit 0, `funcionalidad.py` exit 0, build release local 15,1 MB (ui) + 12,6 MB (wa).
 - Trampa: el heredoc de bash vuelve a cortar código Rust a mitad — escribirlo siempre con Edit/Write.
 - Pendiente: la app instalada pide re-vincular por QR al pasar del sidecar Go (las claves viven en bases distintas); remeasure de RAM con el sidecar Rust.
+
+## 2026-10-24 — Identidad: gemelos LID/PN y nombres de agenda (0.2.7)
+
+- Diagnóstico con el perfil real: 474 chats @lid + 248 @pn (WhatsApp migra a identidades ocultas), chat_addresses sin mapeos útiles y contactos solo con push names. Los mensajes "desordenados y tarde" eran la conversación partida en dos filas (history bajo @pn, mensajes vivos bajo @lid).
+- El fork ya tiene todo en session.db: `whatsmeow_contacts` (full_name = agenda del teléfono, 1344 filas), `whatsmeow_lid_map` y `lid_pn_mapping` (lid↔teléfono). Lo que el Go leía por Store.LIDs/Contacts.
+- Nuevo `identity.rs`: conexión read-only a session.db (fallback en memoria vacía), aliases(pn↔lid), phone_contacts() con la agenda. `reconcile.rs`: canonical_chat (el @pn gana; fusión con merge_chats que mueve mensajes/reacciones/encuestas/pins/envíos, flags max, redirect old→new, puntero recalculado), learn_names (agenda > first_name > push; learn_contact ahora reporta si cambió) y reconcile() que emite ChatMerged por cada fusión y ChatUpserted por nombre cambiado.
+- Cableado: apply_event/store_conversation/reactions resuelven el chat canónico al insertar (transport_jid original se conserva); receipts y presencia por resolve_chat_id; el dispatch del server normaliza el chat_id de todos los RPCs (ForwardMessage sus dos); reconciliación al Connected, al fin del history sync y en cada ContactUpdate.
+- Validación: test nuevo de integración (gemelos → un chat, agenda gana, history aterriza canónico) + corrida sobre COPIA del perfil real: 471 lid chats → 42, 251 chats con nombre de agenda. La UI ya manejaba ChatMerged (retira la fila vieja y remapea selección/recientes).
+- CI arreglado de paso: libasound2-dev faltante en ubuntu (cpal del audio de llamadas), 6 lints de clippy 1.98 en whatfast-ui (2 míos en call_audio, 4 del otro agente: chunks_exact→as_chunks ×2, is_multiple_of, items_after_test_module moviendo render_call_bar antes de los tests).
+- Evidencia: 560 tests del workspace en verde; clippy -D warnings limpio en whatfast-ui y whatfast-wa.
+- Pendiente: los 42 lid chats que quedan son personas sin mapeo aún (o grupos @lid); el recovery de referencias vencidas de medios sigue not_found honesto.

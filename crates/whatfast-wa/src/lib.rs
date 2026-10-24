@@ -5,9 +5,11 @@
 pub mod bridge;
 pub mod calls;
 pub mod db;
+pub mod identity;
 pub mod ingest;
 pub mod media;
 pub mod meta;
+pub mod reconcile;
 pub mod send;
 pub mod server;
 pub mod session;
