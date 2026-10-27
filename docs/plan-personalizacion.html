@@ -102,7 +102,7 @@
     <span><b>Estado</b> propuesta</span>
     <span><b>Etapas</b> 7</span>
     <span><b>Esfuerzo</b> 13–17 días</span>
-    <span><b>Riesgo mayor</b> redibujado por frame</span>
+    <span><b>Riesgo mayor</b> la altura de la burbuja</span>
   </div>
 </header>
 
@@ -178,6 +178,11 @@
         <td><span class="chip no">no existe</span></td>
       </tr>
       <tr>
+        <td>La burbuja del hilo no lee el tema activo</td>
+        <td><code>tokens::bubble_colors</code>, <code>tokens.rs:798</code></td>
+        <td><span class="chip no">bug</span> resuelve el tema por apariencia: un tema propio no cambia el color de la burbuja</td>
+      </tr>
+      <tr>
         <td>Radio de burbuja, ancho máximo, tipografía, fondo del hilo</td>
         <td>—</td>
         <td><span class="chip no">no existe</span></td>
@@ -218,6 +223,54 @@
       <text class="svg-t" x="520" y="182">temas fuera del perfil</text>
     </svg>
     <figcaption><b>Figura 1.</b> Lo verde ya está y no se toca. Lo ámbar es el trabajo. Lo rojo queda afuera a propósito: cada uno de esos cuatro abre una superficie que este plan no cubre.</figcaption>
+  </figure>
+
+  <h3>Las tres piezas</h3>
+  <p>El trabajo se reparte en tres cajas con reglas distintas. El core decide el formato y no sabe dibujar. El modelo guarda los datos del perfil y no sabe parsear. La interfaz dibuja y despacha, y no decide qué es negrita.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 380" role="img" aria-label="Arquitectura de las tres piezas">
+      <text class="svg-tit" x="20" y="16">WHATFAST-CORE · SIN GPUI</text>
+      <text class="svg-tit" x="368" y="16">WHATFAST-MODEL · SIN GPUI</text>
+
+      <rect x="16" y="26" width="320" height="124" rx="8" fill="#fff" stroke="#141413"/>
+      <rect x="364" y="26" width="320" height="124" rx="8" fill="#fff" stroke="#141413"/>
+
+      <rect x="28" y="40" width="52" height="15" rx="3" fill="#f6e9e3"/>
+      <text class="svg-s" x="33" y="51" fill="#c6613f">NUEVO</text>
+      <text class="svg-s" x="88" y="51">markdown.rs · parse → Vec&lt;Block&gt;</text>
+
+      <text class="svg-s" x="28" y="78">whatsapp_formatting.rs · marcas → segmentos</text>
+      <text class="svg-s" x="28" y="104">theme.rs · 30 tokens · export_theme</text>
+      <text class="svg-s" x="28" y="134" fill="#8b8880">sin GPUI · sin red · sin estado</text>
+
+      <text class="svg-s" x="376" y="51">settings.rs · perfil del usuario</text>
+      <text class="svg-s" x="376" y="78">model.rs · caché de alturas</text>
+      <text class="svg-s" x="376" y="104">custom_themes · JSON de los temas</text>
+      <text class="svg-s" x="376" y="134" fill="#8b8880">sin GPUI · solo datos</text>
+
+      <text class="svg-tit" x="20" y="196">WHATFAST-UI · DIBUJA Y DESPACHA</text>
+      <rect x="16" y="206" width="668" height="96" rx="8" fill="#fff" stroke="#141413"/>
+      <text class="svg-s" x="32" y="234">render.rs · burbuja, hilo virtual, ajustes</text>
+      <text class="svg-s" x="32" y="260">tokens.rs · tema → colores de GPUI</text>
+      <text class="svg-s" x="32" y="286">editor · catálogo, selector de token, vista previa</text>
+
+      <path d="M176 150 L176 206" stroke="#2c7a39" stroke-width="1.4"/>
+      <polygon points="176,206 171,196 181,196" fill="#2c7a39"/>
+      <polygon points="176,150 171,160 181,160" fill="#2c7a39"/>
+      <text class="svg-s" x="184" y="182">texto ↔ bloques y segmentos</text>
+
+      <path d="M524 150 L524 206" stroke="#c6613f" stroke-width="1.4"/>
+      <polygon points="524,206 519,196 529,196" fill="#c6613f"/>
+      <text class="svg-s" x="532" y="182">Settings · Theme</text>
+
+      <path d="M366 302 L366 338" stroke="#8b8880" stroke-dasharray="4 4"/>
+      <polygon points="366,338 361,328 371,328" fill="#8b8880"/>
+      <text class="svg-s" x="374" y="328">save_to · reemplazo atómico</text>
+      <rect x="246" y="338" width="240" height="30" rx="6" fill="#faf9f5" stroke="#8b8880"/>
+      <text class="svg-s" x="262" y="357">settings.json · temas en JSON</text>
+    </svg>
+    <figcaption><b>Figura 2.</b> Las tres piezas y el sentido de las llamadas. El core no dibuja, el modelo no parsea y la interfaz no decide formato: pide bloques y los pinta. Lo único que toca el disco es el perfil, con <code>save_to</code>.</figcaption>
   </figure>
 </section>
 
@@ -285,7 +338,7 @@
       <path d="M316 124 L384 124" stroke="#8b8880" stroke-dasharray="4 4"/>
       <text class="svg-s" x="322" y="116">nunca</text>
     </svg>
-    <figcaption><b>Figura 2.</b> La frontera que evita el desastre: un tema ajeno no puede cambiar el tamaño con el que leés, ni el fondo de tu conversación.</figcaption>
+    <figcaption><b>Figura 3.</b> La frontera que evita el desastre: un tema ajeno no puede cambiar el tamaño con el que leés, ni el fondo de tu conversación.</figcaption>
   </figure>
 
   <div class="caja ojo">
@@ -352,7 +405,7 @@
       <path d="M302 104 L332 152" stroke="#c6613f"/>
       <path d="M482 152 L512 152" stroke="#c6613f"/>
     </svg>
-    <figcaption><b>Figura 3.</b> El camino barato está arriba: un mensaje sin bloques no paga nada. Solo el que parece documento entra al parser nuevo.</figcaption>
+    <figcaption><b>Figura 4.</b> El camino barato está arriba: un mensaje sin bloques no paga nada. Solo el que parece documento entra al parser nuevo.</figcaption>
   </figure>
 
   <h3>Casos raros que hay que resolver</h3>
@@ -369,7 +422,7 @@
   </table>
 
   <h3>Cómo se mide</h3>
-  <p>Presupuesto: <b>1 ms por 1 000 caracteres</b> de parseo y <b>8 ms</b> de layout por mensaje en una ventana de 900 px. El resultado se cachea por <code>(message_id, ancho)</code>; un mensaje reciclado por el <code>uniform_list</code> con el mismo ancho no se vuelve a medir.</p>
+  <p>Presupuesto: <b>1 ms por 1 000 caracteres</b> de parseo y <b>8 ms</b> de layout por mensaje en una ventana de 900 px. El resultado se cachea por <code>(message_id, ancho)</code>; un mensaje reciclado por el <code>v_virtual_list</code> con el mismo ancho no se vuelve a medir.</p>
 </section>
 
 <section id="diagramas">
@@ -424,7 +477,7 @@
       <path d="M302 112 L332 108" stroke="#c6613f"/>
       <path d="M482 108 L512 108" stroke="#2c7a39"/>
     </svg>
-    <figcaption><b>Figura 4.</b> El quinto camino no existe: lo que el parser no reconoce no se intenta dibujar. Se muestra el texto original, que es lo que la persona escribió.</figcaption>
+    <figcaption><b>Figura 5.</b> El quinto camino no existe: lo que el parser no reconoce no se intenta dibujar. Se muestra el texto original, que es lo que la persona escribió.</figcaption>
   </figure>
 
   <div class="caja no">
@@ -503,7 +556,7 @@
       <text class="svg-s" x="238" y="118">lo más pedido</text>
       <text class="svg-s" x="540" y="118">lo más caro</text>
     </svg>
-    <figcaption><b>Figura 5.</b> El orden pone primero lo que ya tiene el trabajo difícil hecho y deja el dibujo de grafos para el final, cuando la burbuja ya sabe mostrar bloques.</figcaption>
+    <figcaption><b>Figura 6.</b> El orden pone primero lo que ya tiene el trabajo difícil hecho y deja el dibujo de grafos para el final, cuando la burbuja ya sabe mostrar bloques.</figcaption>
   </figure>
 </section>
 
@@ -512,7 +565,7 @@
   <div class="raya"></div>
   <dl class="kv">
     <dt>Redibujar por frame</dt>
-    <dd>El hilo es un <code>uniform_list</code>: una fila se vuelve a construir al reciclarse. Si el parseo o la medición corren ahí, el scroll se arrastra. Mitigación: cache por <code>(message_id, ancho)</code> y parseo fuera del dibujo.</dd>
+    <dd>El hilo es un <code>v_virtual_list</code>, no un <code>uniform_list</code>: cada mensaje tiene su alto, y las alturas se precalculan antes de pintar con <code>measure_message_heights</code> (<code>render.rs:5714</code>) y se cachean por ancho en <code>model.rs</code>. Un bloque nuevo que devuelva una altura distinta de la que ocupa rompe el scroll: la lista salta y la posición se pierde. Mitigación: el alto del bloque se mide con el mismo código que lo dibuja y la cache se invalida por <code>(message_id, ancho)</code>.</dd>
     <dt>La banda de borradores ya ocupa el lugar</dt>
     <dd>La tarjeta de borradores vive sobre el compositor. El fondo del hilo no puede taparla: el orden de capas se fija en la etapa 5 y se prueba con un borrador visible.</dd>
     <dt>Temas que rompen el contraste</dt>
