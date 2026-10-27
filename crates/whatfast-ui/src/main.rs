@@ -29,6 +29,8 @@
 //!   the clip of the composer
 //! - `navrail`: the column of icons at the left
 //! - `newsletters`: the panel of the channels
+//! - `quick_ask`: the fast mode of the chat, a question to an agent
+//! - `automations_panel`: the tasks of the timer, under the drafts
 //! - `recording`: the capture of the voice notes of the composer
 //! - `statuses`: the strip of the states of the contacts
 //! - `stickers`: the tray of the stickers
@@ -45,10 +47,13 @@
 use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
+mod agents_panel;
 mod app;
 mod attachments;
 mod audio;
+mod automations_panel;
 mod call_audio;
+mod chat_drafts;
 mod composer_attachments;
 mod emoji_recent;
 mod helpers;
@@ -61,6 +66,7 @@ mod message_actions;
 mod navrail;
 mod newsletters;
 mod notifications;
+mod quick_ask;
 mod recording;
 mod render;
 mod rpc;
@@ -70,10 +76,18 @@ mod tabs;
 mod text;
 mod tokens;
 mod ubicaciones;
+mod video;
 
 use app::Whatfast;
 
 fn main() {
+    // The same executable is the MCP server of the agents: `whatfast mcp
+    // --agent <id>` runs before any window exists and before the instance
+    // lock, because an agent works while the application is open.
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() == Some("mcp") {
+        std::process::exit(whatfast_mcp::run(arguments.collect::<Vec<_>>()));
+    }
     // One instance only: two sidecars with the same device session would
     // confuse the server and could invalidate the session of the phone.
     let Some(_lock) = instance::InstanceLock::acquire(&whatfast_model::paths::data_dir()) else {
@@ -93,7 +107,25 @@ fn main() {
                 // canales y los archivados.
                 KeyBinding::new("ctrl-shift-s", app::ToggleStates, None),
                 KeyBinding::new("ctrl-shift-n", app::ToggleChannels, None),
+                KeyBinding::new("ctrl-shift-a", app::ToggleAgents, None),
                 KeyBinding::new("ctrl-shift-h", app::ToggleArchived, None),
+                // Accesibilidad de teclado y atajos de navegacion:
+                KeyBinding::new("ctrl-f", app::FocusSearch, None),
+                KeyBinding::new("cmd-f", app::FocusSearch, None),
+                // El modo rapido del chat: una pregunta sobre la conversacion
+                // abierta, con la respuesta en el cuadro de escribir.
+                KeyBinding::new("ctrl-shift-q", app::OpenQuickAsk, None),
+                KeyBinding::new("escape", app::EscapeAction, None),
+                KeyBinding::new("ctrl-down", app::ScrollToBottomAction, None),
+                KeyBinding::new("end", app::ScrollToBottomAction, None),
+                KeyBinding::new("ctrl-up", app::ScrollToTopAction, None),
+                KeyBinding::new("home", app::ScrollToTopAction, None),
+                KeyBinding::new("pageup", app::PageUpMessages, None),
+                KeyBinding::new("pagedown", app::PageDownMessages, None),
+                KeyBinding::new("alt-up", app::SelectPreviousChat, None),
+                KeyBinding::new("alt-down", app::SelectNextChat, None),
+                KeyBinding::new("ctrl-,", app::OpenSettingsAction, None),
+                KeyBinding::new("cmd-,", app::OpenSettingsAction, None),
             ]);
             // The theme of Whatfast goes over the one of `gpui_component`: the
             // mode comes first, because `Theme::change` rewrites every color from

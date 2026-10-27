@@ -35,6 +35,7 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern void keybd_event(byte v, byte s, uint f, IntPtr e);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
@@ -94,7 +95,16 @@ if($handle -eq [IntPtr]::Zero) {
 try {
     Start-Sleep -Seconds $EsperaSegundos
     [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0004) | Out-Null
-    Start-Sleep -Milliseconds 900
+    # El tamaño va fijo en un cliente de 1475x950: la app recuerda el último
+    # tamaño y las capturas saldrian de medidas distintas.
+    $cliente0 = New-Object Ventana+RECT
+    [Ventana]::GetClientRect($handle, [ref]$cliente0) | Out-Null
+    $marco0 = New-Object Ventana+RECT
+    [Ventana]::GetWindowRect($handle, [ref]$marco0) | Out-Null
+    $deltaX = ($marco0.Right - $marco0.Left) - ($cliente0.Right - $cliente0.Left)
+    $deltaY = ($marco0.Bottom - $marco0.Top) - ($cliente0.Bottom - $cliente0.Top)
+    [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 1475 + $deltaX, 950 + $deltaY, 0x0004) | Out-Null
+    Start-Sleep -Milliseconds 800
     if(-not (EnPrimerPlano $handle $proceso.Id)) {
         Write-Error "la ventana de la app no queda en primer plano"
     }

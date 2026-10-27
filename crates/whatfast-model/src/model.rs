@@ -1361,7 +1361,7 @@ fn estimate_message_height(message: &whatfast_protocol::Message) -> Pixels {
     } else {
         54.0
     };
-    px(48.0 + (lines - 1.0) * 18.0 + image_height + reply_height)
+    px(26.0 + (lines - 1.0) * 18.0 + image_height + reply_height)
 }
 
 fn estimated_image_height(image: &whatfast_protocol::ImageContent) -> f32 {

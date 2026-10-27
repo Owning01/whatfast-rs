@@ -1,0 +1,1451 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manual de agentes · Whatfast</title>
+<style>
+  :root {
+    --paper: #faf9f5;
+    --card: #ffffff;
+    --sunk: #f0eee6;
+    --ink: #141413;
+    --ink-2: #3d3d3a;
+    --ink-3: #73726c;
+    --line: rgba(31, 30, 29, .15);
+    --line-2: rgba(31, 30, 29, .08);
+    --accent: #c6613f;
+    --accent-soft: #f6e7df;
+    --green: #2c7a39;
+    --green-soft: #e2efdf;
+    --amber: #946410;
+    --amber-soft: #f4ead2;
+    --red: #b3261e;
+    --red-soft: #f7dfdc;
+    --blue: #2a69b8;
+    --blue-soft: #dde8f5;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --col: 748px;
+    --r: 12px;
+    --r-sm: 8px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html {
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 16px/1.6 var(--sans);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    padding: 44px 20px 110px;
+    max-width: var(--col);
+    margin-inline: auto;
+  }
+
+  h1 {
+    font: 500 clamp(28px, 4.4vw, 38px)/1.14 var(--serif);
+    margin: 0 0 12px;
+    letter-spacing: -.01em;
+  }
+
+  h2 {
+    font: 500 24px/1.25 var(--serif);
+    margin: 52px 0 14px;
+    padding-top: 10px;
+    position: relative;
+  }
+
+  h2 .n {
+    font: 400 12px/1 var(--mono);
+    color: var(--ink-3);
+    position: absolute;
+    left: -44px;
+    top: 20px;
+  }
+
+  h3 {
+    font-size: 16px;
+    line-height: 1.4;
+    font-weight: 600;
+    margin: 30px 0 8px;
+  }
+
+  p { margin: 0 0 14px; }
+  strong { font-weight: 600; }
+  small { font-size: .86em; color: var(--ink-2); }
+
+  code, kbd, samp {
+    font-family: var(--mono);
+    font-size: .86em;
+  }
+
+  :not(pre) > code {
+    background: var(--sunk);
+    border: 1px solid var(--line-2);
+    border-radius: 5px;
+    padding: 1px 5px;
+    overflow-wrap: break-word;
+  }
+
+  pre {
+    font: 12px/1.55 var(--mono);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+  }
+
+  pre .c { color: var(--ink-3); }
+
+  .kicker {
+    font: 400 14px/1.4 var(--sans);
+    color: var(--ink-3);
+    margin: 0 0 10px;
+  }
+
+  .dek {
+    font-size: 16px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    margin: 0 0 18px;
+    max-width: 62ch;
+  }
+
+  .meta {
+    font: 12px/1.6 var(--mono);
+    color: var(--ink-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 18px;
+    margin: 0 0 30px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tldr {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 14px 18px;
+    margin: 22px 0 30px;
+  }
+
+  .tldr > :last-child { margin-bottom: 0; }
+  .tldr ul { margin: 6px 0 0; padding-left: 20px; }
+
+  nav.toc {
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 14px 18px;
+    background: var(--card);
+    margin: 0 0 12px;
+  }
+
+  nav.toc h2 {
+    font: 600 12px/1 var(--sans);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px;
+    padding: 0;
+  }
+
+  nav.toc ol {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 14px;
+    columns: 2;
+    column-gap: 28px;
+  }
+
+  nav.toc li { margin: 3px 0; break-inside: avoid; }
+  nav.toc a { color: var(--ink-2); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+
+  a { color: var(--accent); }
+
+  ul, ol { margin: 0 0 16px; padding-left: 22px; }
+  li { margin: 4px 0; }
+  li > ul, li > ol { margin: 4px 0; }
+
+  .table-wrap { overflow-x: auto; margin: 0 0 18px; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13.5px;
+    margin: 0;
+  }
+
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line-2);
+  }
+
+  th {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: var(--ink-2);
+    border-bottom-color: var(--line);
+    white-space: nowrap;
+  }
+
+  td code { overflow-wrap: anywhere; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 14px 16px;
+    margin: 0 0 16px;
+  }
+
+  .card > :last-child { margin-bottom: 0; }
+
+  .note {
+    background: var(--accent-soft);
+    border: 1px solid rgba(198, 97, 63, .28);
+    border-radius: var(--r-sm);
+    padding: 12px 15px;
+    margin: 0 0 18px;
+    font-size: 14.5px;
+  }
+
+  .note > :last-child { margin-bottom: 0; }
+  .note b { font-weight: 600; }
+
+  .warn {
+    background: var(--amber-soft);
+    border-color: rgba(148, 100, 16, .3);
+  }
+
+  .risk {
+    background: var(--red-soft);
+    border-color: rgba(179, 38, 30, .28);
+  }
+
+  .pill {
+    display: inline-block;
+    font: 600 11px/1 var(--sans);
+    padding: 3px 7px;
+    border-radius: 99px;
+    background: var(--sunk);
+    color: var(--ink-2);
+    border: 1px solid var(--line);
+    vertical-align: 2px;
+    white-space: nowrap;
+  }
+
+  .pill.ok { background: var(--green-soft); color: var(--green); border-color: transparent; }
+  .pill.warn { background: var(--amber-soft); color: var(--amber); border-color: transparent; }
+  .pill.bad { background: var(--red-soft); color: var(--red); border-color: transparent; }
+  .pill.info { background: var(--blue-soft); color: var(--blue); border-color: transparent; }
+
+  dl.kv {
+    display: grid;
+    grid-template-columns: minmax(auto, max-content) minmax(0, 1fr);
+    gap: 5px 20px;
+    margin: 0 0 18px;
+    font-size: 14px;
+  }
+
+  dl.kv dt {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-2);
+    padding-top: 3px;
+  }
+
+  dl.kv dd { margin: 0; min-width: 0; overflow-wrap: break-word; }
+
+  figure {
+    margin: 0 0 26px;
+  }
+
+  figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+  }
+
+  figcaption {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-3);
+    margin-top: 7px;
+    padding-left: 2px;
+  }
+
+  figcaption b { color: var(--ink-2); font-weight: 600; }
+
+  /* ── diagramas ── */
+  .dg text { font-family: var(--mono); }
+  .dg .box { fill: #fff; stroke: #dcdcd5; stroke-width: 1; }
+  .dg .box.fill { fill: #faf9f5; }
+  .dg .box.pri { stroke: #c6613f; stroke-width: 1.6; }
+  .dg .box.good { stroke: #2c7a39; stroke-width: 1.4; }
+  .dg .box.dash { stroke-dasharray: 4 3; fill: #fff; }
+  .dg .t { font-size: 12px; fill: #141413; }
+  .dg .t.b { font-weight: 600; }
+  .dg .s { font-size: 10.5px; fill: #73726c; }
+  .dg .g { font-size: 9.5px; fill: #9a9a91; letter-spacing: .09em; }
+  .dg .lbl { font-size: 10.5px; fill: #6d6d64; }
+  .dg .ln { stroke: #9a9a91; stroke-width: 1.2; fill: none; }
+  .dg .ln.dash { stroke-dasharray: 4 3; }
+  .dg .bad { font-size: 10.5px; fill: #b3261e; font-weight: 600; }
+  .dg .ok { font-size: 10.5px; fill: #2c7a39; font-weight: 600; }
+
+  footer {
+    margin-top: 60px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ink-3);
+  }
+
+  footer code { font-size: 11.5px; }
+
+  @media (max-width: 620px) {
+    body { padding: 28px 14px 80px; }
+    h2 .n { position: static; display: block; margin-bottom: 2px; }
+    nav.toc ol { columns: 1; }
+    table { font-size: 12.5px; }
+    th, td { padding: 7px 8px; }
+  }
+
+  @media print {
+    body { max-width: none; padding: 0; }
+    figure { break-inside: avoid; }
+    h2 { break-after: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="kicker">Whatfast · documentación para el usuario</p>
+  <h1>Manual de agentes</h1>
+  <p class="dek">Cómo un harness de IA lee tus chats de WhatsApp y manda mensajes a través de Whatfast, con permisos por agente y por chat. Sin tocar tu sesión y sin nube de por medio.</p>
+  <p class="meta">
+    <span>26/10/2026</span>
+    <span>10 herramientas MCP</span>
+    <span>pantalla Agentes y bandeja</span>
+    <span>escala read · draft · send</span>
+  </p>
+</header>
+
+<div class="tldr">
+  <p><strong>En una frase.</strong> Whatfast abre un servidor MCP en tu máquina; tu agente se conecta a ese servidor, no a WhatsApp.</p>
+  <ul>
+    <li>El agente <strong>lee</strong> los chats que le habilitaste.</li>
+    <li>Puede <strong>proponer borradores</strong>: los ves en la pantalla Agentes y los mandás vos.</li>
+    <li>Solo <strong>manda</strong> si el chat está habilitado para enviar, dentro de la ventana horaria y debajo del tope por hora.</li>
+    <li>En el chat, <strong>Preguntar a un agente</strong> deja la respuesta en el cuadro de texto. No la manda.</li>
+  </ul>
+</div>
+
+<nav class="toc" aria-label="Índice">
+  <h2>Índice</h2>
+  <ol>
+    <li><a href="#que-es">Qué es y qué puede hacer</a></li>
+    <li><a href="#piezas">Las piezas</a></li>
+    <li><a href="#permisos">El camino de un pedido</a></li>
+    <li><a href="#herramientas">Las diez herramientas</a></li>
+    <li><a href="#borradores">El ciclo de un borrador</a></li>
+    <li><a href="#ritmo">El ritmo humano</a></li>
+    <li><a href="#cronometro">El cronómetro</a></li>
+    <li><a href="#conectar">Conectar un harness</a></li>
+    <li><a href="#pantalla">La pantalla Agentes</a></li>
+    <li><a href="#bandeja">La bandeja de borradores</a></li>
+    <li><a href="#rapido">El modo rápido</a></li>
+    <li><a href="#automatizaciones">Las automatizaciones</a></li>
+    <li><a href="#fallas">Cuando algo falla</a></li>
+    <li><a href="#limites">Límites honestos</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h2 id="que-es"><span class="n">01</span>Qué es y qué puede hacer</h2>
+
+<p>Un agente es un programa que razona: Claude Code, Codex, Cursor, OpenCode, Pi, Hermes, Claude Desktop o VS Code. Whatfast no trae un modelo propio. Le da a ese programa una puerta de entrada a tu cuenta, con reglas.</p>
+
+<p>La puerta son diez herramientas. Con ellas el agente puede:</p>
+
+<ul>
+  <li><strong>Leer.</strong> Listar conversaciones, leer mensajes, buscar en el caché local, ver la ficha de un chat y bajar un archivo adjunto.</li>
+  <li><strong>Proponer.</strong> Dejar un borrador con su motivo y su confianza, para que vos decidas.</li>
+  <li><strong>Mandar.</strong> Enviar un texto, solo en los chats habilitados y solo si su permiso llega a <code>send</code>.</li>
+</ul>
+
+<p>El agente habla con Whatfast, nunca con la sesión de WhatsApp. Los ajustes, la sesión, las llamadas y los borrados le responden <code>forbidden</code>. La sesión sigue siendo una sola, la de la aplicación.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Escala</th><th>Lee</th><th>Deja borradores</th><th>Manda</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>read</code></td><td>Sí</td><td>No</td><td>No</td></tr>
+    <tr><td><code>draft</code></td><td>Sí</td><td>Sí</td><td>No</td></tr>
+    <tr><td><code>send</code></td><td>Sí</td><td>Sí</td><td>Sí, si el chat y la hora lo permiten</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Las tres escalas son acumulativas: <code>send</code> incluye <code>draft</code>, y <code>draft</code> incluye <code>read</code>. Un agente nuevo arranca en <code>read</code>.</p>
+
+<h2 id="piezas"><span class="n">02</span>Las piezas</h2>
+
+<p>Son dos, y las dos ya viajan adentro de la aplicación.</p>
+
+<dl class="kv">
+  <dt>Socket local</dt>
+  <dd>El sidecar <code>whatfast-wa</code> escucha el mismo contrato de sobres que habla la ventana. En Windows es una tubería con nombre; en Linux y macOS, un archivo de socket que solo puede abrir tu usuario.</dd>
+  <dt>whatfast mcp</dt>
+  <dd>El subcomando del mismo <code>whatfast.exe</code>. Habla JSON-RPC por stdio, como pide el protocolo MCP, y traduce cada herramienta a un pedido del puente.</dd>
+</dl>
+
+<p>El nombre del endpoint se deriva de la carpeta del perfil. En Windows es <code>\\.\pipe\whatfast-&lt;huella&gt;</code>, donde la huella son 16 dígitos hexadecimales del camino del perfil. En Linux y macOS es <code>&lt;perfil&gt;/agent.sock</code>. El backend y los clientes que resuelven el mismo perfil se encuentran solos; no hay nada que configurar.</p>
+
+<figure>
+<svg class="dg" viewBox="0 0 900 300" role="img" aria-labelledby="figA">
+  <title id="figA">Las cinco piezas: ventana, backend, socket, servidor MCP y harness</title>
+  <defs>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a9a91"/>
+    </marker>
+  </defs>
+
+  <text class="g" x="280" y="36" text-anchor="middle">LA APP Y SU BACKEND</text>
+  <text class="g" x="646" y="36" text-anchor="middle">SERVIDOR MCP</text>
+  <text class="g" x="822" y="36" text-anchor="middle">TU HARNESS</text>
+
+  <rect class="box" x="24" y="52" width="132" height="64" rx="8"/>
+  <text class="t b" x="90" y="74" text-anchor="middle">Ventana</text>
+  <text class="s" x="90" y="90" text-anchor="middle">whatfast.exe</text>
+  <text class="s" x="90" y="105" text-anchor="middle">chats y ajustes</text>
+
+  <rect class="box pri" x="196" y="52" width="150" height="64" rx="8"/>
+  <text class="t b" x="271" y="74" text-anchor="middle">Backend</text>
+  <text class="s" x="271" y="90" text-anchor="middle">whatfast-wa</text>
+  <text class="s" x="271" y="105" text-anchor="middle">sesión y caché</text>
+
+  <rect class="box" x="386" y="52" width="150" height="64" rx="8"/>
+  <text class="t b" x="461" y="74" text-anchor="middle">Socket local</text>
+  <text class="s" x="461" y="90" text-anchor="middle">\\.\pipe\whatfast-</text>
+  <text class="s" x="461" y="105" text-anchor="middle">&lt;huella&gt;</text>
+
+  <rect class="box" x="576" y="52" width="140" height="64" rx="8"/>
+  <text class="t b" x="646" y="74" text-anchor="middle">whatfast mcp</text>
+  <text class="s" x="646" y="90" text-anchor="middle">stdio · JSON-RPC</text>
+  <text class="s" x="646" y="105" text-anchor="middle">10 herramientas</text>
+
+  <rect class="box fill" x="760" y="52" width="124" height="64" rx="8"/>
+  <text class="t b" x="822" y="74" text-anchor="middle">Harness</text>
+  <text class="s" x="822" y="90" text-anchor="middle">Claude Code,</text>
+  <text class="s" x="822" y="105" text-anchor="middle">Codex, OpenCode…</text>
+
+  <path class="ln" d="M156 84 H196" marker-end="url(#arrA)"/>
+  <text class="lbl" x="176" y="76" text-anchor="middle">RPC</text>
+
+  <path class="ln" d="M346 84 H386" marker-end="url(#arrA)"/>
+  <text class="lbl" x="366" y="76" text-anchor="middle">sobres</text>
+
+  <path class="ln" d="M536 84 H576" marker-end="url(#arrA)"/>
+  <text class="lbl" x="556" y="76" text-anchor="middle">sobres</text>
+
+  <path class="ln" d="M716 84 H760" marker-end="url(#arrA)"/>
+  <text class="lbl" x="738" y="76" text-anchor="middle">stdio</text>
+
+  <rect class="box fill" x="196" y="176" width="150" height="52" rx="8"/>
+  <text class="t b" x="271" y="198" text-anchor="middle">agents.db</text>
+  <text class="s" x="271" y="214" text-anchor="middle">permisos y tokens</text>
+
+  <path class="ln" d="M271 116 V176" marker-end="url(#arrA)"/>
+  <text class="lbl" x="280" y="150">permisos</text>
+
+  <rect class="box fill" x="386" y="176" width="150" height="52" rx="8"/>
+  <text class="t b" x="461" y="198" text-anchor="middle">Sesión de WhatsApp</text>
+  <text class="s" x="461" y="214" text-anchor="middle">una sola, de la app</text>
+
+  <path class="ln" d="M346 104 H366 V202 H386"/>
+  <text class="lbl" x="390" y="170">sobres</text>
+
+  <rect class="box dash" x="576" y="176" width="308" height="52" rx="8"/>
+  <text class="s" x="730" y="196" text-anchor="middle">Si nadie escucha, el servidor MCP</text>
+  <text class="s" x="730" y="212" text-anchor="middle">arranca el backend y lo suelta a los 10 min</text>
+
+  <path class="ln dash" d="M646 116 V176" marker-end="url(#arrA)"/>
+  <text class="lbl" x="654" y="150">spawn</text>
+
+  <text class="lbl" x="24" y="266">La sesión de WhatsApp es una sola. El agente nunca la toca.</text>
+  <text class="lbl" x="24" y="282">El backend es el único que habla con los servidores.</text>
+</svg>
+<figcaption><b>Figura 1.</b> El recorrido completo. La ventana y el agente entran por el mismo backend; el agente entra por el socket y el servidor MCP.</figcaption>
+</figure>
+
+<h3>El comando</h3>
+
+<pre>whatfast.exe mcp --agent &lt;id&gt; [--data-dir &lt;carpeta&gt;] [--backend &lt;sidecar&gt;]</pre>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Bandera</th><th>Qué hace</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>--agent</code></td>
+      <td>El id del harness: <code>claude-code</code>, <code>codex</code>, <code>cursor</code>, <code>opencode</code>, <code>pi</code>, <code>hermes</code>, <code>claude-desktop</code>, <code>vscode</code>. Ese id busca la fila en <code>agents.db</code> y el archivo <code>agents/&lt;id&gt;.token</code>. Lo escribe la pantalla Agentes al conectar.</td>
+    </tr>
+    <tr>
+      <td><code>--data-dir</code></td>
+      <td>El perfil. Por defecto <code>%LOCALAPPDATA%\whatfast</code>, <code>$XDG_DATA_HOME/whatfast</code> o <code>~/Library/Application Support/whatfast</code>. Respeta <code>WHATFAST_DATA_DIR</code>.</td>
+    </tr>
+    <tr>
+      <td><code>--backend</code></td>
+      <td>El sidecar que arranca cuando no hay nadie escuchando. Por defecto, el <code>whatfast-backend.exe</code> que está al lado de <code>whatfast.exe</code>.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Qué hace al arrancar</h3>
+
+<ol>
+  <li>Al primer pedido abre el endpoint derivado del perfil.</li>
+  <li>Si la ventana está abierta, se cuelga del backend que ya corre.</li>
+  <li>Si la ventana está cerrada, arranca <code>whatfast-backend --serve --idle-exit 600</code>, sin ventana y sin consola. Ese backend se cierra solo a los diez minutos sin pedidos, o cuando el servidor MCP termina.</li>
+  <li>Manda <code>Hello</code> y después <code>Reconnect</code>. Un backend que nadie más arrancó está offline hasta que se le pide conectarse, y offline no llega ningún mensaje.</li>
+</ol>
+
+<div class="note">
+  <p><b>Detalle de Windows.</b> Una tubería abierta en modo síncrono serializa sus operaciones: una lectura pendiente bloquea la escritura siguiente. Por eso cada lado tiene una sola tarea dueña del stream y hace una operación por vez.</p>
+</div>
+
+<h2 id="permisos"><span class="n">03</span>El camino de un pedido</h2>
+
+<p>El permiso se fija <strong>por agente y por chat</strong>, nunca global. Vive en <code>agents.db</code>, en la carpeta del perfil, y el backend lo abre al arrancar. La tabla <code>agents</code> guarda la escala, los chats, el tope por hora, la ventana horaria y el modo de ritmo. El token se guarda como su SHA-256.</p>
+
+<p>Un agente presenta su token en el saludo, en <code>Hello.agent_id</code> y <code>Hello.agent_token</code>. El backend lo compara. Si no coincide, contesta <code>unauthorized</code> en todos los pedidos de esa conexión. La identidad se fija por conexión, no por proceso: el saludo de la ventana no habilita a un agente.</p>
+
+<figure>
+<svg class="dg" viewBox="0 0 900 250" role="img" aria-labelledby="figB">
+  <title id="figB">Cinco controles en fila: saludo, escala, chats, ventana y tope por hora</title>
+  <defs>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a9a91"/>
+    </marker>
+    <marker id="redB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/>
+    </marker>
+  </defs>
+
+  <text class="g" x="234" y="30" text-anchor="middle">TODO PEDIDO</text>
+  <path class="ln" d="M24 38 H444"/>
+  <text class="g" x="594" y="30" text-anchor="middle">SOLO UN ENVÍO</text>
+  <path class="ln" d="M456 38 H732"/>
+
+  <rect class="box" x="24" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="90" y="80" text-anchor="middle">1 · Saludo</text>
+  <text class="s" x="90" y="97" text-anchor="middle">agent_id + token</text>
+  <text class="s" x="90" y="112" text-anchor="middle">por conexión</text>
+
+  <rect class="box" x="168" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="234" y="80" text-anchor="middle">2 · Escala</text>
+  <text class="s" x="234" y="97" text-anchor="middle">read · draft · send</text>
+  <text class="s" x="234" y="112" text-anchor="middle">¿alcanza el pedido?</text>
+
+  <rect class="box" x="312" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="378" y="80" text-anchor="middle">3 · Chats</text>
+  <text class="s" x="378" y="97" text-anchor="middle">lista o todos</text>
+  <text class="s" x="378" y="112" text-anchor="middle">grupos aparte</text>
+
+  <rect class="box" x="456" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="522" y="80" text-anchor="middle">4 · Ventana</text>
+  <text class="s" x="522" y="97" text-anchor="middle">08:00-23:00</text>
+  <text class="s" x="522" y="112" text-anchor="middle">hora local</text>
+
+  <rect class="box" x="600" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="666" y="80" text-anchor="middle">5 · Tope</text>
+  <text class="s" x="666" y="97" text-anchor="middle">20 por hora</text>
+  <text class="s" x="666" y="112" text-anchor="middle">última hora</text>
+
+  <rect class="box good" x="744" y="56" width="132" height="76" rx="8"/>
+  <text class="t b" x="810" y="80" text-anchor="middle">Respuesta</text>
+  <text class="s" x="810" y="97" text-anchor="middle">datos o mensaje</text>
+  <text class="s" x="810" y="112" text-anchor="middle">enviado</text>
+
+  <path class="ln" d="M156 94 H168" marker-end="url(#arrB)"/>
+  <path class="ln" d="M300 94 H312" marker-end="url(#arrB)"/>
+  <path class="ln" d="M444 94 H456" marker-end="url(#arrB)"/>
+  <path class="ln" d="M588 94 H600" marker-end="url(#arrB)"/>
+  <path class="ln" d="M732 94 H744" marker-end="url(#arrB)"/>
+
+  <path class="ln dash" d="M90 132 V160" marker-end="url(#redB)"/>
+  <text class="bad" x="90" y="178" text-anchor="middle">unauthorized</text>
+
+  <path class="ln dash" d="M234 132 V160" marker-end="url(#redB)"/>
+  <text class="bad" x="234" y="178" text-anchor="middle">forbidden</text>
+
+  <path class="ln dash" d="M378 132 V160" marker-end="url(#redB)"/>
+  <text class="bad" x="378" y="178" text-anchor="middle">forbidden</text>
+
+  <path class="ln dash" d="M522 132 V160" marker-end="url(#redB)"/>
+  <text class="bad" x="522" y="178" text-anchor="middle">out_of_window</text>
+
+  <path class="ln dash" d="M666 132 V160" marker-end="url(#redB)"/>
+  <text class="bad" x="666" y="178" text-anchor="middle">rate_limited</text>
+
+  <text class="lbl" x="24" y="212">Un pedido de lectura pasa por 1, 2 y 3. Solo un envío llega a 4 y 5.</text>
+  <text class="lbl" x="24" y="232">La ventana y el tope los evalúa el backend, no el servidor MCP.</text>
+</svg>
+<figcaption><b>Figura 2.</b> Cada control tiene su código de rechazo. El pedido se corta en el primero que no pasa.</figcaption>
+</figure>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Pieza</th><th>Valor por defecto</th><th>Qué controla</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Escala</td>
+      <td><code>read</code></td>
+      <td><code>read</code> lee; <code>draft</code> lee y deja borradores; <code>send</code> lee, deja borradores y manda. Son acumulativas.</td>
+    </tr>
+    <tr>
+      <td>Chats</td>
+      <td>lista vacía</td>
+      <td>Una lista de <code>chat_id</code>, o todos. Una lista vacía no cubre ningún chat. Los grupos, canales y difusiones quedan afuera salvo que se pidan.</td>
+    </tr>
+    <tr>
+      <td>Tope por hora</td>
+      <td><code>20</code></td>
+      <td>Cuenta los envíos de la última hora. Al llegar al tope responde <code>rate_limited</code>. El valor <code>0</code> significa sin tope.</td>
+    </tr>
+    <tr>
+      <td>Ventana</td>
+      <td><code>08:00-23:00</code></td>
+      <td>Hora local del perfil. Fuera de ella responde <code>out_of_window</code> y el mensaje no sale. Se escribe <code>HH:MM-HH:MM</code>; puede cruzar la medianoche; los dos extremos iguales significan todo el día.</td>
+    </tr>
+    <tr>
+      <td>Ritmo</td>
+      <td>encendido</td>
+      <td>Con humanización el texto sale en partes, con la espera de alguien escribiendo. Se apaga por agente.</td>
+    </tr>
+    <tr>
+      <td>Token</td>
+      <td>—</td>
+      <td>Se guarda como SHA-256 en <code>agents.db</code> y como archivo en <code>agents/&lt;id&gt;.token</code>, con permisos <code>0600</code>. No viaja en la línea de comandos.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note warn">
+  <p><b>Trampa de un perfil sin agentes.</b> Si el perfil no tiene ninguna fila en <code>agents.db</code>, un harness que se anuncia sin token se trata como el usuario que lo arrancó. Es lo que permite probar la conexión desde una instalación limpia. En cuanto conectás un harness desde la pantalla Agentes, la tabla tiene una fila y el token pasa a ser obligatorio para todos.</p>
+</div>
+
+<h2 id="herramientas"><span class="n">04</span>Las diez herramientas</h2>
+
+<p>Los resultados son JSON compacto. Cada mensaje trae <code>at</code> en ISO-8601 UTC y <code>at_ms</code>. El cuerpo se corta a 4000 caracteres y avisa con <code>clipped</code>.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Herramienta</th><th>Argumentos</th><th>Devuelve</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>chats_list</code></td>
+      <td><code>limit</code> 1–200 (50), <code>cursor</code>, <code>include_archived</code> (true)</td>
+      <td>Las conversaciones con <code>chat_id</code>, título, sin leer y anticipo del último mensaje. Más <code>total</code> y <code>next_cursor</code>.</td>
+    </tr>
+    <tr>
+      <td><code>messages_read</code></td>
+      <td><code>chat_id</code> (obligatorio), <code>limit</code> 1–200 (40), <code>before_timestamp_ms</code>, <code>before_message_id</code></td>
+      <td>Los mensajes de un chat, del más viejo al más nuevo, más <code>has_more</code>.</td>
+    </tr>
+    <tr>
+      <td><code>messages_search</code></td>
+      <td><code>query</code> (obligatorio), <code>limit</code> 1–100 (20)</td>
+      <td>Mensajes, grupos y contactos que ya están en el caché local. Nunca consulta WhatsApp.</td>
+    </tr>
+    <tr>
+      <td><code>chat_info</code></td>
+      <td><code>chat_id</code> (obligatorio)</td>
+      <td>Dirección, about, nombre verificado, descripción del grupo, fecha de creación y miembros (hasta 50).</td>
+    </tr>
+    <tr>
+      <td><code>attachment_get</code></td>
+      <td><code>chat_id</code>, <code>message_id</code></td>
+      <td>Baja el archivo al caché y devuelve su <code>path</code>. El agente lee el archivo por su cuenta.</td>
+    </tr>
+    <tr>
+      <td><code>messages_wait</code></td>
+      <td><code>chat_id</code> (opcional), <code>timeout_ms</code> 1 000–50 000 (25 000), <code>after_timestamp_ms</code>, <code>after_message_id</code></td>
+      <td>Lo que llegó con su <code>cursor</code>. Si vence el plazo: <code>messages</code> vacío y <code>reason: "timeout"</code>.</td>
+    </tr>
+    <tr>
+      <td><code>message_send</code></td>
+      <td><code>chat_id</code>, <code>text</code>, <code>reply_to_message_id</code>, <code>client_message_id</code></td>
+      <td><code>id</code>, <code>at</code>, <code>status</code> y en cuántas <code>parts</code> salió. Si el chat no está habilitado, deja un borrador y devuelve el borrador.</td>
+    </tr>
+    <tr>
+      <td><code>draft_propose</code></td>
+      <td><code>chat_id</code>, <code>text</code>, <code>reply_to_message_id</code>, <code>reason</code>, <code>confidence</code> 0–1 (0,5)</td>
+      <td><code>draft_id</code>, <code>state</code> y una nota: el usuario lo ve en Whatfast y decide.</td>
+    </tr>
+    <tr>
+      <td><code>drafts_list</code></td>
+      <td><code>state</code> (vacío = los abiertos), <code>limit</code> 1–200 (50)</td>
+      <td>Los borradores con su chat, motivo, confianza y fecha. Incluye los de otros agentes.</td>
+    </tr>
+    <tr>
+      <td><code>draft_decide</code></td>
+      <td><code>draft_id</code> (entero), <code>send</code> (booleano)</td>
+      <td>El <code>state</code> nuevo. <code>send: true</code> aprueba; <code>send: false</code> descarta. Aprobar no envía.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Los pedidos del puente</h3>
+
+<p>Además de las diez herramientas MCP, el puente tiene pedidos que usa la ventana. No son herramientas: un agente del socket los recibe con <code>forbidden</code>. Los que siguen son los que agregaron la pantalla Agentes, la bandeja, el modo rápido y las automatizaciones.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Pedido</th><th>Argumentos</th><th>Qué hace</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>AgentAsk</code></td>
+      <td><code>agent_id</code>, <code>chat_id</code>, <code>question</code>, <code>context</code> (lista de líneas)</td>
+      <td>El modo rápido. Corre el harness sin ventana y devuelve <code>text</code> y <code>ms</code>. No manda nada. Plazo: 90 s.</td>
+    </tr>
+    <tr>
+      <td><code>ScheduleList</code></td>
+      <td>—</td>
+      <td>Las tareas del perfil, pausadas incluidas, con su próximo turno.</td>
+    </tr>
+    <tr>
+      <td><code>SchedulePut</code></td>
+      <td><code>id</code> (0 crea), <code>agent_id</code>, <code>chat_id</code>, <code>kind</code>, <code>at_ms</code>, <code>cron</code>, <code>prompt</code>, <code>output</code>, <code>window</code></td>
+      <td>Crea o reescribe una tarea y calcula su primer turno. Cuando la rechaza, contesta con la tarea y el motivo en <code>error</code>.</td>
+    </tr>
+    <tr>
+      <td><code>SchedulePause</code></td>
+      <td><code>id</code>, <code>paused</code></td>
+      <td>Pausa o reanuda. Al reanudar, el próximo turno se cuenta desde ese momento.</td>
+    </tr>
+    <tr>
+      <td><code>ScheduleRemove</code></td>
+      <td><code>id</code></td>
+      <td>Borra la tarea. <code>removed</code> dice si estaba.</td>
+    </tr>
+    <tr>
+      <td><code>DraftFinish</code></td>
+      <td><code>draft_id</code>, <code>sent</code>, <code>error</code></td>
+      <td>Cierra un borrador aprobado: <code>sent</code> o <code>failed</code>. El motivo del fallo reemplaza al del agente. La bandeja de la ventana hace el mismo cierre sobre <code>agents.db</code>.</td>
+    </tr>
+    <tr>
+      <td><code>GuideInstall</code></td>
+      <td><code>agent_id</code></td>
+      <td>Escribe el bloque de reglas de Whatfast en el archivo que ese harness lee solo. Devuelve <code>installed</code>, <code>target</code> y <code>backup</code>.</td>
+    </tr>
+    <tr>
+      <td><code>GuideRemove</code></td>
+      <td><code>agent_id</code></td>
+      <td>Saca el bloque y deja el archivo como estaba, con la copia <code>.whatfast-backup</code> a un lado.</td>
+    </tr>
+    <tr>
+      <td><code>GuideStatus</code></td>
+      <td><code>agent_id</code></td>
+      <td><code>installed</code> y <code>target</code>: si el bloque está y en qué archivo.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>La guía solo tiene archivo en cuatro harnesses: <code>~/.claude/CLAUDE.md</code>, <code>~/.codex/AGENTS.md</code>, <code>~/.config/opencode/AGENTS.md</code> y <code>~/.cursor/rules/whatfast.mdc</code>. En los otros cuatro el pedido no escribe nada y devuelve el blanco; no adivina una ruta.</p>
+
+<h3>Detalles que importan</h3>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Tema</th><th>Valor real</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Espera de una lectura</td><td>30 s</td></tr>
+    <tr><td>Espera de un envío</td><td>60 s</td></tr>
+    <tr><td>Espera de un adjunto</td><td>120 s</td></tr>
+    <tr><td>Sondeo de <code>messages_wait</code></td><td>Cada 1,2 a 1,8 s sobre el caché. No depende del canal de eventos, que sigue siendo de la ventana.</td></tr>
+    <tr><td>Cuerpo de un mensaje</td><td>Se corta a 4000 caracteres y avisa con <code>clipped</code>.</td></tr>
+    <tr><td><code>message_send</code> con texto largo</td><td>Lo parte y manda varias veces. La cita (<code>reply_to_message_id</code>) viaja solo en la primera parte.</td></tr>
+    <tr><td>Reintento de un envío</td><td>Reusá el mismo <code>client_message_id</code>: el mensaje no sale dos veces. Si no lo mandás, se genera uno.</td></tr>
+    <tr><td>Un chat por envío</td><td>Nunca difusión.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="borradores"><span class="n">05</span>El ciclo de un borrador</h2>
+
+<p>Un borrador es un mensaje que el agente escribió y el usuario todavía no mandó. Vive en la tabla <code>drafts</code>, con su chat, su motivo, su confianza y su estado. Los seis estados son <code>proposed</code>, <code>approved</code>, <code>sending</code>, <code>sent</code>, <code>failed</code> y <code>discarded</code>.</p>
+
+<p>Hay dos formas de que aparezca uno: el agente llama a <code>draft_propose</code>, o una automatización vence y deja la respuesta del harness como borrador.</p>
+
+<figure>
+<svg class="dg" viewBox="0 0 900 274" role="img" aria-labelledby="figC">
+  <title id="figC">Ciclo de vida de un borrador y sus dos ramas</title>
+  <defs>
+    <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a9a91"/>
+    </marker>
+  </defs>
+
+  <text class="g" x="24" y="42">LO ESCRIBE EL AGENTE</text>
+
+  <rect class="box pri" x="24" y="58" width="150" height="58" rx="8"/>
+  <text class="t b" x="99" y="82" text-anchor="middle">propuesto</text>
+  <text class="s" x="99" y="99" text-anchor="middle">espera al humano</text>
+
+  <rect class="box" x="244" y="58" width="150" height="58" rx="8"/>
+  <text class="t b" x="319" y="82" text-anchor="middle">aprobado</text>
+  <text class="s" x="319" y="99" text-anchor="middle">espera su turno</text>
+
+  <rect class="box" x="464" y="58" width="150" height="58" rx="8"/>
+  <text class="t b" x="539" y="82" text-anchor="middle">enviando</text>
+  <text class="s" x="539" y="99" text-anchor="middle">sale por la sesión</text>
+
+  <rect class="box good" x="694" y="58" width="150" height="58" rx="8"/>
+  <text class="t b" x="769" y="82" text-anchor="middle">enviado</text>
+  <text class="s" x="769" y="99" text-anchor="middle">llegó a los ticks</text>
+
+  <path class="ln" d="M174 87 H244" marker-end="url(#arrC)"/>
+  <text class="lbl" x="209" y="79" text-anchor="middle">aprobar</text>
+
+  <path class="ln" d="M394 87 H464" marker-end="url(#arrC)"/>
+  <text class="lbl" x="429" y="79" text-anchor="middle">turno</text>
+
+  <path class="ln" d="M614 87 H694" marker-end="url(#arrC)"/>
+  <text class="lbl" x="654" y="79" text-anchor="middle">ok</text>
+
+  <rect class="box fill" x="24" y="192" width="150" height="54" rx="8"/>
+  <text class="t b" x="99" y="214" text-anchor="middle">descartado</text>
+  <text class="s" x="99" y="231" text-anchor="middle">final</text>
+
+  <path class="ln" d="M99 116 V192" marker-end="url(#arrC)"/>
+  <text class="lbl" x="108" y="158">descartar</text>
+
+  <rect class="box fill" x="464" y="192" width="150" height="54" rx="8"/>
+  <text class="t b" x="539" y="214" text-anchor="middle">fallido</text>
+  <text class="s" x="539" y="231" text-anchor="middle">queda el error</text>
+
+  <path class="ln" d="M575 116 V192" marker-end="url(#arrC)"/>
+  <text class="lbl" x="583" y="158">error</text>
+
+  <text class="lbl" x="694" y="220">Aprobar deja el borrador listo.</text>
+  <text class="lbl" x="694" y="236">El envío es del usuario.</text>
+</svg>
+<figcaption><b>Figura 3.</b> Del estado <code>proposed</code> salen dos caminos: aprobar o descartar. De <code>sending</code> salen dos: <code>sent</code> o <code>failed</code>. El fallo es final: reintentar todavía no tiene botón.</figcaption>
+</figure>
+
+<p>El estado lo escribe el backend. <code>draft_decide</code> con <code>send: true</code> deja el borrador en <code>approved</code>. Ese es el límite de la herramienta: <strong>aprobar no envía</strong>. El envío es del usuario, y lo ejecuta el botón Enviar de la bandeja: el texto sale por el mismo camino que el compositor y el borrador queda en <code>sent</code>.</p>
+
+<div class="note">
+  <p><b>Qué ve el usuario.</b> Los borradores abiertos son los que están en <code>proposed</code>, <code>approved</code> o <code>failed</code>. <code>drafts_list</code> devuelve esos tres cuando no se le pide un estado. La bandeja de la ventana muestra los dos primeros; el fallido queda en <code>agents.db</code> con el motivo que tenía.</p>
+</div>
+
+<h2 id="ritmo"><span class="n">06</span>El ritmo humano</h2>
+
+<p>Un modelo contesta en un instante. Un mensaje que sale en ese instante se nota, del otro lado y del lado de la plataforma. La humanización convierte "mandá este texto" en un plan: en cuántas partes sale y cuánto se espera antes de cada una.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Medida</th><th>Valor</th><th>Nota</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Escritura por carácter</td><td>45 ms</td><td>El texto de 30 caracteres tarda 1,35 s, y el piso lo sube a 1,5 s.</td></tr>
+    <tr><td>Piso</td><td>1,5 s</td><td>Ni un "dale" sale antes.</td></tr>
+    <tr><td>Techo</td><td>6 s</td><td>Un texto largo nunca se convierte en minutos.</td></tr>
+    <tr><td>Variación</td><td>hasta +20 %</td><td>Se suma al tiempo calculado. Dos envíos del mismo texto nunca esperan lo mismo.</td></tr>
+    <tr><td>Pausa entre partes</td><td>800 a 1 800 ms</td><td>Se sortea con la semilla del <code>client_message_id</code>.</td></tr>
+    <tr><td>Corte de una parte</td><td>700 caracteres</td><td>Mínimo 80. Corta en el fin de oración; si no hay, en un espacio.</td></tr>
+    <tr><td>Indicador</td><td><code>SetTyping</code></td><td>Se prende al empezar y se apaga al final. Solo con textos de más de una parte.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>La espera de una parte se calcula así: <code>45 ms × caracteres</code>, recortado entre 1,5 s y 6 s. A eso se le suma la variación y, si no es la primera parte, la pausa entre partes. Con un texto de más de una parte, el servidor prende "escribiendo…" antes de la primera y lo apaga al terminar.</p>
+
+<div class="note">
+  <p><b>El texto se corta donde cortaría una persona.</b> En el último punto, signo de exclamación, pregunta o salto de línea, siempre que ese corte no deje la primera parte hecha un pedazo. Si no hay puntuación cerca, corta en el último espacio. Nunca parte un carácter a la mitad.</p>
+</div>
+
+<div class="note risk">
+  <p><b>El ritmo no elimina el riesgo.</b> Meta puede sancionar el número igual. El ritmo baja la señal de automatización; la aprobación humana la baja más.</p>
+</div>
+
+<h2 id="cronometro"><span class="n">07</span>El cronómetro</h2>
+
+<p>Una tarea programada es un cron o un instante. Las dos formas viven en la tabla <code>schedules</code>, con su agente, su chat, su petición y su salida: <code>read</code>, <code>draft</code> o <code>send</code>.</p>
+
+<p>El cron tiene cinco campos: minuto, hora, día del mes, mes y día de la semana. Acepta <code>*</code>, un número, un rango <code>a-b</code>, un paso <code>*/n</code> o <code>a-b/n</code>, y listas separadas por coma. El domingo es <code>0</code> y también <code>7</code>. No acepta nombres de meses ni de días: la interfaz escribe números. Cuando el día del mes y el día de la semana están restringidos, alcanza con que coincida uno de los dos.</p>
+
+<figure>
+<svg class="dg" viewBox="0 0 900 322" role="img" aria-labelledby="figD">
+  <title id="figD">El cronómetro: vence, consulta la ventana, corre y calcula el próximo turno</title>
+  <defs>
+    <marker id="arrD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a9a91"/>
+    </marker>
+  </defs>
+
+  <rect class="box" x="30" y="60" width="170" height="56" rx="8"/>
+  <text class="t b" x="115" y="83" text-anchor="middle">Tarea vence</text>
+  <text class="s" x="115" y="100" text-anchor="middle">next_at_ms ≤ ahora</text>
+
+  <rect class="box" x="250" y="60" width="170" height="56" rx="8"/>
+  <text class="t b" x="335" y="83" text-anchor="middle">¿Dentro de la ventana?</text>
+  <text class="s" x="335" y="100" text-anchor="middle">hora local del perfil</text>
+
+  <rect class="box pri" x="490" y="60" width="170" height="56" rx="8"/>
+  <text class="t b" x="575" y="83" text-anchor="middle">Corre el harness</text>
+  <text class="s" x="575" y="100" text-anchor="middle">sin ventana</text>
+
+  <rect class="box" x="720" y="60" width="170" height="56" rx="8"/>
+  <text class="t b" x="805" y="83" text-anchor="middle">Borrador o envío</text>
+  <text class="s" x="805" y="100" text-anchor="middle">según el permiso</text>
+
+  <rect class="box fill" x="250" y="210" width="170" height="56" rx="8"/>
+  <text class="t b" x="335" y="233" text-anchor="middle">Espera a la apertura</text>
+  <text class="s" x="335" y="250" text-anchor="middle">hasta las 08:00</text>
+
+  <rect class="box fill" x="720" y="210" width="170" height="56" rx="8"/>
+  <text class="t b" x="805" y="233" text-anchor="middle">Próximo turno</text>
+  <text class="s" x="805" y="250" text-anchor="middle">cron.next + ventana</text>
+
+  <path class="ln" d="M200 88 H250" marker-end="url(#arrD)"/>
+
+  <path class="ln" d="M420 88 H490" marker-end="url(#arrD)"/>
+  <text class="lbl" x="455" y="80" text-anchor="middle">sí</text>
+
+  <path class="ln" d="M335 116 V210" marker-end="url(#arrD)"/>
+  <text class="lbl" x="343" y="168">no</text>
+
+  <path class="ln dash" d="M420 238 H575 V116" marker-end="url(#arrD)"/>
+  <text class="lbl" x="428" y="232">se recalcula</text>
+
+  <path class="ln" d="M660 88 H720" marker-end="url(#arrD)"/>
+  <text class="lbl" x="690" y="80" text-anchor="middle">corre</text>
+
+  <path class="ln" d="M805 116 V210" marker-end="url(#arrD)"/>
+  <text class="lbl" x="813" y="168">fin</text>
+
+  <path class="ln dash" d="M720 266 V296 H115 V116" marker-end="url(#arrD)"/>
+  <text class="lbl" x="420" y="290" text-anchor="middle">vuelve al cronómetro</text>
+
+  <text class="lbl" x="30" y="40">En una tarea Cada tanto, la ventana del perfil decide cuándo corre de verdad.</text>
+</svg>
+<figcaption><b>Figura 4.</b> Una tarea Cada tanto que caería a las 03:00 con ventana 08:00-23:00 no manda nada a las tres de la mañana: espera la apertura.</figcaption>
+</figure>
+
+<p>El cálculo del próximo turno es <code>cron.next(ahora) + ventana</code>. Si la hora que da el cron cae fuera de la ventana, se corre hasta la apertura del mismo día o del siguiente. El horizonte de búsqueda son cuatro años: si la expresión no vuelve a caer en ese plazo, como el 30 de febrero, no hay próximo turno.</p>
+
+<div class="note">
+  <p><b>Lo que hace hoy el cronómetro.</b> El backend revisa las tareas cada 30 segundos, o cada 60 si lo arrancó un agente. Una tarea que venció corre el harness sin ventana y deja su respuesta como borrador en <code>proposed</code>, con el motivo <code>automatización: …</code>. El próximo turno se escribe antes de correr, así que un harness colgado no dispara dos veces la misma tarea.</p>
+</div>
+
+<div class="note warn">
+  <p><b>El límite del cronómetro.</b> Una automatización nunca manda sola: toda corrida termina en un borrador, también cuando la salida elegida es <code>send</code>. El envío automático no está y no es el tramo siguiente: el botón Enviar de la bandeja es del usuario. Si el harness no tiene modo headless, la corrida falla y queda anotada en la bitácora de llamadas.</p>
+</div>
+
+<h2 id="conectar"><span class="n">08</span>Conectar un harness</h2>
+
+<p>Conectar es una sola cosa: decirle al cliente que existe un servidor MCP llamado <code>whatfast</code> y que se arranca con <code>whatfast.exe mcp --agent &lt;id&gt;</code>. Nada más.</p>
+
+<h3>El botón Connect</h3>
+
+<p>La pantalla Agentes de la ventana lista los ocho clientes del catálogo y marca cuáles existen en esta máquina. El botón Conectar (<code>Connect</code>) está activo solo en los detectados y hace tres pasos:</p>
+
+<ol>
+  <li>Genera el token y lo escribe en <code>agents/&lt;id&gt;.token</code>.</li>
+  <li>Registra el agente y su token en <code>agents.db</code>.</li>
+  <li>Escribe la entrada con el formato de ese cliente: comando, archivo JSON, TOML o YAML. Después avisa en dónde quedó.</li>
+</ol>
+
+<p>La sección <a href="#pantalla">La pantalla Agentes</a> cuenta los detalles. El registro a mano sigue disponible y escribe lo mismo que el botón.</p>
+
+<h3>Claude Code</h3>
+
+<pre>claude mcp add --scope user whatfast -- "C:\ruta\a\whatfast.exe" mcp --agent claude-code</pre>
+
+<h3>Codex</h3>
+
+<p>Agregá esta tabla a <code>~/.codex/config.toml</code>:</p>
+
+<pre>[mcp_servers.whatfast]
+command = "C:\\ruta\\a\\whatfast.exe"
+args = ["mcp", "--agent", "codex"]</pre>
+
+<h3>OpenCode</h3>
+
+<p>La entrada va en <code>~/.config/opencode/opencode.jsonc</code>, dentro de <code>mcp.servers</code>:</p>
+
+<pre>"whatfast": {
+  "type": "local",
+  "command": ["C:\\ruta\\a\\whatfast.exe", "mcp", "--agent", "opencode"]
+}</pre>
+
+<p><b>No uses <code>opencode mcp add</code> como camino principal.</b> En Windows el <code>opencode</code> del <code>PATH</code> puede ser un shim de Bun o de npm que no arranca desde otro proceso y responde «bin executable does not exist on disk». La ventana escribe el archivo directamente; el comando sigue sirviendo solo cuando el shim funciona.</p>
+
+<h3>Los ocho clientes</h3>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Cliente</th><th>id</th><th>Cómo se registra</th><th>Dónde</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Claude Code</td>
+      <td><code>claude-code</code></td>
+      <td><code>claude mcp add --scope user</code></td>
+      <td>Configuración de usuario de Claude Code</td>
+    </tr>
+    <tr>
+      <td>Codex</td>
+      <td><code>codex</code></td>
+      <td>Tabla TOML <code>[mcp_servers.whatfast]</code></td>
+      <td><code>~/.codex/config.toml</code></td>
+    </tr>
+    <tr>
+      <td>OpenCode</td>
+      <td><code>opencode</code></td>
+      <td>Archivo JSONC con la clave <code>mcp.servers</code></td>
+      <td><code>~/.config/opencode/opencode.jsonc</code></td>
+    </tr>
+    <tr>
+      <td>Cursor</td>
+      <td><code>cursor</code></td>
+      <td>Objeto JSON con la clave <code>mcpServers</code></td>
+      <td><code>~/.cursor/mcp.json</code></td>
+    </tr>
+    <tr>
+      <td>Claude Desktop</td>
+      <td><code>claude-desktop</code></td>
+      <td>Objeto JSON con la clave <code>mcpServers</code></td>
+      <td><code>%APPDATA%\Claude\claude_desktop_config.json</code></td>
+    </tr>
+    <tr>
+      <td>VS Code</td>
+      <td><code>vscode</code></td>
+      <td><code>code --add-mcp</code> con la definición en JSON</td>
+      <td>Configuración de VS Code</td>
+    </tr>
+    <tr>
+      <td>Pi</td>
+      <td><code>pi</code></td>
+      <td><code>pi mcp add whatfast --</code></td>
+      <td>Configuración de Pi</td>
+    </tr>
+    <tr>
+      <td>Hermes</td>
+      <td><code>hermes</code></td>
+      <td>Mapping YAML con la clave <code>mcp_servers</code></td>
+      <td><code>~/.hermes/config.yaml</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>El nombre del servidor es siempre <code>whatfast</code>, en los ocho. Así el usuario ve una sola entrada. El botón Desconectar todavía no la borra: la entrada queda y se saca a mano.</p>
+
+<div class="note">
+  <p><b>Después de conectar, reiniciá el cliente.</b> Cada uno toma el servidor al arrancar. Hermes además acepta <code>/reload-mcp</code>.</p>
+</div>
+
+<h3>Probar sin escribir</h3>
+
+<pre>cargo build -p whatfast-ui -p whatfast-wa
+python scripts\probar-mcp.py
+python scripts\probar-mcp.py --esperar-ms 20000</pre>
+
+<p>El guion arranca <code>whatfast.exe mcp --agent probar</code>, recorre <code>initialize</code>, <code>tools/list</code>, <code>chats_list</code>, <code>messages_read</code>, <code>chat_info</code> y <code>messages_search</code>. Con <code>--esperar-ms</code> agrega una espera. Con <code>--enviar &lt;chat_id&gt; &lt;texto&gt;</code> manda un mensaje de verdad: sin esa bandera no escribe nada.</p>
+
+<h2 id="pantalla"><span class="n">09</span>La pantalla Agentes</h2>
+
+<p>El riel de la izquierda tiene un destino <strong>Agentes</strong> (<kbd>ctrl-shift-a</kbd>). El destino no pide un dispositivo vinculado: la pantalla lee el perfil y muestra qué harness hay en esta máquina. Es una vista propia, como los estados o los canales, y reemplaza la columna de chats mientras está abierta.</p>
+
+<p>A la izquierda está la lista de los ocho harnesses del catálogo. Cada fila trae el nombre y uno de tres estados: <span class="pill ok">Conectado</span>, <span class="pill info">Detectado en esta máquina</span> o <span class="pill">No instalado</span>. La lista no esconde los que faltan: los muestra para que se sepa qué se puede conectar y qué no.</p>
+
+<figure>
+<svg class="dg" viewBox="0 0 900 400" role="img" aria-labelledby="figE">
+  <title id="figE">El camino de una acción de la ventana: Connect, Ask an agent y una tarea del cronómetro</title>
+  <defs>
+    <marker id="arrE" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a9a91"/>
+    </marker>
+  </defs>
+
+  <text class="g" x="114" y="24" text-anchor="middle">LA VENTANA</text>
+  <text class="g" x="345" y="24" text-anchor="middle">EL PUENTE</text>
+  <text class="g" x="545" y="24" text-anchor="middle">EL BACKEND</text>
+  <text class="g" x="768" y="24" text-anchor="middle">EL DESTINO</text>
+
+  <rect class="box" x="24" y="40" width="180" height="68" rx="8"/>
+  <text class="t b" x="114" y="63" text-anchor="middle">Ventana</text>
+  <text class="s" x="114" y="80" text-anchor="middle">un botón o la tarjeta</text>
+  <text class="s" x="114" y="95" text-anchor="middle">Agentes · chat · tarea</text>
+
+  <rect class="box" x="254" y="40" width="180" height="68" rx="8"/>
+  <text class="t b" x="344" y="63" text-anchor="middle">Bridge</text>
+  <text class="s" x="344" y="80" text-anchor="middle">RpcRequest en sobres</text>
+  <text class="s" x="344" y="95" text-anchor="middle">stdin y stdout</text>
+
+  <rect class="box pri" x="470" y="40" width="140" height="68" rx="8"/>
+  <text class="t b" x="540" y="63" text-anchor="middle">route</text>
+  <text class="s" x="540" y="80" text-anchor="middle">guard y permisos</text>
+  <text class="s" x="540" y="95" text-anchor="middle">main.rs</text>
+
+  <rect class="box fill" x="660" y="26" width="216" height="48" rx="8"/>
+  <text class="t b" x="768" y="45" text-anchor="middle">agents.db</text>
+  <text class="s" x="768" y="62" text-anchor="middle">agentes · borradores · tareas</text>
+
+  <rect class="box fill" x="660" y="88" width="216" height="56" rx="8"/>
+  <text class="t b" x="768" y="108" text-anchor="middle">el harness</text>
+  <text class="s" x="768" y="125" text-anchor="middle">sin ventana: 90 s o 120 s</text>
+
+  <path class="ln" d="M204 74 H254" marker-end="url(#arrE)"/>
+  <text class="lbl" x="229" y="66" text-anchor="middle">sobres</text>
+
+  <path class="ln" d="M434 74 H470" marker-end="url(#arrE)"/>
+  <text class="lbl" x="452" y="66" text-anchor="middle">sobres</text>
+
+  <path class="ln" d="M610 66 H635 V50 H660" marker-end="url(#arrE)"/>
+  <path class="ln" d="M610 82 H635 V116 H660" marker-end="url(#arrE)"/>
+  <text class="lbl" x="636" y="160" text-anchor="middle">el pedido decide</text>
+
+  <path class="ln dash" d="M876 50 H888 V190 H114 V108" marker-end="url(#arrE)"/>
+  <path class="ln dash" d="M876 116 H888"/>
+  <text class="lbl" x="500" y="183" text-anchor="middle">RpcResponse: vuelve por el mismo camino</text>
+
+  <path class="ln dash" d="M24 74 H12 V250 H24" marker-end="url(#arrE)"/>
+  <text class="lbl" x="24" y="206">sin puente</text>
+
+  <rect class="box" x="24" y="212" width="220" height="76" rx="8"/>
+  <text class="t b" x="34" y="234">A · Connect</text>
+  <text class="s" x="34" y="250">token en agents/&lt;id&gt;.token</text>
+  <text class="s" x="34" y="264">fila en agents.db</text>
+  <text class="s" x="34" y="278">entrada en la config</text>
+
+  <path class="ln dash" d="M354 190 V212" marker-end="url(#arrE)"/>
+
+  <rect class="box" x="254" y="212" width="200" height="76" rx="8"/>
+  <text class="t b" x="264" y="234">B · Ask an agent</text>
+  <text class="s" x="264" y="250">la respuesta cae en el</text>
+  <text class="s" x="264" y="264">cuadro de texto</text>
+  <text class="s" x="264" y="278">no se manda sola</text>
+
+  <rect class="box dash" x="470" y="212" width="406" height="76" rx="8"/>
+  <text class="t b" x="484" y="234">C · Una tarea del cronómetro</text>
+  <text class="s" x="484" y="250">Guardar tarea escribe la fila por el mismo camino.</text>
+  <text class="s" x="484" y="264">Al vencer, el cronómetro corre el harness y deja</text>
+  <text class="s" x="484" y="278">un borrador en agents.db: la bandeja lo lee.</text>
+
+  <text class="lbl" x="24" y="316">El mismo puente sirve a la ventana y a un harness: cambia quién saluda.</text>
+  <text class="lbl" x="24" y="332">Connect no cruza el puente: escribe el token, la fila y la configuración.</text>
+  <text class="lbl" x="24" y="348">Una tarea no manda: su corrida termina en un borrador.</text>
+  <text class="lbl" x="24" y="364">RpcResponse cierra la petición pendiente que la ventana dejó anotada.</text>
+</svg>
+<figcaption><b>Figura 5.</b> Los tres caminos de una acción. <b>A</b> no cruza el puente. <b>B</b> y <b>C</b> sí, y solo <b>C</b> termina en un borrador.</figcaption>
+</figure>
+
+<h3>Conectar</h3>
+
+<p>El botón Conectar (<code>Connect</code>) está activo solo en los harnesses detectados. Hace tres cosas, en este orden:</p>
+
+<ol>
+  <li>Genera el token y lo escribe en <code>agents/&lt;id&gt;.token</code>, con permisos <code>0600</code> donde el sistema los tiene. El token no viaja en la línea de comandos: lo lee el servidor MCP del archivo.</li>
+  <li>Abre la fila del agente en <code>agents.db</code> con la escala, los chats, el tope, la ventana y el ritmo que están en el formulario, y guarda el SHA-256 del token. El token en claro no entra en la tabla.</li>
+  <li>Registra el servidor MCP <code>whatfast</code> en la configuración de ese harness, con el comando y el <code>--agent &lt;id&gt;</code> que le toca, y avisa en qué archivo quedó. Antes de escribir un archivo que ya existía, deja una copia de respaldo.</li>
+</ol>
+
+<p>Al final la pantalla escribe la línea del resultado: «Claude Code está conectado. El servidor quedó registrado en …». Si la configuración no se pudo escribir, el agente ya quedó conectado y la línea dice cuál fue el error. Después hay que reiniciar el harness para que tome el servidor; Hermes además acepta <code>/reload-mcp</code>.</p>
+
+<h3>Desconectar</h3>
+
+<p>Desconectar (<code>Disconnect</code>) revoca la fila —le pone fecha de revocación— y borra <code>agents/&lt;id&gt;.token</code>. La conexión que ya hizo el saludo sigue con la identidad que tomó en el saludo: la revocación la alcanza cuando vuelve a conectarse. Lo que <strong>no</strong> hace todavía: sacar la entrada del servidor en la configuración del harness. Esa entrada queda y se borra a mano.</p>
+
+<h3>Cuando el archivo no está donde se lo busca</h3>
+
+<p>La ruta de la configuración de cada harness es una suposición sobre el sistema: un cliente que se movió, que se instaló en otra carpeta o que cambió el nombre de su archivo no se encuentra. Para eso están los dos botones de al lado:</p>
+
+<dl class="kv">
+  <dt>Elegir archivo de configuración…</dt>
+  <dd>Abre el selector de archivos del sistema, escribe el servidor <code>whatfast</code> en el archivo elegido y recuerda la ruta en <code>agents/&lt;id&gt;.config</code>. El siguiente Conectar escribe ahí sin preguntar. El formato lo decide la extensión: <code>.json</code>, <code>.jsonc</code>, <code>.toml</code> o <code>.yaml</code>.</dd>
+  <dt>Escribir el servidor de nuevo</dt>
+  <dd>Repite el registro con la ruta guardada, o con la de la ficha si no hay ninguna elegida. Sirve cuando la conexión quedó hecha pero la configuración del harness no se pudo escribir: el token y la fila ya están, falta la entrada.</dd>
+</dl>
+
+<p><b>OpenCode no se registra por su comando.</b> En Windows, el <code>opencode</code> del <code>PATH</code> suele ser un shim de Bun o de npm que no arranca desde otro proceso («bin executable does not exist on disk»), así que la ventana escribe el archivo <code>~/.config/opencode/opencode.jsonc</code> directamente, en <code>mcp.servers</code>, con la forma <code>{"type": "local", "command": [exe, "mcp", "--agent", "opencode"]}</code>. Los comentarios del encabezado se conservan; los del medio del archivo no sobreviven a la reescritura, y por eso queda la copia de respaldo.</p>
+
+<h3>Los permisos</h3>
+
+<p>La columna de la derecha abre con el harness en frente y el formulario <strong>Permisos</strong>. Cada control termina en la fila de <code>agents.db</code>:</p>
+
+<dl class="kv">
+  <dt>Alcance</dt>
+  <dd><strong>Solo leer</strong> (<code>read</code>), <strong>Borradores</strong> (<code>draft</code>) o <strong>Enviar sin preguntar</strong> (<code>send</code>). Son acumulativas: <code>send</code> incluye <code>draft</code>. La línea de al lado dice qué hace la elegida.</dd>
+  <dt>Chats</dt>
+  <dd><strong>Todos los chats</strong>, <strong>Solo chats directos</strong> o <strong>Chats elegidos</strong>. En el último caso aparece la lista del perfil con una marca por chat; los grupos están en la misma lista y llevan su etiqueta.</dd>
+  <dt>Mensajes por hora</dt>
+  <dd>El tope de envíos de la última hora. <code>0</code> es sin tope. El campo tiene que ser un número: si no, la pantalla responde «El tope por hora tiene que ser un número».</dd>
+  <dt>Ventana horaria</dt>
+  <dd><code>08:00-23:00</code>, en hora local. Vacío significa toda hora. Si el texto no es una ventana, la pantalla responde «La ventana horaria se escribe 08:00-23:00».</dd>
+  <dt>Ritmo</dt>
+  <dd>El botón alterna entre <strong>Ritmo humano</strong> y <strong>Instantáneo</strong>. Es la humanización de ese agente; no hay un interruptor global.</dd>
+</dl>
+
+<p><strong>Guardar permisos</strong> (<code>Save permissions</code>) escribe los cinco valores de una vez. Está deshabilitado mientras el harness no está conectado, porque no hay fila que escribir. La pantalla confirma con «Los permisos quedaron guardados».</p>
+
+<div class="note">
+  <p><b>Un agente nuevo no puede leer nada.</b> Arranca en <code>read</code>, con 20 mensajes por hora, ventana <code>08:00-23:00</code> y ritmo humano, pero en <strong>Chats elegidos</strong> sin ninguna marca. Una lista vacía no cubre ningún chat: hay que marcar los chats y guardar antes de que el agente vea algo.</p>
+</div>
+
+<h2 id="bandeja"><span class="n">10</span>La bandeja de borradores</h2>
+
+<p>La bandeja vive en la misma pantalla, debajo de los permisos. Pide los borradores en <code>proposed</code> y en <code>approved</code> —hasta cincuenta de cada estado— y los dibuja del más nuevo al más viejo dentro de cada estado: primero los propuestos, después los aprobados. Los <code>failed</code> no se muestran: quedan en <code>agents.db</code> con su motivo.</p>
+
+<p>Cada fila trae el título del chat, el agente que lo escribió, la fecha en el formato <code>{day} a las {time}</code>, el texto cortado a 150 caracteres y, cuando existe, el motivo con la forma «Por qué: …». La confianza se escribe en porcentaje o «Sin confianza». Un borrador aprobado lleva la etiqueta <strong>Aprobado</strong>.</p>
+
+<h3>Enviar</h3>
+
+<p><strong>Enviar</strong> (<code>Send</code>) manda el texto de verdad, por el mismo camino que el compositor: la ventana pide <code>SendText</code> y el backend lo pone en la sesión de WhatsApp. Mientras el pedido está en vuelo, los dos botones de la fila quedan deshabilitados. Cuando la respuesta llega bien, la fila desaparece de la bandeja y el borrador queda en <code>sent</code>; la pantalla avisa «El borrador se envió».</p>
+
+<p>Antes de mandar, la ventana exige la sesión conectada y un texto válido. Si no hay conexión, la bandeja responde «Reconectá a WhatsApp antes de enviar» y no manda nada.</p>
+
+<h3>Descartar</h3>
+
+<p><strong>Descartar</strong> (<code>Discard</code>) no manda: escribe el estado <code>discarded</code> en <code>agents.db</code> y saca la fila de la vista. El borrador no se puede recuperar desde la pantalla, pero la fila sigue en la base.</p>
+
+<h3>Cuando falla o vence el tiempo</h3>
+
+<p>Si el backend contesta con un error, la fila queda en <code>failed</code> y la pantalla muestra «No se pudo enviar el borrador: …» con el motivo del backend. Si el pedido no vuelve dentro del plazo, la fila también queda en <code>failed</code> y la pantalla dice «El borrador no se pudo enviar a tiempo».</p>
+
+<p>En los dos casos el borrador sale de la bandeja, porque la bandeja solo lista <code>proposed</code> y <code>approved</code>. El texto y el estado quedan en <code>agents.db</code>; el motivo del fallo se ve en la línea de la pantalla y la fila conserva el motivo que había puesto el agente.</p>
+
+<div class="note warn">
+  <p><b>El estado lo escribe la ventana.</b> La bandeja abre <code>agents.db</code>, manda el texto y anota <code>sent</code> o <code>failed</code> en la misma fila. El pedido <code>DraftFinish</code> existe para hacer ese mismo cierre por el puente, con el motivo del fallo; la bandeja de esta versión escribe la tabla directamente y no lo usa.</p>
+</div>
+
+<h2 id="rapido"><span class="n">11</span>El modo rápido</h2>
+
+<p>En un chat abierto, el botón <strong>Preguntar a un agente</strong> (<code>Ask an agent</code>) abre la tarjeta del modo rápido. El atajo es <kbd>ctrl-shift-q</kbd>. La tarjeta flota arriba a la derecha de la conversación, para que los mensajes que la respuesta necesita sigan a la vista. El atajo no hace nada en otra vista que no sea un chat.</p>
+
+<p>La tarjeta tiene un solo campo, «Preguntá sobre este chat», y el botón <strong>Preguntar</strong> (<code>Ask</code>). La tecla Intro en el campo hace lo mismo que el botón. Mientras espera, muestra «Pensando…» con un botón <strong>Cancelar</strong>; cancelar descarta la espera y la respuesta que llegue después se tira. La <kbd>Esc</kbd> cierra la tarjeta.</p>
+
+<p>Solo se ofrecen los agentes conectados que tienen modo headless: Claude Code, Codex, OpenCode y Pi. Si hay más de uno, la tarjeta muestra un botón por agente y el último elegido queda mientras siga conectado. Si no hay ninguno, dice «Conectá un agente primero».</p>
+
+<h3>Qué viaja en el pedido</h3>
+
+<p>El pedido lleva la pregunta y el contexto del chat que está en pantalla: los últimos <strong>60 mensajes</strong>, hasta <strong>6 000 caracteres</strong>, del más viejo al más nuevo, con una línea por mensaje y la forma <code>Remitente: texto</code>. Los mensajes propios se firman como «You»; los que no traen nombre, como «Unknown contact». Un mensaje sin texto no entra. Si el chat de la pregunta ya no es el que está en pantalla, el contexto va vacío y el agente contesta con la pregunta sola.</p>
+
+<h3>La respuesta</h3>
+
+<p>La respuesta del harness se escribe en el <strong>cuadro de texto</strong> del chat sobre el que se preguntó. No se manda: el botón de enviar del compositor sigue siendo del usuario. Si el chat cambió mientras el agente escribía, el texto espera en el borrador de ese chat.</p>
+
+<p>El plazo del pedido es de <strong>90 segundos</strong>. Pasado el plazo, la tarjeta dice «El agente no respondió a tiempo»; si el harness contesta con un error, dice «El agente no respondió: …». Un harness sin modo headless devuelve <code>failed_precondition</code> con el motivo que manda el backend.</p>
+
+<div class="note">
+  <p><b>Por qué no se manda solo.</b> El modo rápido es una pregunta, no una orden. El agente contesta con el chat como contexto y el usuario decide si ese texto va, si lo edita o si lo borra. Mandarlo automáticamente convertiría una consulta en un mensaje enviado.</p>
+</div>
+
+<h2 id="automatizaciones"><span class="n">12</span>Las automatizaciones</h2>
+
+<p>La sección <strong>Automatizaciones</strong> está debajo de la bandeja, en la misma pantalla. El encabezado cuenta las tareas y tiene el botón <strong>Tarea nueva</strong> (<code>New task</code>). La lista se lee del backend cada vez que se abre la pantalla Agentes.</p>
+
+<p>El alta es un formulario con estos campos:</p>
+
+<dl class="kv">
+  <dt>Agente</dt>
+  <dd>Un botón por harness conectado con modo headless. Si no hay ninguno, el formulario dice «Elegí primero un agente con modo sin ventana» y no deja guardar.</dd>
+  <dt>Chat</dt>
+  <dd>La lista de conversaciones de la ventana, con el chat abierto ya marcado. Si la ventana todavía no abrió ningún chat, ofrece las primeras cuarenta del perfil.</dd>
+  <dt>Tipo</dt>
+  <dd><strong>Una vez</strong> (<code>Once</code>, tarea <code>once</code>) o <strong>Cada tanto</strong> (<code>Every</code>, tarea <code>cron</code>).</dd>
+  <dt>Salida</dt>
+  <dd><strong>Leer</strong> (<code>Read</code>), <strong>Borrador</strong> (<code>Draft</code>) o <strong>Enviar</strong> (<code>Send</code>). El valor se guarda en la tarea y la fila lo muestra.</dd>
+  <dt>Cuándo</dt>
+  <dd>Para <strong>Una vez</strong>, un instante local con la forma <code>2026-10-26 09:00</code>. Para <strong>Cada tanto</strong>, una expresión cron de cinco campos.</dd>
+  <dt>Prompt</dt>
+  <dd>Lo que el agente tiene que hacer. Es un párrafo: el campo crece hasta seis líneas y la tecla Intro escribe un salto, no guarda.</dd>
+  <dt>Ventana</dt>
+  <dd><code>08:00-23:00</code> por defecto. Vacío significa cualquier hora. Hoy se aplica al próximo turno de una tarea <strong>Cada tanto</strong>; una tarea <strong>Una vez</strong> corre en el instante escrito.</dd>
+</dl>
+
+<p>El botón <strong>Guardar tarea</strong> (<code>Save task</code>) manda el alta y espera la respuesta con el formulario abierto: si el backend la rechaza, los valores quedan al lado del motivo. Si la acepta, el formulario se cierra y la lista se vuelve a leer. <strong>Cancelar</strong> cierra el formulario sin guardar.</p>
+
+<h3>La expresión cron</h3>
+
+<p>Son cinco campos: minuto, hora, día del mes, mes y día de la semana. Acepta <code>*</code>, un número, un rango <code>a-b</code>, un paso <code>*/n</code> o <code>a-b/n</code>, y listas separadas por coma. El domingo es <code>0</code> y también <code>7</code>. No acepta nombres de meses ni de días. Con menos o más de cinco campos, o con un valor fuera de rango, el backend contesta <code>… is not a cron of five fields</code>.</p>
+
+<pre>0 9 * * *     <span class="c">todos los días a las 09:00</span>
+30 8 * * 1-5  <span class="c">de lunes a viernes, a las 08:30</span>
+0 */2 * * *   <span class="c">cada dos horas, en punto</span></pre>
+
+<p>El próximo turno lo calcula el backend, no la ventana: toma la expresión o el instante, lo corre hasta la ventana horaria de la tarea y lo escribe. Por eso una tarea <code>cron</code> que caería a las 03:00 con ventana <code>08:00-23:00</code> no corre a las tres: espera la apertura, y una tarea <strong>Una vez</strong> fijada a las 03:00 también se mueve a las 08:00. Una expresión que no vuelve a caer, como el 30 de febrero, se rechaza en el alta con <code>the expression has no turn ahead</code>.</p>
+
+<h3>Pausar, reanudar y borrar</h3>
+
+<p>Cada fila de tarea muestra el agente y el chat, el estado (<strong>Corriendo</strong> o <strong>En pausa</strong>), el turno, la salida y la ventana, el prompt cortado a 120 caracteres y el próximo turno. Los botones son:</p>
+
+<ul>
+  <li><strong>Pausar</strong> (<code>Pause</code>): la tarea deja de vencer y la fila pasa a <strong>En pausa</strong>.</li>
+  <li><strong>Reanudar</strong> (<code>Resume</code>): vuelve a correr y el próximo turno se cuenta desde ese momento, no desde el que había quedado atrás.</li>
+  <li><strong>Borrar</strong> (<code>Delete</code>): la saca de la tabla. No pregunta y no se puede deshacer.</li>
+</ul>
+
+<p>Editar una tarea no está: el formulario siempre crea una nueva. Para cambiar el prompt o la hora hay que borrarla y crearla otra vez.</p>
+
+<h3>Qué pasa cuando vence</h3>
+
+<p>El backend mira cada 30 segundos las tareas vencidas (cada 60 si lo arrancó un agente). Escribe el turno siguiente <em>antes</em> de correr, así un harness colgado no dispara dos veces la misma tarea, y lanza el harness en un hilo aparte con un plazo de 120 segundos.</p>
+
+<p>Si el harness contesta, la respuesta queda como borrador en <code>proposed</code>, con el motivo <code>automatización: &lt;primera línea del prompt&gt;</code> y sin confianza. Si falla, no hay borrador: el intento queda anotado en la bitácora de llamadas con el motivo.</p>
+
+<div class="note warn">
+  <p><b>El límite real.</b> Una tarea nunca manda sola. Aunque la salida diga <strong>Enviar</strong>, la corrida de hoy termina en un borrador y el mensaje sale solo si el usuario aprieta Enviar en la bandeja. <strong>Leer</strong> también deja el texto como borrador: la salida elegida se guarda y se muestra, pero el backend todavía no la usa para callarse ni para mandar.</p>
+</div>
+
+<p>Una tarea solo corre mientras el backend está sirviendo. Con la ventana cerrada y sin ningún harness conectado no hay quién la dispare; el backend que arranca un harness se cierra solo a los diez minutos sin pedidos.</p>
+
+<h2 id="fallas"><span class="n">13</span>Cuando algo falla</h2>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Lo que ves</th><th>Causa</th><th>Qué hacer</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>the backend did not listen</code></td>
+      <td>La aplicación instalada es un release anterior al endpoint. La ventana abierta ocupa el perfil con un backend sin socket.</td>
+      <td>Actualizá la aplicación. Mientras tanto, probá con una copia del perfil (abajo).</td>
+    </tr>
+    <tr>
+      <td>Dos procesos quieren el perfil</td>
+      <td>La ventana abierta ya tiene la sesión y el backend.</td>
+      <td>Es lo esperado: el servidor MCP se cuelga de ese backend y la sesión sigue siendo una sola. Para probar aparte, usá una copia del perfil.</td>
+    </tr>
+    <tr>
+      <td><code>unauthorized</code> con "the token of … does not match"</td>
+      <td>El token del cliente no coincide con el de <code>agents.db</code>. La conexión queda rechazada mientras dure.</td>
+      <td>Volvé a conectar el agente para que se escriba el token nuevo, y reiniciá el cliente.</td>
+    </tr>
+    <tr>
+      <td><code>unauthorized</code> con "was disconnected"</td>
+      <td>El agente está revocado en <code>agents.db</code>.</td>
+      <td>Conectalo otra vez.</td>
+    </tr>
+    <tr>
+      <td><code>forbidden</code></td>
+      <td>La escala no alcanza, el chat no está en la lista, o el pedido no es de un agente (ajustes, sesión, llamadas, borrados).</td>
+      <td>Ampliá el permiso del agente o del chat. Si el pedido no es de lectura ni de escritura de mensajes, no hay nada que ampliar.</td>
+    </tr>
+    <tr>
+      <td><code>out_of_window</code></td>
+      <td>Es fuera de la ventana horaria del agente. El mensaje no salió.</td>
+      <td>Mandalo dentro de la ventana o ampliala. La respuesta dice el horario vigente.</td>
+    </tr>
+    <tr>
+      <td><code>rate_limited</code></td>
+      <td>El agente ya llegó a su tope de envíos en la última hora.</td>
+      <td>Esperá. La respuesta dice cuántos mandó y cuál es el techo.</td>
+    </tr>
+    <tr>
+      <td>Un envío devuelve un borrador en vez de un mensaje</td>
+      <td>El chat no está habilitado para enviar. <code>message_send</code> no falla: deja el texto como borrador para no perderlo.</td>
+      <td>Habilita el chat para enviar, o mandá el borrador desde la bandeja.</td>
+    </tr>
+    <tr>
+      <td>Un borrador queda en <code>failed</code> y desaparece de la bandeja</td>
+      <td>El envío falló o el pedido no volvió a tiempo. La bandeja solo lista <code>proposed</code> y <code>approved</code>.</td>
+      <td>Mirá la conexión de WhatsApp. El motivo se vio en la línea de la pantalla y el estado quedó en <code>drafts</code>; reintentar desde la bandeja todavía no existe.</td>
+    </tr>
+    <tr>
+      <td>La tarjeta del modo rápido dice «Conectá un agente primero»</td>
+      <td>No hay ningún agente conectado con modo headless. Cursor, Claude Desktop, VS Code y Hermes no cuentan.</td>
+      <td>Conectá Claude Code, Codex, OpenCode o Pi.</td>
+    </tr>
+    <tr>
+      <td>La tarjeta dice «El agente no respondió a tiempo»</td>
+      <td>El harness pasó los 90 segundos o quedó colgado. La corrida se mata.</td>
+      <td>Repetí la pregunta. Si vuelve a pasar, revisá la sesión y el login de ese harness.</td>
+    </tr>
+    <tr>
+      <td>La tarea no se guarda y el motivo dice <code>… is not a cron of five fields</code></td>
+      <td>La expresión tiene menos o más de cinco campos, o nombres de días o meses.</td>
+      <td>Usá cinco campos numéricos, por ejemplo <code>0 9 * * *</code>.</td>
+    </tr>
+    <tr>
+      <td>La tarea está guardada pero no dispara</td>
+      <td>Está en pausa, no tiene próximo turno, o la hora cae fuera de su ventana. También pasa si el backend no está sirviendo.</td>
+      <td>Reanudala, mirá el próximo turno en la fila y dejá la ventana abierta o un harness conectado.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>Si el perfil está ocupado por la ventana y no querés cerrarla, apuntá a una copia:</p>
+
+<pre>copy %LOCALAPPDATA%\whatfast\chats.db* %TEMP%\wf-mcp-test\
+python scripts\probar-mcp.py --data-dir %TEMP%\wf-mcp-test --esperar-ms 8000</pre>
+
+<p>Los códigos de las herramientas MCP llegan como error de la herramienta, con <code>retryable: false</code>. El mensaje está en inglés porque lo lee el modelo; el usuario lo ve en la ventana. Los pedidos de la ventana llevan su propio <code>retryable</code>: un plazo agotado o un harness que no arranca se puede reintentar.</p>
+
+<h2 id="limites"><span class="n">14</span>Límites honestos</h2>
+
+<p>Esto es lo que el producto hace hoy y lo que no.</p>
+
+<ul>
+  <li><strong>No se edita una tarea existente.</strong> La pantalla crea, pausa, reanuda y borra. Para cambiar el prompt, el chat o la hora hay que borrar la tarea y crearla otra vez. El backend ya acepta un <code>id</code> para reescribir una fila.</li>
+  <li><strong>Desconectar no limpia la configuración del harness.</strong> Revoca el token y la fila de <code>agents.db</code>, pero la entrada <code>whatfast</code> queda en el archivo del cliente y se saca a mano.</li>
+  <li><strong>No se reintenta un borrador fallido.</strong> La bandeja no muestra los <code>failed</code> ni tiene un botón para volver a mandarlos. El texto y el estado quedan en <code>agents.db</code>.</li>
+  <li><strong>Cuatro clientes no tienen modo headless.</strong> Cursor, Claude Desktop, VS Code y Hermes leen y escriben por MCP, pero Whatfast no les puede pedir una respuesta por su cuenta: no tienen un comando de una sola pasada. Los que sí lo tienen son Claude Code (<code>claude -p</code>), Codex (<code>codex exec</code>), OpenCode (<code>opencode run</code>) y Pi (<code>pi --print</code>). Una pregunta del modo rápido o una tarea con uno de esos cuatro falla con un error de modo headless.</li>
+  <li><strong>Una tarea nunca manda sola.</strong> El cronómetro corre la tarea y deja un borrador, también con la salida Enviar. Una tarea solo corre mientras el backend está sirviendo: con la ventana cerrada y sin ningún agente conectado no hay quién la dispare.</li>
+  <li><strong>Una sesión, un backend.</strong> La sesión de WhatsApp es una sola. Dos perfiles son dos tuberías distintas; el mismo perfil es la misma tubería.</li>
+  <li><strong>El agente no cambia ajustes.</strong> No toca la sesión, no hace llamadas, no borra. Su alcance es leer, proponer y mandar. Las automatizaciones y la guía del agente son del usuario: un agente del socket las recibe con <code>forbidden</code>.</li>
+</ul>
+
+</main>
+
+<footer>
+  <p>Documento del 26/10/2026. Describe el código de esta rama, con la pantalla Agentes, la bandeja de borradores, el modo rápido y las automatizaciones ya en la ventana.</p>
+  <p>Fuentes: <code>docs/agentes.md</code>; <code>crates/whatfast-ui/src/agents_panel.rs</code>; <code>crates/whatfast-ui/src/quick_ask.rs</code>; <code>crates/whatfast-ui/src/automations_panel.rs</code>; <code>crates/whatfast-wa/src/guides.rs</code>; <code>crates/whatfast-wa/src/drafts.rs</code>; <code>crates/whatfast-wa/src/schedules.rs</code>; <code>crates/whatfast-wa/src/scheduler.rs</code>; <code>crates/whatfast-auto/src/grant.rs</code>; <code>crates/whatfast-auto/src/humanize.rs</code>; <code>crates/whatfast-auto/src/cron.rs</code>; <code>crates/whatfast-auto/src/runner.rs</code>; <code>crates/whatfast-mcp/src/tools.rs</code>; <code>crates/whatfast-agents/src/spec.rs</code>; <code>crates/whatfast-protocol/src/local.rs</code>.</p>
+</footer>
+
+</body>
+</html>

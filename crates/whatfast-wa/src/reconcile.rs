@@ -24,6 +24,12 @@ use crate::ingest::chat_upserted;
 ///
 /// Answers the canonical jid and the folds it performed, so the caller can
 /// tell the desktop which rows retired.
+///
+/// The port: the Go picked the hidden-identity chat as the winner and stored
+/// it as the preferred address of an opaque chat id. This store keys a chat
+/// by its address, so the winner has to be the address the contacts table and
+/// the user-facing identity use: the phone number. The chat_merge events and
+/// the redirects carry the rest.
 pub fn canonical_chat(
     store: &Store,
     identity: &Identity,
@@ -56,6 +62,15 @@ pub fn canonical_chat(
         .filter(|chat| **chat != winner)
         .cloned()
         .collect();
+    // A chat row that still carries an alias as its id is a loser even when
+    // no address points at it: the Go's resolveChatTx looks at the row
+    // first, and leaving that row behind would split the person in two and
+    // never converge.
+    for alias in &aliases {
+        if *alias != winner && matches!(store.chat(alias), Ok(Some(_))) {
+            losers.insert(alias.clone());
+        }
+    }
     for alias in &aliases {
         if let Ok(Some((old, new))) = store.adopt_address(alias, &winner)
             && old != winner
@@ -64,6 +79,11 @@ pub fn canonical_chat(
             losers.insert(old);
         }
     }
+    // A pass that started before another one folded the pair finds the loser
+    // gone: there is nothing to move and nothing to announce. Without this
+    // guard both passes announce the same fold, and the second merge trips on
+    // the missing row.
+    losers.retain(|loser| loser != &winner && matches!(store.chat(loser), Ok(Some(_))));
     let mut folds = Vec::new();
     for loser in losers {
         if let Err(error) = store.merge_chats(&winner, &loser) {
@@ -77,6 +97,12 @@ pub fn canonical_chat(
 
 /// Teaches the store the phone's contact names. Answers the jids whose
 /// contact row changed.
+///
+/// The pass runs on every connection, every finished history and every
+/// contact update the phone sends, over the whole agenda (the real profile
+/// carries 1344 contact rows). A row that already says what the agenda says
+/// is left alone: the write transaction it would take is what made the pass
+/// expensive, not the read.
 pub fn learn_names(store: &Store, identity: &Identity) -> Vec<String> {
     let mut changed = Vec::new();
     for contact in identity.phone_contacts() {
@@ -89,6 +115,15 @@ pub fn learn_names(store: &Store, identity: &Identity) -> Vec<String> {
             continue;
         }
         for jid in identity.aliases(&contact.jid) {
+            if !is_stale(
+                store,
+                &jid,
+                name,
+                &contact.push_name,
+                &contact.business_name,
+            ) {
+                continue;
+            }
             if store
                 .learn_contact(&jid, name, &contact.push_name, &contact.business_name)
                 .unwrap_or(false)
@@ -98,6 +133,25 @@ pub fn learn_names(store: &Store, identity: &Identity) -> Vec<String> {
         }
     }
     changed
+}
+
+/// Whether the stored contact row still has to learn something the agenda
+/// knows. An empty agenda field never erases a stored one, so it never counts
+/// as news.
+fn is_stale(
+    store: &Store,
+    jid: &str,
+    contact_name: &str,
+    push_name: &str,
+    business_name: &str,
+) -> bool {
+    let Ok(Some((stored_name, stored_push, stored_business, _))) = store.contact(jid) else {
+        return true;
+    };
+    let name_matches = contact_name.is_empty() || stored_name == contact_name;
+    let push_matches = push_name.is_empty() || stored_push == push_name;
+    let business_matches = business_name.is_empty() || stored_business == business_name;
+    !(name_matches && push_matches && business_matches)
 }
 
 /// The full pass: every hidden-identity chat folds into its phone-number

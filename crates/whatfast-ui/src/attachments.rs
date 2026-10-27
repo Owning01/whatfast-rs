@@ -24,8 +24,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement as _, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    App, Context, FontWeight, InteractiveElement as _, ObjectFit, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px, relative, rgb,
+    rgba,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use whatfast_i18n as i18n;
@@ -86,6 +87,12 @@ const DETAILS_SIZE: f32 = 11.5;
 /// of eleven and a half pixels.
 const ERROR_SIZE: f32 = 11.5;
 
+/// El alto de la fila de los datos del video, antes de la escala.
+const VIDEO_META_HEIGHT: f32 = 40.;
+
+/// El espacio entre la caja del video y su fila de datos, antes de la escala.
+const VIDEO_META_GAP: f32 = 6.;
+
 /// The height of the card, for the measure of the messages.
 ///
 /// port: the card of the oracle is as tall as the circle of its icon, plus
@@ -103,6 +110,13 @@ fn card_height(scale: f32, failed: bool) -> Pixels {
 /// The height of the player of a voice note, for the measure of the messages.
 fn voice_note_height(scale: f32) -> Pixels {
     px(ICON_SIZE * scale + 2.)
+}
+
+/// El alto del reproductor de video, para la medida de los mensajes: la caja
+/// con la forma del archivo y la fila de los datos.
+fn video_height(attachment: &proto::AttachmentContent, scale: f32) -> Pixels {
+    let (_, height) = crate::video::video_box_size(attachment.width, attachment.height, scale);
+    px(height + (VIDEO_META_HEIGHT + VIDEO_META_GAP) * scale + 2.)
 }
 
 /// Whether the note can play here: it is a voice note and its file is in the
@@ -273,6 +287,10 @@ impl Whatfast {
         if is_playable_voice_note(attachment) {
             return voice_note_height(self.ui_scale);
         }
+        // El video se mira en su caja, con los mandos debajo.
+        if crate::video::is_video(attachment) {
+            return video_height(attachment, self.ui_scale);
+        }
         let failed = self
             .attachment_failures
             .contains_key(&(message.chat_id.clone(), message.id.clone()));
@@ -422,6 +440,203 @@ impl Whatfast {
     ///
     /// The caption of the attachment is NOT here: it goes under the card, as
     /// the text of the bubble, with [`bubble_text`].
+    /// El reproductor de un video: la caja con el cuadro que va saliendo, el
+    /// boton de reproducir y la barra del tiempo.
+    ///
+    /// El archivo se mira aca adentro y nunca sale al reproductor del
+    /// sistema. Un video que todavia no esta en el disco muestra la misma
+    /// caja, y el primer boton de reproducir pide el archivo y arranca
+    /// cuando llega.
+    pub(crate) fn render_video(
+        &self,
+        index: usize,
+        message: &proto::Message,
+        attachment: &proto::AttachmentContent,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let scale = self.ui_scale;
+        let key = (message.chat_id.clone(), message.id.clone());
+        let playback = self.video.is_for(&key).then_some(&self.video);
+        let (width, height) =
+            crate::video::video_box_size(attachment.width, attachment.height, scale);
+        let playing = playback.is_some_and(|playback| playback.is_running());
+        let waiting = playback.is_some_and(|playback| playback.waiting);
+        let position = playback.map_or(0.0, |playback| playback.position);
+        let duration = playback
+            .map(|playback| playback.duration)
+            .filter(|duration| *duration > 0.0)
+            .unwrap_or(attachment.duration_seconds as f32);
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let frame = playback.and_then(|playback| playback.frame.clone());
+        let has_frame = frame.is_some();
+        let error = playback.and_then(|playback| playback.error.clone());
+        let play_chat_id = message.chat_id.clone();
+        let play_message_id = message.id.clone();
+        let save_chat_id = message.chat_id.clone();
+        let save_message_id = message.id.clone();
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let hovered = cx.theme().muted;
+        let danger = cx.theme().danger;
+        let title = if waiting {
+            i18n::t("Downloading the video").to_string()
+        } else {
+            attachment_name(attachment)
+        };
+
+        v_flex()
+            .min_w_0()
+            .child(
+                div()
+                    .id(("video-player", index))
+                    .relative()
+                    .w(px(width))
+                    .max_w_full()
+                    .h(px(height))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .bg(rgb(0x0f0f0f))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_video_playback(
+                            play_chat_id.clone(),
+                            play_message_id.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+                    .when_some(frame, |player, frame| {
+                        player.child(img(frame).w_full().h_full().object_fit(ObjectFit::Contain))
+                    })
+                    .when(!has_frame, |player| {
+                        // Sin cuadro todavia: el icono del video, que es lo
+                        // que se ve mientras se baja el archivo.
+                        player.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(WhatfastIcon::Video)
+                                        .with_size(px(38. * scale))
+                                        .text_color(muted),
+                                ),
+                        )
+                    })
+                    // El boton del medio: reproducir o pausar.
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px(54. * scale))
+                                    .rounded_full()
+                                    .bg(rgba(0x000000a6))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(if playing {
+                                            WhatfastIcon::Pause
+                                        } else {
+                                            WhatfastIcon::Play
+                                        })
+                                        .with_size(px(24. * scale))
+                                        .text_color(rgb(0xffffff)),
+                                    ),
+                            ),
+                    )
+                    // La barra del tiempo, pegada al borde de abajo.
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(3. * scale))
+                            .bg(rgba(0x00000066))
+                            .child(div().h_full().w(relative(progress)).bg(accent)),
+                    ),
+            )
+            // La fila de los datos del archivo, con la flecha de la descarga.
+            .child(
+                h_flex()
+                    .mt(px(VIDEO_META_GAP * scale))
+                    .gap(px(CARD_GAP * scale))
+                    .h(px(VIDEO_META_HEIGHT * scale))
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(NAME_SIZE * scale))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(DETAILS_SIZE * scale))
+                                    .text_color(muted)
+                                    .child(format!(
+                                        "{} / {}",
+                                        format_clock(position),
+                                        format_clock(duration)
+                                    )),
+                            ),
+                    )
+                    .when(
+                        !attachment.local_path.is_empty() || attachment.downloadable,
+                        |row| {
+                            row.child(
+                                div()
+                                    .id(("video-save", index))
+                                    .p(px(4. * scale))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(hovered))
+                                    .child(
+                                        Icon::new(WhatfastIcon::Download)
+                                            .with_size(px(DOWNLOAD_SIZE * scale))
+                                            .text_color(muted),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.save_message_attachment(
+                                            save_chat_id.clone(),
+                                            save_message_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                        },
+                    ),
+            )
+            .when_some(error, |player, error| {
+                player.child(
+                    div()
+                        .mt(px(4. * scale))
+                        .text_size(px(ERROR_SIZE * scale))
+                        .text_color(danger)
+                        .child(error),
+                )
+            })
+    }
+
     pub(crate) fn render_attachment_card(
         &self,
         index: usize,
@@ -433,6 +648,11 @@ impl Whatfast {
         // como en la referencia, y no en el programa del sistema.
         if is_playable_voice_note(attachment) {
             return self.render_voice_note(index, message, attachment, cx);
+        }
+        // El video se mira en la burbuja, con su reproductor: el archivo no
+        // sale al programa del sistema.
+        if crate::video::is_video(attachment) {
+            return self.render_video(index, message, attachment, cx);
         }
         let scale = self.ui_scale;
         let name = attachment_name(attachment);

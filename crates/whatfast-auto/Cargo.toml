@@ -1,0 +1,31 @@
+[package]
+name = "whatfast-auto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The agents database, their grants, the human pace and the schedule of the automations."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# The agents database shares the SQLite the sidecar already carries, bundled so
+# the binary keeps no external dependency.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# The JSON of the chat filter and of the detail of a call.
+serde_json = "1.0"
+# The token never reaches the database: `agents` keeps its SHA-256.
+sha2 = "0.10"
+# The token files of the agents, one per harness, live next to the database.
+whatfast-agents = { path = "../whatfast-agents" }
+
+# The offset of the local time zone: `std` has no time zone database, so the
+# question goes to the system that knows it. The window of a grant and the next
+# turn of a schedule are read in local time.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

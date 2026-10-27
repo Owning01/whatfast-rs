@@ -1,8 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/whatfast-agents",
+    "crates/whatfast-auto",
     "crates/whatfast-core",
     "crates/whatfast-i18n",
+    "crates/whatfast-mcp",
     "crates/whatfast-model",
     "crates/whatfast-protocol",
     "crates/whatfast-ui",
@@ -10,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.19"
 edition = "2024"
 # 1.88 is the floor of `opus-pure`, the pure-Rust encoder of the voice notes
 # (`whatfast-ui`): the rest of the workspace compiles with less.

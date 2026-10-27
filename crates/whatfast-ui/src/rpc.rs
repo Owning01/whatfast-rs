@@ -248,6 +248,23 @@ pub(crate) enum PendingRequest {
     },
     /// Asks the sidecar to stop.
     Shutdown,
+    /// The fast mode of the chat: one question about the conversation, put to
+    /// an agent that answers without a window.
+    AgentAsk {
+        chat_id: String,
+    },
+    /// The automations of the profile: the tasks of the timer.
+    Schedules,
+    /// Creates one task of the timer, or rewrites one the user already has.
+    SchedulePut,
+    /// Pauses one task of the timer, or lets it run again.
+    SchedulePause {
+        id: i64,
+    },
+    /// Removes one task of the timer for good.
+    ScheduleRemove {
+        id: i64,
+    },
 }
 
 impl PendingRequest {
@@ -283,7 +300,8 @@ impl PendingRequest {
             | Self::PinnedMessages { .. }
             | Self::Statuses
             | Self::Newsletters
-            | Self::NewsletterMessages { .. } => RequestClass::Read,
+            | Self::NewsletterMessages { .. }
+            | Self::Schedules => RequestClass::Read,
             Self::Pairing
             | Self::SetTyping
             | Self::SendText { .. }
@@ -312,14 +330,22 @@ impl PendingRequest {
             | Self::SetChatPin { .. }
             | Self::SetChatArchive { .. }
             | Self::SetChatMute { .. }
-            | Self::SetChatBlock { .. } => RequestClass::Write,
+            | Self::SetChatBlock { .. }
+            | Self::SchedulePut
+            | Self::SchedulePause { .. }
+            | Self::ScheduleRemove { .. } => RequestClass::Write,
             // port: the origin had no deadline for these two, because its
             // transport had none. The one of the bridge gives the uploads and
             // the downloads of media twenty two minutes, which is what a big
             // file over a slow link needs.
-            Self::SendAttachment { .. } | Self::MessageAttachment { .. } => {
-                RequestClass::Attachment
-            }
+            //
+            // The question of the fast mode takes the same class for another
+            // reason: the harness gives a question ninety seconds, more than
+            // the sixty of a write, and an answer the client stopped waiting
+            // for would be thrown away while the backend was still writing it.
+            Self::SendAttachment { .. }
+            | Self::MessageAttachment { .. }
+            | Self::AgentAsk { .. } => RequestClass::Attachment,
         }
     }
 

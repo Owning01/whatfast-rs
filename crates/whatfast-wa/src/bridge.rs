@@ -33,7 +33,8 @@ pub enum FrameError {
 }
 
 /// Reads one length-prefixed envelope. `Err(FrameError::Closed)` marks a
-/// clean end of the stream.
+/// clean end of the stream: EOF exactly at a frame boundary. EOF inside a
+/// frame's payload is a truncated frame, an error like any other.
 pub fn read_frame(reader: &mut impl Read) -> Result<Envelope, FrameError> {
     let mut header = [0u8; 4];
     read_exact(reader, &mut header)?;
@@ -42,7 +43,7 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Envelope, FrameError> {
         return Err(FrameError::Length { length });
     }
     let mut payload = vec![0u8; length as usize];
-    read_exact(reader, &mut payload)?;
+    read_payload(reader, &mut payload)?;
     let envelope = Envelope::decode(payload.as_slice())?;
     // The backend only ever receives requests from the desktop; a response or
     // event frame here means the stream is out of sync.
@@ -68,21 +69,36 @@ pub fn write_frame(writer: &mut impl Write, envelope: &Envelope) -> Result<(), F
 }
 
 /// `Read::read_exact` reports EOF through an error whose kind is not distinct
-/// from a broken pipe, so the length is read byte-tolerantly to tell a clean
-/// close after a frame boundary from a truncated frame.
+/// from a broken pipe, so the header is read byte-tolerantly to tell a clean
+/// close at a frame boundary from a truncated frame.
 fn read_exact(reader: &mut impl Read, buffer: &mut [u8]) -> Result<(), FrameError> {
     let mut filled = 0;
     while filled < buffer.len() {
         match reader.read(&mut buffer[filled..])? {
             0 if filled == 0 => return Err(FrameError::Closed),
-            0 => {
-                return Err(FrameError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "truncated frame",
-                )));
-            }
+            0 => return Err(truncated()),
             n => filled += n,
         }
     }
     Ok(())
+}
+
+/// The payload reader has no clean-close case: the header committed the
+/// stream to this many bytes, so any EOF here leaves a half-frame behind.
+fn read_payload(reader: &mut impl Read, buffer: &mut [u8]) -> Result<(), FrameError> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..])? {
+            0 => return Err(truncated()),
+            n => filled += n,
+        }
+    }
+    Ok(())
+}
+
+fn truncated() -> FrameError {
+    FrameError::Io(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "truncated frame",
+    ))
 }

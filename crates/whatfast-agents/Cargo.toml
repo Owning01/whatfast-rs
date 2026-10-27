@@ -1,0 +1,12 @@
+[package]
+name = "whatfast-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The catalog of agent harnesses: how each one is detected, registered and run."
+
+[dependencies]
+serde_json = "1.0"
+getrandom = "0.2"

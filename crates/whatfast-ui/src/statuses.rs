@@ -1474,10 +1474,29 @@ fn spawn_advance(
 }
 
 /// Draws the content of one message of a status.
+///
+/// The file of a status is downloaded only when its conversation is opened,
+/// and the conversation of the statuses is never opened; the preview of the
+/// status is the JPEG thumbnail that travels with the message, the same one
+/// the bubble of a chat draws while the file is on its way.
 fn render_message(message: &Message, scale: f32, cx: &mut Context<Whatfast>) -> gpui::Div {
     if let Some(path) = message_image_path(message) {
         return div().max_w(px(320. * scale)).child(
             img(PathBuf::from(path))
+                .max_w(px(320. * scale))
+                .max_h(px(320. * scale))
+                .object_fit(ObjectFit::Contain),
+        );
+    }
+    if let Some(Content::Image(image)) = &message.content
+        && !image.jpeg_thumbnail.is_empty()
+    {
+        let thumbnail = std::sync::Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Jpeg,
+            image.jpeg_thumbnail.clone(),
+        ));
+        return div().max_w(px(320. * scale)).child(
+            img(thumbnail)
                 .max_w(px(320. * scale))
                 .max_h(px(320. * scale))
                 .object_fit(ObjectFit::Contain),

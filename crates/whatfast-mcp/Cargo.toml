@@ -1,0 +1,34 @@
+[package]
+name = "whatfast-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The MCP server of Whatfast: seven tools over the local bridge, spoken on stdio."
+
+[dependencies]
+# The same envelopes the desktop speaks: the server forwards them to the
+# backend through the local endpoint and never invents its own contract.
+whatfast-protocol = { path = "../whatfast-protocol" }
+# The pace of a person and the grant that turns it on: the server reads them
+# from `agents.db`, which the application writes.
+whatfast-auto = { path = "../whatfast-auto" }
+# The local endpoint is a Windows pipe or a Unix socket, and both have to be
+# driven with overlapped I/O: a synchronous pipe handle serializes its
+# operations, so a pending read would block the next write forever.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+# The queues between the blocking server loop and the connection tasks.
+async-channel.workspace = true
+# The JSON of the MCP protocol and of the tool arguments.
+serde_json = "1.0"
+# Encoding and decoding the envelopes of the bridge.
+prost.workspace = true
+# A UUID for the sends, generated the way the desktop generates it.
+getrandom = "0.2"
+
+[dev-dependencies]
+# The end-to-end tests build a profile of their own: the chats database it
+# serves and the agents database that holds the grant of the test.
+whatfast-wa = { path = "../whatfast-wa" }
+whatfast-auto = { path = "../whatfast-auto" }

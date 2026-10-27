@@ -81,6 +81,9 @@ pub(crate) enum NavAction {
     /// The channels of the newsletters: they are not conversations, so they
     /// live in their own view.
     Channels,
+    /// The agent harnesses of this machine and their drafts: they have their
+    /// own view too.
+    Agents,
     /// The conversations that were archived.
     Archived,
     /// The privacy section of the settings.
@@ -109,6 +112,8 @@ impl NavAction {
             // The channels are a bubble of messages, the glyph of the
             // reference.
             NavAction::Channels => WhatfastIcon::Messages.into(),
+            // The agents are a robot: the set of gpui_component has one.
+            NavAction::Agents => IconName::Bot.into(),
             // The archived conversations go into a box: the set of Whatfast
             // has the archive, the one of gpui_component no.
             NavAction::Archived => WhatfastIcon::Archive.into(),
@@ -124,6 +129,7 @@ impl NavAction {
             NavAction::Search
             | NavAction::States
             | NavAction::Channels
+            | NavAction::Agents
             | NavAction::Archived
             | NavAction::Privacy
             | NavAction::Settings => ICON_SIZE,
@@ -140,6 +146,7 @@ impl NavAction {
             NavAction::Search => "Quick search (Ctrl+K)",
             NavAction::States => "States",
             NavAction::Channels => "Channels",
+            NavAction::Agents => "Agents",
             NavAction::Archived => "Archived",
             NavAction::Privacy => "Privacy architecture",
             NavAction::Settings => "Settings",
@@ -171,6 +178,8 @@ pub(crate) struct NavRail {
     states_open: bool,
     /// The view of the channels is open.
     channels_open: bool,
+    /// The view of the agents is open.
+    agents_open: bool,
     /// The view of the archived conversations is open.
     archived_open: bool,
     /// The settings panel is open.
@@ -189,6 +198,7 @@ impl std::fmt::Debug for NavRail {
             .field("sidebar_open", &self.sidebar_open)
             .field("states_open", &self.states_open)
             .field("channels_open", &self.channels_open)
+            .field("agents_open", &self.agents_open)
             .field("archived_open", &self.archived_open)
             .field("settings_open", &self.settings_open)
             .field("scale", &self.scale)
@@ -204,6 +214,7 @@ impl NavRail {
             sidebar_open: true,
             states_open: false,
             channels_open: false,
+            agents_open: false,
             archived_open: false,
             settings_open: false,
             scale: normalized_ui_scale(scale),
@@ -260,6 +271,16 @@ impl NavRail {
         self.channels_open = open;
     }
 
+    /// Whether the view of the agents is open.
+    pub(crate) fn agents_open(&self) -> bool {
+        self.agents_open
+    }
+
+    /// The view of the agents is open, or it is closed.
+    pub(crate) fn set_agents_open(&mut self, open: bool) {
+        self.agents_open = open;
+    }
+
     /// Whether the view of the archived conversations is open.
     pub(crate) fn archived_open(&self) -> bool {
         self.archived_open
@@ -308,6 +329,7 @@ impl NavRail {
                 active: self.sidebar_open
                     && !self.states_open
                     && !self.channels_open
+                    && !self.agents_open
                     && !self.archived_open,
                 enabled: self.link == LinkState::Linked,
             },
@@ -328,6 +350,13 @@ impl NavRail {
                 // The channels are their own view too.
                 active: self.channels_open,
                 enabled: self.link == LinkState::Linked,
+            },
+            NavButton {
+                action: NavAction::Agents,
+                // The agents are their own view: the screen of the harnesses
+                // and the tray of their drafts.
+                active: self.agents_open,
+                enabled: true,
             },
         ]
     }
@@ -514,9 +543,10 @@ mod tests {
                 NavAction::Chats,
                 NavAction::Search,
                 NavAction::States,
-                NavAction::Channels
+                NavAction::Channels,
+                NavAction::Agents
             ],
-            "the chats and the search are above the spacer, and the states and the channels with them"
+            "the chats and the search are above the spacer, and the states, the channels and the agents with them"
         );
         assert_eq!(
             bottom,
@@ -557,6 +587,17 @@ mod tests {
     }
 
     #[test]
+    fn the_button_of_the_agents_is_active_when_the_view_is_open() {
+        let mut rail = rail();
+        assert!(!rail.top_buttons()[4].active);
+        rail.set_agents_open(true);
+        assert!(rail.top_buttons()[4].active);
+        assert!(rail.agents_open());
+        // The chats and the agents are two views of the same column.
+        assert!(!rail.top_buttons()[0].active);
+    }
+
+    #[test]
     fn the_button_of_the_archived_is_active_when_the_view_is_open() {
         let mut rail = rail();
         assert!(!rail.bottom_buttons()[0].active);
@@ -583,6 +624,10 @@ mod tests {
         assert!(!rail.top_buttons()[1].enabled, "the search");
         assert!(!rail.top_buttons()[2].enabled, "the states");
         assert!(!rail.top_buttons()[3].enabled, "the channels");
+        assert!(
+            rail.top_buttons()[4].enabled,
+            "the agents of the machine do not need a linked device"
+        );
         assert!(!rail.bottom_buttons()[0].enabled, "the archived");
         assert!(!rail.bottom_buttons()[1].enabled, "the privacy");
         assert!(

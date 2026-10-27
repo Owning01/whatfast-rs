@@ -283,31 +283,64 @@ impl EventPump {
 
     /// Writes a history-sync chunk into the store and announces it. The
     /// initial sync arrives in compressed chunks; each chunk is one pass.
+    ///
+    /// The Go's completeness rule is the oracle: only `FULL` and `RECENT`
+    /// chunks that reach 100% can finish the initial sync, and a chunk that
+    /// could not be decoded or stored fails it. The counters are the Go's:
+    /// received, decoded and failed message totals beside the processed ones.
     fn ingest_history(&self, lazy: &wacore::types::events::LazyHistorySync) {
+        let sync_type = lazy.sync_type();
+        let on_demand = lazy.peer_data_request_session_id().is_some();
+        // HistorySyncType: INITIAL_BOOTSTRAP = 0, FULL = 2, RECENT = 3.
+        let contributes = matches!(sync_type, 0 | 2 | 3);
+        let terminal = matches!(sync_type, 2 | 3);
+        let progress = lazy.progress().unwrap_or(0);
         let Some(parsed) = lazy.get() else {
             tracing::warn!("a history chunk failed to decode");
+            if contributes {
+                self.record_history(
+                    HistoryCounters {
+                        progress,
+                        terminal,
+                        ..HistoryCounters::default()
+                    },
+                    true,
+                );
+            }
             return;
         };
         crate::ingest::learn_history_contacts(&self.store, parsed);
-        let on_demand = lazy.peer_data_request_session_id().is_some();
-        if !on_demand {
-            let mut status = self.state.sync_status();
-            status.phase = whatfast_protocol::SyncPhase::InitialHistory as i32;
-            status.revision += 1;
-            self.state.set_sync(status.clone());
-            let _ = status;
+        let mut counters = HistoryCounters {
+            progress,
+            terminal,
+            ..HistoryCounters::default()
+        };
+        for conversation in &parsed.conversations {
+            for entry in &conversation.messages {
+                counters.received += 1;
+                // What the Go counted as decoded is what carries a body; the
+                // rest failed its parse and must fail the chunk.
+                let decodable = entry
+                    .message
+                    .as_option()
+                    .is_some_and(|web| web.message.as_option().is_some());
+                if decodable {
+                    counters.decoded += 1;
+                } else {
+                    counters.failed += 1;
+                }
+            }
         }
         let conversations = crate::ingest::history_conversations(parsed);
-        let mut chats: u64 = 0;
-        let mut messages: u64 = 0;
         for conversation in &conversations {
             match crate::ingest::store_conversation(&self.store, &self.identity, conversation) {
                 Ok((event, stored)) => {
-                    chats += 1;
-                    messages += stored;
+                    counters.chats += 1;
+                    counters.stored += stored;
                     self.push(event);
                 }
                 Err(error) => {
+                    counters.failed += conversation.messages.len() as u64;
                     tracing::warn!("a history conversation failed to store: {error}");
                 }
             }
@@ -322,37 +355,137 @@ impl EventPump {
             self.spawn_reconcile();
         }
         if on_demand {
-            tracing::info!("on-demand history: chats={chats} messages={messages}");
-        } else {
-            tracing::info!("history chunk: chats={chats} messages={messages}");
-            {
-                let complete = conversations
-                    .iter()
-                    .any(|conversation| conversation.end_of_history_transfer);
-                let mut status = self.state.sync_status();
-                status.chats_processed += chats;
-                status.messages_processed += messages;
-                status.phase = if complete {
-                    whatfast_protocol::SyncPhase::Complete as i32
-                } else {
-                    whatfast_protocol::SyncPhase::InitialHistory as i32
-                };
-                self.state.set_sync(status);
+            tracing::info!(
+                "on-demand history: chats={} messages={}",
+                counters.chats,
+                counters.stored
+            );
+            return;
+        }
+        if contributes {
+            self.record_history(counters.clone(), counters.failed > 0);
+        }
+        tracing::info!(
+            "history chunk: chats={} messages={}",
+            counters.chats,
+            counters.stored
+        );
+        self.push(whatfast_protocol::BackendEvent {
+            sequence: 0,
+            event: Some(whatfast_protocol::backend_event::Event::SyncProgress(
+                whatfast_protocol::SyncProgress {
+                    chats_processed: counters.chats,
+                    messages_processed: counters.stored,
+                    // The Go's terminal rule: only a FULL/RECENT chunk at
+                    // 100% without a failure completes the sync.
+                    complete: counters.terminal && counters.progress >= 100 && counters.failed == 0,
+                },
+            )),
+        });
+    }
+
+    /// Applies one contributing chunk to the reported sync status and
+    /// announces the change, the way the Go `updateSyncStatus` did.
+    fn record_history(&self, counters: HistoryCounters, failed_chunk: bool) {
+        let mut status = self.state.sync_status();
+        if status.started_at_ms == 0 {
+            status.started_at_ms = unix_ms();
+        }
+        status.phase = whatfast_protocol::SyncPhase::InitialHistory as i32;
+        status.detail = "Receiving WhatsApp history".into();
+        status.chats_processed += counters.chats;
+        status.messages_processed += counters.stored;
+        status.messages_received += counters.received;
+        status.messages_decoded += counters.decoded;
+        status.messages_failed += counters.failed;
+        if counters.progress > status.whatsapp_progress {
+            status.whatsapp_progress = counters.progress;
+        }
+        if failed_chunk {
+            status.phase = whatfast_protocol::SyncPhase::Failed as i32;
+            status.detail = format!(
+                "Some chat history could not be decoded or saved locally ({} of {} messages failed)",
+                counters.failed, counters.received
+            );
+            status.completed_at_ms = 0;
+        } else if counters.terminal && counters.progress >= 100 {
+            status.phase = whatfast_protocol::SyncPhase::Complete as i32;
+            status.detail = "Up to date".into();
+            status.completed_at_ms = unix_ms();
+        }
+        self.state.set_sync(status.clone());
+        self.push(whatfast_protocol::BackendEvent {
+            sequence: 0,
+            event: Some(whatfast_protocol::backend_event::Event::SyncStatusChanged(
+                whatfast_protocol::SyncStatusChanged {
+                    status: Some(status),
+                },
+            )),
+        });
+    }
+
+    /// Records one favourite sticker the phone synced, the Go
+    /// `reduceFavoriteSticker`: the id is the hex of the encrypted file hash,
+    /// because WhatsApp never syncs a favourite's plaintext one.
+    fn reduce_favorite_sticker(&self, update: &wacore::types::events::FavoriteStickerUpdate) {
+        let action = &update.action;
+        let encrypted = action.file_enc_sha256.clone().unwrap_or_default();
+        if encrypted.is_empty() {
+            return;
+        }
+        let id = crate::db::hex_lower(&encrypted);
+        let changed = if action.is_favorite.unwrap_or(false) {
+            let favorite = crate::db::FavoriteStickerRow {
+                id,
+                mime: action.mimetype.clone().unwrap_or_default(),
+                direct_path: action.direct_path.clone().unwrap_or_default(),
+                media_key: action.media_key.clone().unwrap_or_default(),
+                file_enc_sha256: encrypted,
+                width: action.width.map(i64::from).unwrap_or(0),
+                height: action.height.map(i64::from).unwrap_or(0),
+                animated: action.is_lottie.unwrap_or(false),
+                file_size: action.file_length.map(|size| size as i64).unwrap_or(0),
+                local_path: String::new(),
+                updated_at: update.timestamp.timestamp_millis(),
+            };
+            match self.store.upsert_favorite_sticker(&favorite) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!("record favourite sticker: {error}");
+                    false
+                }
             }
+        } else {
+            match self.store.remove_favorite_sticker(&id) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::error!("remove favourite sticker: {error}");
+                    false
+                }
+            }
+        };
+        if changed {
             self.push(whatfast_protocol::BackendEvent {
                 sequence: 0,
-                event: Some(whatfast_protocol::backend_event::Event::SyncProgress(
-                    whatfast_protocol::SyncProgress {
-                        chats_processed: chats,
-                        messages_processed: messages,
-                        complete: conversations
-                            .iter()
-                            .any(|conversation| conversation.end_of_history_transfer),
-                    },
+                event: Some(whatfast_protocol::backend_event::Event::StickersChanged(
+                    whatfast_protocol::StickersChanged {},
                 )),
             });
         }
     }
+}
+
+/// One history chunk's message counters, the Go `historyReductionStats` plus
+/// the chunk's own progress and sync type.
+#[derive(Clone, Default)]
+struct HistoryCounters {
+    chats: u64,
+    stored: u64,
+    received: u64,
+    decoded: u64,
+    failed: u64,
+    progress: u32,
+    terminal: bool,
 }
 
 impl EventHandler for EventPump {
@@ -434,6 +567,7 @@ impl EventHandler for EventPump {
             }
             // ---- data events (the store) ----
             Event::HistorySync(lazy) => self.ingest_history(lazy),
+            Event::FavoriteStickerUpdate(update) => self.reduce_favorite_sticker(update),
             Event::IncomingCall(incoming) => {
                 let offer = self.calls.offer(*incoming.clone());
                 self.push(offer);
@@ -493,4 +627,119 @@ fn unix_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// The `context` combinator used when opening the device store.
 use anyhow::Context as _;
+
+#[cfg(test)]
+mod tests {
+    use super::{EventPump, HistoryCounters, SessionState};
+    use std::sync::{Arc, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// One pump over a throwaway profile: no bot, no network, the store and
+    /// the event channel only.
+    fn pump(label: &str) -> EventPump {
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-wa-sync-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::db::Store::open(&dir.join("chats.db")).unwrap());
+        let (events, _receiver) = async_channel::bounded(32);
+        EventPump {
+            events,
+            state: Arc::new(SessionState::new(true, String::new())),
+            store,
+            identity: Arc::new(crate::identity::Identity::open(&dir)),
+            calls: Arc::new(crate::calls::Calls::new()),
+            client: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// The Go completes the initial sync only on a FULL/RECENT chunk that
+    /// reached 100% without a failure.
+    #[test]
+    fn a_terminal_chunk_at_full_progress_completes_the_initial_sync() {
+        let pump = pump("complete");
+        pump.record_history(
+            HistoryCounters {
+                chats: 3,
+                stored: 40,
+                received: 42,
+                decoded: 42,
+                progress: 100,
+                terminal: true,
+                ..HistoryCounters::default()
+            },
+            false,
+        );
+        let status = pump.state.sync_status();
+        assert_eq!(
+            status.phase,
+            whatfast_protocol::SyncPhase::Complete as i32,
+            "phase {}",
+            status.phase
+        );
+        assert!(status.completed_at_ms > 0);
+        assert_eq!(status.messages_received, 42);
+        assert_eq!(status.messages_processed, 40);
+        assert_eq!(status.whatsapp_progress, 100);
+    }
+
+    /// A non-terminal chunk (the server-pushed bootstrap) never finishes the
+    /// sync, whatever its progress says.
+    #[test]
+    fn a_bootstrap_chunk_stays_in_the_initial_phase() {
+        let pump = pump("bootstrap");
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 2,
+                received: 2,
+                decoded: 2,
+                progress: 100,
+                terminal: false,
+                ..HistoryCounters::default()
+            },
+            false,
+        );
+        let status = pump.state.sync_status();
+        assert_eq!(
+            status.phase,
+            whatfast_protocol::SyncPhase::InitialHistory as i32
+        );
+        assert_eq!(status.completed_at_ms, 0);
+    }
+
+    /// A chunk that could not be stored fails the phase and keeps the failure
+    /// counters the desktop shows.
+    #[test]
+    fn a_failed_chunk_reports_the_failed_message_count() {
+        let pump = pump("failed");
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 0,
+                received: 10,
+                decoded: 8,
+                failed: 2,
+                progress: 100,
+                terminal: true,
+            },
+            true,
+        );
+        let status = pump.state.sync_status();
+        assert_eq!(status.phase, whatfast_protocol::SyncPhase::Failed as i32);
+        assert_eq!(status.completed_at_ms, 0);
+        assert_eq!(status.messages_failed, 2);
+        assert!(
+            status.detail.contains("(2 of 10 messages failed)"),
+            "{}",
+            status.detail
+        );
+    }
+}

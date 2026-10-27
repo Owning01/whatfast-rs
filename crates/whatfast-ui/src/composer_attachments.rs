@@ -16,8 +16,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, Hsla, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    div, img, px, rgb, rgba,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img,
+    px, rgb, rgba,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use whatfast_i18n as i18n;
@@ -177,16 +177,6 @@ impl PendingImages {
     pub(crate) fn clear(&mut self) {
         self.selected = 0;
         self.images.clear();
-    }
-
-    /// The height the tray adds to the footer, for the boxes that float over
-    /// the composer and have to clear it.
-    pub(crate) fn tray_height(&self, scale: f32) -> Pixels {
-        if self.images.is_empty() {
-            return px(0.);
-        }
-        // The border of the top of the tray is the extra pixel.
-        px((THUMB + TRAY_PADDING * 2.) * scale + 1.)
     }
 }
 
@@ -469,7 +459,6 @@ mod tests {
         tray.remove(0);
         assert!(tray.is_empty());
         assert_eq!(tray.selected_index(), 0);
-        assert_eq!(tray.tray_height(1.0), gpui::px(0.0));
     }
 
     #[test]
@@ -505,14 +494,6 @@ mod tests {
         assert!(tray.is_empty());
         assert_eq!(tray.selected_index(), 0);
         assert!(tray.take_all().is_empty());
-    }
-
-    #[test]
-    fn the_tray_is_as_tall_as_its_thumbnail() {
-        let tray = tray(1);
-        // The thumbnail, the padding of the two sides and the border.
-        assert_eq!(tray.tray_height(1.0), gpui::px(79.0));
-        assert_eq!(tray.tray_height(2.0), gpui::px(157.0));
     }
 
     #[test]

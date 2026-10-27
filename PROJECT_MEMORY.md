@@ -1498,3 +1498,663 @@ zona de archivos y nadie toco `render.rs` fuera de su region.
 - CI arreglado de paso: libasound2-dev faltante en ubuntu (cpal del audio de llamadas), 6 lints de clippy 1.98 en whatfast-ui (2 míos en call_audio, 4 del otro agente: chunks_exact→as_chunks ×2, is_multiple_of, items_after_test_module moviendo render_call_bar antes de los tests).
 - Evidencia: 560 tests del workspace en verde; clippy -D warnings limpio en whatfast-ui y whatfast-wa.
 - Pendiente: los 42 lid chats que quedan son personas sin mapeo aún (o grupos @lid); el recovery de referencias vencidas de medios sigue not_found honesto.
+
+## 2026-10-24 — Auditoría de paridad Go→Rust del proceso y el bridge (ola 0)
+
+- Auditados main.rs/bridge.rs/bridge_smoke.rs contra el oráculo Go (cmd/whatfast-backend, internal/bridge, app/server.go): framing, lock, handshake, shutdown, exit codes, logs. Evidencia empírica con probe python (target/probe_wa.py, varint a mano) pre y post fix.
+- Divergencias corregidas: (1) fallo de framing (frame gigante/zero/truncado/no-request) salía con exit 0, el Go sale 1 → ahora FAILURE vía flag del hilo lector; (2) EOF dentro del payload tras header completo pasaba por cierre limpio → ahora es frame truncado (bridge.rs); (3) mensaje del lock "another backend owns" no matcheaba el needle FATAL "profile is already in use" de classify_exit del transport (la UI habría reintentado para siempre) → texto del Go restaurado; (4) con --log-file los logs iban solo al archivo → tee stderr+archivo como el MultiWriter del Go; (5) eventos pre-handshake sin gate en el loop de serve → gate handshaken tras escribir la respuesta Hello; (6) permisos unix 0700/0600 del securefs del Go ahora espejados (Windows: ACL del perfil, como el Go).
+- Fix CI macOS: a_second_backend_cannot_own_the_same_directory tenía una carrera de arranque entre dos procesos (el intruso podía tomar el lock y salir limpio por EOF de stdin); ahora el holder completa handshake antes del intruso y se verifica que sigue vivo tras la negativa. fs4 0.13.1 usa flock vía rustix: exclusión entre procesos correcta en macOS.
+- Tests bridge_smoke: 4 → 10 (mismatch post-handshake responde y sale limpio; hello sin solape; frames gigante/zero; truncado; no-request; flags requeridos). clippy --all-targets 0 warnings, cargo test -p whatfast-wa verde.
+- Hallazgos ajenos reportados: Go congelado en v21 y la UI negocia min=max=22 → el exe Go ya no sirve de rollback (hello lo rechaza); lock file Go=.profile.lock vs Rust=backend.lock (sin exclusión mutua entre binarios, sancionado por MIGRATION.md); pool de medios/"busy" del server.go sin equivalente en el loop Rust (todo serializado); log en texto tracing vs JSON slog del Go (requiere feature json fuera de partición).
+
+## 2026-10-24 — Auditoría de paridad del store y el esquema (partición B)
+
+- Auditados `crates/whatfast-wa/src/db.rs` y `tests/store.rs` contra `backend/internal/store/store.go` (~100 métodos exportados, 20 tablas, índices, defaults y claves foráneas).
+- Corregido en db.rs: `insert_message` era INSERT OR IGNORE y ahora aplica el reducer del Go (merge columna por columna, stamp de timestamp 0, `storage_health`, unread una sola vez, puntero solo hacia adelante); `set_message_status` con la tabla de FAILED; reacciones con tombstone y colapso PN/LID; `messages_around` con la ventana centrada y los clamps del Go; `messages_after` con limit+1; `merge_chats` fusiona las filas en colisión (antes las descartaba) y recalcula el unread; búsquedas con el matcher difuso del Go (trigramas LIKE, ranking, límites 20/6); newsletters DESC + `subscribed_at`; `upsert_poll` refresca si `snapshot_at=0`; `resolve_chat_id` en el orden del Go; flags/mute/nombre crean el chat; paths de medios con guard por kind.
+- Schema: tablas, índices, defaults y FKs iguales; extras del puerto documentados (`media_*`, `payload`, tabla `contacts`); falta el FTS5 `message_search` + triggers (la búsqueda usa trigramas LIKE + scoring en Rust); `schema_version` inicial 2 vs 18.
+- Tests y evidencia: `tests/store.rs` 5→27 (23 de esta pasada + 4 de la verificación final: clamp 50/200, revoke con preview, pseudo-mensajes reaction, desempate de cursor por jid); `cargo test -p whatfast-wa` 46 passed / 0 failed / 1 ignored (16 bridge + 2 identity + 27 store + 1 lib), clippy --all-targets -D warnings en 0, fmt limpio.
+- Pendiente: APIs del Go sin puerto (journals inbound, integrity/coverage, MarkReadThrough/UnreadThrough, pins, sticker favorites, poll read/vote, outgoing reactions, StatusMessagesSince, Groups) — las tablas están, los RPC siguen `not_implemented`; `mark_chat_read` limpia `messages.unread` además del contador (decisión del puerto, documentada).
+- Trampa: `refresh_chat_pointer` escribía `last_message_from_me`, columna que no existe en el schema propio → toda fusión de chats fallaba con "no such column".
+
+## 2026-10-24 - Auditoria de paridad Go->Rust: dispatch, RPC faltantes e identidad
+
+- E1 (`server.rs`, `session.rs`, `wire.rs` y `db.rs` aditivo): los 8 RPC que respondian `not_implemented` sin estar en el plan ya tienen brazo real (`OpenContact`, `ListStatuses`, newsletters x3, `ListStickers`, `SetMessagePin`, `ListPinnedMessages`). Ademas: ventana 25/50 en `OpenMessageWindow`, `has_more` con `limit+1`, `MarkRead` con `through_message_id` y evento, `SendReaction`/`ForwardMessage` idempotentes, avatares revalidados a 24 h, handshake despues de escribir la respuesta, `wire` lee `image_*` para adjuntos heredados y encuestas desde `polls`, sync inicial con la regla del Go.
+- E2 (`identity.rs`, `reconcile.rs`): apertura perezosa de `session.db`, `user_part` tolera el sufijo `:59`, la fila de chat huerfana de direccion converge, segunda pasada idempotente (0 `ChatMerged`), `learn_names` salta contactos iguales (antes ~4000 escrituras por pasada). Perfil real en copia: 35415 mensajes antes y despues, 470 redirects coherentes con el mapa, 0 folds pendientes.
+- El juez de paridad tenia los 8 RPC declarados pendientes (el gate pasaba por declaracion): ahora son brazos reales y `PENDIENTES_DECLARADOS` quedo con los 7 del plan. `docs/paridad-sidecar.md` se reescribio con 43/50 reales y la seccion "Como verificar".
+- Evidencia: `cargo fmt --all --check` 0; clippy de los 5 crates + UI 0 warnings; `cargo test --workspace` 674 passed / 0 failed (whatfast-wa 126: 44 lib, 16 bridge, 27 store, 12 ingest, 19 server, 8 identity + 1 ignorado); `parity.py` 123/123 exit 0; `funcionalidad.py` exit 0; `paridad_sidecar.py` 43/50, 7 pendientes, 0 sin declarar, exit 0.
+- Trampas: `has_more = len == limit` anunciaba una pagina que no existe; `insert_message` no crea el chat y `messages.chat_jid` tiene FK; `send_image` sigue guardando el path que eligio el usuario (contra `bridge.proto:1005-1007`) y `fetch_message_media` no genera miniatura.
+- Pendiente: `SearchLocal` sin contactos ni reemplazo de menciones; `sender_name`/`sender_phone_number`/`sender_avatar_path` y `mention_texts` vacios en `wire`; FTS5 sin portar (trigramas LIKE, no ignora acentos); pool de medios del Go sin equivalente.
+
+## 2026-10-25 - Cero not_implemented: los 7 RPC pendientes ganan brazo real
+
+- Queja: la app mostraba muchos errores `not_implemented` (cada chat abierto
+  pedia `GetChatHistoryCoverage`, el panel pedia `GetIntegrityStatus`, etc.).
+- Los 7 eran los ultimos del ledger: `VotePoll`, `RequestOlderHistory`,
+  `GetChatHistoryCoverage`, `GetHistoryOverview`, `GetIntegrityStatus`,
+  `RepairLocalCache`, `RepairRecentReactions`.
+- Locales (solo DB): `history_coverage`/`save_history_coverage`/
+  `history_overview`/`oldest_message_row`/`integrity_status`/
+  `repair_local_cache` en `db.rs`, con la semantica del Go (no_anchor,
+  exhausted-con-recibidos pasa a more_available, `PRAGMA quick_check`,
+  journal inbound, resamenes derivados; la reparacion no toca FTS porque el
+  puerto no tiene tabla `message_search`).
+- Encuestas: `polls` suma `creator_jid` + `message_secret` (migracion con
+  `ALTER TABLE` tolerante en `Store::open`); `send.rs` guarda la clave al
+  crear, `ingest.rs::persist_poll_definition` la guarda al recibir y en el
+  historial; `apply_poll_vote` con guarda de timestamp. `VotePoll` valida
+  como el Go y vota con `vote_raw` de verdad.
+- `RequestOlderHistory`: maquina de estados + `fetch_message_history` real
+  (50 mensajes), ventana anti-doble-pedido en el `Server`, evento
+  `HistoryCoverageChanged` al pedir, y expiracion a 30 s que marca
+  `more_available` si el conteo crecio o `failed` con reintento si no.
+- `RepairRecentReactions`: reserva hasta 16 replays pendientes, un resend PDO
+  por item (`retry_pdo_placeholder_resend_request`), completa los que el
+  telefono responde; sin pendientes responde `not_found` igual que el Go.
+- El `match` del dispatch quedo exhaustivo: se elimino el brazo `Some(other)`
+  (el compilador lo marco inalcanzable, esa es la prueba) y `request_name`;
+  un RPC nuevo no compila hasta tener brazo. `PENDIENTES_DECLARADOS` quedo
+  vacio y `docs/paridad-sidecar.md` dice 50/50.
+- Trampa: `ContextInfo` no tiene `message_secret`; el secreto esta en el
+  `MessageContextInfo` del `wa::Message` (`msg.message_context_info`).
+- Evidencia: `cargo fmt --all --check` 0; clippy 5 crates + UI 0 warnings;
+  `cargo test --workspace` 685 passed / 0 failed (whatfast-wa 137: 45 lib,
+  16 bridge, 33 store, 12 ingest, 23 server, 8 identity + 1 ignorado);
+- Release 0.2.8 instalada y verificada: `dist\` con `whatfast.exe`
+  (15,1 MB) y `whatfast-backend.exe` (13,0 MB), ambos con `0.2.8` adentro;
+  `instalar.ps1` los dejo en `%LOCALAPPDATA%\Programs\Whatfast` y el smoke
+  de arranque (perfil temporal, backend hijo vivo) paso.
+- Release 0.2.10 instalada y verificada (15,1 + 13,0 MB, `0.2.10` adentro):
+  cura de raiz el badge que no se iba (ver entrada 2026-10-26 b): el
+  `MarkRead` con cero filas recalcula igual, y abrir el chat marca sin
+  esperar al render.
+  `parity.py` 123/123 exit 0; `funcionalidad.py` exit 0;
+  `paridad_sidecar.py` 50/50 reales, 0 pendientes, 0 sin declarar, exit 0.
+- Pendiente: la cobertura no se actualiza al llegar historial bajo demanda
+  (la expiracion la normaliza a los 30 s); `SearchLocal` sigue sin contactos;
+  `sender_name`/`sender_phone_number` vacios en `wire`.
+
+## 2026-10-25 — Campo del mensaje de varias líneas y texto largo sin desbordar
+
+**Qué cambió**
+
+- El campo del mensaje pasó a `auto_grow(1, 6)`: crece hasta seis renglones,
+  scrollea adentro y el pegado conserva los saltos de línea. En una línea el
+  componente borraba los `\n` del portapapeles y el texto pegado salía todo
+  junto (`InputState::paste` hace `replace('\n', "")` fuera de multi-línea).
+- El pie del chat dejó de tener alto fijo: el panel de emojis, el de stickers,
+  el de menciones, la línea de "escribiendo" y la barra de respuesta cuelgan de
+  un ancla `absolute` con `bottom(relative(1.))` sobre el campo, así lo siguen
+  cuando crece. Antes se anclaban con `bottom(56 px + bandeja)` y un campo de
+  tres líneas los tapaba.
+- La burbuja del mensaje topa el ancho del texto en `TEXT_MAX_WIDTH` (512). La
+  vista de texto se medía con el ancho de una burbuja que se encoge al
+  contenido, o sea infinito: un mensaje largo se pintaba en una línea y se
+  salía de la ventana. Con el tope envuelve, incluso un token sin espacios.
+- Visor de fotos: el tamaño de la imagen se calcula en píxeles desde la ventana
+  y el tamaño real del archivo (`viewer_picture_size` + lectores PNG/JPEG/WebP)
+  y la tarjeta recorta con `overflow_hidden`; una foto vertical entra entera.
+- `jpeg_dimensions` tenía un off-by-one (`index + 9 < len`): un SOF pegado al
+  final del buffer se descartaba. Lo encontró el test nuevo del header.
+- El input del campo no se repintaba al abrirse el panel de menciones: el
+  carácter que lo abría no se veía hasta el clic siguiente. Se notifica al
+  input cuando el panel se abre o se cierra.
+
+**Por qué**: reporte del usuario — "no permite pegar mensajes, ni visualizar
+mensajes largos, y se rompe la visualización"; las fotos del visor se veían
+cortadas al medio.
+
+**Evidencia**: 692 tests en verde (`cargo test --workspace`), `fmt` y `clippy
+-D warnings` limpios, `parity.py` 123/123, `funcionalidad.py` y
+`paridad_sidecar.py` (50/50, gate OK) exit 0. Capturas con el banco rápido
+`%TEMP%\opencode\probar.ps1` (una sola corrida de la app para toda la tanda).
+
+**Trampas**
+
+- `whatfast-backend.exe --version` **ignora** el argumento y arranca el backend
+  con la sesión real: no se usa para verificar la versión. Se comprueba
+  buscando el texto `0.2.11` dentro de los binarios.
+- `MinimizeAll` (Shell.Application) deja la app nueva arrancada minimizada y la
+  captura sale del escritorio. `IsWindowVisible` sigue en true: no sirve para
+  detectarlo.
+- `scripts\build.cmd` sale con 1 por el `dir` final, aunque compile.
+
+**Pendiente**: el panel de menciones repite un participante al final de la
+lista del backend falso.
+
+## 2026-10-25 — El pegado conserva la forma del texto
+
+**Qué cambió**
+
+- `message_html` envuelve el cuerpo de cada renglón en `<div><pre>…</pre></div>`.
+  La vista de texto (`TextView::html`) minifica el HTML antes de leerlo con
+  `html5minify`, y ese minificador colapsa todo espacio fuera de `<pre>`:
+  la sangría, los espacios repetidos y las líneas en blanco se perdían al
+  pintar la burbuja aunque el mensaje guardado estuviera intacto.
+- Los renglones en blanco llevan `&#8203;` (espacio de ancho cero) para que
+  midan el alto de una línea; sin él, el párrafo vacío se pintaba con alto cero.
+- El tabulador se expande a cuatro espacios: la vista de texto no le da ancho.
+- Tests: `message_html` con sangría, columnas y renglón en blanco.
+
+**Por qué**: el usuario pidió que el texto pegado se vea con la misma forma,
+espaciado y columnas con que se pegó.
+
+**Evidencia**: el texto del modelo y del portapapeles ya era fiel
+(code points verificados: 4 espacios de sangría, 8 entre columnas, `\n\n`);
+solo fallaba el pintado. Captura G2 con la burbuja igual al texto pegado y
+enlaces + wrap intactos. 693 tests, fmt y clippy limpios, los 3 jueces exit 0.
+Release 0.2.12 instalada.
+
+**Trampas**
+
+- `TextView::html` no conserva espacios aunque el HTML los traiga: hay que
+  pasar por `<pre>` o el minificador los colapsa. Un `<p>` vacío tampoco da
+  altura.
+- Verificar el texto de un mensaje con el menú "Copy" y `Get-Clipboard` sirve
+  para separar "se guardó mal" de "se pinta mal".
+
+## 2026-10-26 — El video se reproduce dentro de la burbuja
+
+**Qué cambió**
+
+- Módulo nuevo `crates/whatfast-ui/src/video.rs`: el video de un mensaje se
+  decodifica en un hilo propio con Media Foundation (viene con Windows, sin
+  decodificador externo) y se pinta como una imagen más de la burbuja. El
+  sonido del archivo va por `rodio` (la feature `mp4` ya traía el AAC).
+- La burbuja de video tiene caja con la forma del archivo, botón de
+  reproducir/pausar, barra de progreso, tiempo transcurrido y de duración, y
+  la flecha de descarga al costado. El archivo ya no sale al reproductor del
+  sistema.
+- Un video que todavía no está en el disco muestra la misma caja: el primer
+  clic pide la descarga y arranca solo cuando el archivo llega
+  (`attachment_play_requested`). Si la descarga no lo consigue, el error se ve
+  en la burbuja y no queda esperando para siempre.
+- El video se corta al cambiar de conversación y el reloj se detiene al
+  pausar. La cola de cuadros es corta: si la interfaz va atrasada se tira el
+  cuadro, nunca se acumula atraso.
+
+**Por qué**: el usuario pidió ver el video con su reproductor dentro del chat,
+no una tarjeta de descarga.
+
+**Evidencia**
+
+- `cargo test -p whatfast-ui`: 245 en verde, 1 ignorado (el del video real).
+- El decodificador se probó contra un MP4 4K de la máquina
+  (`WHATFAST_VIDEO_SAMPLE`): abre en ~40 ms, entrega cuadros en BGRA de
+  `ancho*alto*4` con el alfa en 255, topados a 720 de ancho.
+- Ritmo en release: 10 cuadros de un 4K en 0,5 s (~33 ms por cuadro) después
+  de cambiar la reducción a `imageops::thumbnail` (17 ms contra 65 ms de
+  `resize` con Triangle).
+- `cargo clippy --workspace --all-targets -- -D warnings` limpio y `fmt` OK.
+
+**Trampas**
+
+- `MFCreateSourceReaderFromURL` con la ruta cruda devuelve `E_INVALIDARG`:
+  hay que pasar la url `file:///C:/...`.
+- `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` **rompe** la creación
+  del lector en esta versión de Windows (E_INVALIDARG); sin él, `SetCurrentMediaType`
+  con `MF_MT_FRAME_SIZE` reducido no escala nada, por eso la reducción se hace
+  en software sobre el cuadro decodificado.
+- El atlas de gpui en Windows es `B8G8R8A8`: los cuadros van en BGRA, que es
+  justo lo que entrega `MFVideoFormat_RGB32`.
+- `RenderImage::new` necesita `Vec<Frame>`: `SmallVec` no acepta un `Frame`
+  suelto.
+
+**Pendiente**
+
+- `cargo test --workspace` tiene un rojo ajeno en
+  `whatfast-wa/tests/server.rs::list_statuses_groups_by_sender_newest_first`
+  (espera 3 grupos y encuentra 2) por el trabajo en curso de otro agente sobre
+  `crates/whatfast-wa/src/server.rs`; no es de estos cambios.
+- El reproductor no tiene salto en la barra (seek): reinicia desde el
+  principio con el botón.
+
+## 2026-10-26 — La pantalla del QR ya no aparece al abrir
+
+**Qué cambió**
+
+- La ventana pregunta el estado de la cuenta al conectarse al sidecar, y el
+  sidecar abre la sesion despues del saludo: mientras no la tiene, contesta
+  `paired: false`. Antes la ventana le creia a esa primera respuesta y mostraba
+  la pantalla de vinculacion con "Esperando el QR..." por un segundo, hasta
+  que llegaba `Connected`.
+- Ahora esa respuesta se vuelve a preguntar hasta 8 veces cada 200 ms
+  (`AUTH_PROBE_ATTEMPTS`), solo mientras la pantalla siga en `Starting`. El
+  usuario ve "Starting Whatfast" un instante y entra directo.
+- Un `ConnectionChanged(Connected)` con la pantalla todavia en `Starting` o
+  `Pairing` dispara la misma consulta, sin duplicarla si ya hay una en vuelo.
+- Si de verdad no hay dispositivo vinculado, tras 1,6 s se abre la pantalla
+  del QR como antes.
+
+**Por qué**: el usuario reporto que al abrir la app veia la pantalla de
+vinculacion por un segundo y despues entraba sola.
+
+**Evidencia**: 245 tests de `whatfast-ui` en verde, `fmt` y `clippy -D warnings`
+limpios. Release 0.2.14 instalada.
+
+**Trampa**
+
+- `GetAuthState` con la sesion todavia sin abrir devuelve "sin vincular" y
+  `Offline`; no es una respuesta sobre la cuenta, es la ausencia de sesion.
+
+## 2026-10-26 — El arranque pinta la lista al instante y no pasa por el QR
+
+**Qué cambió**
+
+- La ventana pide `ListChats` y `Reconnect` junto con el saludo, en paralelo.
+  La lista sale de la base local (`chats.db`), no de la sesión de WhatsApp, así
+  que se pinta apenas contesta el sidecar, sin esperar el handshake.
+- El sidecar no abría la sesión al arrancar: la creaba recién en `StartPairing`
+  o `Reconnect`. Por eso la cuenta vinculada tardaba ~1 s en conectar y la
+  ventana mostraba el QR mientras tanto. Ahora la ventana pide `Reconnect` en
+  el saludo: con dispositivo vinculado arranca la sesión (`started: true`), sin
+  dispositivo responde `false` sin efectos.
+- La pantalla de vinculación ya no se abre por un `AuthState.paired == false`:
+  se piden los códigos con `request_pairing()` sin cambiar de pantalla, y el QR
+  aparece solo cuando llega un código de verdad (`PairingQr`).
+- `account_ready` recuerda que la cuenta respondió "vinculado": una lista
+  vacía no deja la ventana en `Syncing` ni en `Starting`.
+- La rama `AuthState` no vuelve a `Syncing` si la lista ya está en pantalla.
+
+**Por qué**: el usuario reportó que al abrir veía "Starting", después la
+pantalla del QR y recién ahí WhatsApp; pidió que el arranque sea inmediato.
+
+**Evidencia**: 245 tests de `whatfast-ui`, `fmt` y `clippy -D warnings` limpios.
+Release 0.2.15 instalada (la app estaba abierta; el usuario autorizó cerrarla).
+
+**Trampa**
+
+- `Server::new` deja `session: None` y solo la crea en `StartPairing` o
+  `Reconnect`; cualquier cliente que asuma que el sidecar conecta solo se queda
+  esperando y cree que no hay dispositivo.
+
+## 2026-10-26 — La barra de "sin conexión" ya no sale al arrancar
+
+**Qué cambió**
+
+- La barra amarilla del chat se dibujaba con cualquier estado distinto de
+  `Connected`, incluido `Connecting`. Ahora pide `Offline`, `Reconnecting` o
+  `Failed`: es el aviso de una conexión perdida, no el del handshake.
+- `AuthState` con `paired: false` ya no escribe el estado de la conexión: esa
+  respuesta es la sesión todavía sin abrir y su `Offline` pisaba el
+  "conectando" del arranque. Solo una cuenta vinculada informa el estado.
+- El sondeo del estado de la cuenta sigue hasta 8 veces aunque la lista local
+  ya esté en pantalla (`!account_ready` en vez de `screen == Starting`).
+- `Reconnect` en el saludo ya no deja el detalle "Connecting on your request":
+  el detalle queda vacío y la cabecera muestra el estado traducido.
+
+**Por qué**: con 0.2.15 el usuario vio "sin conexión" al abrir. La lista se
+pinta desde `chats.db` antes del handshake, y el `AuthState` de esa primera
+respuesta (`paired:false`, `Offline`) dejaba la barra amarilla a la vista hasta
+que llegaba `Connected`, segundos después.
+
+**Evidencia**: 245 tests de `whatfast-ui`, `fmt` y `clippy -D warnings` limpios.
+Release 0.2.16 instalada (el usuario autorizó cerrar el backend huérfano).
+
+**Trampa**
+
+- `Reconnect` cuando no hay sesión la crea pero no emite
+  `ConnectionChanged(Connecting)` (solo lo hace `StartPairing`).
+- Quedó un `whatfast-backend.exe` vivo (pid 17968) con la ventana cerrada desde
+  las 13:32; el backend no muere cuando se va la interfaz. Pendiente: que salga
+  al cerrarse stdin, y que la interfaz no deje huérfanos.
+
+
+## 2026-10-26 — Plan de agentes y el catálogo de harnesses
+
+**Qué cambió**
+
+- `docs/plan-agentes.html` (empaquetado en `plan-agentes.packed.html`): el plan
+  de conectar harnesses con un click, con las cinco decisiones del usuario
+  aplicadas. Manda directo cuando el chat está habilitado, pregunta qué harness
+  atiende al activar el modo agente, y el resto queda como se propuso.
+- Crate nuevo `whatfast-agents`: las ocho fichas (Claude Code, Codex, OpenCode,
+  Cursor, Claude Desktop, VS Code, Pi, Hermes) con detección por PATH y archivo,
+  rutas por sistema, token por agente y registro del servidor en JSON, TOML,
+  YAML o por la CLI del cliente.
+- `Method::JsonArg` cubre VS Code (`code --add-mcp <json>`).
+- `RunSpec` es opcional: Cursor, Claude Desktop, VS Code y Hermes no tienen modo
+  headless confirmado, así que no atienden pedidos del modo rápido.
+
+**Por qué**: el usuario eligió el plan y pidió empezar por la conexión.
+
+**Evidencia**: `cargo check --workspace --all-targets` limpio; 17 tests de
+`whatfast-agents` en verde; `clippy -D warnings` limpio.
+
+**Trampa**
+
+- `opencode mcp add` necesita `--global` para escribir la config del usuario;
+  sin la bandera escribe la del proyecto.
+- El merge de TOML y YAML es por bloque y conserva comentarios, pero no es un
+  parser: si el archivo tiene el bloque indentado de forma rara, falla el
+  reemplazo. El backup queda en `<archivo>.whatfast-backup`.
+
+## 2026-10-26 — M1: el socket local y el servidor `whatfast mcp`
+
+**Qué cambió**
+
+- `crates/whatfast-protocol/src/local.rs`: `endpoint(data_dir)` deriva el nombre
+  del perfil (fnv64). Windows: `\\.\pipe\whatfast-<huella>`; Unix:
+  `<perfil>/agent.sock` con permisos de dueño.
+- `crates/whatfast-wa/src/socket.rs`: segundo transporte del backend, siempre
+  encendido. Contrato de sobres v22 igual que stdin, una conexión, una
+  operación por vez, `Shutdown` de un cliente local cierra el proceso.
+- `crates/whatfast-wa/src/main.rs`: `serve()` con dos transportes, `--serve`
+  (sin stdin, sin ventana) y `--idle-exit N`.
+- `crates/whatfast-mcp/`: el servidor MCP completo (siete herramientas), el
+  cliente del socket, el arranque del sidecar y `whatfast.exe mcp --agent <id>`
+  despachado en `whatfast-ui/src/main.rs` antes del lock de instancia.
+- `scripts/probar-mcp.py` y `docs/agentes.md`.
+
+**Por qué**: el usuario pidió conectar cualquier harness con un click; el MCP es
+el camino agente → Whatfast, y el socket es lo que evita abrir un segundo
+proceso con la app ya abierta.
+
+**Evidencia**: `probar-mcp.py` contra una copia del perfil real: 786 chats,
+mensajes, búsqueda y espera; salida 0 y sin backend huérfano. 16 tests de
+`bridge_smoke`, 14 de `whatfast-mcp`, 24 de `whatfast-wa --test server`.
+`cargo test --workspace` y `clippy --workspace --all-targets -D warnings`
+limpios.
+
+**Trampa**
+
+- `async-channel 2.5` panica con `bounded(0)` (`capacity cannot be zero`): el
+  rendezvous que usaba la cola de entrada tiraba el backend al arrancar. Queda
+  en 256 y el fin de stdin es una señal aparte (`stdin_closed`), con drenaje
+  `try_recv` antes de salir para no perder ninguna respuesta.
+- Una tubería de Windows abierta en modo síncrono serializa lectura y escritura:
+  una lectura pendiente bloquea la escritura siguiente. Los dos lados son tokio.
+- El backend instalado (0.2.16) no tiene el socket, así que con la app abierta el
+  MCP no lo encuentra: hay que probar con `--data-dir` de una copia, o instalar
+  una release con M1.
+- `tests/server.rs::list_statuses_groups_by_sender_newest_first` esperaba tres
+  grupos (a, b, a) y el servidor agrupa uno por autor: quedó en dos, con
+  a = [s3, s1].
+- `status_identity` (de WhatFast-Fixes) tenía dos `if` anidados que rompían
+  clippy; pasó a let-chains y su comentario de `newsletter_invite_key` volvió a
+  su función.
+
+## 2026-10-26 — M2: la base de los agentes, los permisos y los borradores
+
+**Qué cambió**
+
+- Crate nuevo `whatfast-auto`: `agents.db` en el perfil con las cuatro tablas
+  (`agents`, `drafts`, `schedules`, `agent_calls`), el permiso (`read`/`draft`/
+  `send` por agente y por chat, con tope por hora y ventana horaria), el ritmo
+  humano (`humanize`: partes y esperas sembradas) y el cron de cinco campos con
+  la cola fuera de la ventana (`cron`, `defer_to_window`) más el desfasaje local
+  del sistema (`local`).
+- `crates/whatfast-wa/src/guard.rs`: el guardián del endpoint local. El saludo
+  de un agente lleva `agent_id` y `agent_token` (campos nuevos del contrato), el
+  token se compara contra su SHA-256 y cada pedido se filtra por escala y chats.
+  Las listas se recortan antes de salir; cada llamada queda en `agent_calls`.
+- `crates/whatfast-wa/src/drafts.rs`: los tres RPC de borradores
+  (`DraftPropose`, `DraftList`, `DraftDecide`), contestados por el bucle de
+  servicio antes de llegar al `Server`: la tabla vive al lado de la sesión, no
+  adentro.
+- `whatfast-mcp`: 10 herramientas (las tres de borradores), el ritmo aplicado en
+  `message_send` (partes, `SetTyping`, esperas) y el borrador automático cuando
+  el chat no está habilitado para enviar.
+
+**Por qué**: el usuario eligió mandar directo donde el chat está habilitado y
+dejar borrador donde no. Sin permisos, cualquier proceso del mismo usuario podía
+leer y mandar por el socket.
+
+**Evidencia**: 55 tests de `whatfast-auto`, 23 de `whatfast-mcp` (9 de punta a
+punta contra el backend real: token ajeno, recorte de listas, `forbidden`,
+`rate_limited`, borradores), 18 de `whatfast-wa --test guard`; `probar-mcp.py`
+lista las 10 herramientas y sigue leyendo los 786 chats de una copia del perfil.
+clippy `-D warnings` limpio en los cuatro crates.
+
+**Trampa**
+
+- Un backend viejo descarta los pedidos que no conoce y contesta
+  `invalid_argument: empty request`; el MCP lo traduce a "actualizá la
+  aplicación". Antes de correr los tests de punta a punta hay que `cargo build -p
+  whatfast-wa`: el test arranca el binario del `target`, no el del workspace.
+- Los e2e dejan `whatfast-wa.exe` vivos 10 minutos si el test paniquea antes de
+  `client.shutdown()`; hay que matar los del `target\debug` antes de un build.
+- Un perfil sin ninguna fila en `agents.db` trata al harness sin token como el
+  usuario; con una fila, el token es obligatorio. Es la regla que deja probar
+  antes de que exista la pantalla Agentes.
+- `ChatFilter::only` incluye grupos; `ChatFilter::default` no cubre ningún chat.
+- El borrador aprobado **no** se envía solo: queda `approved` y lo manda la
+  ventana (o el runner), que es donde está la sesión.
+
+## 2026-10-26 — M3: el runner headless, el cronómetro y la guía
+
+**Qué cambió**
+
+- `whatfast-auto/src/runner.rs`: lanza un harness sin ventana (prompt por stdin,
+  stdout leído en hilos para no bloquearse, plazo que mata al hijo, `RunError`
+  con `NoHeadless`/`Start`/`Timeout`/`Failed`/`Empty`). Siete tests con comandos
+  del sistema (`cmd /c more`, `ping`, `cat`, `sleep`).
+- `whatfast-wa/src/scheduler.rs`: cada 30 s (60 s en `--serve`) mira las tareas
+  vencidas, escribe el próximo turno **antes** de correr y lanza el harness en el
+  pool bloqueante. La respuesta queda siempre como borrador en `agents.db`; el
+  resultado va a `agent_calls` con la herramienta `schedule`.
+- `whatfast-agents/src/guide.rs`: la guía del agente (14 líneas) y su instalación
+  por harness dentro de un bloque `<!-- whatfast:inicio -->`/`fin` en el archivo
+  de reglas, con copia de respaldo y sin duplicar. Cubre claude-code, codex,
+  opencode y cursor; los otros cuatro no declaran archivo.
+
+**Por qué**: el modo rápido del chat y las automatizaciones necesitan las mismas
+dos piezas: preguntarle a un harness y leer su respuesta, con plazo.
+
+**Evidencia**: 62 tests de `whatfast-auto`, 27 de `whatfast-agents`, 54 del
+sidecar (5 nuevos del scheduler) y el resto del workspace igual; clippy y fmt
+limpios en los tres crates.
+
+**Trampa**
+
+- `ClientSpec` **no** tiene el campo `RulesTarget` que dibuja el plan: `guide.rs`
+  lleva su propia tabla de destinos por id. Si se agrega al spec, la tabla se
+  muda.
+- El prompt va por stdin, no por argumento: en la lista de procesos de la
+  máquina no debe aparecer el texto del usuario.
+- `cmd /c more` agrega saltos de línea: el test del prompt largo compara por
+  longitud mínima y sufijo, no por igualdad.
+- Un harness sin `RunSpec` (Cursor, Claude Desktop, VS Code, Hermes) no atiende
+  ni el modo rápido ni una automatización: la tarea queda registrada como fallo.
+
+## 2026-10-26 — M3 bis: el modo rápido y las automatizaciones del bridge
+
+**Qué cambió**
+
+- `whatfast-auto/src/ask.rs`: arma el pedido del modo rápido (pedido del usuario
+  + los últimos 6 000 caracteres del chat, los más nuevos) y lanza el harness
+  con plazo de 90 s. Seis tests.
+- `whatfast-wa/src/schedules.rs`: los cuatro pedidos de las automatizaciones
+  (`ScheduleList`, `SchedulePut`, `SchedulePause`, `ScheduleRemove`). Valida el
+  harness (tiene que tener modo headless), el cron de cinco campos, la ventana y
+  el instante; calcula el primer turno con la zona del sistema. Diez tests.
+- `whatfast-auto/src/db.rs`: `schedule(id)` y `update_schedule` (reescribe sin
+  cambiar de fila).
+- `proto/bridge.proto` v24: `AgentAsk` (69), `ScheduleList` (70), `SchedulePut`
+  (71), `SchedulePause` (72) y `ScheduleRemove` (73), más el mensaje `Schedule`.
+  `main.rs::route` los contesta; `server.rs` los rechaza si llegan a su match y
+  `fake.rs` los simula.
+
+**Por qué**: el runner y la tabla estaban, pero ni la ventana ni nadie podía
+pedirle algo a un harness ni editar una tarea. El modo rápido y la pantalla de
+automatizaciones necesitan esta puerta.
+
+**Evidencia**: 68 tests de `whatfast-auto`, 64 del sidecar (10 nuevos de
+schedules), 9 de `whatfast-protocol`; clippy `-D warnings` y `cargo fmt --check`
+limpios en los tres crates.
+
+**Trampa**
+
+- Solo el usuario edita automatizaciones: un agente del socket recibe
+  `forbidden`. No es un permiso configurable.
+- El modo rápido corre en el pool bloqueante y espera al harness: la conexión
+  que lo pidió queda tomada hasta 90 s, el resto del backend sigue.
+- `AgentAsk` no manda nada: el texto vuelve al cuadro de composición de la
+  ventana, y mandarlo sigue siendo una decisión del usuario.
+
+## 2026-10-26 — La ventana de los agentes: pantalla, bandeja, modo rápido y automatizaciones
+
+**Qué cambió**
+
+- `crates/whatfast-ui/src/agents_panel.rs` (1539 líneas): la pantalla Agentes en el
+  riel (`ctrl-shift-a`), conectar y desconectar un harness con un clic, los
+  permisos completos (escala, chats, tope por hora, ventana, ritmo) y la bandeja
+  de borradores con Enviar y Descartar.
+- `crates/whatfast-ui/src/quick_ask.rs` (489 líneas): el modo rápido del chat,
+  `ctrl-shift-q` y el botón "Ask an agent"; la respuesta va al compositor, no se
+  manda.
+- `crates/whatfast-ui/src/automations_panel.rs` (1156 líneas): la sección
+  Automations dentro de la pantalla Agentes, con alta, pausa y borrado.
+- `crates/whatfast-wa/src/guides.rs` y los RPC `GuideInstall/Remove/Status`;
+  `DraftFinish` para que la ventana cierre un borrador aprobado.
+- `rpc.rs` ganó cinco variantes de `PendingRequest`; `AgentAsk` va por la clase
+  `Attachment` porque el harness tiene 90 s y `Write` corta a los 60.
+- Los RPC nuevos del bridge (v24): `AgentAsk` (69), `ScheduleList/Put/Pause/Remove`
+  (70-73), `DraftFinish` (74) y `GuideInstall/Remove/Status` (75-77).
+
+**Por qué**: el backend ya sabía pedirle algo a un harness y guardar tareas; sin
+estas pantallas el usuario no podía conectar nada ni ver un borrador.
+
+**Evidencia**: 267 tests de `whatfast-ui` (11 nuevos), 67 del sidecar, 68 de
+`whatfast-auto`, 27 de `whatfast-agents`; `cargo test --workspace` en verde,
+clippy `-D warnings` y `fmt --check` limpios. Dos pruebas nuevas por el pipe real
+en `bridge_smoke.rs`: la lista de automatizaciones de un perfil nuevo y el
+`AgentAsk` a un harness sin modo headless.
+
+**Trampa**
+
+- La pantalla Agentes y la bandeja leen `agents.db` directo, no por RPC: viven en
+  la misma máquina y el archivo está al lado del perfil.
+- El registro del servidor MCP usa `std::env::current_exe()` de la ventana: es
+  la ruta correcta, el sidecar no sirve para eso.
+- Desconectar revoca el token y la fila, pero no borra la entrada del servidor en
+  la config del harness (`write::unregister` queda para el tramo siguiente).
+- Un borrador que falla sale de la bandeja: se guarda `failed` y la bandeja lista
+  `proposed` y `approved`.
+- La pantalla solo crea tareas: no edita una existente, aunque el backend acepta
+  `id != 0` en `SchedulePut`.
+
+## 2026-10-26 — Release 0.2.17 instalada
+
+**Qué cambió**: se subió la versión del workspace a 0.2.17, se compiló el release
+con `scripts\build.cmd` y se instaló con `scripts\instalar.ps1` en
+`%LOCALAPPDATA%\Programs\Whatfast` (la app estaba cerrada, no hubo que matar
+nada). `dist\whatfast.exe` 16 802 304 b y `dist\whatfast-backend.exe`
+13 299 200 b.
+
+**Evidencia**
+
+- `cargo test --workspace` en verde antes del build (UI 267, sidecar 67,
+  `whatfast-auto` 68, `whatfast-agents` 27).
+- El sidecar instalado, con `--serve --data-dir %TEMP%\wf-017 --idle-exit 8`:
+  crea `agents.db`, `chats.db` y el lock del perfil, y sale solo con "the local
+  endpoint stayed idle: exiting".
+- `probar-mcp.py` contra los binarios instalados: servidor `whatfast 0.2.17`,
+  diez herramientas, 786 chats del perfil copiado, salida limpia del servidor.
+  `chat_info` falla con `chat_info_unavailable: client is not connected` porque
+  la copia del perfil no tiene la sesión de WhatsApp conectada; no es del MCP.
+
+**Trampa**
+
+- `scripts\build.cmd` sale con código 1 aunque compile: hay que mirar `dist\`.
+- El bump de la versión del workspace invalida todos los crates del workspace,
+  no las dependencias: el release tardó 5 min 40 s con la caché de `G:\_build`.
+- La copia de un perfil sirve para leer, no para `chat_info` ni para enviar:
+  esas rutas van a la red y necesitan el dispositivo vinculado.
+
+## 2026-10-26 — 0.2.17 reinstalada: la ventana horaria también rige las tareas de una vez
+
+**Qué cambió**: `schedules.rs::turn` aplica `defer_to_window` también a `Kind::Once`.
+Una tarea fijada a las 03:00 con ventana `08:00-23:00` se mueve a la apertura en
+vez de correr de madrugada. Test nuevo: `a_once_task_outside_the_window_waits_for_it_to_open`.
+
+**Por qué**: la decisión del usuario es que toda automatización respete la ventana;
+antes solo la respetaba el cron. Lo detectó el subagente que escribió el manual.
+
+**Evidencia**: 11 tests de `schedules`, clippy y fmt limpios; release recompilada
+en 3 min 41 s, `scripts\instalar.ps1` corrido y verificado sobre el binario
+instalado: `--serve --idle-exit 6` sale solo con "the local endpoint stayed idle:
+exiting", y `probar-mcp.py` responde `whatfast 0.2.17` con diez herramientas.
+
+**Trampa**: `Start-Process -PassThru` no devuelve `ExitCode` de forma fiable en
+PowerShell; para saber si el sidecar salió bien hay que mirar el log de stderr.
+
+## 2026-10-27 — OpenCode se registra por archivo y el usuario puede elegir el suyo (0.2.18)
+
+**Qué cambió**
+
+- `whatfast-agents`: `Method::OpenCode` escribe `~/.config/opencode/opencode.jsonc`
+  en `mcp.servers` con `{"type":"local","command":[exe,"mcp","--agent","opencode"]}`.
+  Antes se ejecutaba `opencode mcp add`, y en Windows el `opencode` del PATH es un
+  shim de Bun que no arranca desde otro proceso ("bin executable does not exist on
+  disk").
+- Lector de JSONC propio: `strip_jsonc` quita comentarios y comas finales; los
+  comentarios del encabezado se conservan y los del medio se pierden (queda el
+  respaldo `.whatfast-backup`).
+- `write::register_at` / `unregister_at`: escriben en un archivo elegido a mano,
+  con el formato que dicta la extensión (`.json`, `.jsonc`, `.toml`, `.yaml`).
+  La ruta se guarda en `agents/<id>.config` y `register` la usa sin preguntar.
+- Pantalla Agentes: botones "Choose config file…" y "Write server again" en la
+  tarjeta del harness.
+
+**Por qué**: la ruta de la ficha es una suposición sobre el sistema; cuando el
+cliente se movió, el usuario tiene que poder apuntar al archivo real.
+
+**Evidencia**: 33 tests de `whatfast-agents` (6 nuevos, uno de ellos corre contra
+el `opencode.jsonc` real de la máquina: conserva `disabled_providers`, agrega
+`whatfast` y lo quita sin tocar el resto); 267 de la UI; clippy `-D warnings` y
+`fmt --check` limpios.
+
+**Trampa**
+
+- `unregister` sin ruta guardada escribe en la config real del cliente: los
+  tests usan `unregister_at` con una copia en `%TEMP%`.
+- El merge de JSONC reescribe el documento entero: el orden de las claves y la
+  indentación cambian, y los comentarios internos se pierden.
+- La fila del agente puede quedar `Conectado` con la configuración sin escribir:
+  "Write server again" la repara sin volver a desconectar.
+
+## 2026-10-27 — El borrador se ve en la conversación (0.2.19)
+
+**Qué cambió**: `crates/whatfast-ui/src/chat_drafts.rs` dibuja una banda sobre el
+compositor con los borradores `proposed` del chat abierto: texto, agente, motivo y
+tres botones. Enviar usa `send_agent_draft` (el permiso y el estado siguen en la
+bandeja); Editar marca `discarded` y pone el texto en el compositor; Cancelar
+marca `discarded`. Hasta tres filas, la más nueva primero, y `+N more in the
+Agents tray` para el resto.
+
+**Por qué**: el borrador tiene que estar donde va a salir. La bandeja de la
+pantalla Agentes se queda como vista de conjunto.
+
+**Evidencia**: 271 tests de `whatfast-ui` (4 nuevos de `chat_drafts`); recarga al
+elegir chat, al cerrarlo y cada 3 s sobre el barrido de 1 s que ya existía.
+
+**Trampa**
+
+- La banda va fuera del `uniform_list` del hilo: meterla adentro rompe el scroll.
+- Si `agents.db` no abre, la banda no se dibuja y la conversación sigue igual.
+- El `+N` es texto, no un botón que salta a la bandeja.
+
+## 2026-10-27 — 0.2.19 instalada y el parser de bloques de markdown
+
+**Qué cambió**
+
+- Release 0.2.19 instalada (el usuario autorizó cerrar los 13 procesos `whatfast`
+  y el backend). Lleva la banda de borradores en la conversación.
+- `crates/whatfast-core/src/markdown.rs`: parser de bloques de un mensaje
+  (`Paragraph`, `Heading`, `Code`, `List`, `Quote`, `Table`, `Rule`) con
+  `has_blocks()` como puerta. 13 tests.
+
+**Por qué**: el markdown en las burbujas no necesita un parser nuevo de formato:
+`whatsapp_formatting.rs` ya lee las marcas de WhatsApp con estilos por segmento.
+Lo que faltaba era la capa de bloques alrededor.
+
+**Evidencia**: 13 tests de markdown, clippy `-D warnings` limpio; versión
+reportada por el MCP instalado: `whatfast 0.2.19` con las diez herramientas.
+
+**Trampa**
+
+- Con la app abierta, `scripts\instalar.ps1` falla con "el proceso no puede
+  obtener acceso al archivo": hay que cerrar la ventana, y eso necesita el OK
+  del usuario.
+- `has_blocks` existe para que un mensaje sin bloques se dibuje exactamente como
+  antes: cualquier cambio de dibujo nuevo tiene que pasar por esa puerta.

@@ -17,6 +17,12 @@ tracing.workspace = true
 async-channel.workspace = true
 # The generated Envelope types and framing constants of the bridge contract.
 whatfast-protocol = { path = "../whatfast-protocol" }
+# The agents database, their grants, the pace and the schedule of the
+# automations: the tables the local endpoint is guarded with.
+whatfast-auto = { path = "../whatfast-auto" }
+# The catalog of harnesses: the id of an agent is the id of its ficha, and the
+# headless mode of the automations comes from the same place.
+whatfast-agents = { path = "../whatfast-agents" }
 # The RPC loop is a Tokio runtime: whatsapp-rust's transport and voip stack
 # are async, and the store, the client and later the calls all live on it.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }

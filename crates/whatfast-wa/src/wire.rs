@@ -6,11 +6,11 @@
 
 use whatfast_protocol::{
     AttachmentContent, Chat as WireChat, ChatKind, ContactContent, ContactsContent, ImageContent,
-    LocationContent, Message as WireMessage, PollContent, Reaction as WireReaction, TextContent,
-    UnsupportedContent,
+    LocationContent, Message as WireMessage, PollContent, PollOption, PollVoter,
+    Reaction as WireReaction, TextContent, UnsupportedContent,
 };
 
-use crate::db::{ChatRow, MessageRow, ReactionRow};
+use crate::db::{ChatRow, MessageRow, PollSnapshot, ReactionRow};
 
 /// The conversation kind of a chat, by the transport JID's server.
 fn chat_kind(jid: &str) -> ChatKind {
@@ -24,7 +24,7 @@ fn chat_kind(jid: &str) -> ChatKind {
 }
 
 /// The digits of a jid's user half, the phone number a direct chat shows.
-fn phone_digits(jid: &str) -> String {
+pub(crate) fn phone_digits(jid: &str) -> String {
     jid.split('@').next().unwrap_or("").to_owned()
 }
 
@@ -87,11 +87,21 @@ fn wire_status(status: i64) -> i32 {
     }
 }
 
-/// The wire message of one store row, content oneof included.
+/// The wire message of one store row, content oneof included. A poll row is
+/// served without its stored definition, which the oracle renders as an
+/// unsupported payload; callers that can read the `polls` table use
+/// [`wire_message_polled`].
 pub fn wire_message(message: &MessageRow) -> WireMessage {
+    wire_message_polled(message, None)
+}
+
+/// The wire message of one store row, with the poll definition when the
+/// caller looked it up: the Go `wireMessage` rendered a poll only while its
+/// `polls` row existed.
+pub fn wire_message_polled(message: &MessageRow, poll: Option<&PollSnapshot>) -> WireMessage {
     let status = wire_status(message.status);
     let reactions = message.reactions.iter().map(wire_reaction).collect();
-    let content = wire_content(message);
+    let content = wire_content(message, poll);
     WireMessage {
         id: message.id.clone(),
         chat_id: message.chat_jid.clone(),
@@ -114,7 +124,10 @@ pub fn wire_message(message: &MessageRow) -> WireMessage {
     }
 }
 
-fn wire_content(message: &MessageRow) -> whatfast_protocol::message::Content {
+fn wire_content(
+    message: &MessageRow,
+    poll: Option<&PollSnapshot>,
+) -> whatfast_protocol::message::Content {
     use whatfast_protocol::message::Content as C;
     if message.revoked || message.kind == "revoked" {
         return C::Unsupported(UnsupportedContent {
@@ -134,30 +147,70 @@ fn wire_content(message: &MessageRow) -> whatfast_protocol::message::Content {
             width: message.image_width.max(0) as u32,
             height: message.image_height.max(0) as u32,
             file_size: message.image_size.max(0) as u64,
-            downloadable: message.image_size > 0 && message.image_local_path.is_empty(),
+            // The Go advertised the download affordance whenever the message
+            // was live, whether or not the cache already held the file.
+            downloadable: !message.revoked,
             sticker: message.kind == "sticker",
             animated: message.image_animated,
             thumbnail_path: String::new(),
             jpeg_thumbnail: message.image_thumbnail.clone(),
         }),
-        "video" | "audio" | "document" => C::Attachment(AttachmentContent {
-            kind: message.kind.clone(),
-            caption: if message.media_caption.is_empty() {
-                message.text.clone()
+        "video" | "audio" | "document" => {
+            // The Go schema stored every media kind in the `image_*` columns;
+            // a migrated row still names its file there. The same rule the
+            // download path uses decides which column group is authoritative.
+            let descriptor_in_image_columns = message.media_direct_path.is_empty()
+                && message.media_media_key.is_empty()
+                && !message.image_direct_path.is_empty();
+            let mime = if descriptor_in_image_columns && !message.image_mime.is_empty() {
+                message.image_mime.clone()
             } else {
-                message.media_caption.clone()
-            },
-            mime_type: message.media_mime.clone(),
-            file_name: message.media_file_name.clone(),
-            local_path: message.media_local_path.clone(),
-            file_size: message.media_size.max(0) as u64,
-            width: message.media_width.max(0) as u32,
-            height: message.media_height.max(0) as u32,
-            duration_seconds: message.media_duration.max(0) as u32,
-            animated: message.media_animated,
-            voice_note: message.media_voice,
-            downloadable: message.media_size > 0 && message.media_local_path.is_empty(),
-        }),
+                message.media_mime.clone()
+            };
+            let local_path = if descriptor_in_image_columns && message.media_local_path.is_empty() {
+                message.image_local_path.clone()
+            } else {
+                message.media_local_path.clone()
+            };
+            let file_size = if descriptor_in_image_columns {
+                message.image_size
+            } else {
+                message.media_size
+            };
+            let width = if descriptor_in_image_columns {
+                message.image_width
+            } else {
+                message.media_width
+            };
+            let height = if descriptor_in_image_columns {
+                message.image_height
+            } else {
+                message.media_height
+            };
+            let animated = if descriptor_in_image_columns {
+                message.image_animated
+            } else {
+                message.media_animated
+            };
+            C::Attachment(AttachmentContent {
+                kind: message.kind.clone(),
+                caption: if message.media_caption.is_empty() {
+                    message.text.clone()
+                } else {
+                    message.media_caption.clone()
+                },
+                mime_type: mime,
+                file_name: message.media_file_name.clone(),
+                local_path,
+                file_size: file_size.max(0) as u64,
+                width: width.max(0) as u32,
+                height: height.max(0) as u32,
+                duration_seconds: message.media_duration.max(0) as u32,
+                animated,
+                voice_note: message.media_voice,
+                downloadable: !message.revoked,
+            })
+        }
         "contacts" => C::Contacts(ContactsContent {
             contacts: message
                 .contacts_json
@@ -173,12 +226,39 @@ fn wire_content(message: &MessageRow) -> whatfast_protocol::message::Content {
             url: message.location_url.clone(),
             live: message.location_live,
         }),
-        "poll" => C::Poll(PollContent {
-            question: message.text.clone(),
-            options: Vec::new(),
-            selectable_options_count: 1,
-            total_voters: 0,
-        }),
+        // A poll whose definition is gone renders as an unsupported payload,
+        // exactly the Go fallback: the content lived in `polls`, not in the
+        // message row.
+        "poll" => match poll {
+            Some(poll) => C::Poll(PollContent {
+                question: poll.question.clone(),
+                options: poll
+                    .options
+                    .iter()
+                    .map(|option| PollOption {
+                        name: option.name.clone(),
+                        vote_count: option.votes,
+                        selected_by_me: option.selected_by_me,
+                        voters: option
+                            .voters
+                            .iter()
+                            .map(|voter| PollVoter {
+                                user_id: voter.jid.clone(),
+                                display_name: String::new(),
+                                avatar_path: String::new(),
+                                from_me: voter.from_me,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                selectable_options_count: poll.selectable_count,
+                total_voters: poll.total_voters,
+            }),
+            None => C::Unsupported(UnsupportedContent {
+                type_name: message.kind.clone(),
+                fallback_text: message.text.clone(),
+            }),
+        },
         _ => C::Unsupported(UnsupportedContent {
             type_name: message.kind.clone(),
             fallback_text: message.text.clone(),
@@ -212,5 +292,122 @@ pub fn wire_reaction(reaction: &ReactionRow) -> WireReaction {
         sender_name: String::new(),
         sender_phone_number: String::new(),
         sender_avatar_path: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{wire_message, wire_message_polled};
+    use crate::db::{MessageRow, PollOptionRow, PollSnapshot, PollVoterRow};
+
+    fn row(kind: &str) -> MessageRow {
+        MessageRow {
+            id: "m1".into(),
+            chat_jid: "a@s.whatsapp.net".into(),
+            transport_jid: "a@s.whatsapp.net".into(),
+            kind: kind.into(),
+            status: 2,
+            ..Default::default()
+        }
+    }
+
+    /// The Go schema stored every media kind in the `image_*` columns: a
+    /// migrated attachment row must still name its file and its size.
+    #[test]
+    fn a_legacy_attachment_reads_its_descriptor_from_the_image_columns() {
+        let mut message = row("video");
+        message.image_mime = "video/mp4".into();
+        message.image_local_path = "/cache/video.mp4".into();
+        message.image_direct_path = "/v/t62.7118-24".into();
+        message.image_media_key = vec![1, 2, 3];
+        message.image_width = 640;
+        message.image_height = 480;
+        message.image_size = 2048;
+        message.media_mime = "stale/mime".into();
+
+        let wired = wire_message(&message);
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) = wired.content
+        else {
+            panic!("expected attachment content");
+        };
+        assert_eq!(attachment.kind, "video");
+        assert_eq!(attachment.mime_type, "video/mp4");
+        assert_eq!(attachment.local_path, "/cache/video.mp4");
+        assert_eq!(attachment.file_size, 2048);
+        assert_eq!(attachment.width, 640);
+        assert_eq!(attachment.height, 480);
+        assert!(attachment.downloadable);
+    }
+
+    /// The download chip follows the message, not the cache: the Go wired
+    /// `Downloadable: !m.Revoked` for every live media message.
+    #[test]
+    fn a_cached_image_is_still_downloadable_and_a_revoked_one_is_not() {
+        let mut message = row("image");
+        message.image_size = 10;
+        message.image_local_path = "/cache/image.jpg".into();
+        let Some(whatfast_protocol::message::Content::Image(image)) =
+            wire_message(&message).content
+        else {
+            panic!("expected image content");
+        };
+        assert!(image.downloadable);
+
+        message.revoked = true;
+        let Some(whatfast_protocol::message::Content::Unsupported(unsupported)) =
+            wire_message(&message).content
+        else {
+            panic!("expected unsupported content");
+        };
+        assert_eq!(unsupported.type_name, "revoked");
+    }
+
+    /// A poll renders from the `polls` table; without a stored definition the
+    /// Go fell back to an unsupported payload.
+    #[test]
+    fn a_poll_renders_its_stored_definition() {
+        let mut message = row("poll");
+        message.text = "Lunch?".into();
+        let wired = wire_message(&message);
+        let Some(whatfast_protocol::message::Content::Unsupported(unsupported)) = wired.content
+        else {
+            panic!("expected the unsupported fallback");
+        };
+        assert_eq!(unsupported.type_name, "poll");
+
+        let snapshot = PollSnapshot {
+            message_id: "m1".into(),
+            question: "Lunch?".into(),
+            selectable_count: 2,
+            total_voters: 1,
+            options: vec![
+                PollOptionRow {
+                    name: "Pizza".into(),
+                    votes: 0,
+                    selected_by_me: false,
+                    voters: Vec::new(),
+                },
+                PollOptionRow {
+                    name: "Sushi".into(),
+                    votes: 1,
+                    selected_by_me: true,
+                    voters: vec![PollVoterRow {
+                        jid: "me@s.whatsapp.net".into(),
+                        from_me: true,
+                    }],
+                },
+            ],
+        };
+        let Some(whatfast_protocol::message::Content::Poll(poll)) =
+            wire_message_polled(&message, Some(&snapshot)).content
+        else {
+            panic!("expected poll content");
+        };
+        assert_eq!(poll.selectable_options_count, 2);
+        assert_eq!(poll.total_voters, 1);
+        assert_eq!(poll.options[1].name, "Sushi");
+        assert_eq!(poll.options[1].vote_count, 1);
+        assert!(poll.options[1].selected_by_me);
+        assert!(poll.options[1].voters[0].from_me);
     }
 }

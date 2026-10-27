@@ -77,6 +77,26 @@ message RpcRequest {
     CallHangupRequest call_hangup = 54;
     CallMuteRequest call_mute = 55;
     CallAudioRequest call_audio = 56;
+    // v23: the drafts of the agents, which the desktop shows as a tray, and
+    // the decision of the user about each one.
+    DraftProposeRequest draft_propose = 66;
+    DraftListRequest draft_list = 67;
+    DraftDecideRequest draft_decide = 68;
+    // The answer of the desktop about an approved draft it sent or could not.
+    DraftFinishRequest draft_finish = 74;
+    // The guide of the agent, which lives in the rules file of the harness.
+    GuideInstallRequest guide_install = 75;
+    GuideRemoveRequest guide_remove = 76;
+    GuideStatusRequest guide_status = 77;
+    // The fast mode of the chat: ask the agent of this profile a question
+    // about the conversation that is open.
+    AgentAskRequest agent_ask = 69;
+    // The automations: the tasks of the timer, which the screen creates,
+    // pauses and removes.
+    ScheduleListRequest schedule_list = 70;
+    SchedulePutRequest schedule_put = 71;
+    SchedulePauseRequest schedule_pause = 72;
+    ScheduleRemoveRequest schedule_remove = 73;
   }
 }
 
@@ -140,7 +160,213 @@ message RpcResponse {
     CallHangupResponse call_hangup = 63;
     CallMuteResponse call_mute = 64;
     CallAudioResponse call_audio = 65;
+    DraftProposeResponse draft_propose = 66;
+    DraftListResponse draft_list = 67;
+    DraftDecideResponse draft_decide = 68;
+    DraftFinishResponse draft_finish = 74;
+    GuideInstallResponse guide_install = 75;
+    GuideRemoveResponse guide_remove = 76;
+    GuideStatusResponse guide_status = 77;
+    AgentAskResponse agent_ask = 69;
+    ScheduleListResponse schedule_list = 70;
+    SchedulePutResponse schedule_put = 71;
+    SchedulePauseResponse schedule_pause = 72;
+    ScheduleRemoveResponse schedule_remove = 73;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The drafts of the agents
+// ---------------------------------------------------------------------------
+
+// One message an agent proposes for the user to approve. A draft waits in
+// `agents.db` until the user sends it, edits it or throws it away; an agent
+// with the `send` scope on a chat skips the tray and sends.
+
+message DraftProposeRequest {
+  // The chat the draft goes to.
+  string chat_id = 1;
+  string text = 2;
+  // The message it answers, when it is a reply.
+  string reply_to_message_id = 3;
+  // Why the agent wrote it, in one line.
+  string reason = 4;
+  // How sure it is, 0 to 1.
+  double confidence = 5;
+  // The agent that writes it. Empty means the agent of the connection; the
+  // backend refuses a name that is not the one that said hello.
+  string agent_id = 6;
+}
+message DraftProposeResponse {
+  int64 draft_id = 1;
+  string state = 2;
+}
+message DraftListRequest {
+  // Empty answers every state but the discarded ones.
+  string state = 1;
+  uint32 limit = 2;
+}
+message DraftListResponse {
+  repeated Draft drafts = 1;
+}
+message Draft {
+  int64 id = 1;
+  string agent_id = 2;
+  string chat_id = 3;
+  // The title of the chat, joined for the tray.
+  string chat_title = 4;
+  string reply_to_message_id = 5;
+  string text = 6;
+  string reason = 7;
+  double confidence = 8;
+  // proposed | approved | sending | sent | failed | discarded
+  string state = 9;
+  int64 at_ms = 10;
+}
+message DraftDecideRequest {
+  int64 draft_id = 1;
+  // True sends it; false discards it.
+  bool send = 2;
+}
+message DraftDecideResponse {
+  Draft draft = 1;
+  // Empty when the decision was applied.
+  string error = 2;
+}
+message DraftFinishRequest {
+  int64 draft_id = 1;
+  // True when the desktop put the text on the wire.
+  bool sent = 2;
+  // Why it could not, when it could not.
+  string error = 3;
+}
+message DraftFinishResponse {
+  Draft draft = 1;
+}
+
+// ---------------------------------------------------------------------------
+// The guide of the agent
+// ---------------------------------------------------------------------------
+
+// The guide is a short block of rules that Whatfast writes into the file each
+// harness reads by itself. Installing it is what makes an agent know how to
+// talk to the account without being told every time.
+
+message GuideInstallRequest {
+  string agent_id = 1;
+}
+message GuideInstallResponse {
+  // True when the block ended up in the rules file.
+  bool installed = 1;
+  // The file that holds the block; empty when the harness has no such file.
+  string target = 2;
+  // The copy that was made before writing, when there was one.
+  string backup = 3;
+}
+message GuideRemoveRequest {
+  string agent_id = 1;
+}
+message GuideRemoveResponse {
+  bool removed = 1;
+}
+message GuideStatusRequest {
+  string agent_id = 1;
+}
+message GuideStatusResponse {
+  bool installed = 1;
+  string target = 2;
+}
+
+// ---------------------------------------------------------------------------
+// The fast mode of the chat
+// ---------------------------------------------------------------------------
+
+// The user is reading a conversation and asks the agent for a hand with it.
+// The agent answers, and the answer goes to the composer: nothing is sent.
+
+message AgentAskRequest {
+  // The agent that answers. It must be connected and have a headless mode.
+  string agent_id = 1;
+  // The chat the question is about.
+  string chat_id = 2;
+  string question = 3;
+  // The recent messages of the chat, oldest first, as "who: text". The
+  // backend keeps the newest when they do not fit.
+  repeated string context = 4;
+}
+message AgentAskResponse {
+  string agent_id = 1;
+  // The answer of the agent, as it wrote it.
+  string text = 2;
+  // How long the agent took, in milliseconds.
+  int64 ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// The automations
+// ---------------------------------------------------------------------------
+
+// A task of the timer: a prompt, a chat and a turn. The backend looks at the
+// tasks that came due and asks the harness of the task without a window.
+
+message Schedule {
+  int64 id = 1;
+  string agent_id = 2;
+  string chat_id = 3;
+  // The title of the chat, joined for the screen.
+  string chat_title = 4;
+  // once | cron
+  string kind = 5;
+  // The instant of a `once` task.
+  int64 at_ms = 6;
+  // The expression of a `cron` task: five fields.
+  string cron = 7;
+  string prompt = 8;
+  // read | draft | send
+  string output = 9;
+  // HH:MM-HH:MM, empty when it may fire at any hour.
+  string window = 10;
+  // When it fires next, zero when it has no turn left.
+  int64 next_at_ms = 11;
+  bool paused = 12;
+}
+message ScheduleListRequest {}
+message ScheduleListResponse {
+  repeated Schedule schedules = 1;
+}
+message SchedulePutRequest {
+  // Zero creates the task; anything else rewrites that row.
+  int64 id = 1;
+  string agent_id = 2;
+  string chat_id = 3;
+  // once | cron
+  string kind = 4;
+  int64 at_ms = 5;
+  string cron = 6;
+  string prompt = 7;
+  // read | draft | send
+  string output = 8;
+  // HH:MM-HH:MM, empty for any hour.
+  string window = 9;
+}
+message SchedulePutResponse {
+  Schedule schedule = 1;
+  // Empty when the task was saved.
+  string error = 2;
+}
+message SchedulePauseRequest {
+  int64 id = 1;
+  bool paused = 2;
+}
+message SchedulePauseResponse {
+  Schedule schedule = 1;
+  string error = 2;
+}
+message ScheduleRemoveRequest {
+  int64 id = 1;
+}
+message ScheduleRemoveResponse {
+  bool removed = 1;
 }
 
 message BackendEvent {
@@ -186,6 +412,12 @@ message HelloRequest {
   string desktop_version = 1;
   uint32 minimum_protocol_version = 2;
   uint32 maximum_protocol_version = 3;
+  // The agent that speaks, when the client is an MCP server instead of the
+  // desktop. The desktop leaves both empty and gets the user's own rights; an
+  // agent presents the id it was connected with and the token of the profile.
+  // A wrong token is `unauthorized` for the rest of the connection.
+  string agent_id = 4;
+  string agent_token = 5;
 }
 
 message HelloResponse {

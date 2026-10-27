@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Agentes en Whatfast</title>
+<link rel="stylesheet" href="C:/Users/perca/.agents/skills/html-plan/runtime/htmlplan.css">
+<script src="C:/Users/perca/.agents/skills/html-plan/runtime/htmlplan.js" defer></script>
+<style data-mock-shared>
+  .wf { font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1d1f1e; background: #fff; border: 1px solid #dcdcd5; border-radius: 8px; overflow: hidden; }
+  .wf .hd { padding: 9px 13px; border-bottom: 1px solid #ecece5; font-weight: 650; display: flex; gap: 8px; align-items: baseline; }
+  .wf .hd small { color: #85857c; font-weight: 400; }
+  .wf .row { display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; padding: 8px 13px; border-bottom: 1px solid #f3f3ec; }
+  .wf .row b { font-weight: 600; }
+  .wf .row small { color: #85857c; grid-column: 1; }
+  .wf .row .act { grid-column: 1 / -1; color: #6d6d64; font-size: 12px; }
+  .wf .ok { color: #17694a; font-weight: 600; }
+  .wf .bad { color: #a5342a; font-weight: 600; }
+  .wf .dim { color: #85857c; }
+  .wf .ft { display: flex; gap: 8px; align-items: center; padding: 9px 13px; background: #faf9f5; border-top: 1px solid #ecece5; }
+  .wf .field { flex: 1; color: #9a9a91; border: 1px solid #e2e2da; border-radius: 6px; padding: 6px 9px; background: #fff; }
+  .wf .btn { font-size: 13px; padding: 5px 9px; border-radius: 6px; border: 1px solid #dcdcd5; background: #fff; }
+  .wf .btn.pri { background: #1d1f1e; color: #fff; border-color: #1d1f1e; }
+  .wf .msg { padding: 8px 13px; color: #4d4d47; }
+  .wf .msg.me { text-align: right; color: #1d1f1e; }
+  .wf .pal { margin: 4px 13px 10px; border: 1px solid #dcdcd5; border-radius: 7px; overflow: hidden; }
+  .wf .pal div { padding: 7px 10px; border-top: 1px solid #f3f3ec; color: #4d4d47; }
+  .wf .pal div:first-child { border-top: 0; }
+  .wf .pal .pi { color: #1d1f1e; font-weight: 600; }
+  .wf .pal .on { background: #f4f2ec; }
+  .wf .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid #dcdcd5; color: #6d6d64; }
+  .wf .note { padding: 8px 13px; background: #f6f4ee; color: #5e5e56; font-size: 12px; }
+</style>
+<body>
+
+<header>
+  <h1>Conectar agentes y automatizar WhatsApp desde Whatfast</h1>
+  <doc-changes new="14" changed="6"></doc-changes>
+  <details class="thread"><summary>Por qué · 5 pedidos</summary>
+    <doc-quote via="prompt" from="el usuario">quiero agregar a whatfast un metodo facil para que cualquier persona pueda agregar sus agentes o harneses de IA, para que lean sus mensajes, manden mensajes</doc-quote>
+    <doc-quote via="prompt" from="el usuario">que solo se conecte con un click, que sea super simple</doc-quote>
+    <doc-quote via="prompt" from="el usuario">agrega un modo de humanizacion, para evitar problemas con Meta</doc-quote>
+    <doc-quote via="prompt" from="el usuario">en el chat, tiene que haber un modo rapido, donde yo pueda hacerle una peticion al agente</doc-quote>
+    <doc-quote via="prompt" from="el usuario">que permita configurar cronometros y funciones automaticas cada cierta hora</doc-quote>
+  </details>
+</header>
+
+<main>
+<doc-plan>
+
+<!-- ═════════ 1 ═════════ -->
+<doc-claim>
+  <p>Cualquier harness se conecta con un click.</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="wf">
+  <div class="hd">Agentes <small>2 conectados</small></div>
+  <div class="row"><b>Claude Code</b><span class="ok">Conectado</span><small>7 herramientas · propone borradores</small><span class="act">Probar · Desconectar</span></div>
+  <div class="row"><b>OpenCode</b><span class="ok">Conectado</span><small>7 herramientas · solo leer</small><span class="act">Probar · Desconectar</span></div>
+  <div class="row"><b>Cursor</b><span class="dim">Detectado</span><small>Se conecta en un click.</small><span class="act" data-ref="one">Conectar</span></div>
+  <div class="row"><b>Pi</b><span class="dim">No instalado</span><small>Copiá el comando para el que uses.</small><span class="act">Copiar</span></div>
+</div></template>
+    <doc-pin ref="one" title="Un click">Registra el token, escribe la config del cliente y prueba.</doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>La lista muestra solo los clientes que existen en esta máquina.</p>
+    <doc-calls title="Detección" caption="Cada ficha declara cómo se detecta y cómo se escribe.">
+<script type="text/plain">
+~ <AgentsView/>                                  @ crates/whatfast-ui/src/render.rs:5877
++   **detect_all**()                             @ crates/whatfast-agents/src/detect.rs:18
++     which("claude")                            @ crates/whatfast-agents/src/detect.rs:44
++     data_dir("Claude")                         @ crates/whatfast-agents/src/detect.rs:52
++     **platform_config**(os)                    @ crates/whatfast-agents/src/paths.rs:21
++   **connect**(client)                          @ crates/whatfast-agents/src/connect.rs:24
++     **grant**(agent_id)                        @ crates/whatfast-agents/src/token.rs:12
++     **write_client_config**(spec, cmd)         @ crates/whatfast-agents/src/write.rs:30
++     **verify**(agent_id)                       @ crates/whatfast-agents/src/verify.rs:22
+</script>
+    </doc-calls>
+    <doc-claim at="crates/whatfast-agents/src/connect.rs:24">
+      <p><b>connect.rs:24</b> · connect()</p>
+      <doc-code title="connect.rs · sketch" lang="rust" hl="4-9">
+<script type="text/plain">
+pub async fn connect(spec: &ClientSpec, exe: &Path) -> Result<Connected> {
+    let agent = store.create_agent(spec.id, spec.default_scope)?;   // id, token, permisos
+    let cmd = McpCommand::new(exe).agent(&agent.id);                 // <exe> mcp --agent <id>
+    spec.write(&cmd)?;                                               // CLI, archivo o deep link
+    let tools = verify(&agent, exe).await?;                           // arranca el server y cuenta
+    Ok(Connected { agent, tools })
+}
+</script>
+      <doc-pin line="3" tone="info" title="El token no va en la línea de comandos">Vive en agents/&lt;id&gt;.token con permisos 0600.</doc-pin>
+      </doc-code>
+    </doc-claim>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Cada cliente es una ficha declarativa. Agregar uno nuevo no toca la interfaz.</p>
+    <doc-code title="spec.rs · sketch" lang="rust" start="12">
+<script type="text/plain">
+pub struct ClientSpec {
+    pub id: &'static str,       // "codex"
+    pub name: &'static str,     // "Codex"
+    pub detect: Detect,         // which | path | both
+    pub mcp: McpMethod,         // Cli | File | Link
+    pub mcp_path: &'static [PlatPath],
+    pub run: RunSpec,           // headless
+    pub rules: RulesTarget,     // el guía
+    pub restart: &'static str,  // "Reiniciá Codex"
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Conectar escribe con el formato de cada cliente, no con uno propio.</p>
+    <doc-code title="write.rs · sketch" lang="rust" start="30" hl="6-11">
+<script type="text/plain">
+fn write_client_config(spec: &ClientSpec, cmd: &McpCommand) -> Result<()> {
+    let path = spec.mcp_path.for_os(current_os())?;
+    let backup = backup_once(&path)?;                  // .whatfast-backup, una vez
+    match spec.mcp {
+        McpMethod::Cli => run(spec.mcp_cli, cmd)?,      // claude mcp add, opencode mcp add
+        McpMethod::File(fmt) => merge(&path, fmt, cmd)?, // json5 / toml / yaml
+        McpMethod::Deeplink => open(deep_link(&spec, cmd))?,
+    }
+    log_write(spec.id, path, backup);
+    Ok(())
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Si la ruta del ejecutable cambia, la app reescribe las entradas.</p>
+    <doc-code title="repair.rs · sketch" lang="rust" start="14">
+<script type="text/plain">
+pub fn repair_on_start(state: &State) -> Vec<Repair> {
+    let exe = current_exe()?;                       // la ruta instalada, hoy
+    state.agents()
+        .filter(|a| a.command.exe != exe)           // la app se movió o se actualizó
+        .map(|a| a.spec.write(&a.command.with_exe(&exe)))
+        .collect()
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-ask id="offline">
+    <p>¿Qué pasa si el harness abre el servidor MCP con la app cerrada?</p>
+    <label><input type="radio" name="offline" value="spawn" checked> Arranca el backend solo <small>el agente funciona sin la ventana</small></label>
+    <label><input type="radio" name="offline" value="error"> Responde un error que dice “abrí Whatfast”</label>
+  </doc-ask>
+</doc-claim>
+
+<!-- ═════════ 2 ═════════ -->
+<doc-claim>
+  <p>El agente lee y manda dentro de lo permitido.</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="wf">
+  <div class="hd">Bandeja <small>2 propuestas</small></div>
+  <div class="row"><b>Ana</b><span class="dim">hace 2 min</span><small>«Sí, te lo paso mañana a la mañana.»</small><span class="act" data-ref="acts">Enviar · Editar · Descartar</span></div>
+  <div class="row"><b>Grupo Feria</b><span class="dim">hace 5 min</span><small>«Llego 15:30, avisen si hay cambio.»</small><span class="act">Enviar · Editar · Descartar</span></div>
+</div></template>
+    <doc-pin ref="acts" title="Solo para chats en “proponer”">Con el chat en “enviar”, el agente manda sin pasar por acá.</doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>Siete herramientas cubren leer, buscar, esperar y mandar.</p>
+    <doc-code title="tools.rs · sketch" lang="rust" start="8">
+<script type="text/plain">
+pub const TOOLS: &[Tool] = &[
+    tool!("chats_list",       read),   // ListChats
+    tool!("messages_read",    read),   // ListMessages / ListMessagesAfter
+    tool!("messages_search",  read),   // SearchLocal
+    tool!("chat_info",        read),   // GetChatInfo
+    tool!("attachment_get",   read),   // GetMessageAttachment -> ruta local
+    tool!("messages_wait",    read),   // long-poll de 25 s
+    tool!("message_send",     write),  // SendText: draft o send
+];
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Un envío del agente recorre cinco estados.</p>
+    <doc-machine name="draft" caption="El verde punteado es lo que propone el agente.">
+<script type="text/plain">
+machine draft initial propuesto
+state propuesto   # El agente escribió. Espera al humano.
+state aprobado    # El humano aprobó. Espera su turno.
+state esperando   # El ritmo humano lo frena.
+state enviando    # Sale por la sesión de WhatsApp.
+state enviado   final   # Llegó a los ticks.
+state fallido     # Quedó el error.
+state descartado final  # El humano lo tiró.
+
+| propuesto | aprobado | esperando | enviando |
+| descartado | fallido | .         | enviado  |
+
+propuesto  -aprobar->    aprobado   : click
+propuesto  -descartar->  descartado : click
++ propuesto -auto->      esperando  : chat en enviar
+aprobado   -programar->  esperando  : ritmo
+esperando  -turno->      enviando   : ventana
+enviando   -ok->         enviado    : 1 s
+enviando   -fail->       fallido    : error
++ fallido  -reintentar-> esperando  : ×3
+</script>
+    <div data-state="propuesto"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="tag">propuesta</span><small>«Sí, te lo paso mañana a la mañana.»</small><span class="act">Enviar · Editar · Descartar</span></div></div></template></doc-mock></div>
+    <div data-state="aprobado"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="ok">aprobado</span><small>Sale en el próximo turno.</small></div></div></template></doc-mock></div>
+    <div data-state="esperando"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="dim">esperando</span><small>En 3 min · escribiendo</small></div></div></template></doc-mock></div>
+    <div data-state="enviando"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="dim">enviando</span><small>Marca de “escribiendo…”</small></div></div></template></doc-mock></div>
+    <div data-state="enviado"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="ok">enviado</span><small>14:22 · dos ticks</small></div></div></template></doc-mock></div>
+    <div data-state="fallido"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="bad">falló</span><small>Sin conexión. Reintenta 3 veces.</small><span class="act">Reintentar · Descartar</span></div></div></template></doc-mock></div>
+    <div data-state="descartado"><doc-mock frame="none" w="400"><template><div class="wf"><div class="row"><b>Ana</b><span class="dim">descartado</span><small>El humano lo tiró.</small></div></div></template></doc-mock></div>
+  </doc-machine>
+  </doc-claim>
+
+  <doc-claim>
+    <p>El permiso se fija por agente y por chat, nunca global.</p>
+    <doc-code title="scope.rs · sketch" lang="rust" start="6" hl="7-9">
+<script type="text/plain">
+pub enum Scope { Read, Draft, Send }
+
+pub struct Grant {
+    pub agent: AgentId,
+    pub scope: Scope,                 // lectura por defecto
+    pub chats: ChatFilter,            // Allow(lista) | All | Groups(false)
+    pub per_hour: u16,                // 20 por defecto
+    pub window: Window,               // 8:00–23:00 local
+}
+</script>
+    </doc-code>
+    <doc-ask id="auto">
+      <p>¿El modo agente manda solo, o deja borradores?</p>
+      <label><input type="radio" name="auto" value="draft"> Deja borradores; “enviar” se activa por chat</label>
+      <label><input type="radio" name="auto" value="send" checked> Manda directo cuando el chat está habilitado</label>
+    </doc-ask>
+  </doc-claim>
+
+  <doc-claim>
+    <p>El guía viaja en tres lugares y siempre es el mismo texto.</p>
+    <doc-code title="agents/GUIDE.md · sketch" lang="markdown" start="1">
+<script type="text/plain">
+# Whatfast · guía del agente
+
+Podés leer chats y proponer mensajes. No cambiás ajustes.
+Hablás con Whatfast, nunca con la sesión de WhatsApp.
+
+## Reglas
+- Escribí corto y en el idioma del chat.
+- Citá el mensaje con reply_to si respondés a uno.
+- No mandes links ni archivos sin pedir permiso.
+- Un chat por envío. Nunca difusión.
+- Si el chat no está en tus permisos, pedilo; no insistas.
+
+## Salida
+Borrador: { chat_id, reply_to?, text, motivo, confianza 0-1 }
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Cada llamada queda en una bitácora que el usuario puede leer.</p>
+    <doc-schema id="calls" lang="sql" title="agent_calls" caption="Se escribe en la misma transacción que la respuesta.">
+<script type="text/plain">
+CREATE TABLE agent_calls (
+  id         INTEGER PRIMARY KEY,
+  at_ms      INTEGER NOT NULL,
+  agent_id   TEXT    NOT NULL,
+  tool       TEXT    NOT NULL,      -- messages_read, message_send…
+  chat_id    TEXT,
+  ok         INTEGER NOT NULL,
+  ms         INTEGER NOT NULL,
+  bytes      INTEGER NOT NULL,      -- cuánto leyó el agente
+  detail     TEXT
+);
+CREATE INDEX agent_calls_at ON agent_calls (agent_id, at_ms DESC);
+</script>
+    </doc-schema>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════════ 3 ═════════ -->
+<doc-claim>
+  <p>El usuario pide trabajo al agente desde el chat.</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="wf">
+  <div class="msg">Che, ¿me pasás el precio del envío?</div>
+  <div class="pal" data-ref="pal">
+    <div class="pi">Preguntarle al agente…</div>
+    <div>Resumir este chat</div>
+    <div>Redactar respuesta</div>
+    <div class="on">Traducir al inglés</div>
+  </div>
+  <div class="ft"><span class="btn">+</span><span class="field">Escribí un mensaje</span><span class="btn pri">⚡</span></div>
+</div></template>
+    <doc-pin ref="pal" title="Ctrl/⌘ + J">La paleta abre con teclado o con el botón del rayo.</doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>La paleta arma el contexto y llama al harness que ya está conectado.</p>
+    <doc-calls title="Modo rápido" caption="El resultado no se envía: se muestra como tarjeta.">
+<script type="text/plain">
++ <**QuickPalette**/>                              @ crates/whatfast-ui/src/quick.rs:22
++   **build_prompt**(guide, chat, ask)             @ crates/whatfast-auto/src/prompt.rs:11
++   **run_once**(harness, prompt)                  @ crates/whatfast-auto/src/runner.rs:20
++     spawn(cmd)                                   @ crates/whatfast-auto/src/runner.rs:58
++     **parse_output**(stdout)                     @ crates/whatfast-auto/src/runner.rs:96
++   **show_card**(text)                            @ crates/whatfast-ui/src/quick.rs:88
+</script>
+    </doc-calls>
+    <doc-claim at="crates/whatfast-auto/src/runner.rs:20">
+      <p><b>runner.rs:20</b> · run_once()</p>
+      <doc-code title="runner.rs · sketch" lang="rust" hl="5-9">
+<script type="text/plain">
+pub async fn run_once(h: Harness, prompt: &str) -> Result<String> {
+    let mut cmd = Command::new(h.bin);
+    cmd.args(h.print_args);                 // claude -p | codex exec | opencode run | pi --print
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+    cmd.kill_on_drop();
+    let out = timeout(h.at, cmd.output()).await??;
+    Ok(parse_output(out.stdout))
+}
+</script>
+      <doc-pin line="3" tone="info" title="Un solo lugar">Los argumentos viven en la ficha del cliente, no acá.</doc-pin>
+      </doc-code>
+    </doc-claim>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Un chat puede quedar en modo agente.</p>
+    <doc-mock frame="none" w="440"><template>
+<div class="wf">
+  <div class="hd">Ana <small>modo agente</small></div>
+  <div class="note" data-ref="mode">El agente propone. Vos aprobás.</div>
+  <div class="row"><b>Propone</b><span class="dim">por defecto</span><small>Cada mensaje nuevo genera un borrador.</small></div>
+  <div class="row"><b>Responde</b><span class="bad">apagado</span><small>Requiere permiso de envío en este chat.</small></div>
+  <div class="row"><b>Pausado</b><span class="dim">—</span><small>Vos lo frenás y los mensajes quedan para vos.</small></div>
+</div></template>
+    <doc-pin ref="mode" title="El estado vive por chat">No por cuenta. Un chat puede estar en modo agente y otro no.</doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>El modo vive en el chat, no en la cuenta.</p>
+    <doc-code title="chat_mode.rs · sketch" lang="rust" start="4">
+<script type="text/plain">
+pub enum ChatMode { Manual, Propose, Answer, Paused }
+
+pub struct ChatAgent {
+    pub chat_id: ChatId,
+    pub agent: AgentId,
+    pub mode: ChatMode,      // Manual por defecto
+    pub burst: Window,       // 3 propuestas cada 2 min
+}
+</script>
+    </doc-code>
+    <doc-ask id="harness">
+      <p>Si hay varios harness conectados, ¿cuál atiende al chat?</p>
+      <label><input type="radio" name="harness" value="first"> El primero de la lista, configurable</label>
+      <label><input type="radio" name="harness" value="ask" checked> Preguntar cada vez que se activa</label>
+    </doc-ask>
+  </doc-claim>
+</doc-claim>
+</doc-claim>
+
+<!-- ═════════ 4 ═════════ -->
+<doc-claim>
+  <p>Cada envío automático sigue un ritmo humano.</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="wf">
+  <div class="hd">Ritmo <small>perfil prudente</small></div>
+  <div class="row"><b>Escribir</b><span class="dim">3 s</span><small>0,9 s + 32 ms por carácter, con variación de ±35 %.</small></div>
+  <div class="row"><b>Pausa entre mensajes</b><span class="dim">1,5–4 s</span><small>Nunca dos seguidos.</small></div>
+  <div class="row"><b>Tope</b><span class="dim">20 / hora</span><small>120 por día y por agente.</small></div>
+  <div class="row"><b>Horario</b><span class="dim">8:00–23:00</span><small>Fuera de eso, queda en cola.</small></div>
+</div></template>
+  </doc-mock>
+
+  <doc-claim>
+    <p>El retardo no es fijo: se calcula por mensaje y lleva variación.</p>
+    <doc-code title="humanize.rs · sketch" lang="rust" hl="3-7">
+<script type="text/plain">
+pub fn typing_delay(text: &str, profile: &Profile) -> Duration {
+    let chars = text.chars().count() as f32;
+    let base = profile.base + profile.per_char * chars;       // 0.9 s + 32 ms/carácter
+    let capped = base.clamp(profile.min, profile.max);        // 1.2 s a 9 s
+    jitter(capped, profile.jitter)                            // ±35 %, nunca exacto
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>El agente no pisa al humano ni responde en el mismo segundo.</p>
+    <doc-code title="guard.rs · sketch" lang="rust" start="10">
+<script type="text/plain">
+pub fn can_send(g: &Grant, chat: &ChatState, now: Instant) -> Decision {
+    if now - chat.last_human_send < Duration::from_secs(90) { return Decision::Wait; }
+    if now - chat.last_incoming  < Duration::from_secs(8)  { return Decision::Wait; }
+    if g.sent_last_hour >= g.per_hour                       { return Decision::Cool(five_min); }
+    if !g.window.contains(local_time(now))                  { return Decision::Queue(next_open(now)); }
+    Decision::Go(auto_pause())
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>La lectura también se demora: no marca leído al instante.</p>
+    <doc-code title="read.rs · sketch" lang="rust" start="4">
+<script type="text/plain">
+pub async fn mark_read_later(chat: ChatId, had_focus: bool) {
+    let delay = if had_focus { rand(1..3) } else { rand(2..6) };
+    sleep(Duration::from_secs(delay)).await;
+    client.mark_read(chat).await;      // 1 a 6 s, y más si la ventana está al frente
+}
+</script>
+    </doc-code>
+    <doc-ask id="profile">
+      <p>¿Qué perfil de ritmo viene activo de fábrica?</p>
+      <label><input type="radio" name="profile" value="safe" checked> Prudente <small>topes bajos, ventana 8–23</small></label>
+      <label><input type="radio" name="profile" value="normal"> Normal <small>más margen, misma ventana</small></label>
+      <label><input type="radio" name="profile" value="off"> Apagado <small>sin retardos ni topes</small></label>
+    </doc-ask>
+    <doc-note tone="risk"><strong>No elimina el riesgo</strong> Meta puede sancionar el número igual. El ritmo baja la señal; la aprobación humana la baja más.</doc-note>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Una ráfaga se frena sola y avisa en la ventana.</p>
+    <doc-code title="burst.rs · sketch" lang="rust" start="6">
+<script type="text/plain">
+pub fn guard_burst(agent: &AgentId, window: &mut Window2) -> Action {
+    window.push(Instant::now());
+    if window.count_last(Duration::from_secs(120)) > 3 {
+        agent.pause(Duration::from_secs(600));
+        return Action::Notify("El agente se frenó: demasiadas propuestas en dos minutos.");
+    }
+    Action::Continue
+}
+</script>
+    </doc-code>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════════ 5 ═════════ -->
+<doc-claim>
+  <p>Las tareas disparan al agente a su hora.</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="wf">
+  <div class="hd">Automatizaciones <small>3 activas</small></div>
+  <div class="row"><b>Todos los días 20:00</b><span class="ok">activa</span><small>Resumen del grupo Feria → borrador</small><span class="act">Pausar · Editar</span></div>
+  <div class="row"><b>Mañana 9:00</b><span class="ok">una vez</span><small>Recordatorio para Ana → enviar</small><span class="act">Pausar · Editar</span></div>
+  <div class="row"><b>Cada 2 h</b><span class="dim">pausada</span><small>Revisar pendientes → solo leer</small><span class="act">Activar · Borrar</span></div>
+</div></template>
+  </doc-mock>
+
+  <doc-claim>
+    <p>Una tarea es un cron o un instante. Los dos viven en la misma tabla.</p>
+    <doc-schema id="sched" lang="sql" title="schedules" caption="El próximo disparo se calcula al guardar y al correr.">
+<script type="text/plain">
+CREATE TABLE schedules (
+  id          INTEGER PRIMARY KEY,
+  agent_id    TEXT NOT NULL,
+  chat_id     TEXT NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('once','cron')),
+  at_ms       INTEGER,               -- kind = once
+  cron        TEXT,                  -- kind = cron, 5 campos
+  prompt      TEXT NOT NULL,         -- la petición al agente
+  output      TEXT NOT NULL CHECK (output IN ('draft','send','read')),
+  window      TEXT,                  -- "08:00-23:00" o NULL
+  next_at_ms  INTEGER,
+  paused      INTEGER NOT NULL DEFAULT 0
+);
+</script>
+    </doc-schema>
+  </doc-claim>
+
+  <doc-claim>
+    <p>El motor dispara en una ventana, no al segundo exacto.</p>
+    <doc-code title="schedule.rs · sketch" lang="rust" hl="4-6">
+<script type="text/plain">
+pub async fn tick(state: Arc<State>) -> ! {
+    loop {
+        let now = unix_ms();
+        for task in state.due(now) {                       // next_at_ms <= now
+            let at = now + rand(0..90_000);                // hasta 90 s de variación
+            spawn_task(task, at);
+        }
+        sleep(Duration::from_secs(20)).await;
+    }
+}
+</script>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>El agente corre sin ventana: el backend escucha en un socket local.</p>
+    <doc-flow caption="Un backend, dos transportes. El mismo Envelope de protobuf en los dos.">
+<script type="text/plain">
+ui   = Ventana
+core = Backend [accent]
+sock = Socket
+mcp  = MCP
+harn = Harness
+run  = Runner
+cron = Cron
+db   = agents.db
+
+| ui   | .    | harn |
+| .    | core | .    |
+| sock | .    | mcp  |
+| run  | cron | db   |
+
+ui   -> core : RPC
+harn -> mcp  : stdio
+mcp  -> sock : envelope
+sock -> core : envelope
+core -> db   : permisos
+core -> run  : tarea
+cron -> run  : dispara
+run  -> harn : prompt
+</script>
+    </doc-flow>
+    <doc-claim at="crates/whatfast-wa/src/main.rs:203">
+      <p><b>main.rs:203</b> · el bucle de eventos</p>
+      <doc-code src="crates/whatfast-wa/src/main.rs" lines="203-212"></doc-code>
+    </doc-claim>
+    <doc-claim at="crates/whatfast-wa/src/server.rs:90">
+      <p><b>server.rs:90</b> · Server::new()</p>
+      <doc-code src="crates/whatfast-wa/src/server.rs" lines="90-106"></doc-code>
+    </doc-claim>
+    <doc-ask id="window">
+      <p>¿Las automatizaciones respetan el horario del perfil?</p>
+      <label><input type="radio" name="window" value="yes" checked> Sí, fuera de la ventana van a la cola</label>
+      <label><input type="radio" name="window" value="no"> No, disparan a cualquier hora</label>
+    </doc-ask>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════════ shared · no cambia ═════════ -->
+<doc-claim aux="shared">
+  <p>Compartido: una base nueva con tres tablas.</p>
+  <doc-schema id="agents" lang="sql" title="agents.db" caption="Separada de chats.db: los permisos sobreviven a una reparación del caché.">
+<script type="text/plain">
+CREATE TABLE agents (
+  id         TEXT PRIMARY KEY,        -- "claude-code"
+  client     TEXT NOT NULL,
+  scope      TEXT NOT NULL,           -- read | draft | send
+  chats      TEXT NOT NULL,           -- JSON: allowlist
+  per_hour   INTEGER NOT NULL,
+  window     TEXT,
+  token_hash TEXT NOT NULL,
+  created_ms INTEGER NOT NULL,
+  revoked_ms INTEGER
+);
+
+CREATE TABLE drafts (
+  id         INTEGER PRIMARY KEY,
+  agent_id   TEXT NOT NULL,
+  chat_id    TEXT NOT NULL,
+  reply_to   TEXT,
+  text       TEXT NOT NULL,
+  reason     TEXT,
+  confidence REAL,
+  state      TEXT NOT NULL,           -- propuesto… enviado
+  at_ms      INTEGER NOT NULL
+);
+</script>
+  </doc-schema>
+  <doc-claim>
+    <p>Los archivos nuevos viven en tres crates.</p>
+    <doc-tree caption="Lo nuevo, por crate.">
+<script type="text/plain">
+crates/
+  + whatfast-agents/    # fichas, detección, escritura, tokens, guía
+  + whatfast-mcp/       # servidor MCP por stdio
+  + whatfast-auto/      # runner, ritmo, schedule
+  ~ whatfast-wa/        # segundo transporte
+  ~ whatfast-ui/        # pantalla Agentes, paleta, bandeja
+docs/
+  + plan-agentes.html
+</script>
+    </doc-tree>
+  </doc-claim>
+</doc-claim>
+
+<doc-claim aux="scope">
+  <p>No cambia: la sesión, los 40 RPC y la pantalla de chats.</p>
+  <ul>
+    <li>La sesión de WhatsApp sigue siendo una sola, de la app.</li>
+    <li>Los RPC existentes se llaman como están.</li>
+    <li>Sin modelo propio: el agente es el harness que el usuario ya usa.</li>
+    <li>Sin nube: el socket no sale de la máquina.</li>
+  </ul>
+</doc-claim>
+
+</doc-plan>
+</main>
+</body>
+</html>

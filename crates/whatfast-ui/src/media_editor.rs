@@ -119,9 +119,21 @@ pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> 
     let width = (plan.crop.width.round().max(1.0) as u32).min(rotated.width().saturating_sub(x));
     let height = (plan.crop.height.round().max(1.0) as u32).min(rotated.height().saturating_sub(y));
     let cropped = image::imageops::crop_imm(&rotated, x, y, width, height).to_image();
-    cropped
-        .save(destination)
-        .map_err(|error| format!("the picture could not be saved: {error}"))
+    let ext = destination
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "jpg" || ext == "jpeg" {
+        image::DynamicImage::ImageRgba8(cropped)
+            .into_rgb8()
+            .save(destination)
+            .map_err(|error| format!("the picture could not be saved: {error}"))
+    } else {
+        cropped
+            .save(destination)
+            .map_err(|error| format!("the picture could not be saved: {error}"))
+    }
 }
 
 /// The events of the editor.
@@ -365,24 +377,26 @@ impl MediaEditor {
 
     /// The size of the preview of the picture, in the pixels of the window.
     fn drawn_size(&self) -> PixelSize {
-        let scale = preview_scale(self.natural);
+        let rotated = self.rotated_size();
+        let scale = preview_scale(rotated);
         PixelSize {
-            width: (self.natural.width * scale).round(),
-            height: (self.natural.height * scale).round(),
+            width: (rotated.width * scale).round(),
+            height: (rotated.height * scale).round(),
         }
     }
 
     /// How many pixels of the window are one pixel of the picture.
     fn window_per_picture(&self) -> (f64, f64) {
         let drawn = self.drawn_size();
+        let rotated = self.rotated_size();
         (
-            if drawn.width > 0.0 {
-                drawn.width / self.natural.width
+            if drawn.width > 0.0 && rotated.width > 0.0 {
+                drawn.width / rotated.width
             } else {
                 0.0
             },
-            if drawn.height > 0.0 {
-                drawn.height / self.natural.height
+            if drawn.height > 0.0 && rotated.height > 0.0 {
+                drawn.height / rotated.height
             } else {
                 0.0
             },
@@ -731,7 +745,11 @@ impl MediaEditor {
                             )
                             .child(
                                 Button::new("media-editor-send")
-                                    .label(if working { "Preparing." } else { "Send" })
+                                    .label(if working {
+                                        i18n::t("Preparing...")
+                                    } else {
+                                        i18n::t("Done")
+                                    })
                                     .disabled(working)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if !this.working {
@@ -754,7 +772,6 @@ impl MediaEditor {
     /// The surface of the preview: the picture, already rotated, and the
     /// rectangle of the crop.
     fn surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let frame = self.rotated_size();
         let (scale_x, scale_y) = self.window_per_picture();
         let crop = self.crop();
         let primary = cx.theme().primary;
@@ -782,10 +799,11 @@ impl MediaEditor {
             );
         }
 
+        let drawn = self.drawn_size();
         let mut surface = div()
             .relative()
-            .w(px(frame.width as f32))
-            .h(px(frame.height as f32))
+            .w(px(drawn.width as f32))
+            .h(px(drawn.height as f32))
             .overflow_hidden()
             .on_mouse_down(
                 MouseButton::Left,

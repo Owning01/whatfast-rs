@@ -20,11 +20,17 @@ use whatsapp_rust::waproto::whatsapp as wa;
 
 use crate::db::{self, MessageRow, Store};
 use crate::meta::hash_hex;
-use crate::send::{chat_jid, internal, refresh_chat_pointer, stored_request};
+use crate::send::{chat_jid, internal, refresh_chat_pointer, reply_context};
 use crate::session::Session;
 
 /// The download ceiling, the same 2 GiB the Go sidecar enforced.
 const MAX_MEDIA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The outgoing image ceiling (`maxImageBytes`) and the safe decode bounds
+/// `safeImageConfig` enforced before an upload.
+const MAX_OUTGOING_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IMAGE_EDGE: u32 = 8192;
+const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 
 /// Sends a local image with an optional caption.
 #[expect(clippy::too_many_arguments)]
@@ -38,11 +44,6 @@ pub async fn send_image(
     reply_to_message_id: &str,
     reply_to_chat_id: &str,
 ) -> Result<MessageRow, (String, String, bool)> {
-    if let Some((_chat, message_id)) = stored_request(store, client_message_id)
-        && let Some(row) = store.message(chat_id, &message_id).map_err(internal)?
-    {
-        return Ok(row);
-    }
     let bytes = std::fs::read(image_path).map_err(|error| {
         (
             "invalid_argument".into(),
@@ -50,8 +51,16 @@ pub async fn send_image(
             false,
         )
     })?;
-    let mime = sniff_mime(&bytes);
+    let fingerprint = format!("image\u{0}{caption}\u{0}{}", hash_hex(&bytes));
+    if let Some(row) =
+        crate::send::stored_outgoing(store, client_message_id, chat_id, &fingerprint)?
+    {
+        return Ok(row);
+    }
+    let mime = outgoing_image_mime(&bytes)?;
     let (width, height) = sniff_dimensions(&bytes, &mime);
+    check_image_bounds(width, height)?;
+    let context = reply_context(store, chat_id, reply_to_chat_id, reply_to_message_id)?;
     let response = session
         .client
         .upload(bytes, MediaType::Image, UploadOptions::new())
@@ -69,22 +78,11 @@ pub async fn send_image(
     image.file_length = Some(response.file_length);
     image.width = Some(width);
     image.height = Some(height);
+    if let Some(context) = context {
+        image.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+    }
     let mut message = wa::Message::default();
     message.image_message = whatsapp_rust::waproto::buffa::MessageField::some(image);
-    if !caption.is_empty() && !reply_to_message_id.is_empty() {
-        let reply_chat = if reply_to_chat_id.is_empty() {
-            chat_id.to_owned()
-        } else {
-            reply_to_chat_id.to_owned()
-        };
-        if let Some(mut image) = message.image_message.as_option().cloned() {
-            let mut context = wa::ContextInfo::default();
-            context.stanza_id = Some(reply_to_message_id.to_owned());
-            context.remote_jid = Some(reply_chat);
-            image.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
-            message.image_message = whatsapp_rust::waproto::buffa::MessageField::some(image);
-        }
-    }
     deliver_media(
         session,
         store,
@@ -110,6 +108,7 @@ pub async fn send_image(
         },
         reply_to_message_id,
         reply_to_chat_id,
+        &fingerprint,
     )
     .await
 }
@@ -145,43 +144,27 @@ async fn deliver_media(
     media: MediaKind,
     reply_to_message_id: &str,
     reply_to_chat_id: &str,
+    fingerprint: &str,
 ) -> Result<MessageRow, (String, String, bool)> {
     let jid: Jid =
         chat_jid(chat_id).map_err(|message| ("invalid_argument".into(), message, false))?;
-    let sent = session
-        .client
-        .send_message(jid, message)
-        .await
-        .map_err(|error| ("send_failed".into(), format!("{error}"), true))?;
-    let message_id = sent.message_id.to_string();
-    store
-        .write(|conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO outgoing_requests(client_request_id,chat_jid,text,message_id,created_at)
-                 VALUES(?1,?2,?3,?4,?5)",
-                rusqlite::params![
-                    client_message_id,
-                    chat_id,
-                    media.caption,
-                    message_id,
-                    db::now_ms()
-                ],
-            )?;
-            Ok(())
-        })
-        .map_err(internal)?;
+    let reply_chat_id = if reply_to_message_id.is_empty() {
+        String::new()
+    } else if reply_to_chat_id.is_empty() {
+        chat_id.to_owned()
+    } else {
+        reply_to_chat_id.to_owned()
+    };
     let row = MessageRow {
-        id: message_id,
         chat_jid: chat_id.to_owned(),
         transport_jid: chat_id.to_owned(),
-        sender_jid: String::new(),
+        sender_jid: crate::send::own_sender_jid(session),
         text: String::new(),
         timestamp: db::now_ms(),
         from_me: true,
-        status: whatfast_protocol::MessageStatus::Sent as i64,
         kind: media.kind.to_owned(),
         reply_to_id: reply_to_message_id.to_owned(),
-        reply_to_chat_id: reply_to_chat_id.to_owned(),
+        reply_to_chat_id: reply_chat_id,
         image_mime: media.mime.clone(),
         image_caption: media.caption.clone(),
         image_local_path: media.local_path.clone(),
@@ -209,14 +192,51 @@ async fn deliver_media(
         media_caption: media.caption,
         ..MessageRow::default()
     };
-    store.insert_message(&row).map_err(internal)?;
+    let (row, already_reserved) = crate::send::reserve_outgoing(
+        session,
+        store,
+        client_message_id,
+        chat_id,
+        fingerprint,
+        row,
+    )?;
+    if already_reserved {
+        return Ok(row);
+    }
+    session
+        .client
+        .send(whatsapp_rust::SendRequest::new(&jid, message).with_options(
+            whatsapp_rust::SendOptions::default().with_message_id(
+                whatsapp_rust::MessageId::new(row.id.as_str()).map_err(|error| {
+                    ("internal".into(), format!("bad message id: {error}"), false)
+                })?,
+            ),
+        ))
+        .await
+        .map_err(|error| {
+            let _ = store.set_message_status(
+                chat_id,
+                &row.id,
+                whatfast_protocol::MessageStatus::Failed as i64,
+            );
+            ("send_failed".into(), format!("{error}"), true)
+        })?;
+    store
+        .set_message_status(
+            chat_id,
+            &row.id,
+            whatfast_protocol::MessageStatus::Sent as i64,
+        )
+        .map_err(internal)?;
+    let mut row = row;
+    row.status = whatfast_protocol::MessageStatus::Sent as i64;
     refresh_chat_pointer(store, chat_id).map_err(internal)?;
     Ok(row)
 }
 
 /// The mime of a media blob by its first bytes; unknown falls back to a
 /// generic stream so the upload still happens.
-fn sniff_mime(bytes: &[u8]) -> String {
+pub(crate) fn sniff_mime(bytes: &[u8]) -> String {
     match bytes.first_chunk::<12>() {
         Some([0x89, b'P', b'N', b'G', ..]) => "image/png",
         Some([0xFF, 0xD8, 0xFF, ..]) => "image/jpeg",
@@ -227,9 +247,62 @@ fn sniff_mime(bytes: &[u8]) -> String {
     .to_owned()
 }
 
-/// The pixel size of a PNG or JPEG; unknown formats answer zero and the
-/// peer's client scales on its own.
-fn sniff_dimensions(bytes: &[u8], mime: &str) -> (u32, u32) {
+/// The mime an outgoing image must have: the Go refused anything outside the
+/// four formats WhatsApp renders (`supportedImageMIME`) and refused blobs over
+/// 32 MiB before uploading them.
+fn outgoing_image_mime(bytes: &[u8]) -> Result<String, (String, String, bool)> {
+    if bytes.is_empty() || bytes.len() > MAX_OUTGOING_IMAGE_BYTES {
+        return Err((
+            "invalid_argument".into(),
+            format!(
+                "image must be a regular file between 1 byte and {} MiB",
+                MAX_OUTGOING_IMAGE_BYTES / (1024 * 1024)
+            ),
+            false,
+        ));
+    }
+    let mime = sniff_mime(bytes);
+    match mime.as_str() {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Ok(mime),
+        _ => Err((
+            "invalid_argument".into(),
+            format!("unsupported image type {mime}"),
+            false,
+        )),
+    }
+}
+
+/// The decode bounds `safeImageConfig` enforced: an edge over 8192 or more
+/// than 16 megapixels is refused before the upload.
+fn check_image_bounds(width: u32, height: u32) -> Result<(), (String, String, bool)> {
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_EDGE
+        || height > MAX_IMAGE_EDGE
+        || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+    {
+        return Err((
+            "invalid_argument".into(),
+            format!("image dimensions {width}x{height} exceed the safe limit"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a blob is an Ogg container that carries an Opus stream, the only
+/// payload WhatsApp accepts as a voice note (`openAttachmentSource`).
+fn is_ogg_opus(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"OggS")
+        && bytes
+            .windows(8)
+            .take(64)
+            .any(|window| window == b"OpusHead")
+}
+
+/// The pixel size of a PNG, JPEG, GIF or WebP; unknown or truncated formats
+/// answer zero and the caller refuses the upload.
+pub(crate) fn sniff_dimensions(bytes: &[u8], mime: &str) -> (u32, u32) {
     match mime {
         "image/png" => {
             // IHDR: 8-byte signature, 4 length, 4 "IHDR", then width/height.
@@ -240,6 +313,16 @@ fn sniff_dimensions(bytes: &[u8], mime: &str) -> (u32, u32) {
             }
             (0, 0)
         }
+        "image/gif" => {
+            // The logical screen descriptor: "GIF8" + 2 version + 2 size.
+            if bytes.len() >= 10 {
+                let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+                let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+                return (width, height);
+            }
+            (0, 0)
+        }
+        "image/webp" => webp_dimensions(bytes),
         "image/jpeg" => {
             let mut offset = 2;
             while offset + 9 < bytes.len() {
@@ -267,6 +350,58 @@ fn sniff_dimensions(bytes: &[u8], mime: &str) -> (u32, u32) {
     }
 }
 
+/// The canvas size of a WebP file, read from whichever bitstream chunk it
+/// carries: VP8X stores the canvas, VP8 the lossy frame header and VP8L the
+/// packed lossless size.
+fn webp_dimensions(bytes: &[u8]) -> (u32, u32) {
+    let Some(header) = bytes.get(..16) else {
+        return (0, 0);
+    };
+    if &header[8..12] != b"WEBP" {
+        return (0, 0);
+    }
+    match &header[12..16] {
+        b"VP8X" => {
+            let Some(header) = bytes.get(..30) else {
+                return (0, 0);
+            };
+            // The canvas is stored minus one in three bytes each; the +1 has
+            // to apply after the three bytes are joined.
+            let width = 1
+                + (u32::from(header[24])
+                    | (u32::from(header[25]) << 8)
+                    | (u32::from(header[26]) << 16));
+            let height = 1
+                + (u32::from(header[27])
+                    | (u32::from(header[28]) << 8)
+                    | (u32::from(header[29]) << 16));
+            (width, height)
+        }
+        b"VP8 " => {
+            let Some(header) = bytes.get(..30) else {
+                return (0, 0);
+            };
+            if header[23] != 0x9d || header[24] != 0x01 || header[25] != 0x2a {
+                return (0, 0);
+            }
+            let width = u16::from_le_bytes([header[26], header[27]]) & 0x3fff;
+            let height = u16::from_le_bytes([header[28], header[29]]) & 0x3fff;
+            (u32::from(width), u32::from(height))
+        }
+        b"VP8L" => {
+            let Some(header) = bytes.get(..25) else {
+                return (0, 0);
+            };
+            if header[20] != 0x2f {
+                return (0, 0);
+            }
+            let bits = u32::from_le_bytes([header[21], header[22], header[23], header[24]]);
+            (1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff))
+        }
+        _ => (0, 0),
+    }
+}
+
 /// Sends a document, a video, or an audio/voice note from a local file.
 #[expect(clippy::too_many_arguments)]
 pub async fn send_attachment(
@@ -281,10 +416,19 @@ pub async fn send_attachment(
     reply_to_chat_id: &str,
     voice_note: bool,
 ) -> Result<MessageRow, (String, String, bool)> {
-    if let Some((_chat, message_id)) = stored_request(store, client_message_id)
-        && let Some(row) = store.message(chat_id, &message_id).map_err(internal)?
-    {
-        return Ok(row);
+    if caption.len() > 4096 {
+        return Err((
+            "invalid_argument".into(),
+            "caption must be valid UTF-8 up to 4096 bytes".into(),
+            false,
+        ));
+    }
+    if kind == whatfast_protocol::AttachmentKind::Audio && !caption.is_empty() {
+        return Err((
+            "invalid_argument".into(),
+            "audio messages do not support captions".into(),
+            false,
+        ));
     }
     let bytes = std::fs::read(file_path).map_err(|error| {
         (
@@ -310,6 +454,23 @@ pub async fn send_attachment(
         ),
         _ => (MediaType::Document, "document", sniff_mime(&bytes)),
     };
+    if voice_note && wire_kind == "audio" && !is_ogg_opus(&bytes) {
+        return Err((
+            "invalid_argument".into(),
+            "voice notes must contain Ogg Opus data".into(),
+            false,
+        ));
+    }
+    let fingerprint = format!(
+        "{wire_kind}\u{0}{caption}\u{0}{file_name}\u{0}{}",
+        hash_hex(&bytes)
+    );
+    if let Some(row) =
+        crate::send::stored_outgoing(store, client_message_id, chat_id, &fingerprint)?
+    {
+        return Ok(row);
+    }
+    let context = reply_context(store, chat_id, reply_to_chat_id, reply_to_message_id)?;
     let response = session
         .client
         .upload(bytes, media_type, UploadOptions::new())
@@ -328,6 +489,13 @@ pub async fn send_attachment(
             video.file_sha256 = Some(response.file_sha256.to_vec());
             video.file_enc_sha256 = Some(response.file_enc_sha256.to_vec());
             video.file_length = Some(response.file_length);
+            let (w, h, dur) = probe_video_metadata(file_path);
+            video.width = w;
+            video.height = h;
+            video.seconds = dur;
+            if let Some(context) = context.clone() {
+                video.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+            }
             message.video_message = whatsapp_rust::waproto::buffa::MessageField::some(video);
         }
         "audio" => {
@@ -340,6 +508,9 @@ pub async fn send_attachment(
             audio.file_enc_sha256 = Some(response.file_enc_sha256.to_vec());
             audio.file_length = Some(response.file_length);
             audio.ptt = Some(voice_note);
+            if let Some(context) = context.clone() {
+                audio.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+            }
             message.audio_message = whatsapp_rust::waproto::buffa::MessageField::some(audio);
         }
         _ => {
@@ -354,6 +525,9 @@ pub async fn send_attachment(
             document.file_sha256 = Some(response.file_sha256.to_vec());
             document.file_enc_sha256 = Some(response.file_enc_sha256.to_vec());
             document.file_length = Some(response.file_length);
+            if let Some(context) = context {
+                document.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+            }
             message.document_message = whatsapp_rust::waproto::buffa::MessageField::some(document);
         }
     }
@@ -382,6 +556,7 @@ pub async fn send_attachment(
         },
         reply_to_message_id,
         reply_to_chat_id,
+        &fingerprint,
     )
     .await
 }
@@ -396,11 +571,13 @@ pub async fn send_sticker(
     reply_to_message_id: &str,
     reply_to_chat_id: &str,
 ) -> Result<MessageRow, (String, String, bool)> {
-    if let Some((_chat, message_id)) = stored_request(store, client_message_id)
-        && let Some(row) = store.message(chat_id, &message_id).map_err(internal)?
+    let fingerprint = format!("sticker\u{0}{}", hash_hex(webp_data));
+    if let Some(row) =
+        crate::send::stored_outgoing(store, client_message_id, chat_id, &fingerprint)?
     {
         return Ok(row);
     }
+    let context = reply_context(store, chat_id, reply_to_chat_id, reply_to_message_id)?;
     let response = session
         .client
         .upload(webp_data.to_vec(), MediaType::Sticker, UploadOptions::new())
@@ -418,6 +595,9 @@ pub async fn send_sticker(
     sticker.width = Some(width);
     sticker.height = Some(height);
     sticker.is_animated = Some(animated);
+    if let Some(context) = context {
+        sticker.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+    }
     let mut message = wa::Message::default();
     message.sticker_message = whatsapp_rust::waproto::buffa::MessageField::some(sticker);
     deliver_media(
@@ -445,32 +625,19 @@ pub async fn send_sticker(
         },
         reply_to_message_id,
         reply_to_chat_id,
+        &fingerprint,
     )
     .await
 }
 
-/// The WebP dimensions from the VP8X chunk; plain VP8/VP8L answer 512, the
-/// square WhatsApp normalizes to, and `animated` reads the ALPH/ANIM flag.
+/// The WebP dimensions and animation flag of a sticker. The VP8X chunk also
+/// carries the ALPH/ANIM flag; a plain VP8/VP8L file is a still image.
 fn sniff_webp(bytes: &[u8]) -> (u32, u32, bool) {
-    let Some(header) = bytes.first_chunk::<30>() else {
-        return (0, 0, false);
-    };
-    if &header[8..12] != b"WEBP" {
-        return (0, 0, false);
-    }
-    match &header[12..16] {
-        b"VP8X" => {
-            let width = (1 + u32::from(header[24]))
-                | (u32::from(header[25]) << 8)
-                | (u32::from(header[26]) << 16);
-            let height = (1 + u32::from(header[27]))
-                | (u32::from(header[28]) << 8)
-                | (u32::from(header[29]) << 16);
-            let animated = header[20] & 0x02 != 0;
-            (width, height, animated)
-        }
-        _ => (512, 512, false),
-    }
+    let (width, height) = webp_dimensions(bytes);
+    let animated = bytes
+        .first_chunk::<21>()
+        .is_some_and(|header| &header[12..16] == b"VP8X" && header[20] & 0x02 != 0);
+    (width, height, animated)
 }
 
 /// The cache path of one message's media: a stable hash of the ids plus the
@@ -538,6 +705,42 @@ fn cache_extension(mime: &str, file_name: &str) -> String {
     }
 }
 
+/// Probes video dimensions (width, height) and duration (seconds) using ffprobe if available.
+fn probe_video_metadata(file_path: &str) -> (Option<u32>, Option<u32>, Option<u32>) {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return (None, None, None);
+    };
+    if !output.status.success() {
+        return (None, None, None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let width = lines.first().and_then(|w| w.parse::<u32>().ok());
+    let height = lines.get(1).and_then(|h| h.parse::<u32>().ok());
+    let seconds = lines
+        .get(2)
+        .and_then(|d| d.parse::<f64>().ok())
+        .map(|s| s.round() as u32);
+    (width, height, seconds)
+}
+
 /// Which columns of the row carry the media, and which CDN type decrypts it.
 struct MediaSource {
     mime: String,
@@ -579,16 +782,44 @@ impl MediaSource {
                 },
             }
         } else {
-            Self {
-                mime: row.media_mime.clone(),
-                file_name: row.media_file_name.clone(),
-                local_path: row.media_local_path.clone(),
-                direct_path: row.media_direct_path.clone(),
-                media_key: row.media_media_key.clone(),
-                file_sha256: row.media_file_sha256.clone(),
-                file_enc_sha256: row.media_file_enc_sha256.clone(),
-                file_size: row.media_size.max(0) as u64,
-                media_type,
+            // This port writes an attachment's descriptor to the media_*
+            // columns; a row that carries it in image_* instead (the Go
+            // schema stored every media kind there) still downloads.
+            let descriptor_in_image_columns = row.media_direct_path.is_empty()
+                && row.media_media_key.is_empty()
+                && !row.image_direct_path.is_empty();
+            if descriptor_in_image_columns {
+                Self {
+                    mime: if row.image_mime.is_empty() {
+                        row.media_mime.clone()
+                    } else {
+                        row.image_mime.clone()
+                    },
+                    file_name: row.media_file_name.clone(),
+                    local_path: if row.media_local_path.is_empty() {
+                        row.image_local_path.clone()
+                    } else {
+                        row.media_local_path.clone()
+                    },
+                    direct_path: row.image_direct_path.clone(),
+                    media_key: row.image_media_key.clone(),
+                    file_sha256: row.image_file_sha256.clone(),
+                    file_enc_sha256: row.image_file_enc_sha256.clone(),
+                    file_size: row.image_size.max(0) as u64,
+                    media_type,
+                }
+            } else {
+                Self {
+                    mime: row.media_mime.clone(),
+                    file_name: row.media_file_name.clone(),
+                    local_path: row.media_local_path.clone(),
+                    direct_path: row.media_direct_path.clone(),
+                    media_key: row.media_media_key.clone(),
+                    file_sha256: row.media_file_sha256.clone(),
+                    file_enc_sha256: row.media_file_enc_sha256.clone(),
+                    file_size: row.media_size.max(0) as u64,
+                    media_type,
+                }
             }
         })
     }
@@ -760,4 +991,191 @@ fn set_media_path(
         store.set_media_local_path(&row.chat_jid, &row.id, path)
     };
     changed.map(|_| ()).map_err(internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal PNG header: the signature, the IHDR length and type, then the
+    /// two 32-bit dimensions the sniffer reads.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+        ];
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    /// A JPEG with one APP0 segment (16 bytes) followed by the SOF0 that
+    /// carries the frame size.
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        bytes.extend_from_slice(&[0u8; 14]);
+        bytes.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 10]);
+        bytes
+    }
+
+    fn gif(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes
+    }
+
+    /// A VP8X WebP: the canvas size is stored minus one in three bytes each,
+    /// and bit 1 of the flags marks an animation.
+    fn webp_vp8x(width: u32, height: u32, animated: bool) -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WEBPVP8X");
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.push(u8::from(animated) << 1);
+        bytes.extend_from_slice(&[0, 0, 0]);
+        let width = width - 1;
+        let height = height - 1;
+        bytes.extend_from_slice(&width.to_le_bytes()[..3]);
+        bytes.extend_from_slice(&height.to_le_bytes()[..3]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    /// A lossless WebP: 0x2f then 14 bits of width-1 followed by 14 bits of
+    /// height-1.
+    fn webp_vp8l(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WEBPVP8L");
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.push(0x2f);
+        let bits = (width - 1) | ((height - 1) << 14);
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn the_four_supported_formats_report_mime_and_size() {
+        let cases = [
+            (png(800, 600), "image/png", (800, 600)),
+            (jpeg(640, 480), "image/jpeg", (640, 480)),
+            (gif(320, 200), "image/gif", (320, 200)),
+            (webp_vp8x(1000, 600, false), "image/webp", (1000, 600)),
+            (webp_vp8l(512, 384), "image/webp", (512, 384)),
+        ];
+        for (bytes, mime, size) in cases {
+            assert_eq!(outgoing_image_mime(&bytes).expect("a known image"), mime);
+            assert_eq!(sniff_dimensions(&bytes, mime), size, "{mime}");
+        }
+    }
+
+    #[test]
+    fn outgoing_images_refuse_unknown_formats() {
+        let error = outgoing_image_mime(b"not an image at all")
+            .expect_err("an unknown blob is refused before the upload");
+        assert_eq!(error.0, "invalid_argument");
+        assert!(error.1.contains("unsupported image type"));
+        assert!(outgoing_image_mime(&[]).is_err());
+    }
+
+    #[test]
+    fn image_bounds_refuse_oversized_canvases() {
+        assert!(check_image_bounds(8192, 1000).is_ok());
+        assert!(check_image_bounds(8193, 10).is_err());
+        assert!(check_image_bounds(5000, 5000).is_err());
+        assert!(check_image_bounds(0, 10).is_err());
+    }
+
+    #[test]
+    fn voice_notes_must_be_ogg_opus() {
+        let mut opus = b"OggS".to_vec();
+        opus.extend_from_slice(&[0u8; 20]);
+        opus.extend_from_slice(b"OpusHead");
+        assert!(is_ogg_opus(&opus));
+        assert!(!is_ogg_opus(b"OggS without an opus stream"));
+        assert!(!is_ogg_opus(b"RIFF....WAVEfmt "));
+    }
+
+    #[test]
+    fn sticker_metadata_reads_both_webp_bitstreams() {
+        assert_eq!(sniff_webp(&webp_vp8x(512, 512, true)), (512, 512, true));
+        assert_eq!(sniff_webp(&webp_vp8x(512, 512, false)), (512, 512, false));
+        assert_eq!(sniff_webp(&webp_vp8l(512, 512)), (512, 512, false));
+        assert_eq!(sniff_webp(b"not webp"), (0, 0, false));
+    }
+
+    #[test]
+    fn cache_paths_are_stable_and_take_the_extension_from_the_name() {
+        let dir = std::path::Path::new("media");
+        let first = cached_media_path(
+            dir,
+            "5491100000001@s.whatsapp.net",
+            "3EB0A",
+            "application/pdf",
+            "report.pdf",
+        );
+        let second = cached_media_path(
+            dir,
+            "5491100000001@s.whatsapp.net",
+            "3EB0A",
+            "application/pdf",
+            "report.pdf",
+        );
+        assert_eq!(first, second);
+        assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("pdf"));
+        let from_mime = cached_media_path(dir, "chat", "id", "audio/ogg; codecs=opus", "");
+        assert_eq!(
+            from_mime.extension().and_then(|ext| ext.to_str()),
+            Some("ogg")
+        );
+        let unknown = cached_media_path(dir, "chat", "id", "application/x-unknown", "");
+        assert_eq!(unknown.extension(), None);
+        let other = cached_media_path(dir, "chat", "other", "application/pdf", "report.pdf");
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn attachment_descriptors_in_the_image_columns_still_download() {
+        let row = MessageRow {
+            kind: "video".into(),
+            image_mime: "video/mp4".into(),
+            image_direct_path: "/v/t62.7118-24/abc".into(),
+            image_media_key: vec![7u8; 32],
+            image_file_sha256: vec![1u8; 32],
+            image_file_enc_sha256: vec![2u8; 32],
+            image_size: 4_096,
+            media_file_name: "clip.mp4".into(),
+            ..MessageRow::default()
+        };
+        let source = MediaSource::of(&row).expect("a video row carries media");
+        assert_eq!(source.direct_path, "/v/t62.7118-24/abc");
+        assert_eq!(source.file_size, 4_096);
+        assert_eq!(source.mime, "video/mp4");
+        assert_eq!(source.file_name, "clip.mp4");
+
+        let native = MessageRow {
+            kind: "video".into(),
+            media_mime: "video/mp4".into(),
+            media_direct_path: "/v/native".into(),
+            media_media_key: vec![9u8; 32],
+            media_size: 10,
+            ..MessageRow::default()
+        };
+        let source = MediaSource::of(&native).expect("a video row carries media");
+        assert_eq!(source.direct_path, "/v/native");
+        assert_eq!(source.file_size, 10);
+    }
+
+    #[test]
+    fn text_rows_have_no_media_source() {
+        let row = MessageRow {
+            kind: "text".into(),
+            ..MessageRow::default()
+        };
+        assert!(MediaSource::of(&row).is_none());
+    }
 }

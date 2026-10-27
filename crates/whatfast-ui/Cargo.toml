@@ -17,6 +17,14 @@ anyhow.workspace = true
 async-channel.workspace = true
 whatfast-core = { path = "../whatfast-core" }
 whatfast-i18n = { path = "../whatfast-i18n" }
+# The catalog of the agent harnesses and the registration of the server in the
+# configuration of each one: the screen of the agents runs it with one click.
+whatfast-agents = { path = "../whatfast-agents" }
+# The permissions and the drafts of the agents, in the shared `agents.db`.
+whatfast-auto = { path = "../whatfast-auto" }
+# The MCP server an agent harness starts from this same executable
+# (`whatfast mcp --agent <id>`): the tools, the local bridge client.
+whatfast-mcp = { path = "../whatfast-mcp" }
 whatfast-model = { path = "../whatfast-model" }
 whatfast-protocol = { path = "../whatfast-protocol" }
 # The GPUI stack comes from the Zed repository. Do NOT add `rev = ...` here:
@@ -65,6 +73,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_System_Time",
     "Win32_UI_WindowsAndMessaging",
+] }
+# El video de los mensajes se decodifica con Media Foundation, que viene con
+# Windows: no hay decodificador externo ni librerias que instalar.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
 ] }
 
 # The lock of the single instance asks the system whether the process that

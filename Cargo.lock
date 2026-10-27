@@ -9582,8 +9582,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "whatfast-agents"
+version = "0.2.19"
+dependencies = [
+ "getrandom 0.2.17",
+ "serde_json",
+]
+
+[[package]]
+name = "whatfast-auto"
+version = "0.2.19"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tracing",
+ "whatfast-agents",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "whatfast-core"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "serde",
  "serde_json",
@@ -9591,14 +9614,28 @@ dependencies = [
 
 [[package]]
 name = "whatfast-i18n"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
+name = "whatfast-mcp"
+version = "0.2.19"
+dependencies = [
+ "async-channel",
+ "getrandom 0.2.17",
+ "prost",
+ "serde_json",
+ "tokio",
+ "whatfast-auto",
+ "whatfast-protocol",
+ "whatfast-wa",
+]
+
+[[package]]
 name = "whatfast-model"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "emojis",
  "image",
@@ -9611,7 +9648,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-protocol"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "async-channel",
  "prost",
@@ -9622,7 +9659,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-ui"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9645,16 +9682,20 @@ dependencies = [
  "smol",
  "tempfile",
  "uuid",
+ "whatfast-agents",
+ "whatfast-auto",
  "whatfast-core",
  "whatfast-i18n",
+ "whatfast-mcp",
  "whatfast-model",
  "whatfast-protocol",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "whatfast-wa"
-version = "0.2.7"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9666,6 +9707,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wacore",
+ "whatfast-agents",
+ "whatfast-auto",
  "whatfast-protocol",
  "whatsapp-rust",
 ]

@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan · Personalización, markdown y diagramas · Whatfast</title>
+<style>
+  :root {
+    --papel: #faf9f5;
+    --tinta: #141413;
+    --tinta-suave: #5c5a54;
+    --tinta-tenue: #8b8880;
+    --linea: #e3e1d8;
+    --acento: #c6613f;
+    --acento-suave: #f6e9e3;
+    --verde: #2c7a39;
+    --verde-suave: #e8f2e9;
+    --ambar: #8a6100;
+    --ambar-suave: #fbf0d4;
+    --rojo: #b3261e;
+    --rojo-suave: #fbe9e7;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--papel); }
+  body {
+    margin: 0;
+    color: var(--tinta);
+    font: 16px/1.62 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .hoja { max-width: 764px; margin: 0 auto; padding: 64px 24px 96px; }
+  header.tapa { border-bottom: 1px solid var(--linea); padding-bottom: 28px; margin-bottom: 8px; }
+  .sello {
+    display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: .12em;
+    text-transform: uppercase; color: var(--acento); background: var(--acento-suave);
+    padding: 7px 10px; border-radius: 4px;
+  }
+  h1 { font-size: 34px; line-height: 1.18; letter-spacing: -.02em; margin: 18px 0 10px; }
+  .bajada { color: var(--tinta-suave); font-size: 17px; margin: 0; }
+  .ficha { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 22px; font-size: 13px; color: var(--tinta-tenue); }
+  .ficha b { color: var(--tinta); font-weight: 600; }
+  nav.indice { margin: 26px 0 8px; padding: 18px 20px; background: #fff; border: 1px solid var(--linea); border-radius: 8px; }
+  nav.indice h2 { font: 600 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--tinta-tenue); margin: 0 0 12px; }
+  nav.indice ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 28px; font-size: 14px; }
+  nav.indice li { margin: 5px 0; break-inside: avoid; }
+  nav.indice a { color: var(--tinta); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav.indice a:hover { border-color: var(--acento); color: var(--acento); }
+  section { margin-top: 52px; }
+  h2.titulo { font-size: 24px; letter-spacing: -.015em; margin: 0 0 4px; display: flex; align-items: baseline; gap: 12px; }
+  h2.titulo .n { font: 600 12px/1 var(--mono); color: var(--acento); letter-spacing: .1em; }
+  .raya { height: 1px; background: var(--linea); margin: 14px 0 22px; }
+  h3 { font-size: 17px; margin: 30px 0 8px; letter-spacing: -.01em; }
+  p { margin: 12px 0; }
+  ul, ol { margin: 12px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  code { font: 13px var(--mono); background: #f0eee6; padding: 1px 5px; border-radius: 3px; }
+  pre { font: 12.5px/1.6 var(--mono); background: #fff; border: 1px solid var(--linea); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--linea); vertical-align: top; }
+  th { font: 600 11px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--tinta-tenue); }
+  tbody tr:nth-child(odd) { background: #fff; }
+  .caja { border: 1px solid var(--linea); border-radius: 8px; padding: 16px 18px; margin: 18px 0; background: #fff; }
+  .caja.ok { border-left: 3px solid var(--verde); background: var(--verde-suave); }
+  .caja.ojo { border-left: 3px solid var(--ambar); background: var(--ambar-suave); }
+  .caja.no { border-left: 3px solid var(--rojo); background: var(--rojo-suave); }
+  .caja h4 { margin: 0 0 6px; font-size: 14px; }
+  .caja p { margin: 6px 0 0; font-size: 14px; }
+  figure { margin: 26px 0; }
+  figure svg { width: 100%; height: auto; background: #fff; border: 1px solid var(--linea); border-radius: 8px; }
+  figcaption { font-size: 13px; color: var(--tinta-tenue); margin-top: 10px; }
+  figcaption b { color: var(--tinta); }
+  .dos { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+  .dos .caja { margin: 0; }
+  .chip { display: inline-block; font: 600 10.5px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; padding: 5px 8px; border-radius: 3px; margin-right: 6px; }
+  .chip.hoy { background: var(--verde-suave); color: var(--verde); }
+  .chip.falta { background: var(--ambar-suave); color: var(--ambar); }
+  .chip.no { background: var(--rojo-suave); color: var(--rojo); }
+  dl.kv { margin: 16px 0; }
+  dl.kv dt { font-weight: 600; margin-top: 14px; }
+  dl.kv dd { margin: 4px 0 0; color: var(--tinta-suave); font-size: 15px; }
+  .etapa { border-left: 2px solid var(--linea); padding: 0 0 4px 20px; margin: 22px 0 22px 6px; position: relative; }
+  .etapa::before { content: ""; position: absolute; left: -7px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--papel); border: 2px solid var(--acento); }
+  .etapa h4 { margin: 0 0 6px; font-size: 15px; }
+  .etapa .done { font-size: 13px; color: var(--tinta-suave); }
+  .etapa .done b { color: var(--verde); }
+  footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--linea); font-size: 13px; color: var(--tinta-tenue); }
+  .svg-t { font: 12px var(--mono); fill: #141413; }
+  .svg-s { font: 10.5px var(--mono); fill: #5c5a54; }
+  .svg-tit { font: 600 10px var(--mono); fill: #8b8880; letter-spacing: .08em; }
+  @media (max-width: 640px) { .dos { grid-template-columns: 1fr; } nav.indice ol { columns: 1; } h1 { font-size: 27px; } }
+</style>
+</head>
+<body>
+<div class="hoja">
+
+<header class="tapa">
+  <span class="sello">Plan de trabajo · Whatfast</span>
+  <h1>Personalización del chat, markdown y diagramas</h1>
+  <p class="bajada">Tres funciones sobre una base que ya existe: los 30 tokens de tema, el parser de formato de WhatsApp y el editor de ajustes. El plan separa lo que ya está de lo que falta, y pone un criterio verificable en cada etapa.</p>
+  <div class="ficha">
+    <span><b>Estado</b> propuesta</span>
+    <span><b>Etapas</b> 7</span>
+    <span><b>Esfuerzo</b> 13–17 días</span>
+    <span><b>Riesgo mayor</b> redibujado por frame</span>
+  </div>
+</header>
+
+<nav class="indice">
+  <h2>Índice</h2>
+  <ol>
+    <li><a href="#resumen">Resumen</a></li>
+    <li><a href="#hoy">Qué hay hoy</a></li>
+    <li><a href="#personalizacion">Personalización</a></li>
+    <li><a href="#markdown">Markdown</a></li>
+    <li><a href="#diagramas">Diagramas</a></li>
+    <li><a href="#etapas">Etapas</a></li>
+    <li><a href="#riesgos">Riesgos</a></li>
+    <li><a href="#decisiones">Decisiones abiertas</a></li>
+    <li><a href="#esfuerzo">Esfuerzo</a></li>
+  </ol>
+</nav>
+
+<section id="resumen">
+  <h2 class="titulo"><span class="n">01</span>Resumen</h2>
+  <div class="raya"></div>
+  <p><b>Se agrega</b> un editor de tema completo —hoy solo cambia el acento—, perillas de burbuja (radio, ancho, tipografía, fondo del hilo), y un modo documento en las burbujas: encabezados, listas, citas, código, tablas y diagramas de un subconjunto propio.</p>
+  <p><b>No se agrega</b> plugins, ni Mermaid completo, ni un editor de temas por archivo fuera del perfil. Un diagrama arbitrario no entra: lo que no se entiende se muestra como código.</p>
+  <div class="caja ojo">
+    <h4>El riesgo mayor</h4>
+    <p>Dibujar bloques por mensaje en una lista virtualizada de miles de filas. Si el layout de bloques corre en cada frame, la conversación se arrastra. La mitigación está en la etapa 1: el parseo y el layout se cachean por mensaje, y el dibujo no vuelve a medir texto si el ancho no cambió.</p>
+  </div>
+</section>
+
+<section id="hoy">
+  <h2 class="titulo"><span class="n">02</span>Qué hay hoy</h2>
+  <div class="raya"></div>
+  <p>Todo lo que sigue está en el árbol y es verificable. La columna de la derecha dice qué falta para llegar a lo que se pidió.</p>
+
+  <table>
+    <thead>
+      <tr><th style="width:38%">Pieza</th><th style="width:34%">Dónde</th><th>Estado</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>30 tokens de tema, con <code>BubbleInBg</code>, <code>BubbleOutBg</code>, <code>QuoteBar</code></td>
+        <td><code>whatfast-core/src/theme.rs</code></td>
+        <td><span class="chip hoy">hecho</span> falta editarlos uno por uno</td>
+      </tr>
+      <tr>
+        <td>Catálogo de temas con vista previa y borrado</td>
+        <td><code>whatfast-ui/src/render.rs</code> ~3840</td>
+        <td><span class="chip hoy">hecho</span></td>
+      </tr>
+      <tr>
+        <td>Editor de tema: <b>solo</b> el color de acento</td>
+        <td><code>ACCENT_SWATCHES</code></td>
+        <td><span class="chip falta">falta</span> el resto de los tokens</td>
+      </tr>
+      <tr>
+        <td>Escala, densidad, split view, idioma</td>
+        <td><code>whatfast-model/src/settings.rs</code></td>
+        <td><span class="chip hoy">hecho</span> son cuatro perillas</td>
+      </tr>
+      <tr>
+        <td>Parseo del formato de WhatsApp: negrita, itálica, tachado, mono, enlaces</td>
+        <td><code>whatfast-core/src/whatsapp_formatting.rs</code></td>
+        <td><span class="chip hoy">hecho</span> 55 KB, con estilos por segmento</td>
+      </tr>
+      <tr>
+        <td>Bloques de markdown: encabezado, lista, cita, código, tabla, regla</td>
+        <td><code>whatfast-core/src/markdown.rs</code></td>
+        <td><span class="chip hoy">hecho</span> parser con 13 tests; falta dibujarlo</td>
+      </tr>
+      <tr>
+        <td>Diagramas</td>
+        <td>—</td>
+        <td><span class="chip no">no existe</span></td>
+      </tr>
+      <tr>
+        <td>Radio de burbuja, ancho máximo, tipografía, fondo del hilo</td>
+        <td>—</td>
+        <td><span class="chip no">no existe</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <figure>
+    <svg viewBox="0 0 700 210" role="img" aria-label="Qué hay y qué falta">
+      <text class="svg-tit" x="16" y="22">HOY</text>
+      <rect x="16" y="34" width="200" height="34" rx="5" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-t" x="28" y="56">30 tokens + catálogo</text>
+      <rect x="16" y="76" width="200" height="34" rx="5" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-t" x="28" y="98">formato de WhatsApp</text>
+      <rect x="16" y="118" width="200" height="34" rx="5" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-t" x="28" y="140">bloques de markdown</text>
+      <rect x="16" y="160" width="200" height="34" rx="5" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-t" x="28" y="182">escala · densidad</text>
+
+      <text class="svg-tit" x="262" y="22">FALTA</text>
+      <rect x="262" y="34" width="200" height="34" rx="5" fill="#fbf0d4" stroke="#8a6100"/>
+      <text class="svg-t" x="274" y="56">editor token por token</text>
+      <rect x="262" y="76" width="200" height="34" rx="5" fill="#fbf0d4" stroke="#8a6100"/>
+      <text class="svg-t" x="274" y="98">dibujar los bloques</text>
+      <rect x="262" y="118" width="200" height="34" rx="5" fill="#fbf0d4" stroke="#8a6100"/>
+      <text class="svg-t" x="274" y="140">perillas de burbuja</text>
+      <rect x="262" y="160" width="200" height="34" rx="5" fill="#fbf0d4" stroke="#8a6100"/>
+      <text class="svg-t" x="274" y="182">fondo del hilo</text>
+
+      <text class="svg-tit" x="508" y="22">NO ENTRA</text>
+      <rect x="508" y="34" width="176" height="34" rx="5" fill="#fbe9e7" stroke="#b3261e"/>
+      <text class="svg-t" x="520" y="56">plugins</text>
+      <rect x="508" y="76" width="176" height="34" rx="5" fill="#fbe9e7" stroke="#b3261e"/>
+      <text class="svg-t" x="520" y="98">Mermaid completo</text>
+      <rect x="508" y="118" width="176" height="34" rx="5" fill="#fbe9e7" stroke="#b3261e"/>
+      <text class="svg-t" x="520" y="140">HTML dentro del chat</text>
+      <rect x="508" y="160" width="176" height="34" rx="5" fill="#fbe9e7" stroke="#b3261e"/>
+      <text class="svg-t" x="520" y="182">temas fuera del perfil</text>
+    </svg>
+    <figcaption><b>Figura 1.</b> Lo verde ya está y no se toca. Lo ámbar es el trabajo. Lo rojo queda afuera a propósito: cada uno de esos cuatro abre una superficie que este plan no cubre.</figcaption>
+  </figure>
+</section>
+
+<section id="personalizacion">
+  <h2 class="titulo"><span class="n">03</span>Personalización del chat</h2>
+  <div class="raya"></div>
+
+  <h3>Qué se puede tocar</h3>
+  <p>Hoy el editor solo cambia el acento. La propuesta es que el usuario toque lo que ve, sin editar un archivo a mano.</p>
+
+  <table>
+    <thead><tr><th style="width:30%">Perilla</th><th style="width:20%">Dónde vive</th><th>Qué cambia</th></tr></thead>
+    <tbody>
+      <tr><td>Color de cada token</td><td><code>Theme</code></td><td>Los 30, con selector de color y campo hexadecimal</td></tr>
+      <tr><td>Acento, hover y texto sobre acento</td><td><code>Theme</code></td><td>Ya existe el acento; se suman los dos derivados</td></tr>
+      <tr><td>Radio de burbuja</td><td><code>Settings</code></td><td>De 0 a 20 px, aplicado al contenedor de la burbuja</td></tr>
+      <tr><td>Ancho máximo de burbuja</td><td><code>Settings</code></td><td>De 45% a 85% del ancho del hilo</td></tr>
+      <tr><td>Tipografía del mensaje</td><td><code>Settings</code></td><td>Familia del sistema, tamaño base y altura de línea</td></tr>
+      <tr><td>Fondo del hilo</td><td><code>Settings</code></td><td>Color plano, imagen o patrón, con opacidad</td></tr>
+      <tr><td>Estilo de cola</td><td><code>Theme</code></td><td>Con cola, sin cola, o solo el primero del grupo</td></tr>
+      <tr><td>Densidad y separación entre grupos</td><td><code>Settings</code></td><td>Ya existe la densidad; se suma el aire entre días</td></tr>
+    </tbody>
+  </table>
+
+  <h3>La regla que ordena todo</h3>
+  <div class="caja">
+    <p><b>Un tema se comparte; una preferencia no.</b> Lo que hace a la identidad visual —colores, radios, cola— va en <code>Theme</code>, que se exporta y se importa como archivo. Lo que depende de la pantalla de cada uno —tamaño de letra, ancho de burbuja, fondo— va en <code>Settings</code>, que es del perfil.</p>
+    <p>Si el fondo fuera parte del tema, importar un tema ajeno te cambiaría la imagen de fondo sin querer. Si el tamaño de letra fuera parte del tema, un tema oscuro te obligaría a su tipografía.</p>
+  </div>
+
+  <h3>Cómo se edita</h3>
+  <ol>
+    <li>El catálogo de temas ya existe (<code>render.rs</code> ~3840): se le agrega <b>Duplicar</b> para partir de uno y no de cero.</li>
+    <li>Al elegir un tema propio, el editor muestra los 30 tokens en una grilla de tres columnas: muestra, nombre y valor. Un clic abre el selector; al lado, el campo hexadecimal acepta pegado.</li>
+    <li>Arriba del editor, una <b>vista previa en vivo</b>: una mini conversación con dos burbujas, un mensaje con cita y la barra del compositor. Se redibuja con cada cambio y no guarda hasta «Guardar».</li>
+    <li>Los cambios sin guardar se marcan en el título del panel. Salir sin guardar pregunta.</li>
+    <li>Importar: un selector de archivo lee el JSON de <code>export_theme</code>. Exportar ya está.</li>
+  </ol>
+
+  <h3>Fondo del hilo</h3>
+  <p>Una imagen de fondo se <b>copia al perfil</b> (<code>wallpapers/&lt;hash&gt;.png</code>) y el ajuste guarda el nombre relativo. Nunca una ruta absoluta: el perfil se mueve entre máquinas y el tema se comparte. Si la imagen falta, se cae al color plano y se avisa una vez.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 250" role="img" aria-label="Dónde vive cada perilla">
+      <rect x="16" y="26" width="300" height="196" rx="8" fill="#fff" stroke="#c6613f"/>
+      <text class="svg-tit" x="32" y="48">THEME · SE EXPORTA</text>
+      <text class="svg-s" x="32" y="74">30 colores</text>
+      <text class="svg-s" x="32" y="94">radio de burbuja</text>
+      <text class="svg-s" x="32" y="114">estilo de cola</text>
+      <text class="svg-s" x="32" y="134">apariencia (claro/oscuro)</text>
+      <text class="svg-s" x="32" y="154">nombre y autor</text>
+      <text class="svg-s" x="32" y="182">→ JSON en un archivo</text>
+      <text class="svg-s" x="32" y="202">→ se comparte en el repo</text>
+
+      <rect x="384" y="26" width="300" height="196" rx="8" fill="#fff" stroke="#2c7a39"/>
+      <text class="svg-tit" x="400" y="48">SETTINGS · ES DEL PERFIL</text>
+      <text class="svg-s" x="400" y="74">tamaño de letra</text>
+      <text class="svg-s" x="400" y="94">ancho de burbuja</text>
+      <text class="svg-s" x="400" y="114">fondo del hilo</text>
+      <text class="svg-s" x="400" y="134">densidad</text>
+      <text class="svg-s" x="400" y="154">split view</text>
+      <text class="svg-s" x="400" y="182">→ no viaja con el tema</text>
+      <text class="svg-s" x="400" y="202">→ se pierde al cambiar de perfil</text>
+
+      <path d="M316 124 L384 124" stroke="#8b8880" stroke-dasharray="4 4"/>
+      <text class="svg-s" x="322" y="116">nunca</text>
+    </svg>
+    <figcaption><b>Figura 2.</b> La frontera que evita el desastre: un tema ajeno no puede cambiar el tamaño con el que leés, ni el fondo de tu conversación.</figcaption>
+  </figure>
+
+  <div class="caja ojo">
+    <h4>Límite honesto</h4>
+    <p>Un token puede quedar con contraste insuficiente: el usuario elige. El editor lo avisa cuando el par texto/fondo baja de 4.5:1, pero no lo impide.</p>
+  </div>
+</section>
+
+<section id="markdown">
+  <h2 class="titulo"><span class="n">04</span>Markdown en las burbujas</h2>
+  <div class="raya"></div>
+
+  <h3>Qué se interpreta</h3>
+  <table>
+    <thead><tr><th style="width:34%">Bloque</th><th style="width:33%">Sintaxis</th><th>Qué dibuja</th></tr></thead>
+    <tbody>
+      <tr><td>Párrafo</td><td>texto suelto</td><td>El texto con las marcas de WhatsApp ya interpretadas</td></tr>
+      <tr><td>Encabezado</td><td><code>#</code> a <code>######</code> + espacio</td><td>Tres tamaños, todos con peso semibold</td></tr>
+      <tr><td>Lista</td><td><code>- </code>, <code>* </code>, <code>+ </code>, <code>1. </code></td><td>Viñeta o número, sangría de 1.2 em</td></tr>
+      <tr><td>Cita</td><td><code>&gt; </code></td><td>Barra de 2 px con el color <code>QuoteBar</code> del tema</td></tr>
+      <tr><td>Código</td><td>tres backticks + lenguaje</td><td>Bloque monoespaciado, con el lenguaje en la esquina y copiar</td></tr>
+      <tr><td>Tabla</td><td><code>|</code> y una fila de guiones</td><td>Grilla con alineación por columna, scroll si no entra</td></tr>
+      <tr><td>Regla</td><td><code>---</code>, <code>***</code>, <code>___</code></td><td>Línea de 1 px</td></tr>
+      <tr><td>Diagrama</td><td><code>```mermaid</code> o <code>```flow</code></td><td>Ver sección 05</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Dónde se parsea</h3>
+  <p>El parser de bloques ya está en <code>whatfast-core/src/markdown.rs</code>: devuelve <code>Vec&lt;Block&gt;</code> y nunca falla. Las marcas de WhatsApp quedan intactas adentro de cada bloque, y el dibujo se las pasa a <code>parse_whatsapp_text</code>, que ya existe.</p>
+  <pre>texto → markdown::parse → bloques
+      → por bloque: whatsapp_formatting::parse_whatsapp_text → segmentos con estilo
+      → dibujo (GPUI) → burbuja</pre>
+  <p>La puerta es <code>markdown::has_blocks(text)</code>: si el mensaje no tiene ningún bloque, se dibuja exactamente como hoy. Eso hace que el cambio no pueda degradar las conversaciones normales, que son la mayoría.</p>
+
+  <div class="caja ok">
+    <h4>Regla de oro</h4>
+    <p><b>Enviar no cambia.</b> El texto que sale es el que escribió el usuario, byte por byte. El markdown es solo para leer: WhatsApp no lo entiende y convertirlo sería mandar otra cosa de la que se escribió.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 700 200" role="img" aria-label="Pipeline del markdown">
+      <rect x="16" y="70" width="118" height="56" rx="6" fill="#fff" stroke="#141413"/>
+      <text class="svg-t" x="30" y="94">mensaje</text>
+      <text class="svg-s" x="30" y="112">texto plano</text>
+
+      <rect x="164" y="70" width="138" height="56" rx="6" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-t" x="178" y="94">has_blocks</text>
+      <text class="svg-s" x="178" y="112">¿tiene bloques?</text>
+
+      <rect x="332" y="18" width="150" height="52" rx="6" fill="#fff" stroke="#8b8880"/>
+      <text class="svg-s" x="346" y="40">no → burbuja de siempre</text>
+      <text class="svg-s" x="346" y="57">sin costo</text>
+
+      <rect x="332" y="126" width="150" height="52" rx="6" fill="#f6e9e3" stroke="#c6613f"/>
+      <text class="svg-s" x="346" y="148">sí → markdown::parse</text>
+      <text class="svg-s" x="346" y="165">Vec&lt;Block&gt;</text>
+
+      <rect x="512" y="126" width="172" height="52" rx="6" fill="#fff" stroke="#c6613f"/>
+      <text class="svg-s" x="526" y="148">por bloque: formato</text>
+      <text class="svg-s" x="526" y="165">de WhatsApp</text>
+
+      <path d="M134 98 L164 98" stroke="#141413"/>
+      <path d="M302 92 L332 44" stroke="#8b8880"/>
+      <path d="M302 104 L332 152" stroke="#c6613f"/>
+      <path d="M482 152 L512 152" stroke="#c6613f"/>
+    </svg>
+    <figcaption><b>Figura 3.</b> El camino barato está arriba: un mensaje sin bloques no paga nada. Solo el que parece documento entra al parser nuevo.</figcaption>
+  </figure>
+
+  <h3>Casos raros que hay que resolver</h3>
+  <table>
+    <thead><tr><th style="width:34%">Caso</th><th>Decisión</th></tr></thead>
+    <tbody>
+      <tr><td>Mensaje de 100 000 caracteres</td><td>Se parsea una vez y se corta el dibujo a los 20 000 con un «ver todo»; el texto completo sigue en la copia</td></tr>
+      <tr><td>Marca sin cerrar: <code>*hola</code></td><td>Queda como texto; el parser de WhatsApp ya lo trata así</td></tr>
+      <tr><td>Anidamiento de bloques</td><td>No se soporta: una lista dentro de una cita se dibuja plana. Se documenta, no se implementa</td></tr>
+      <tr><td>Enlaces peligrosos</td><td>Solo <code>http</code> y <code>https</code>, con el filtro que ya existe en <code>message_format::safe_http_url</code></td></tr>
+      <tr><td>RTL y emoji ZWJ</td><td>Se dibuja por segmentos ya existentes; el corte de línea lo hace GPUI</td></tr>
+      <tr><td>Tabla más ancha que la burbuja</td><td>Scroll horizontal dentro del bloque, nunca cortar celdas</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Cómo se mide</h3>
+  <p>Presupuesto: <b>1 ms por 1 000 caracteres</b> de parseo y <b>8 ms</b> de layout por mensaje en una ventana de 900 px. El resultado se cachea por <code>(message_id, ancho)</code>; un mensaje reciclado por el <code>uniform_list</code> con el mismo ancho no se vuelve a medir.</p>
+</section>
+
+<section id="diagramas">
+  <h2 class="titulo"><span class="n">05</span>Diagramas</h2>
+  <div class="raya"></div>
+
+  <h3>Alcance real</h3>
+  <p>Un subconjunto, dibujado con primitivas de GPUI. Lo que no se entiende se muestra como bloque de código con un aviso: nunca un error, nunca un cuadro vacío.</p>
+  <table>
+    <thead><tr><th style="width:26%">Diagrama</th><th style="width:40%">Sintaxis aceptada</th><th>Qué no</th></tr></thead>
+    <tbody>
+      <tr><td><code>flowchart</code> / <code>graph</code></td><td><code>TD</code> y <code>LR</code>; nodos <code>A[texto]</code>, <code>A(texto)</code>, <code>A{texto}</code>; aristas <code>--&gt;</code>, <code>---</code>, con etiqueta <code>|sí|</code></td><td>Subgrafos, estilos por nodo, clases CSS</td></tr>
+      <tr><td><code>sequenceDiagram</code></td><td>Participantes y flechas <code>-&gt;&gt;</code>, <code>--&gt;&gt;</code></td><td>Marcos <code>alt</code>/<code>loop</code>, activaciones</td></tr>
+      <tr><td><code>erDiagram</code></td><td>Entidades con atributos y relaciones <code>||--o{</code></td><td>Cardinalidad extendida, notas</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Layout</h3>
+  <dl class="kv">
+    <dt>Grafos</dt>
+    <dd>Por capas: profundidad desde la raíz, orden estable por aparición, y una pasada de cruce mínima entre capas vecinas. Determinista: el mismo texto da el mismo dibujo, siempre.</dd>
+    <dt>Secuencia</dt>
+    <dd>Una columna por participante, una fila por mensaje, en el orden del texto. Sin layout que resolver.</dd>
+    <dt>Entidades</dt>
+    <dd>Grilla de dos columnas con las aristas dibujadas por encima, enrutadas por el borde.</dd>
+  </dl>
+  <p>El layout se cachea con el texto del bloque. Un diagrama de 30 nodos tiene que quedar por debajo de 20 ms, y eso se mide en un test con un diagrama real de ese tamaño.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 220" role="img" aria-label="Pipeline del diagrama">
+      <rect x="16" y="80" width="126" height="56" rx="6" fill="#fff" stroke="#141413"/>
+      <text class="svg-t" x="30" y="104">bloque</text>
+      <text class="svg-s" x="30" y="122">```mermaid</text>
+
+      <rect x="172" y="80" width="130" height="56" rx="6" fill="#f6e9e3" stroke="#c6613f"/>
+      <text class="svg-s" x="186" y="104">parser</text>
+      <text class="svg-s" x="186" y="122">¿qué tipo?</text>
+
+      <rect x="332" y="16" width="150" height="46" rx="6" fill="#fff" stroke="#8b8880"/>
+      <text class="svg-s" x="346" y="44">desconocido → código</text>
+
+      <rect x="332" y="80" width="150" height="56" rx="6" fill="#fff" stroke="#c6613f"/>
+      <text class="svg-s" x="346" y="104">layout</text>
+      <text class="svg-s" x="346" y="122">capas · columnas · grilla</text>
+
+      <rect x="512" y="80" width="172" height="56" rx="6" fill="#e8f2e9" stroke="#2c7a39"/>
+      <text class="svg-s" x="526" y="104">dibujo con GPUI</text>
+      <text class="svg-s" x="526" y="122">caja + texto + flecha</text>
+
+      <path d="M142 108 L172 108" stroke="#141413"/>
+      <path d="M302 100 L332 46" stroke="#8b8880"/>
+      <path d="M302 112 L332 108" stroke="#c6613f"/>
+      <path d="M482 108 L512 108" stroke="#2c7a39"/>
+    </svg>
+    <figcaption><b>Figura 4.</b> El quinto camino no existe: lo que el parser no reconoce no se intenta dibujar. Se muestra el texto original, que es lo que la persona escribió.</figcaption>
+  </figure>
+
+  <div class="caja no">
+    <h4>Lo que no se promete</h4>
+    <p>Un diagrama de Mermaid que use subgrafos, temas, iconos o anotaciones va a salir como código. Es el precio de no arrastrar un motor de renderizado externo ni un binario de Node.</p>
+  </div>
+</section>
+
+<section id="etapas">
+  <h2 class="titulo"><span class="n">06</span>Etapas</h2>
+  <div class="raya"></div>
+  <p>Cada etapa se puede publicar sola. El orden pone primero lo que ya tiene parser escrito y deja el dibujo nuevo para el final.</p>
+
+  <div class="etapa">
+    <h4>1 · Bloques en la burbuja</h4>
+    <p>Dibujar párrafo, encabezado, lista, cita, código y regla con <code>markdown::parse</code>. Cache por mensaje. Nada más.</p>
+    <p class="done"><b>Terminado cuando…</b> un mensaje con los seis bloques se ve legible en claro y oscuro; un mensaje sin bloques se dibuja idéntico al de hoy; 900 px de ancho y 20 mensajes visibles no bajan de 60 fps.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>2 · Tablas y código con acciones</h4>
+    <p>Tabla con alineación y scroll; bloque de código con lenguaje y botón de copiar; «ver todo» para mensajes largos.</p>
+    <p class="done"><b>Terminado cuando…</b> una tabla de 8 columnas entra con scroll y sin cortar celdas; copiar deja el texto exacto en el portapapeles.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>3 · Editor de tema completo</h4>
+    <p>Los 30 tokens editables, duplicar un tema, vista previa en vivo, importar y exportar.</p>
+    <p class="done"><b>Terminado cuando…</b> duplicar «vercel-dark», cambiar seis tokens y guardar deja un tema propio que sobrevive al reinicio; exportar y volver a importar da el mismo tema; el aviso de contraste aparece con un par ilegible.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>4 · Perillas de burbuja</h4>
+    <p>Radio, ancho máximo, tipografía y aire entre grupos, guardados en <code>Settings</code>.</p>
+    <p class="done"><b>Terminado cuando…</b> cada perilla tiene su valor por defecto igual al de hoy (nadie nota el cambio hasta que la toca) y el ancho máximo no rompe los mensajes con cita ni los adjuntos.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>5 · Fondo del hilo</h4>
+    <p>Color plano, imagen copiada al perfil, opacidad y patrón.</p>
+    <p class="done"><b>Terminado cuando…</b> una imagen elegida se copia a <code>wallpapers/</code>, el perfil se puede mover de carpeta sin romper el fondo, y una imagen que falta cae al color plano con un aviso.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>6 · Diagramas de flujo</h4>
+    <p>Bloque <code>```mermaid</code> con <code>flowchart TD/LR</code>, nodos y aristas con etiqueta, layout por capas.</p>
+    <p class="done"><b>Terminado cuando…</b> un diagrama de 30 nodos se dibuja en menos de 20 ms, dos veces el mismo texto da el mismo dibujo byte por byte, y un diagrama roto sale como código con aviso.</p>
+  </div>
+
+  <div class="etapa">
+    <h4>7 · Secuencia y entidades</h4>
+    <p><code>sequenceDiagram</code> y <code>erDiagram</code> con el subconjunto de la tabla de la sección 05.</p>
+    <p class="done"><b>Terminado cuando…</b> una secuencia de seis participantes no se solapa, y una relación de entidades se lee sin cruzar el texto.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 700 132" role="img" aria-label="Orden de las etapas">
+      <line x1="30" y1="66" x2="670" y2="66" stroke="#e3e1d8"/>
+      <g>
+        <circle cx="70" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="66" y="70" fill="#fff">1</text>
+        <circle cx="170" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="166" y="70" fill="#fff">2</text>
+        <circle cx="270" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="266" y="70" fill="#fff">3</text>
+        <circle cx="370" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="366" y="70" fill="#fff">4</text>
+        <circle cx="470" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="466" y="70" fill="#fff">5</text>
+        <circle cx="570" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="566" y="70" fill="#fff">6</text>
+        <circle cx="650" cy="66" r="13" fill="#c6613f"/><text class="svg-s" x="646" y="70" fill="#fff">7</text>
+      </g>
+      <text class="svg-s" x="46" y="98">bloques</text>
+      <text class="svg-s" x="138" y="98">tablas</text>
+      <text class="svg-s" x="238" y="98">editor</text>
+      <text class="svg-s" x="338" y="98">burbuja</text>
+      <text class="svg-s" x="440" y="98">fondo</text>
+      <text class="svg-s" x="540" y="98">flujo</text>
+      <text class="svg-s" x="622" y="98">secuencia</text>
+      <text class="svg-s" x="46" y="118">ya hay parser</text>
+      <text class="svg-s" x="238" y="118">lo más pedido</text>
+      <text class="svg-s" x="540" y="118">lo más caro</text>
+    </svg>
+    <figcaption><b>Figura 5.</b> El orden pone primero lo que ya tiene el trabajo difícil hecho y deja el dibujo de grafos para el final, cuando la burbuja ya sabe mostrar bloques.</figcaption>
+  </figure>
+</section>
+
+<section id="riesgos">
+  <h2 class="titulo"><span class="n">07</span>Riesgos y trampas</h2>
+  <div class="raya"></div>
+  <dl class="kv">
+    <dt>Redibujar por frame</dt>
+    <dd>El hilo es un <code>uniform_list</code>: una fila se vuelve a construir al reciclarse. Si el parseo o la medición corren ahí, el scroll se arrastra. Mitigación: cache por <code>(message_id, ancho)</code> y parseo fuera del dibujo.</dd>
+    <dt>La banda de borradores ya ocupa el lugar</dt>
+    <dd>La tarjeta de borradores vive sobre el compositor. El fondo del hilo no puede taparla: el orden de capas se fija en la etapa 5 y se prueba con un borrador visible.</dd>
+    <dt>Temas que rompen el contraste</dt>
+    <dd>El usuario elige; el editor avisa. Sin aviso, un tema con texto del mismo color que el fondo deja la app inusable.</dd>
+    <dt>Imágenes de fondo en el perfil</dt>
+    <dd>Copiar y no referenciar. Un tema importado jamás trae una ruta absoluta: se ignora y se avisa.</dd>
+    <dt>Tablas y código en burbujas angostas</dt>
+    <dd>Scroll interno y ancho mínimo de 200 px. Sin eso, una tabla empuja el layout del hilo.</dd>
+    <dt>Diagramas que no cierran</dt>
+    <dd>El layout tiene que ser determinista y acotado: un grafo con un ciclo se dibuja igual, y uno con 200 nodos se corta con un aviso en vez de colgar la ventana.</dd>
+  </dl>
+</section>
+
+<section id="decisiones">
+  <h2 class="titulo"><span class="n">08</span>Decisiones abiertas</h2>
+  <div class="raya"></div>
+  <p>Cinco preguntas que cambian el trabajo. Cada una trae una recomendación.</p>
+
+  <table>
+    <thead><tr><th style="width:36%">Pregunta</th><th>Recomendación</th></tr></thead>
+    <tbody>
+      <tr><td>¿El fondo admite imagen o solo color?</td><td>Solo color y patrón en la etapa 5; la imagen propia queda como opción aparte, porque agrega el manejo de archivos del perfil</td></tr>
+      <tr><td>¿El markdown se aplica también a los mensajes propios?</td><td>Sí, a los dos: la burbuja es la misma y el usuario escribe notas propias con bloques todo el tiempo</td></tr>
+      <tr><td>¿Los diagramas se muestran abiertos o colapsados?</td><td>Abiertos, con un tope de alto y botón para expandir</td></tr>
+      <tr><td>¿El ancho de burbuja es global o por chat?</td><td>Global en la etapa 4; por chat solo si aparece un pedido concreto</td></tr>
+      <tr><td>¿Se pueden compartir temas dentro de la app?</td><td>No en este plan: exportar e importar un archivo alcanza y no agrega red</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="esfuerzo">
+  <h2 class="titulo"><span class="n">09</span>Esfuerzo</h2>
+  <div class="raya"></div>
+  <table>
+    <thead><tr><th style="width:52%">Etapa</th><th style="width:16%">Días</th><th>Qué habilita</th></tr></thead>
+    <tbody>
+      <tr><td>1 · Bloques en la burbuja</td><td>2</td><td>El modo documento, con el parser ya escrito</td></tr>
+      <tr><td>2 · Tablas y código</td><td>1.5</td><td>Notas y pedidos pegados de otro lado</td></tr>
+      <tr><td>3 · Editor de tema</td><td>2.5</td><td>Personalización completa de colores</td></tr>
+      <tr><td>4 · Perillas de burbuja</td><td>1.5</td><td>Lectura cómoda según la vista</td></tr>
+      <tr><td>5 · Fondo del hilo</td><td>1.5</td><td>Identidad del chat</td></tr>
+      <tr><td>6 · Diagramas de flujo</td><td>3</td><td>El caso más pedido</td></tr>
+      <tr><td>7 · Secuencia y entidades</td><td>2</td><td>Documentación técnica dentro del chat</td></tr>
+      <tr><td><b>Total</b></td><td><b>14</b></td><td>Con pruebas y capturas por etapa</td></tr>
+    </tbody>
+  </table>
+  <div class="caja">
+    <h4>Qué se entrega después de cada etapa</h4>
+    <p>Una release instalable, los tests de la pieza nueva en verde, y una captura del antes y el después en <code>docs/screenshots/</code>. Ninguna etapa deja el árbol sin compilar.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Plan escrito sobre el código de la rama <code>main</code> el 27/10/2026. Cada ruta citada existe en el repositorio: <code>whatfast-core/src/theme.rs</code>, <code>whatfast-core/src/markdown.rs</code>, <code>whatfast-core/src/whatsapp_formatting.rs</code>, <code>whatfast-model/src/settings.rs</code>, <code>whatfast-ui/src/render.rs</code>, <code>whatfast-ui/src/tokens.rs</code>.</p>
+  <p>Describe el código de esta rama, no una versión publicada. La 0.2.19 instalada no incluye el dibujo de bloques ni el editor nuevo.</p>
+</footer>
+
+</div>
+</body>
+</html>

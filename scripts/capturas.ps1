@@ -27,12 +27,12 @@ if(-not (Test-Path $destino)) {
 }
 
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Ventana {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr c);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
@@ -45,6 +45,10 @@ public class Ventana {
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 }
 "@
+
+# La captura y los clics son en pixeles del dispositivo: sin esto, una
+# pantalla al 125% entrega medidas virtuales y las fotos salen de otro tamano.
+[Ventana]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
 
 function Rect([IntPtr]$handle) {
     $rect = New-Object Ventana+RECT
@@ -134,6 +138,15 @@ if($handle -eq [IntPtr]::Zero) {
 # La ventana va a la esquina: la sombra que Windows dibuja alrededor entraria
 # en la captura si no.
 [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0004) | Out-Null
+# El tamano va fijo en un cliente de 1475x950 fisico: la app recuerda el
+# ultimo tamano y las capturas saldrian de medidas distintas.
+$cliente0 = New-Object Ventana+RECT
+[Ventana]::GetClientRect($handle, [ref]$cliente0) | Out-Null
+$marco0 = New-Object Ventana+RECT
+[Ventana]::GetWindowRect($handle, [ref]$marco0) | Out-Null
+$deltaX = ($marco0.Right - $marco0.Left) - ($cliente0.Right - $cliente0.Left)
+$deltaY = ($marco0.Bottom - $marco0.Top) - ($cliente0.Bottom - $cliente0.Top)
+[Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 1475 + $deltaX, 950 + $deltaY, 0x0004) | Out-Null
 [Ventana]::SetForegroundWindow($handle) | Out-Null
 Start-Sleep -Seconds 4
 

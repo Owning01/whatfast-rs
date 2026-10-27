@@ -173,19 +173,13 @@ impl StickerTray {
         let sending = self.state.borrow().sending.clone();
         let query = self.state.borrow().query.clone();
 
-        // The panel floats over the composer: a box with rounded corners, a
-        // border and a shadow, as wide as the conversation, with a small gap
-        // over the composer. The tray of the pictures of the composer lifts
-        // it, so the box never covers them.
+        // El panel cuelga del ancla que se apoya en el borde de arriba del
+        // campo, asi que solo deja el hueco de la referencia contra el campo:
+        // la bandeja de las fotos queda por debajo del ancla y no hay que
+        // sumar su alto.
         v_flex()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom(
-                px((COMPOSER_HEIGHT + COMPOSER_GAP) * scale)
-                    + app.pending_images.tray_height(scale),
-            )
             .mx(px(8. * scale))
+            .mb(px(COMPOSER_GAP * scale))
             .h(px(TRAY_HEIGHT * scale))
             .rounded(cx.theme().radius_lg)
             .border_1()

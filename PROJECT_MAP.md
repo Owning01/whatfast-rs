@@ -33,9 +33,16 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `crates/whatfast-protocol/` | Contrato protobuf + transporte (`transport.rs`) + backend de demostración (`fake.rs`). |
 | `crates/whatfast-model/` | El modelo de datos y los módulos sin GPUI: `model`, `paths`, `settings`, `favorites`, `sticker`, `emoji_picker`, `starred` (el archivo de los mensajes destacados). Cero GPUI en su árbol de dependencias. |
 | `crates/whatfast-i18n/` | Los textos de la interfaz. Un JSON por idioma en `locales/` (`en`, `es`, `zh`); el `build.rs` los descubre y los incrusta. La clave es la frase en inglés: una traducción faltante cae al inglés. Agregar un idioma es agregar `locales/<código>.json`. |
-| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales), `instance.rs` (el lock de instancia única), `local_time.rs` (el desfasaje de la zona horaria, preguntado al sistema), `attachments.rs` (la tarjeta de un archivo adjunto y el reproductor de la nota de voz), `composer_attachments.rs` (la bandeja de las fotos que esperan el boton de mandar), `notifications.rs` (el hilo que manda los avisos al sistema), `audio.rs` (la decodificacion y la salida de sonido del sistema), `recording.rs` (la captura del microfono que arma la nota de voz en Ogg Opus), `ubicaciones.rs` (la tarjeta de un lugar y la de un contacto), `emoji_recent.rs` (los emojis usados lately). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
+| `crates/whatfast-ui/` | La interfaz GPUI: `main.rs` (la entrada), `app.rs` (el estado), `rpc.rs` (los pedidos), `render.rs` (el dibujo), `helpers.rs`, `text.rs`, `tokens.rs` (el tema), `navrail.rs` (la columna de destinos), `statuses.rs` (la vista de los estados), `newsletters.rs` (la vista de los canales), `instance.rs` (el lock de instancia única), `local_time.rs` (el desfasaje de la zona horaria, preguntado al sistema), `attachments.rs` (la tarjeta de un archivo adjunto y el reproductor de la nota de voz), `composer_attachments.rs` (la bandeja de las fotos que esperan el boton de mandar), `notifications.rs` (el hilo que manda los avisos al sistema), `audio.rs` (la decodificacion y la salida de sonido del sistema), `recording.rs` (la captura del microfono que arma la nota de voz en Ogg Opus), `ubicaciones.rs` (la tarjeta de un lugar y la de un contacto), `emoji_recent.rs` (los emojis usados lately), `agents_panel.rs` (la pantalla Agentes: conectar un harness, sus permisos y la bandeja de borradores), `automations_panel.rs` (las tareas del cronómetro) y `quick_ask.rs` (la tarjeta del modo rápido del chat) y `chat_drafts.rs` (la banda de borradores en la conversación, con Enviar, Editar y Cancelar). El commit del stack de Zed lo fija el `Cargo.lock` (ver el rulebook §2). |
+| `crates/whatfast-agents/` | El catálogo de harnesses de IA: una ficha por cliente (`spec.rs`) con cómo se detecta, cómo se registra el servidor MCP y cómo corre un prompt; `detect.rs` (PATH y archivos por sistema), `paths.rs` (carpetas por SO), `token.rs` (token privado por agente) `write.rs` (merge JSON/JSONC/TOML/YAML, CLI y argumento JSON; y la ruta de configuración que el usuario elige a mano, guardada en `agents/<id>.config`) y `guide.rs` (la guía del agente y su instalación en el archivo de reglas de cada harness). No depende de GPUI ni de la red. |
+| `docs/plan-agentes.html` | El plan de la conexión de agentes, con sus decisiones. Se empaqueta con `html-plan`: `docs/plan-agentes.packed.html` es el archivo que se abre. |
+| `crates/whatfast-mcp/` | El servidor MCP que pide un harness: JSON-RPC por líneas en `server.rs` (diez herramientas), el cliente del socket en `client.rs` (arranca el backend si no hay nadie, presenta el token del agente, manda `Hello` y `Reconnect`, y le manda `Shutdown` al terminar), las herramientas en `tools.rs` (ritmo humano incluido), el framing en `framing.rs` y el ISO-8601 en `time.rs`. Se invoca como `whatfast.exe mcp --agent <id>`. |
+| `crates/whatfast-auto/` | Lo que el perfil sabe de los agentes: `db.rs` (`agents.db`: agentes con su permiso y el SHA-256 del token, borradores, `schedules` y `agent_calls`), `grant.rs` (escala, chats, tope por hora y ventana), `humanize.rs` (el ritmo: partes y esperas), `cron.rs` (cinco campos y la cola fuera de la ventana), `runner.rs` (un harness sin ventana, con plazo), `ask.rs` (el pedido del modo
+rápido con el chat como contexto) y `local.rs` (el desfasaje de la zona horaria, preguntado al sistema). |
+| `docs/agentes.md` | El endpoint local, el comando `whatfast mcp`, las siete herramientas, cómo probarlo y lo que todavía no está. |
+| `scripts/probar-mcp.py` | La prueba real del servidor MCP: `initialize`, `tools/list`, `chats_list`, `messages_read`, `chat_info`, `messages_search` y la espera opcional. Con `--enviar` manda un mensaje de verdad. |
 | `backend/` | El sidecar en Go, **congelado**: el contrato v22 del puente lo deja atrás (falla `unsupported_protocol`). Queda solo como referencia de la migración. |
-| `crates/whatfast-wa/` | **El sidecar vivo**, en Rust sobre `whatsapp-rust` (fork crmne rev `94f7c137`, feature `voip`). Reemplaza al Go con el mismo `bridge.proto` v22 y las mismas banderas `--stdio --data-dir --log-file`. Sesión (`session.rs`), ingesta y clasificación (`ingest.rs`), store de chats (`db.rs`, mismo esquema del Go), envíos (`send.rs`, `media.rs`), avatares (`meta.rs`), llamadas de voz con audio crudo por el puente (`calls.rs`) y descarga de medios entrantes con cache (`media.rs::fetch_message_media`). Plan y olas en su `MIGRATION.md`. La UI lo prueba con `WHATFAST_BACKEND=target\debug\whatfast-wa.exe`. La identidad (agenda y mapa LID↔teléfono) vive en `identity.rs` (lectura del session.db del fork) y la reconciliación en `reconcile.rs` (una fila por persona, el jid de teléfono gana). |
+| `crates/whatfast-wa/` | **El sidecar vivo**, en Rust sobre `whatsapp-rust` (fork crmne rev `94f7c137`, feature `voip`). Reemplaza al Go con el mismo `bridge.proto` v22 y las mismas banderas `--stdio --data-dir --log-file`. Sesión (`session.rs`), ingesta y clasificación (`ingest.rs`), store de chats (`db.rs`, mismo esquema del Go), envíos (`send.rs`, `media.rs`), avatares (`meta.rs`), llamadas de voz con audio crudo por el puente (`calls.rs`) y descarga de medios entrantes con cache (`media.rs::fetch_message_media`). El mismo `Server` se sirve por un segundo transporte: el endpoint local de los agentes (`socket.rs`), con `--serve` y `--idle-exit` para correr sin ventana, y el guardián que decide qué puede hacer cada agente (`guard.rs`, permisos de `agents.db`) con los borradores (`drafts.rs`) y las automatizaciones (`schedules.rs`, `scheduler.rs`). Plan y olas en su `MIGRATION.md`. La UI lo prueba con `WHATFAST_BACKEND=target\debug\whatfast-wa.exe`. La identidad (agenda y mapa LID↔teléfono) vive en `identity.rs` (lectura del session.db del fork) y la reconciliación en `reconcile.rs` (una fila por persona, el jid de teléfono gana). |
 | `proto/bridge.proto` | El contrato v22: el del origen más las llamadas (`CallPlace`..`CallAudio`, frames de audio i16 LE a 16 kHz). |
 | `assets/icons/` | Los iconos de Whatfast (los mismos del cliente de Tauri). |
 | `scripts/test.cmd`, `scripts/lint.cmd` | Wrappers de cargo: target compartido, `sccache` y el override de `rustc-wrapper`. |
@@ -93,6 +100,9 @@ crates/whatfast-core                ← lógica pura portada del frontend
 | `python scripts\parity.py` | Corre el juez de paridad F2 (sale con 1 si algo falta). |
 | `python scripts\funcionalidad.py` | La puerta de "igual que el cliente web": todos los RPC que pide la interfaz y los componentes cubiertos. |
 | `python scripts\idiomas.py` | La cobertura de cada idioma; `--strict` falla si falta una clave. |
+| `python scripts\probar-mcp.py [--esperar-ms N]` | Prueba el servidor MCP contra el perfil real; `--enviar <chat_id> <texto>` manda un mensaje. |
+| `whatfast.exe mcp --agent <id>` | El servidor MCP por stdio para un harness. Abre la app cerrada un `whatfast-backend --serve --idle-exit 600`. |
+| `whatfast-backend.exe --serve --data-dir <carpeta> [--idle-exit N]` | El backend sin ventana: solo sirve el endpoint local y muere a los N segundos sin pedidos. |
 
 ## Baseline y meta
 
@@ -112,7 +122,24 @@ compilación de Windows deja `whatfast-wa.exe` como `whatfast-backend.exe`
 en `dist\` y el release lo empaqueta igual.
 
 **Paridad del oráculo: 123/123 (100 %) + 68 tests de caracterización.
-557 tests en verde en el workspace; clippy limpio en todo el workspace.**
+693 tests en verde en el workspace; clippy limpio en todo el workspace.
+Paridad RPC del sidecar: 50/50 con brazo real, 0 pendientes, 0 sin declarar
+(`docs/paridad-sidecar.md`). No queda ningún `not_implemented`.
+
+**Agentes (M1 y M2 cerrados):** el backend sirve el endpoint local
+(`\\.\pipe\whatfast-<huella>` en Windows, `<perfil>/agent.sock` en Unix) además
+de stdin, y `whatfast.exe mcp --agent <id>` expone diez herramientas MCP sobre
+ese socket. Con la app cerrada el MCP arranca `whatfast-backend --serve
+--idle-exit 600` y lo cierra al salir. El permiso de cada agente vive en
+`agents.db` (escala por chat, tope por hora, ventana horaria y ritmo humano) y
+los borradores también. La ventana tiene la pantalla Agentes (conectar con un
+clic), la bandeja, el modo rápido del chat y la sección de automatizaciones.
+
+Versión instalada: 0.2.19 (agentes de IA: socket local, servidor MCP de diez
+herramientas, `agents.db` con permisos, bandeja de borradores y banda del
+borrador en la conversación, humanizador, pantalla Agentes, modo rápido del
+chat y automatizaciones con cronómetro; OpenCode se registra por archivo y el
+usuario puede elegir el archivo de configuración a mano).
 
 ## Medido (release, 20/10/2026)
 

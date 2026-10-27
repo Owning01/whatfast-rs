@@ -1618,6 +1618,92 @@ pub fn fake_loop(
             Some(rpc_request::Request::Shutdown(_)) => {
                 rpc_response::Result::Shutdown(crate::ShutdownResponse {})
             }
+            // The fake has no tray and no agents database: a draft is
+            // acknowledged, the list is empty and a decision says so.
+            Some(rpc_request::Request::DraftPropose(_)) => {
+                rpc_response::Result::DraftPropose(crate::DraftProposeResponse {
+                    draft_id: 1,
+                    state: "proposed".into(),
+                })
+            }
+            Some(rpc_request::Request::DraftList(_)) => {
+                rpc_response::Result::DraftList(crate::DraftListResponse { drafts: Vec::new() })
+            }
+            Some(rpc_request::Request::DraftDecide(_)) => {
+                rpc_response::Result::DraftDecide(crate::DraftDecideResponse {
+                    draft: None,
+                    error: "the fake backend has no drafts".into(),
+                })
+            }
+            Some(rpc_request::Request::DraftFinish(_)) => {
+                rpc_response::Result::DraftFinish(crate::DraftFinishResponse { draft: None })
+            }
+            Some(rpc_request::Request::GuideInstall(_)) => {
+                rpc_response::Result::GuideInstall(crate::GuideInstallResponse {
+                    installed: false,
+                    target: String::new(),
+                    backup: String::new(),
+                })
+            }
+            Some(rpc_request::Request::GuideRemove(_)) => {
+                rpc_response::Result::GuideRemove(crate::GuideRemoveResponse { removed: false })
+            }
+            Some(rpc_request::Request::GuideStatus(_)) => {
+                rpc_response::Result::GuideStatus(crate::GuideStatusResponse {
+                    installed: false,
+                    target: String::new(),
+                })
+            }
+            // The fake runs no harness: the fast mode answers with the echo of
+            // the question, which is what the screen shows without an agent.
+            Some(rpc_request::Request::AgentAsk(request)) => {
+                rpc_response::Result::AgentAsk(crate::AgentAskResponse {
+                    agent_id: request.agent_id,
+                    text: format!("(fake) {}", request.question),
+                    ms: 1,
+                })
+            }
+            // The fake keeps no table of automations: the list is empty and a
+            // change is acknowledged without a row.
+            Some(rpc_request::Request::ScheduleList(_)) => {
+                rpc_response::Result::ScheduleList(crate::ScheduleListResponse {
+                    schedules: Vec::new(),
+                })
+            }
+            Some(rpc_request::Request::SchedulePut(request)) => {
+                rpc_response::Result::SchedulePut(crate::SchedulePutResponse {
+                    schedule: Some(crate::Schedule {
+                        id: 1,
+                        agent_id: request.agent_id,
+                        chat_id: request.chat_id,
+                        chat_title: String::new(),
+                        kind: request.kind,
+                        at_ms: request.at_ms,
+                        cron: request.cron,
+                        prompt: request.prompt,
+                        output: request.output,
+                        window: request.window,
+                        next_at_ms: request.at_ms,
+                        paused: false,
+                    }),
+                    error: String::new(),
+                })
+            }
+            Some(rpc_request::Request::SchedulePause(request)) => {
+                rpc_response::Result::SchedulePause(crate::SchedulePauseResponse {
+                    schedule: None,
+                    error: if request.paused {
+                        String::new()
+                    } else {
+                        "the fake backend has no automations".into()
+                    },
+                })
+            }
+            Some(rpc_request::Request::ScheduleRemove(_)) => {
+                rpc_response::Result::ScheduleRemove(crate::ScheduleRemoveResponse {
+                    removed: true,
+                })
+            }
             None => continue,
             // v22 calls: the demonstration answers the control plane so the
             // interface can exercise the flow without a linked device.

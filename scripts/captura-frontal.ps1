@@ -55,9 +55,10 @@ public class Ventana {
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint id1, uint id2, bool attach);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, int d, IntPtr e);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
@@ -136,6 +137,9 @@ function Clic([IntPtr]$handle, [int]$dx, [int]$dy) {
     [Ventana]::mouse_event(0x8001, $normalX, $normalY, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 300
     [Ventana]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+    # Un respiro entre el presionar y el soltar: sin el, GPUI a veces no arma
+    # el clic del boton (el del clip del compositor lo pide).
+    Start-Sleep -Milliseconds 120
     [Ventana]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 900
     # El guion dice donde quedo el cursor: si la foto y el clic no usan la
@@ -170,10 +174,13 @@ function ClicDerecho([IntPtr]$handle, [int]$dx, [int]$dy) {
 }
 
 function Rueda([IntPtr]$handle, [int]$dx, [int]$dy, [int]$pasos) {
+    # Pasos negativos giran la rueda hacia abajo: positivo sube, negativo baja.
+    $sentido = [Math]::Sign($pasos)
+    $vueltas = [Math]::Abs($pasos)
     $origen = Origen $handle
     [Ventana]::SetCursorPos($origen[0] + $dx, $origen[1] + $dy) | Out-Null
-    for($i = 0; $i -lt $pasos; $i++) {
-        [Ventana]::mouse_event(0x0800, 0, 0, 120, [IntPtr]::Zero)
+    for($i = 0; $i -lt $vueltas; $i++) {
+        [Ventana]::mouse_event(0x0800, 0, 0, [int](120 * $sentido), [IntPtr]::Zero)
         Start-Sleep -Milliseconds 120
     }
     Start-Sleep -Milliseconds 700
@@ -220,15 +227,38 @@ try {
     # La ventana va a la esquina: sin esto la sombra de Windows entra en la
     # foto.
     [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0004) | Out-Null
+    # El tamaño va fijo en un cliente de 1475x950: la app recuerda el último
+    # tamaño y las capturas saldrian de medidas distintas.
+    $cliente0 = New-Object Ventana+RECT
+    [Ventana]::GetClientRect($handle, [ref]$cliente0) | Out-Null
+    $marco0 = New-Object Ventana+RECT
+    [Ventana]::GetWindowRect($handle, [ref]$marco0) | Out-Null
+    $deltaX = ($marco0.Right - $marco0.Left) - ($cliente0.Right - $cliente0.Left)
+    $deltaY = ($marco0.Bottom - $marco0.Top) - ($cliente0.Bottom - $cliente0.Top)
+    [Ventana]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 1475 + $deltaX, 950 + $deltaY, 0x0004) | Out-Null
+    Start-Sleep -Milliseconds 800
     Start-Sleep -Milliseconds 900
     if(-not (EnPrimerPlano $handle $proceso.Id)) {
         Write-Error "la ventana de la app no queda en primer plano"
     }
     Write-Output "=== capturas ==="
+    if($RuedasPrevias -ne "") {
+        foreach($par in $RuedasPrevias -split ";") {
+            $punto = $par -split ","
+            Rueda $handle ([int]$punto[0]) ([int]$punto[1]) ([int]$punto[2])
+        }
+    }
     if($Clics -ne "") {
         foreach($par in $Clics -split ";") {
-            $punto = $par -split ","
-            Clic $handle ([int]$punto[0]) ([int]$punto[1])
+            # Un paso "w:x,y,pasos" gira la rueda en medio de la secuencia:
+            # positivo sube, negativo baja.
+            if($par.StartsWith("w:")) {
+                $rueda = $par.Substring(2) -split ","
+                Rueda $handle ([int]$rueda[0]) ([int]$rueda[1]) ([int]$rueda[2])
+            } else {
+                $punto = $par -split ","
+                Clic $handle ([int]$punto[0]) ([int]$punto[1])
+            }
         }
     }
     if($Destinos -ne "") {
