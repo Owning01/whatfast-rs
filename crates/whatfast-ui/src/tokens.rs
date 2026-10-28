@@ -795,9 +795,42 @@ pub(crate) fn token_color(theme: &Theme, token: ThemeToken) -> Rgba {
 /// The theme of `gpui_component` has no colors for the bubbles, so the ones
 /// of Whatfast are used: the received messages go on the gray of the
 /// reference and the sent ones on its green.
-pub(crate) fn bubble_colors(appearance: ThemeAppearance) -> (Rgba, Rgba) {
-    let colors = ThemeColors::resolve(&app_theme(appearance));
+///
+/// The theme is the one in use and not the one of the appearance: a theme
+/// the user made has its own bubbles, and asking by appearance painted the
+/// palette of the app over it.
+pub(crate) fn bubble_colors(theme: &Theme) -> (Rgba, Rgba) {
+    let colors = ThemeColors::resolve(theme);
     (colors.bubble_in_bg, colors.bubble_out_bg)
+}
+
+/// The ratio of contrast between two colors of a theme, from 1 to 21.
+///
+/// It is the ratio of WCAG 2.1: the relative luminance of each color over the
+/// same of the other. The editor of the themes tells the user when the text
+/// of a pair falls under 4.5; it never stops the change, because the theme is
+/// the choice of the person who paints it.
+pub(crate) fn contrast_ratio(first: &str, second: &str) -> Option<f32> {
+    let first = luminance(parse_color(first)?);
+    let second = luminance(parse_color(second)?);
+    let (light, dark) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    Some((light + 0.05) / (dark + 0.05))
+}
+
+/// The relative luminance of a color, as WCAG defines it.
+fn luminance(color: Rgba) -> f32 {
+    let channel = |value: f32| {
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
 }
 
 /// Applies an interface scale to the fonts of the application.
@@ -820,13 +853,13 @@ pub(crate) fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut gpui::
 #[cfg(test)]
 mod tests {
     use gpui::px;
-    use whatfast_core::theme::{Theme, ThemeToken, ThemeVisualStyle};
+    use whatfast_core::theme::{Theme, ThemeAppearance, ThemeToken, ThemeVisualStyle};
 
     use super::{
         BASE_MONO_FONT_SIZE, BASE_UI_FONT_SIZE, DARK_GREEN, DEFAULT_UI_SCALE, MAX_UI_SCALE,
         MIN_UI_SCALE, MODERN_RADII, Metrics, PANEL, SKEUOMORPHIC_RADII, ThemeColors, ThemeShadow,
-        UI_SCALE_STEP, dark_green, font_sizes, normalized_ui_scale, panel, parse_color,
-        parse_shadow,
+        UI_SCALE_STEP, bubble_colors, contrast_ratio, dark_green, font_sizes, normalized_ui_scale,
+        panel, parse_color, parse_shadow,
     };
 
     /// The color of a hexadecimal literal, as the converter has to build it.
@@ -1091,6 +1124,28 @@ mod tests {
         for (token, value) in expected {
             assert_eq!(theme.tokens.get(token), value, "token {:?}", token);
         }
+    }
+
+    #[test]
+    fn a_custom_theme_paints_its_own_bubbles() {
+        // The bug of the plan: the bubble resolved the palette by appearance,
+        // so a theme the user made never changed the color of the bubble.
+        let mut theme = super::app_theme(ThemeAppearance::Dark);
+        theme.tokens.set(ThemeToken::BubbleInBg, "#123456");
+        let (received, _) = bubble_colors(&theme);
+        assert_eq!(received, color(0x123456));
+    }
+
+    #[test]
+    fn the_contrast_of_two_tokens_is_the_ratio_of_wcag() {
+        // White over black is the biggest ratio there is.
+        let ratio = contrast_ratio("#ffffff", "#000000").unwrap();
+        assert!((ratio - 21.0).abs() < 0.01, "{ratio}");
+        // A color over itself has no contrast at all.
+        let ratio = contrast_ratio("#808080", "#808080").unwrap();
+        assert!((ratio - 1.0).abs() < 0.01, "{ratio}");
+        // A token the converter does not understand has no ratio to show.
+        assert_eq!(contrast_ratio("no-es-un-color", "#000000"), None);
     }
 
     #[test]

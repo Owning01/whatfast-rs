@@ -92,6 +92,7 @@ pub(crate) enum PendingRequest {
         chat_id: String,
     },
     SetTyping,
+    CreateGroup,
     SendText {
         chat_id: String,
         draft_text: String,
@@ -133,6 +134,8 @@ pub(crate) enum PendingRequest {
     CallHangup,
     CallMute,
     CallAudio,
+    /// One access unit of the camera toward the sidecar, at 15 per second.
+    CallVideo,
     /// The progress of the synchronization of the account.
     SyncStatus,
     /// Asks WhatsApp for more history of one conversation.
@@ -322,6 +325,7 @@ impl PendingRequest {
             | Self::CallHangup
             | Self::CallMute
             | Self::CallAudio
+            | Self::CallVideo
             | Self::SetMessagePin { .. }
             | Self::CreatePoll { .. }
             | Self::VotePoll { .. }
@@ -331,6 +335,7 @@ impl PendingRequest {
             | Self::SetChatArchive { .. }
             | Self::SetChatMute { .. }
             | Self::SetChatBlock { .. }
+            | Self::CreateGroup
             | Self::SchedulePut
             | Self::SchedulePause { .. }
             | Self::ScheduleRemove { .. } => RequestClass::Write,

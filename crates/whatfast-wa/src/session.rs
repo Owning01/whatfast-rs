@@ -569,8 +569,34 @@ impl EventHandler for EventPump {
             Event::HistorySync(lazy) => self.ingest_history(lazy),
             Event::FavoriteStickerUpdate(update) => self.reduce_favorite_sticker(update),
             Event::IncomingCall(incoming) => {
-                let offer = self.calls.offer(*incoming.clone());
-                self.push(offer);
+                // The library reports every call stanza here, not only the
+                // offer: an accept, a reject, a terminate and each ICE
+                // candidate of a live call arrive by this same path. Only the
+                // offer rings.
+                match &incoming.action {
+                    wacore::types::call::CallAction::Offer { .. } => {
+                        // The bar looks the chat up by its local id: an offer
+                        // from a peer that this side knows by another address
+                        // still shows the name.
+                        let from = crate::ingest::jid_text(&incoming.from);
+                        let chat_id = self.store.resolve_chat_id(&from).unwrap_or(from);
+                        let offer = self.calls.offer(*incoming.clone(), chat_id);
+                        self.push(offer);
+                    }
+                    wacore::types::call::CallAction::Terminate { reason, .. }
+                    | wacore::types::call::CallAction::Reject { reason, .. } => {
+                        // A call that ends before the answer leaves no
+                        // ringing bar behind.
+                        let call_id = incoming.action.call_id().to_owned();
+                        if self.calls.forget(&call_id) {
+                            self.push(crate::calls::ended_event(
+                                &call_id,
+                                reason.as_deref().unwrap_or("remote"),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
             }
             Event::Messages(batch) => {
                 crate::ingest::spawn_enc_reactions(
@@ -600,7 +626,12 @@ impl EventHandler for EventPump {
                 for backend_event in events {
                     self.push(backend_event);
                 }
-                if !matches!(other, Event::Receipt(_) | Event::ChatPresence(_)) {
+                if !matches!(
+                    other,
+                    Event::Receipt(_)
+                        | Event::ChatPresence(_)
+                        | Event::UndecryptableMessage(_)
+                ) {
                     tracing::debug!("event not carried by the bridge yet: {other:?}");
                 }
             }

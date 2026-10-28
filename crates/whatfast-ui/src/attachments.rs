@@ -130,6 +130,14 @@ fn is_playable_voice_note(attachment: &proto::AttachmentContent) -> bool {
         && std::path::Path::new(&attachment.local_path).is_file()
 }
 
+/// Whether an audio still has to be asked for: the file is not on the disk,
+/// so the player cannot draw its wave or play it.
+pub(crate) fn audio_needs_download(attachment: &proto::AttachmentContent) -> bool {
+    attachment.kind == "audio"
+        && (attachment.local_path.is_empty()
+            || !std::path::Path::new(&attachment.local_path).is_file())
+}
+
 /// The chip of the speed of the note: `1x`, `1.5x` or `2x`.
 fn format_speed(speed: f32) -> String {
     if (speed - speed.round()).abs() < 0.01 {
@@ -454,11 +462,40 @@ impl Whatfast {
         attachment: &proto::AttachmentContent,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let (width, height) =
+            crate::video::video_box_size(attachment.width, attachment.height, self.ui_scale);
+        self.render_video_player(index, message, attachment, width, height, false, cx)
+    }
+
+    /// The player of the video of a status.
+    ///
+    /// The viewer of the statuses fills the window, so the box grows past the
+    /// width of a bubble: it is the same player with more room.
+    pub(crate) fn render_status_video(
+        &self,
+        index: usize,
+        message: &proto::Message,
+        attachment: &proto::AttachmentContent,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let (width, height) =
+            crate::video::status_box_size(attachment.width, attachment.height, self.ui_scale);
+        self.render_video_player(index, message, attachment, width, height, true, cx)
+    }
+
+    fn render_video_player(
+        &self,
+        index: usize,
+        message: &proto::Message,
+        attachment: &proto::AttachmentContent,
+        width: f32,
+        height: f32,
+        on_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let scale = self.ui_scale;
         let key = (message.chat_id.clone(), message.id.clone());
         let playback = self.video.is_for(&key).then_some(&self.video);
-        let (width, height) =
-            crate::video::video_box_size(attachment.width, attachment.height, scale);
         let playing = playback.is_some_and(|playback| playback.is_running());
         let waiting = playback.is_some_and(|playback| playback.waiting);
         let position = playback.map_or(0.0, |playback| playback.position);
@@ -478,10 +515,25 @@ impl Whatfast {
         let play_message_id = message.id.clone();
         let save_chat_id = message.chat_id.clone();
         let save_message_id = message.id.clone();
-        let muted = cx.theme().muted_foreground;
-        let accent = cx.theme().accent;
-        let hovered = cx.theme().muted;
-        let danger = cx.theme().danger;
+        // The viewer of the statuses is always dark, whatever the theme of the
+        // window: the colors of the card come with the background.
+        let (muted, accent, hovered, danger, title_color) = if on_dark {
+            (
+                rgba(0xffffffb3).into(),
+                rgba(0xffffffff).into(),
+                rgba(0xffffff22).into(),
+                rgba(0xff8a8aff).into(),
+                rgba(0xffffffff).into(),
+            )
+        } else {
+            (
+                cx.theme().muted_foreground,
+                cx.theme().accent,
+                cx.theme().muted,
+                cx.theme().danger,
+                cx.theme().foreground,
+            )
+        };
         let title = if waiting {
             i18n::t("Downloading the video").to_string()
         } else {
@@ -584,6 +636,7 @@ impl Whatfast {
                                     .truncate()
                                     .text_size(px(NAME_SIZE * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(title_color)
                                     .child(title),
                             )
                             .child(
@@ -794,8 +847,9 @@ mod tests {
     use whatfast_protocol::AttachmentContent;
 
     use super::{
-        attachment_details, attachment_label, attachment_name, bubble_text, format_bytes,
-        format_clock, format_duration, format_speed, is_playable_voice_note, voice_note_height,
+        attachment_details, attachment_label, attachment_name, audio_needs_download, bubble_text,
+        format_bytes, format_clock, format_duration, format_speed, is_playable_voice_note,
+        voice_note_height,
     };
 
     /// An attachment with the values that a test needs.
@@ -834,6 +888,19 @@ mod tests {
         assert_eq!(format_duration(75), "1:15");
         assert_eq!(format_duration(3600), "1:00:00");
         assert_eq!(format_duration(3725), "1:02:05");
+    }
+
+    #[test]
+    fn an_audio_without_the_file_is_asked_for_on_its_own() {
+        let mut voice = attachment("audio");
+        voice.voice_note = true;
+        assert!(audio_needs_download(&voice));
+        // A path that does not point at a file is as good as no path.
+        voice.local_path = "C:/whatfast/does-not-exist.ogg".into();
+        assert!(audio_needs_download(&voice));
+        // Other kinds have their own path: the audios do not pull them.
+        assert!(!audio_needs_download(&attachment("video")));
+        assert!(!audio_needs_download(&attachment("document")));
     }
 
     #[test]

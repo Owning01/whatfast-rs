@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use whatfast_i18n as i18n;
 
 use gpui::{
@@ -43,6 +43,7 @@ use whatfast_protocol::{
 };
 
 use crate::app::Whatfast;
+use crate::helpers::avatar_element;
 use crate::icons::WhatfastIcon;
 use crate::local_time::local_offset_minutes;
 use crate::tokens::parse_color;
@@ -51,12 +52,19 @@ use crate::tokens::parse_color;
 ///
 /// port: `STATUS_STEP_MS` of the origin.
 pub(crate) const STATUS_STEP_MS: u64 = 3_000;
+/// How long the strip waits before asking for the statuses again.
+///
+/// The view asks again only while the list is empty: a request that failed
+/// during the connection must not leave the view empty for the whole session.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(10);
 /// The side of the ring of a status, in pixels, before the scale.
 pub(crate) const RING_SIZE: f32 = 46.0;
 /// The side of the avatar of the viewer, in pixels, before the scale.
-pub(crate) const VIEWER_AVATAR_SIZE: f32 = 34.0;
+pub(crate) const VIEWER_AVATAR_SIZE: f32 = 44.0;
 /// The width of the ring of a status, in pixels, before the scale.
 pub(crate) const RING_BORDER: f32 = 3.0;
+/// The opening between the ring and the photo, in pixels, before the scale.
+pub(crate) const PHOTO_GAP: f32 = 2.5;
 /// The length of every dash of the ring of a status that was not seen, in
 /// pixels, before the scale.
 ///
@@ -164,8 +172,12 @@ pub(crate) struct StatusStripState {
     /// stops when the counter moves, so the task of one viewer does not move
     /// the next one.
     pub(crate) generation: u64,
-    /// Whether the statuses were already asked for.
-    pub(crate) requested: bool,
+    /// When the statuses were asked for the last time.
+    ///
+    /// The strip asks again while the list is empty: a request that failed
+    /// because the sidecar was still connecting must not leave the view empty
+    /// for the rest of the session. `None` means never asked.
+    pub(crate) requested_at: Option<Instant>,
     /// Whether the composer of a text status is open in the panel.
     ///
     /// The reference draws two buttons, one for the text and one for the
@@ -180,6 +192,18 @@ impl StatusStripState {
             text_color: DEFAULT_STATUS_COLOR.to_string(),
             ..Self::default()
         }
+    }
+}
+
+/// Whether the strip has to ask the sidecar for the statuses again.
+///
+/// A request that ends with an empty list —the sidecar was still connecting,
+/// or the account had no status in the window— leaves the view asking again
+/// after [`RETRY_AFTER`], instead of staying empty for the whole session.
+pub(crate) fn should_request(state: &StatusStripState, now: Instant) -> bool {
+    match state.requested_at {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= RETRY_AFTER,
     }
 }
 
@@ -215,7 +239,7 @@ pub(crate) fn sender_label(group: &StatusGroup) -> String {
     if !group.sender_name.trim().is_empty() {
         group.sender_name.clone()
     } else {
-        group.sender_phone_number.clone()
+        whatfast_core::phone::format(&group.sender_phone_number)
     }
 }
 
@@ -461,6 +485,17 @@ impl StatusStrip {
         state.text_composer_open = !state.text_composer_open;
     }
 
+    /// Closes the viewer of the statuses.
+    pub(crate) fn close_viewer(&self, cx: &mut Context<Whatfast>) {
+        self.state.borrow_mut().viewer = None;
+        cx.notify();
+    }
+
+    /// The state of the status strip.
+    pub(crate) fn state(&self) -> Rc<RefCell<StatusStripState>> {
+        self.state.clone()
+    }
+
     /// Draws the panel of the states that sits next to the list.
     ///
     /// The reference draws the circle of dashes of the states at the top,
@@ -630,6 +665,8 @@ impl StatusStrip {
         let groups = app.store.statuses();
         let muted = cx.theme().muted_foreground;
 
+        let hover = cx.theme().muted;
+        let state = self.state.clone();
         let mut list = v_flex()
             .id("status-view")
             .flex_1()
@@ -642,6 +679,19 @@ impl StatusStrip {
                     .gap(px(4.))
                     .px(px(16. * scale))
                     .py(px(12. * scale))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        let groups = app.store.statuses();
+                        if let Some(own_index) = groups.iter().position(|g| {
+                            g.sender_id == "me@s.whatsapp.net"
+                                || g.messages.iter().any(|m| m.from_me)
+                        }) {
+                            open_viewer(app, &state, own_index, "me@s.whatsapp.net", cx);
+                        } else {
+                            choose_photo_status(&state, window, cx);
+                        }
+                    }))
                     .child(
                         h_flex()
                             .gap(px(12. * scale))
@@ -680,7 +730,13 @@ impl StatusStrip {
                     .child(i18n::t("RECENT")),
             );
             for (index, group) in groups.iter().enumerate() {
-                list = list.child(self.render_status_row(group, index, scale, cx));
+                // La foto del que subio el estado: la misma que muestra el
+                // chat, si el contacto la tiene.
+                let avatar_path = app
+                    .store
+                    .participant_avatar_path(&group.sender_id)
+                    .unwrap_or("");
+                list = list.child(self.render_status_row(group, index, avatar_path, scale, cx));
             }
         }
 
@@ -692,6 +748,7 @@ impl StatusStrip {
         &self,
         group: &StatusGroup,
         index: usize,
+        avatar_path: &str,
         scale: f32,
         cx: &mut Context<Whatfast>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -715,7 +772,7 @@ impl StatusStrip {
             .items_center()
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
-            .child(self.render_ring(group, index, scale, cx))
+            .child(self.render_ring(group, index, avatar_path, scale, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -730,8 +787,8 @@ impl StatusStrip {
                     )
                     .child(div().text_xs().text_color(muted).child(time)),
             )
-            .on_click(cx.listener(move |_app, _, _, cx| {
-                open_viewer(&state, index, &sender, cx);
+            .on_click(cx.listener(move |app, _, _, cx| {
+                open_viewer(app, &state, index, &sender, cx);
             }))
     }
 
@@ -796,6 +853,7 @@ impl StatusStrip {
         &self,
         group: &StatusGroup,
         index: usize,
+        avatar_path: &str,
         scale: f32,
         cx: &mut Context<Whatfast>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -807,6 +865,9 @@ impl StatusStrip {
         let seen = has_seen(&self.state.borrow(), &sender);
         let size = RING_SIZE * scale;
         let thickness = RING_BORDER * scale;
+        // The photo sits inside the ring: the border and the gap take their
+        // part of the circle, the way the reference draws it.
+        let inner = (RING_SIZE - 2. * RING_BORDER - 2. * PHOTO_GAP) * scale;
         div()
             .id(ElementId::named_usize("status-ring", index))
             .flex_shrink_0()
@@ -817,8 +878,6 @@ impl StatusStrip {
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(16. * scale))
-            .font_weight(FontWeight::BOLD)
             .child(
                 canvas(
                     |_, _, _| (),
@@ -829,9 +888,9 @@ impl StatusStrip {
                 .absolute()
                 .inset_0(),
             )
-            .child(avatar_label(&label))
-            .on_click(cx.listener(move |_app, _, _, cx| {
-                open_viewer(&state, index, &sender, cx);
+            .child(avatar_element(&label, avatar_path, px(inner), cx))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                open_viewer(app, &state, index, &sender, cx);
             }))
     }
 
@@ -899,7 +958,7 @@ impl StatusStrip {
         &self,
         app: &Whatfast,
         cx: &mut Context<Whatfast>,
-    ) -> Option<gpui::Div> {
+    ) -> Option<gpui::Stateful<gpui::Div>> {
         let viewer = self.viewer()?;
         let scale = app.ui_scale;
         let groups = app.store.statuses();
@@ -909,18 +968,31 @@ impl StatusStrip {
         let background = message
             .and_then(|message| self.state.borrow().colors.get(&message.id).cloned())
             .and_then(|color| parse_color(&color))
-            .unwrap_or_else(|| cx.theme().background.into());
+            .or_else(|| {
+                if let Some(msg) = message {
+                    if matches!(msg.content, Some(Content::Text(_))) {
+                        let hash = msg
+                            .id
+                            .bytes()
+                            .fold(0usize, |acc, b| acc.wrapping_add(b as usize));
+                        let color_str = STATUS_COLORS[hash % STATUS_COLORS.len()];
+                        return parse_color(color_str);
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| rgba(0x0b141aff));
 
         let progress =
             h_flex()
                 .gap(px(4. * scale))
                 .children(group.messages.iter().enumerate().map(|(index, _)| {
                     let color = if index < viewer.message_index {
-                        cx.theme().muted_foreground
+                        rgba(0xffffffcc)
                     } else if index == viewer.message_index {
-                        cx.theme().primary
+                        rgba(0xffffffff)
                     } else {
-                        cx.theme().border
+                        rgba(0xffffff44)
                     };
                     div()
                         .flex_1()
@@ -930,20 +1002,31 @@ impl StatusStrip {
                 }));
 
         let sender = sender_label(group);
+        let avatar_path = app
+            .store
+            .participant_avatar_path(&group.sender_id)
+            .unwrap_or("");
         let meta = h_flex()
             .gap(px(10. * scale))
+            .items_center()
             .child(
+                // La foto del que subio el estado, con el anillo verde: es la
+                // misma pieza del visor de Instagram.
                 div()
+                    .flex_shrink_0()
                     .size(px(VIEWER_AVATAR_SIZE * scale))
                     .rounded_full()
                     .border(px(RING_BORDER * scale))
-                    .border_color(cx.theme().primary)
+                    .border_color(rgba(0x25d366ff))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(13. * scale))
-                    .font_weight(FontWeight::BOLD)
-                    .child(avatar_label(&sender)),
+                    .child(avatar_element(
+                        &sender,
+                        avatar_path,
+                        px((VIEWER_AVATAR_SIZE - 2. * RING_BORDER) * scale),
+                        cx,
+                    )),
             )
             .child(
                 v_flex()
@@ -953,6 +1036,7 @@ impl StatusStrip {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgba(0xffffffff))
                             .truncate()
                             .child(if sender.is_empty() {
                                 "Status".to_string()
@@ -963,7 +1047,7 @@ impl StatusStrip {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(rgba(0xffffffaa))
                             .child(
                                 message
                                     .map(|message| message_time(message.timestamp_ms))
@@ -973,23 +1057,23 @@ impl StatusStrip {
             )
             .child(self.render_close(cx));
 
-        let content = div()
+        let content = v_flex()
             .id("status-viewer-content")
             .flex_1()
             .min_h_0()
-            .flex()
             .items_center()
             .justify_center()
             .p(px(16. * scale))
-            .overflow_y_scroll()
             .child(match message {
-                Some(message) => render_message(message, scale, cx),
+                Some(message) => render_message(app, message, scale, cx),
                 None => div(),
             });
 
         let mut viewer_root = v_flex()
+            .id("status-viewer")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(background)
             .child(
                 v_flex()
@@ -1002,7 +1086,7 @@ impl StatusStrip {
             )
             .child(content);
 
-        if groups.len() > 1 {
+        if groups.len() > 1 || group.messages.len() > 1 {
             viewer_root = viewer_root.child(self.render_navs(cx));
         }
         Some(viewer_root)
@@ -1011,22 +1095,23 @@ impl StatusStrip {
     /// The button that closes the viewer.
     fn render_close(&self, cx: &mut Context<Whatfast>) -> gpui::Stateful<gpui::Div> {
         let state = self.state.clone();
-        let foreground = cx.theme().foreground;
-        let hover = cx.theme().muted;
+        let hover = rgba(0xffffff22);
         div()
             .id("status-viewer-close")
-            .size(px(28.))
+            .size(px(32.))
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
+            .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .child(
                 Icon::new(IconName::Close)
-                    .with_size(px(20.))
-                    .text_color(foreground),
+                    .with_size(px(22.))
+                    .text_color(rgba(0xffffffff)),
             )
-            .on_click(cx.listener(move |_app, _, _, cx| {
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.stop_video();
                 state.borrow_mut().viewer = None;
                 cx.notify();
             }))
@@ -1040,8 +1125,10 @@ impl StatusStrip {
         h_flex()
             .id("status-nav")
             .absolute()
-            .inset_0()
-            .px(px(12.))
+            .top_1_2()
+            .left_0()
+            .right_0()
+            .px(px(16.))
             .items_center()
             .justify_between()
             .child(self.render_nav(false, cx))
@@ -1051,8 +1138,7 @@ impl StatusStrip {
     /// One of the buttons that move between the statuses.
     fn render_nav(&self, forward: bool, cx: &mut Context<Whatfast>) -> gpui::Stateful<gpui::Div> {
         let state = self.state.clone();
-        let foreground = cx.theme().foreground;
-        let hover = cx.theme().muted;
+        let hover = rgba(0xffffff33);
         div()
             .id(if forward {
                 "status-nav-next"
@@ -1062,9 +1148,11 @@ impl StatusStrip {
             .flex_none()
             .size(px(NAV_SIZE))
             .rounded_full()
+            .bg(rgba(0x00000055))
             .flex()
             .items_center()
             .justify_center()
+            .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .child(
                 Icon::new(if forward {
@@ -1072,12 +1160,12 @@ impl StatusStrip {
                 } else {
                     IconName::ChevronLeft
                 })
-                .with_size(px(24.))
-                .text_color(foreground),
+                .with_size(px(28.))
+                .text_color(rgba(0xffffffff)),
             )
             .on_click(cx.listener(move |app, _, _, cx| {
                 let groups = app.store.statuses().to_vec();
-                move_viewer(&state, forward, &groups, cx);
+                move_viewer(app, &state, forward, &groups, cx);
             }))
     }
 
@@ -1086,12 +1174,13 @@ impl StatusStrip {
         if !app.store.statuses().is_empty() {
             return;
         }
+        let now = Instant::now();
         {
             let mut state = self.state.borrow_mut();
-            if state.requested {
+            if !should_request(&state, now) {
                 return;
             }
-            state.requested = true;
+            state.requested_at = Some(now);
         }
         cx.spawn(async move |weak, cx| {
             weak.update(cx, |app, cx| {
@@ -1387,10 +1476,39 @@ fn statuses_chat_id(app: &Whatfast) -> String {
     }
 }
 
+/// Whether the status shown in the viewer is a video.
+///
+/// A video keeps the viewer until the user moves: the step of three seconds
+/// would cut it before it ends.
+fn viewer_is_video(groups: &[StatusGroup], viewer: StatusViewer) -> bool {
+    groups
+        .get(viewer.group_index)
+        .and_then(|group| group.messages.get(viewer.message_index))
+        .is_some_and(|message| match &message.content {
+            Some(Content::Attachment(attachment)) => crate::video::is_video(attachment),
+            _ => false,
+        })
+}
+
+/// Preloads the full image of the status that is currently shown in the viewer.
+fn preload_viewer_media(app: &mut Whatfast, state: &Rc<RefCell<StatusStripState>>) {
+    let viewer = state.borrow().viewer;
+    let Some(viewer) = viewer else { return };
+    let groups = app.store.statuses();
+    let Some(group) = groups.get(viewer.group_index) else { return };
+    let Some(message) = group.messages.get(viewer.message_index) else { return };
+    if let Some(Content::Image(image)) = &message.content {
+        if image.local_path.is_empty() || !std::path::Path::new(&image.local_path).is_file() {
+            app.load_message_image(message.chat_id.clone(), message.id.clone());
+        }
+    }
+}
+
 /// Opens the viewer of the status of one group.
 ///
 /// The group passes to be a seen status: its ring becomes solid.
 fn open_viewer(
+    app: &mut Whatfast,
     state: &Rc<RefCell<StatusStripState>>,
     group_index: usize,
     sender_id: &str,
@@ -1406,12 +1524,16 @@ fn open_viewer(
         mark_seen(&mut inner, sender_id);
         inner.generation
     };
+    // A video of another viewer must not keep playing under this one.
+    app.stop_video();
+    preload_viewer_media(app, state);
     cx.notify();
     spawn_advance(state, generation, cx);
 }
 
 /// Moves the viewer to the next or to the previous status.
-fn move_viewer(
+pub(crate) fn move_viewer(
+    app: &mut Whatfast,
     state: &Rc<RefCell<StatusStripState>>,
     forward: bool,
     groups: &[StatusGroup],
@@ -1421,14 +1543,29 @@ fn move_viewer(
     let Some(mut viewer) = inner.viewer else {
         return;
     };
-    if forward {
+    let moved = if forward {
         if advance_viewer(&mut viewer, groups) {
             inner.viewer = Some(viewer);
+            true
         } else {
             inner.viewer = None;
+            false
         }
     } else if previous_viewer(&mut viewer, groups) {
         inner.viewer = Some(viewer);
+        true
+    } else {
+        false
+    };
+    if moved {
+        app.stop_video();
+    }
+    if moved && inner.viewer.is_some() {
+        inner.generation += 1;
+        let generation = inner.generation;
+        drop(inner);
+        spawn_advance(state, generation, cx);
+        preload_viewer_media(app, state);
     }
     cx.notify();
 }
@@ -1455,12 +1592,19 @@ fn spawn_advance(
                     return false;
                 };
                 let groups = app.store.statuses();
+                if viewer_is_video(groups, viewer) {
+                    return true;
+                }
                 if !advance_viewer(&mut viewer, groups) {
+                    app.stop_video();
                     inner.viewer = None;
                     cx.notify();
                     return false;
                 }
+                app.stop_video();
                 inner.viewer = Some(viewer);
+                drop(inner);
+                preload_viewer_media(app, &state);
                 cx.notify();
                 true
             });
@@ -1474,40 +1618,153 @@ fn spawn_advance(
 }
 
 /// Draws the content of one message of a status.
-///
-/// The file of a status is downloaded only when its conversation is opened,
-/// and the conversation of the statuses is never opened; the preview of the
-/// status is the JPEG thumbnail that travels with the message, the same one
-/// the bubble of a chat draws while the file is on its way.
-fn render_message(message: &Message, scale: f32, cx: &mut Context<Whatfast>) -> gpui::Div {
+fn render_message(
+    app: &Whatfast,
+    message: &Message,
+    scale: f32,
+    cx: &mut Context<Whatfast>,
+) -> gpui::Div {
+    // A status video is watched in the viewer with the player of the bubbles:
+    // the file is downloaded on play and Media Foundation decodes the frames.
+    if let Some(Content::Attachment(attachment)) = &message.content {
+        if crate::video::is_video(attachment) {
+            let mut container = v_flex()
+                .items_center()
+                .justify_center()
+                .child(app.render_status_video(usize::MAX, message, attachment, cx));
+            if !attachment.caption.trim().is_empty() {
+                container = container.child(
+                    div()
+                        .mt_3()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgba(0x00000099))
+                        .text_color(rgba(0xffffffff))
+                        .text_size(px(15. * scale))
+                        .text_center()
+                        .max_w(px(600. * scale))
+                        .child(attachment.caption.clone()),
+                );
+            }
+            return container;
+        }
+    }
+    if let Some(Content::Image(image)) = &message.content {
+        let mut image_elem = None;
+        let path = if !image.local_path.is_empty()
+            && std::path::Path::new(&image.local_path).is_file()
+        {
+            Some(image.local_path.clone())
+        } else if !image.thumbnail_path.is_empty()
+            && std::path::Path::new(&image.thumbnail_path).is_file()
+        {
+            Some(image.thumbnail_path.clone())
+        } else {
+            None
+        };
+
+        if let Some(path) = path {
+            image_elem = Some(
+                img(PathBuf::from(path))
+                    .max_h(px(640. * scale))
+                    .max_w(px(800. * scale))
+                    .rounded_md()
+                    .object_fit(ObjectFit::Contain),
+            );
+        } else if !image.jpeg_thumbnail.is_empty() {
+            let thumbnail = std::sync::Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Jpeg,
+                image.jpeg_thumbnail.clone(),
+            ));
+            image_elem = Some(
+                img(thumbnail)
+                    .max_h(px(640. * scale))
+                    .max_w(px(800. * scale))
+                    .rounded_md()
+                    .object_fit(ObjectFit::Contain),
+            );
+        }
+
+        if let Some(rendered_img) = image_elem {
+            let mut container = v_flex().items_center().justify_center().child(rendered_img);
+            if !image.caption.trim().is_empty() {
+                container = container.child(
+                    div()
+                        .mt_3()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgba(0x00000099))
+                        .text_color(rgba(0xffffffff))
+                        .text_size(px(15. * scale))
+                        .text_center()
+                        .max_w(px(600. * scale))
+                        .child(image.caption.clone()),
+                );
+            }
+            return container;
+        }
+    }
+
+    if let Some(Content::Attachment(attachment)) = &message.content {
+        if !attachment.local_path.is_empty()
+            && std::path::Path::new(&attachment.local_path).is_file()
+        {
+            let mut container = v_flex().items_center().justify_center().child(
+                img(PathBuf::from(&attachment.local_path))
+                    .max_h(px(640. * scale))
+                    .max_w(px(800. * scale))
+                    .rounded_md()
+                    .object_fit(ObjectFit::Contain),
+            );
+            if !attachment.caption.trim().is_empty() {
+                container = container.child(
+                    div()
+                        .mt_3()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgba(0x00000099))
+                        .text_color(rgba(0xffffffff))
+                        .text_size(px(15. * scale))
+                        .text_center()
+                        .max_w(px(600. * scale))
+                        .child(attachment.caption.clone()),
+                );
+            }
+            return container;
+        }
+    }
+
     if let Some(path) = message_image_path(message) {
-        return div().max_w(px(320. * scale)).child(
-            img(PathBuf::from(path))
-                .max_w(px(320. * scale))
-                .max_h(px(320. * scale))
-                .object_fit(ObjectFit::Contain),
-        );
+        if std::path::Path::new(&path).is_file() {
+            return v_flex().items_center().justify_center().child(
+                img(PathBuf::from(path))
+                    .max_h(px(640. * scale))
+                    .max_w(px(800. * scale))
+                    .rounded_md()
+                    .object_fit(ObjectFit::Contain),
+            );
+        }
     }
-    if let Some(Content::Image(image)) = &message.content
-        && !image.jpeg_thumbnail.is_empty()
-    {
-        let thumbnail = std::sync::Arc::new(gpui::Image::from_bytes(
-            gpui::ImageFormat::Jpeg,
-            image.jpeg_thumbnail.clone(),
-        ));
-        return div().max_w(px(320. * scale)).child(
-            img(thumbnail)
-                .max_w(px(320. * scale))
-                .max_h(px(320. * scale))
-                .object_fit(ObjectFit::Contain),
-        );
-    }
-    v_flex().gap_2().child(
-        div()
-            .text_size(px(16. * scale))
-            .text_color(cx.theme().foreground)
-            .child(message_text(message).to_string()),
-    )
+
+    let text = message_text(message);
+    v_flex()
+        .items_center()
+        .justify_center()
+        .max_w(px(680. * scale))
+        .px_6()
+        .py_4()
+        .child(
+            div()
+                .text_size(px(26. * scale))
+                .line_height(px(36. * scale))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgba(0xffffffff))
+                .text_center()
+                .child(text.to_string()),
+        )
 }
 
 #[cfg(test)]
@@ -1548,7 +1805,46 @@ mod tests {
         assert_eq!(sender_label(&sender), "Ana");
         sender.sender_name = String::new();
         sender.sender_phone_number = "5493811234567".to_string();
-        assert_eq!(sender_label(&sender), "5493811234567");
+        // The number stands for the name written the way WhatsApp writes it.
+        assert_eq!(sender_label(&sender), "+54 9 381 123-4567");
+    }
+
+    #[test]
+    fn a_video_status_stays_in_the_viewer_until_the_user_moves() {
+        let video = Content::Attachment(whatfast_protocol::AttachmentContent {
+            mime_type: "video/mp4".into(),
+            ..Default::default()
+        });
+        let picture = Content::Image(ImageContent::default());
+        let groups = vec![StatusGroup {
+            messages: vec![
+                Message {
+                    id: "video".into(),
+                    content: Some(video),
+                    ..Default::default()
+                },
+                Message {
+                    id: "picture".into(),
+                    content: Some(picture),
+                    ..Default::default()
+                },
+            ],
+            ..group("ana", 0)
+        }];
+        let at = |message_index| StatusViewer {
+            group_index: 0,
+            message_index,
+        };
+        assert!(viewer_is_video(&groups, at(0)));
+        assert!(!viewer_is_video(&groups, at(1)));
+        // A viewer whose group is gone is not a video: the loop can advance.
+        assert!(!viewer_is_video(
+            &groups,
+            StatusViewer {
+                group_index: 4,
+                message_index: 0,
+            }
+        ));
     }
 
     #[test]
@@ -1685,6 +1981,20 @@ mod tests {
         mark_seen(&mut state, "maya@s.whatsapp.net");
         assert!(has_seen(&state, "maya@s.whatsapp.net"));
         assert!(!has_seen(&state, "priya@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn the_strip_asks_again_after_a_failed_request() {
+        let mut state = StatusStripState::new();
+        let now = Instant::now();
+        // The first look always asks.
+        assert!(should_request(&state, now));
+        state.requested_at = Some(now);
+        // Right after asking, it waits.
+        assert!(!should_request(&state, now));
+        assert!(!should_request(&state, now + RETRY_AFTER / 2));
+        // A request that left the list empty is retried, not remembered.
+        assert!(should_request(&state, now + RETRY_AFTER));
     }
 
     #[test]

@@ -77,6 +77,8 @@ message RpcRequest {
     CallHangupRequest call_hangup = 54;
     CallMuteRequest call_mute = 55;
     CallAudioRequest call_audio = 56;
+    // The video of a call: one H.264 access unit, Annex-B, per request.
+    CallVideoRequest call_video = 78;
     // v23: the drafts of the agents, which the desktop shows as a tray, and
     // the decision of the user about each one.
     DraftProposeRequest draft_propose = 66;
@@ -97,6 +99,9 @@ message RpcRequest {
     SchedulePutRequest schedule_put = 71;
     SchedulePauseRequest schedule_pause = 72;
     ScheduleRemoveRequest schedule_remove = 73;
+    // v24: create a group with a subject and the participants the user
+    // picked in the desktop. The group is created on the phone's account.
+    CreateGroupRequest create_group = 79;
   }
 }
 
@@ -160,6 +165,7 @@ message RpcResponse {
     CallHangupResponse call_hangup = 63;
     CallMuteResponse call_mute = 64;
     CallAudioResponse call_audio = 65;
+    CallVideoResponse call_video = 78;
     DraftProposeResponse draft_propose = 66;
     DraftListResponse draft_list = 67;
     DraftDecideResponse draft_decide = 68;
@@ -172,6 +178,7 @@ message RpcResponse {
     SchedulePutResponse schedule_put = 71;
     SchedulePauseResponse schedule_pause = 72;
     ScheduleRemoveResponse schedule_remove = 73;
+    CreateGroupResponse create_group = 79;
   }
 }
 
@@ -395,6 +402,7 @@ message BackendEvent {
     CallUpdate call_update = 26;
     CallEnded call_ended = 27;
     CallAudio call_audio_out = 28;
+    CallVideo call_video_out = 29;
   }
 }
 
@@ -660,6 +668,16 @@ message SetChatBlockRequest {
   bool blocked = 2;
 }
 message SetChatBlockResponse { Chat chat = 1; }
+
+// The creation of a group: the subject writes the name of the conversation,
+// and the participants are the jids the user picked. The backend answers with
+// the chat row it stored, so the desktop can open it without waiting for the
+// synchronization.
+message CreateGroupRequest {
+  string subject = 1;
+  repeated string participant_jids = 2;
+}
+message CreateGroupResponse { Chat chat = 1; }
 
 message SendImageRequest {
   // Stable UUID with the same idempotency contract as SendTextRequest.
@@ -1277,8 +1295,8 @@ message SendAttachmentResponse { Message message = 1; }
 message CallPlaceRequest {
   // The conversation's transport jid (a direct chat).
   string chat_id = 1;
-  // True asks for video; the first wave carries voice only and answers
-  // `video_unsupported` when set.
+  // True places a video call: the desktop sends and shows H.264 access units
+  // through `CallVideo`/`CallVideoOut` next to the voice.
   bool video = 2;
 }
 
@@ -1287,7 +1305,11 @@ message CallPlaceResponse {
   string call_id = 1;
 }
 
-message CallAcceptRequest { string call_id = 1; }
+message CallAcceptRequest {
+  string call_id = 1;
+  // True answers with video. An offer that did not carry video ignores it.
+  bool video = 2;
+}
 message CallAcceptResponse {}
 
 message CallRejectRequest { string call_id = 1; }
@@ -1310,6 +1332,15 @@ message CallAudioRequest {
   bytes pcm = 2;
 }
 message CallAudioResponse {}
+
+// A chunk of the camera's H.264 byte stream, Annex-B, from the desktop. The
+// backend frames it into access units with the library's splitter. Fire and
+// forget like the audio: a late chunk is dropped, never queued.
+message CallVideoRequest {
+  string call_id = 1;
+  bytes data = 2;
+}
+message CallVideoResponse {}
 
 message CallOffer {
   string call_id = 1;
@@ -1335,4 +1366,13 @@ message CallEnded {
 message CallAudio {
   string call_id = 1;
   bytes pcm = 2;
+}
+
+// One access unit of the peer's video toward the desktop: Annex-B H.264.
+message CallVideo {
+  string call_id = 1;
+  bytes au = 2;
+  // The unit holds an IDR with its SPS/PPS: the safe point to start or
+  // restart a decoder.
+  bool keyframe = 3;
 }

@@ -23,6 +23,7 @@ use wacore::proto_helpers::MessageBuilderExt as _;
 use wacore::types::message_ref::MessageRef;
 use whatfast_protocol::MessageStatus;
 use whatsapp_rust::waproto::whatsapp as wa;
+use whatsapp_rust::waproto::whatsapp::message::extended_text_message::PreviewType;
 use whatsapp_rust::{Jid, MessageId, SendOptions, SendRequest};
 
 use crate::db::{self, ChatRow, MessageRow, Store};
@@ -291,6 +292,47 @@ fn canonical_mentions(raw_jids: &[String]) -> Vec<String> {
     mentions
 }
 
+/// The message the phone would send for one text: a plain conversation when
+/// there is nothing else, and the extended text when a quote, a mention or
+/// the card of a link has to ride with it.
+fn text_message(
+    text: &str,
+    context: Option<wa::ContextInfo>,
+    mentions: &[String],
+    preview: Option<&crate::link_preview::LinkPreview>,
+) -> wa::Message {
+    if context.is_none() && mentions.is_empty() && preview.is_none() {
+        return wa::Message::text(text);
+    }
+    let mut extended = wa::message::ExtendedTextMessage::default();
+    extended.text = Some(text.to_owned());
+    let mut context = context;
+    if !mentions.is_empty() {
+        let mut value = context.take().unwrap_or_default();
+        value.mentioned_jid = mentions.to_vec();
+        context = Some(value);
+    }
+    if let Some(context) = context {
+        extended.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
+    }
+    if let Some(preview) = preview {
+        extended.matched_text = Some(preview.matched_text.clone());
+        extended.title = Some(preview.title.clone());
+        extended.description = Some(preview.description.clone());
+        if preview.thumbnail.is_empty() {
+            extended.preview_type = Some(PreviewType::NONE);
+        } else {
+            extended.jpeg_thumbnail = Some(preview.thumbnail.clone());
+            extended.thumbnail_width = Some(preview.width);
+            extended.thumbnail_height = Some(preview.height);
+            extended.preview_type = Some(PreviewType::IMAGE);
+        }
+    }
+    let mut message = wa::Message::default();
+    message.extended_text_message = whatsapp_rust::waproto::buffa::MessageField::some(extended);
+    message
+}
+
 /// Sends text. Answers the wire message (with its WhatsApp id) or a
 /// retryable failure.
 pub async fn send_text(
@@ -316,7 +358,11 @@ pub async fn send_text(
     store
         .ensure_chat(&request.chat_id, &request.chat_id)
         .map_err(internal)?;
-    let staged = MessageRow {
+    // WhatsApp previews the first link of the text before sending it: the
+    // card rides inside the message, so the receivers never fetch the page.
+    // A page that does not answer in time leaves the text without a card.
+    let preview = crate::link_preview::for_text(&request.text).await;
+    let mut staged = MessageRow {
         chat_jid: request.chat_id.clone(),
         transport_jid: request.chat_id.clone(),
         sender_jid: own_sender_jid(session),
@@ -332,6 +378,16 @@ pub async fn send_text(
         },
         ..MessageRow::default()
     };
+    if let Some(preview) = preview.as_ref() {
+        // The row keeps the card so a forward or a history reload draws it
+        // without asking the page again.
+        staged.link_preview_url = preview.matched_text.clone();
+        staged.link_preview_title = preview.title.clone();
+        staged.link_preview_description = preview.description.clone();
+        staged.link_preview_thumbnail = preview.thumbnail.clone();
+        staged.link_preview_width = i64::from(preview.width);
+        staged.link_preview_height = i64::from(preview.height);
+    }
     let (row, already_reserved) = reserve_outgoing(
         session,
         store,
@@ -344,18 +400,14 @@ pub async fn send_text(
         return Ok(row);
     }
 
-    // The reply context rides on the message itself, the WhatsApp way.
-    let mut message = wa::Message::text(request.text.clone());
-    let mut context = context;
-    let mentions = canonical_mentions(&request.mentioned_jids);
-    if !mentions.is_empty() {
-        let mut extended = context.take().unwrap_or_default();
-        extended.mentioned_jid = mentions;
-        context = Some(extended);
-    }
-    if let Some(context) = context {
-        message = wa::Message::text_with_context(request.text.clone(), context);
-    }
+    // The reply context and the mentions ride on the message itself, the
+    // WhatsApp way, and the preview of the first link rides with them.
+    let message = text_message(
+        &request.text,
+        context,
+        &canonical_mentions(&request.mentioned_jids),
+        preview.as_ref(),
+    );
     session
         .client
         .send(SendRequest::new(&jid, message).with_options(
@@ -965,5 +1017,69 @@ mod tests {
         row.from_me = true;
         row.revoked = true;
         assert!(revoke_rejection(&row, 10_000).is_some());
+    }
+
+    #[test]
+    fn the_preview_of_the_link_rides_on_the_message() {
+        let preview = crate::link_preview::LinkPreview {
+            matched_text: "https://example.com/nota".into(),
+            title: "La nota".into(),
+            description: "Lo que cuenta".into(),
+            thumbnail: vec![0xff, 0xd8, 0xff],
+            width: 320,
+            height: 200,
+        };
+
+        let message = text_message("mira https://example.com/nota", None, &[], Some(&preview));
+        let extended = message
+            .extended_text_message
+            .as_option()
+            .expect("the message is an extended text");
+
+        assert_eq!(
+            extended.text.as_deref(),
+            Some("mira https://example.com/nota")
+        );
+        assert_eq!(
+            extended.matched_text.as_deref(),
+            Some("https://example.com/nota")
+        );
+        assert_eq!(extended.title.as_deref(), Some("La nota"));
+        assert_eq!(extended.description.as_deref(), Some("Lo que cuenta"));
+        assert_eq!(
+            extended.jpeg_thumbnail.as_deref(),
+            Some(&[0xff, 0xd8, 0xff][..])
+        );
+        assert_eq!(extended.thumbnail_width, Some(320));
+        assert_eq!(extended.preview_type, Some(PreviewType::IMAGE));
+    }
+
+    #[test]
+    fn a_text_without_a_link_stays_a_plain_conversation() {
+        let message = text_message("hola", None, &[], None);
+
+        assert_eq!(message.conversation.as_deref(), Some("hola"));
+        assert!(message.extended_text_message.as_option().is_none());
+    }
+
+    #[test]
+    fn a_link_without_a_picture_keeps_the_card_without_a_thumbnail() {
+        let preview = crate::link_preview::LinkPreview {
+            matched_text: "https://example.com".into(),
+            title: "Ejemplo".into(),
+            description: String::new(),
+            thumbnail: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+
+        let message = text_message("https://example.com", None, &[], Some(&preview));
+        let extended = message
+            .extended_text_message
+            .as_option()
+            .expect("the message is an extended text");
+
+        assert!(extended.jpeg_thumbnail.is_none());
+        assert_eq!(extended.preview_type, Some(PreviewType::NONE));
     }
 }

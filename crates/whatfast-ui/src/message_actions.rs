@@ -164,6 +164,9 @@ pub(crate) struct MessageMenu {
     revoked: bool,
     /// The message carries a content.
     has_content: bool,
+    /// The message is a view-once notice: the content never reaches this
+    /// device, so most of the actions do not apply.
+    view_once: bool,
     /// The text that the copy of the message puts in the clipboard.
     text: String,
     /// The message has a text to copy.
@@ -250,6 +253,7 @@ impl MessageMenu {
             from_me: message.from_me,
             revoked: message.revoked,
             has_content: message.content.is_some(),
+            view_once: crate::render::is_view_once_message(message),
             // port: the oracle copies `messageText(message)`, which is the
             // caption of a picture and the name of a file too.
             has_text: !text.is_empty(),
@@ -337,6 +341,25 @@ impl MessageMenu {
     /// port: the menu of the oracle draws the answer, the forward, the pin,
     /// the edit and the copy, and then a divider and the deletion.
     pub(crate) fn items(&self) -> Vec<MessageMenuItem> {
+        // El aviso de visualizacion unica no tiene contenido en este
+        // dispositivo: WhatsApp deja solo la info y la eliminacion, y aca el
+        // menu hace lo mismo.
+        if self.view_once {
+            return vec![
+                MessageMenuItem {
+                    action: MessageAction::Delete,
+                    label: "Delete for me",
+                    enabled: !self.revoked,
+                    danger: true,
+                },
+                MessageMenuItem {
+                    action: MessageAction::DeleteForEveryone,
+                    label: "Delete for everyone",
+                    enabled: !self.revoked && self.from_me,
+                    danger: true,
+                },
+            ];
+        }
         let forwardable = self.has_content && !self.revoked;
         vec![
             MessageMenuItem {
@@ -574,8 +597,20 @@ pub(crate) fn chat_matches(chat: &Chat, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    let haystack = format!("{} {}", chat.title, chat.phone_number).to_lowercase();
-    haystack.contains(&needle)
+    let haystack = format!(
+        "{} {} {}",
+        chat.title,
+        chat.phone_number,
+        whatfast_core::phone::format(&chat.phone_number)
+    )
+    .to_lowercase();
+    if haystack.contains(&needle) {
+        return true;
+    }
+    // The number written with the plus and the dashes also answers to its
+    // digits: "5493" finds "+54 9 381 604-1868".
+    let digits = whatfast_core::phone::digits(&needle);
+    !digits.is_empty() && whatfast_core::phone::digits(&haystack).contains(&digits)
 }
 
 /// The chats that match a query of the search.
@@ -778,7 +813,7 @@ impl ForwardPicker {
         for chat in self.visible_chats() {
             let chat_id = chat.id.clone();
             let title = if chat.title.trim().is_empty() {
-                chat.phone_number.clone()
+                whatfast_core::phone::format(&chat.phone_number)
             } else {
                 chat.title.clone()
             };
@@ -1755,7 +1790,7 @@ impl Render for AttachmentBar {
 mod tests {
     use gpui::{point, px};
     use whatfast_protocol::message::Content;
-    use whatfast_protocol::{Chat, ChatKind, Message, TextContent};
+    use whatfast_protocol::{Chat, ChatKind, Message, TextContent, UnsupportedContent};
 
     use super::{
         AttachmentBar, EDIT_WINDOW_MS, MessageAction, MessageMenu, MessageMenuItem, PollForm,
@@ -1898,6 +1933,23 @@ mod tests {
         message.content = Some(Content::Image(Default::default()));
         let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
         assert!(!menu.editable());
+    }
+
+    /// El aviso de visualizacion unica no trae contenido al dispositivo
+    /// vinculado: el menu solo ofrece la eliminacion.
+    #[test]
+    fn a_view_once_notice_only_offers_the_deletion() {
+        let mut message = other_message(0);
+        message.content = Some(Content::Unsupported(UnsupportedContent {
+            type_name: "view_once".to_string(),
+            ..UnsupportedContent::default()
+        }));
+        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
+        let actions: Vec<MessageAction> = menu.items().into_iter().map(|item| item.action).collect();
+        assert!(actions.contains(&MessageAction::Delete));
+        assert!(!actions.contains(&MessageAction::Forward));
+        assert!(!actions.contains(&MessageAction::Star));
+        assert!(!actions.contains(&MessageAction::Copy));
     }
 
     #[test]

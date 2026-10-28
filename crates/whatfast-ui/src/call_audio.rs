@@ -23,6 +23,9 @@ use cpal::{SampleFormat, StreamConfig};
 /// The engine's audio clock.
 pub const RATE: u32 = 16_000;
 
+/// The engine reads frames of exactly 60 ms: 960 samples at 16 kHz.
+const FRAME_SAMPLES: usize = 960;
+
 /// The live capture: drops into `frames` as engine-clock i16 chunks.
 pub struct Capture {
     _stream: cpal::Stream,
@@ -49,6 +52,7 @@ impl Capture {
             rate: device_rate,
             channels,
             carry: std::sync::Mutex::new(Vec::new()),
+            pending: std::sync::Mutex::new(Vec::new()),
             position: std::sync::atomic::AtomicU64::new(0),
         });
         let config: StreamConfig = supported.into();
@@ -96,6 +100,8 @@ struct CaptureState {
     rate: u32,
     channels: usize,
     carry: std::sync::Mutex<Vec<f32>>,
+    /// Engine-clock samples that wait for a whole frame of 960.
+    pending: std::sync::Mutex<Vec<i16>>,
     position: std::sync::atomic::AtomicU64,
 }
 
@@ -113,7 +119,10 @@ impl CaptureState {
         let mut carry = self.carry.lock().expect("carry lock");
         carry.extend_from_slice(&mono);
         let ratio = f64::from(self.rate) / f64::from(RATE);
-        let mut position = self.position.load(Ordering::Relaxed) as f64;
+        // The position is relative to the first sample of the carry, and it
+        // keeps its fraction: a 48 kHz device steps by three, so the fraction
+        // is not always zero.
+        let mut position = f64::from_bits(self.position.load(Ordering::Relaxed));
         let mut engine: Vec<i16> = Vec::with_capacity(carry.len());
         while ((position as usize) + 1) < carry.len() {
             let index = position as usize;
@@ -127,10 +136,23 @@ impl CaptureState {
             engine.push(muted_sample);
             position += ratio;
         }
-        self.position.store(position as u64, Ordering::Relaxed);
-        carry.drain(..position as usize);
+        // The step can pass the end of the carry: the samples before the next
+        // position are consumed, and the position becomes relative to the new
+        // first sample. Draining the raw position would cut more than the
+        // carry holds and panic on the next block.
+        let consumed = (position as usize).min(carry.len());
+        carry.drain(..consumed);
+        self.position
+            .store((position - consumed as f64).to_bits(), Ordering::Relaxed);
         if !engine.is_empty() {
-            let _ = out.try_send(engine);
+            // The engine only accepts frames of exactly 960 samples: the
+            // samples of a short callback wait here for the next one.
+            let mut pending = self.pending.lock().expect("pending lock");
+            pending.extend_from_slice(&engine);
+            while pending.len() >= FRAME_SAMPLES {
+                let frame: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
+                let _ = out.try_send(frame);
+            }
         }
     }
 }
@@ -216,5 +238,42 @@ impl Playback {
     /// Empties whatever is pending: the right move when a call ends.
     pub fn flush(&self) {
         self.sink.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptureState, FRAME_SAMPLES, MUTE};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn the_capture_hands_the_engine_frames_of_sixty_milliseconds() {
+        // The engine rejects anything that is not 960 samples. A device that
+        // calls back with 1024 samples at 48 kHz produces shorter chunks, so
+        // the capture has to wait and join them.
+        MUTE.store(false, Ordering::SeqCst);
+        let (tx, rx) = async_channel::unbounded();
+        let state = CaptureState {
+            rate: 48_000,
+            channels: 1,
+            carry: std::sync::Mutex::new(Vec::new()),
+            pending: std::sync::Mutex::new(Vec::new()),
+            position: AtomicU64::new(0),
+        };
+        let block = vec![0i16; 1024];
+        for _ in 0..10 {
+            state.accept(&block, &tx);
+        }
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+        assert!(!frames.is_empty());
+        for frame in &frames {
+            assert_eq!(frame.len(), FRAME_SAMPLES);
+        }
+        // 10 blocks of 1024 at 48 kHz are 3413 samples at 16 kHz: three whole
+        // frames, and the rest stays for the next callback.
+        assert_eq!(frames.len(), 3);
     }
 }

@@ -1,7 +1,7 @@
 # Agentes en Whatfast
 
 El servidor MCP de Whatfast y el socket local que lo alimenta. Un harness
-(Claude Code, Codex, Cursor, OpenCode, Pi, Hermes) se conecta a este servidor y
+(Claude Code, Codex, Cursor, OpenCode, Antigravity, Pi, Hermes) se conecta a este servidor y
 trabaja sobre la cuenta de WhatsApp del usuario sin tocar la sesión.
 
 ## Las dos piezas
@@ -22,7 +22,7 @@ whatfast.exe mcp --agent <id> [--data-dir <carpeta>] [--backend <sidecar>]
 ```
 
 - `--agent`: el id del harness (`claude-code`, `codex`, `cursor`, `opencode`,
-  `pi`, `hermes`, `claude-desktop`, `vscode`). Hoy solo nombra la conexión; los
+  `pi`, `hermes`, `claude-desktop`, `vscode`, `antigravity`). Hoy solo nombra la conexión; los
   permisos por agente llegan con la base de agentes.
 - `--data-dir`: el perfil. Por defecto `%LOCALAPPDATA%\whatfast` (o
   `$XDG_DATA_HOME/whatfast`, o `~/Library/Application Support/whatfast`), y

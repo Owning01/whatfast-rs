@@ -128,7 +128,7 @@ fn mark_discarded(app: &mut Whatfast, draft_id: i64) {
     };
     app.store.toast_error = Some(i18n::t_args(
         "The draft could not be discarded: {error}",
-        &[("error", error.as_str())],
+        &[("error", crate::helpers::user_error(&error))],
     ));
 }
 

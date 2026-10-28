@@ -28,9 +28,27 @@ pub(crate) fn phone_digits(jid: &str) -> String {
     jid.split('@').next().unwrap_or("").to_owned()
 }
 
-/// The title of a chat, resolved with the Go's rule: for direct chats the
-/// saved contact name wins, then the business name, then the push name the
-/// contact chose, then the stored name, then the bare phone digits.
+/// The line breaks of a text, always as `\n`.
+///
+/// WhatsApp and the stored rows mix CRLF, LF and a lone CR. The window
+/// splits a bubble in lines by `\n` and measures it with the text shaper of
+/// the interface: a carriage return made the measure say one line, and the
+/// rows after it overlapped the bubble.
+fn normalize_newlines(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_owned();
+    }
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// The title of a chat.
+///
+/// For a group the title is the subject. For a direct chat the saved name of
+/// the contact wins, then the business name, then the name the store knows;
+/// when the contact is not in the address book the title is its phone number,
+/// formatted as WhatsApp writes it. The name the contact chose for itself is
+/// not a title: two people can call themselves the same, and the user asked
+/// for the number of the ones that are not saved.
 fn chat_title(chat: &ChatRow) -> String {
     if chat.address_jid.ends_with("@g.us") {
         return chat.name.clone();
@@ -38,14 +56,21 @@ fn chat_title(chat: &ChatRow) -> String {
     [
         chat.contact_name.as_str(),
         chat.business_name.as_str(),
-        chat.push_name.as_str(),
         chat.name.as_str(),
-        chat.phone_number.as_str(),
     ]
     .into_iter()
     .find(|candidate| !candidate.is_empty())
     .map(str::to_owned)
-    .unwrap_or_else(|| phone_digits(&chat.address_jid))
+    .unwrap_or_else(|| phone_number(chat))
+}
+
+/// The number of the chat, with the plus and the groups of its country.
+fn phone_number(chat: &ChatRow) -> String {
+    if chat.phone_number.is_empty() {
+        whatfast_core::phone::format(&phone_digits(&chat.address_jid))
+    } else {
+        whatfast_core::phone::format(&chat.phone_number)
+    }
 }
 
 /// The wire chat of one store row. `muted` is true while the mute deadline
@@ -57,7 +82,7 @@ pub fn wire_chat(chat: &ChatRow) -> WireChat {
         kind: chat_kind(&chat.address_jid) as i32,
         title: chat_title(chat),
         avatar_path: String::new(),
-        last_message_preview: chat.last_message_text.clone(),
+        last_message_preview: normalize_newlines(&chat.last_message_text),
         last_message_timestamp_ms: chat.last_message_at,
         unread_count: chat.unread_count.max(0) as u32,
         muted: chat.muted_until > now,
@@ -132,16 +157,16 @@ fn wire_content(
     if message.revoked || message.kind == "revoked" {
         return C::Unsupported(UnsupportedContent {
             type_name: "revoked".into(),
-            fallback_text: message.text.clone(),
+            fallback_text: normalize_newlines(&message.text),
         });
     }
     match message.kind.as_str() {
         "text" => C::Text(TextContent {
-            text: message.text.clone(),
+            text: normalize_newlines(&message.text),
             link_preview: wire_link_preview(message),
         }),
         "image" | "sticker" => C::Image(ImageContent {
-            caption: message.image_caption.clone(),
+            caption: normalize_newlines(&message.image_caption),
             mime_type: message.image_mime.clone(),
             local_path: message.image_local_path.clone(),
             width: message.image_width.max(0) as u32,
@@ -194,11 +219,19 @@ fn wire_content(
             };
             C::Attachment(AttachmentContent {
                 kind: message.kind.clone(),
-                caption: if message.media_caption.is_empty() {
+                // An audio or a video has no caption of its own when the row
+                // only carries the placeholder that the ingest wrote ("Voice
+                // message", "Video"): that text is the preview of the chat
+                // list, not a caption.
+                caption: normalize_newlines(&if message.kind == "audio"
+                    || message.kind == "video"
+                {
+                    message.media_caption.clone()
+                } else if message.media_caption.is_empty() {
                     message.text.clone()
                 } else {
                     message.media_caption.clone()
-                },
+                }),
                 mime_type: mime,
                 file_name: message.media_file_name.clone(),
                 local_path,
@@ -256,12 +289,12 @@ fn wire_content(
             }),
             None => C::Unsupported(UnsupportedContent {
                 type_name: message.kind.clone(),
-                fallback_text: message.text.clone(),
+                fallback_text: normalize_newlines(&message.text),
             }),
         },
         _ => C::Unsupported(UnsupportedContent {
             type_name: message.kind.clone(),
-            fallback_text: message.text.clone(),
+            fallback_text: normalize_newlines(&message.text),
         }),
     }
 }
@@ -311,6 +344,30 @@ mod tests {
         }
     }
 
+    /// WhatsApp sends some bodies with a lone CR between the lines. The
+    /// window cuts the bubble by `\n`, so the CR has to become an LF before
+    /// the text reaches it.
+    #[test]
+    fn the_line_breaks_of_a_text_arrive_as_lf() {
+        let mut message = row("text");
+        message.text = "uno\rdos\r\ntres".into();
+        let Some(whatfast_protocol::message::Content::Text(text)) =
+            wire_message(&message).content
+        else {
+            panic!("expected text content");
+        };
+        assert_eq!(text.text, "uno\ndos\ntres");
+
+        let mut image = row("image");
+        image.image_caption = "arriba\rabajo".into();
+        let Some(whatfast_protocol::message::Content::Image(image)) =
+            wire_message(&image).content
+        else {
+            panic!("expected image content");
+        };
+        assert_eq!(image.caption, "arriba\nabajo");
+    }
+
     /// The Go schema stored every media kind in the `image_*` columns: a
     /// migrated attachment row must still name its file and its size.
     #[test]
@@ -337,6 +394,49 @@ mod tests {
         assert_eq!(attachment.width, 640);
         assert_eq!(attachment.height, 480);
         assert!(attachment.downloadable);
+    }
+
+    /// The text of an audio or a video row is the placeholder that the ingest
+    /// wrote, not a caption: the bubble must not repeat it under the player.
+    #[test]
+    fn the_placeholder_of_a_media_message_is_not_a_caption() {
+        let mut message = row("audio");
+        message.text = "Voice message".into();
+        message.media_voice = true;
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            wire_message(&message).content
+        else {
+            panic!("expected attachment content");
+        };
+        assert!(attachment.voice_note);
+        assert!(attachment.caption.is_empty());
+
+        let mut video = row("video");
+        video.text = "Video".into();
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            wire_message(&video).content
+        else {
+            panic!("expected attachment content");
+        };
+        assert!(attachment.caption.is_empty());
+        // A caption that WhatsApp did send still travels under the card.
+        video.media_caption = "the agenda of the meeting".into();
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            wire_message(&video).content
+        else {
+            panic!("expected attachment content");
+        };
+        assert_eq!(attachment.caption, "the agenda of the meeting");
+
+        // The real caption of another attachment still travels under the card.
+        let mut document = row("document");
+        document.text = "the agenda of the meeting".into();
+        let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+            wire_message(&document).content
+        else {
+            panic!("expected attachment content");
+        };
+        assert_eq!(attachment.caption, "the agenda of the meeting");
     }
 
     /// The download chip follows the message, not the cache: the Go wired

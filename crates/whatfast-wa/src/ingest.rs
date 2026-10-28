@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use wacore::types::events::{ChatPresenceUpdate, Event, InboundMessage, Receipt};
+use wacore::types::events::{
+    ChatPresenceUpdate, Event, InboundMessage, Receipt, UnavailableType, UndecryptableMessage,
+};
 use wacore::types::message::{MessageInfo, StanzaMessageType};
 use wacore::types::presence::{ChatActivity, ReceiptType};
 use whatfast_protocol::{
@@ -162,6 +164,14 @@ fn message_poll_snapshot(message: &wa::Message) -> Option<&wa::message::PollResu
         .poll_result_snapshot_message
         .as_option()
         .or_else(|| message.poll_result_snapshot_message_v3.as_option())
+}
+
+/// A view-once message is an envelope: the phone keeps the media key, so a
+/// linked device never gets the photo, the video or the voice note itself.
+fn view_once_wrapper(message: &wa::Message) -> bool {
+    message.view_once_message.is_set()
+        || message.view_once_message_v2.is_set()
+        || message.view_once_message_v2_extension.is_set()
 }
 
 /// A PTV (round video note) is a video attachment the UI plays round.
@@ -590,6 +600,14 @@ fn passive_message(message: &wa::Message) -> bool {
 /// mirroring the Go's `extractMessageContent` order and fallback texts.
 fn classify(content: &wa::Message, stanza_type: &str) -> Content {
     let mut out = Content::default();
+
+    // The bubble says what the message is, not what it carried: the media
+    // never left the phone.
+    if view_once_wrapper(content) {
+        out.kind = "view_once".into();
+        out.text = "One-time message".into();
+        return out;
+    }
 
     if let Some(image) = content.image_message.as_option() {
         out.kind = "image".into();
@@ -1702,6 +1720,13 @@ pub fn apply_event(
             }
             (events, Vec::new())
         }
+        // A view-once message never reaches this device as content: the
+        // phone keeps it and the library reports only the envelope.
+        Event::UndecryptableMessage(undecryptable)
+            if undecryptable.unavailable_type == UnavailableType::ViewOnce =>
+        {
+            store_view_once(store, identity, undecryptable)
+        }
         Event::Receipt(receipt) => (
             store_receipt(store, receipt).unwrap_or_default(),
             Vec::new(),
@@ -1712,6 +1737,54 @@ pub fn apply_event(
         ),
         _ => (Vec::new(), Vec::new()),
     }
+}
+
+/// Stores the envelope of a view-once message. The phone keeps the content,
+/// so the row carries the time, the author and the chat pointer; the notice
+/// itself is the interface's job.
+fn store_view_once(
+    store: &Store,
+    identity: &crate::identity::Identity,
+    undecryptable: &UndecryptableMessage,
+) -> (Vec<BackendEvent>, Vec<Ingested>) {
+    let info = &undecryptable.info;
+    // A status is not a chat row: the strip has its own table, and a
+    // placeholder would paint a bubble in the conversation list.
+    if jid_text(&info.source.chat) == "status@broadcast" {
+        return (Vec::new(), Vec::new());
+    }
+    let chat_jid = jid_text(&info.source.chat);
+    let sender_jid = jid_text(&info.source.sender.to_non_ad());
+    if !info.push_name.is_empty() && !info.source.is_from_me {
+        store
+            .learn_contact(&sender_jid, "", &info.push_name.to_string(), "")
+            .ok();
+    }
+    let mut message = MessageRow {
+        id: info.id.to_string(),
+        chat_jid: chat_jid.clone(),
+        transport_jid: chat_jid.clone(),
+        sender_jid,
+        timestamp: info.timestamp.timestamp_millis(),
+        from_me: info.source.is_from_me,
+        status: INBOUND_STATUS,
+        unread: !info.source.is_from_me,
+        kind: "view_once".into(),
+        text: "One-time message".into(),
+        ..MessageRow::default()
+    };
+    let (canonical, _folds) = crate::reconcile::canonical_chat(store, identity, &chat_jid);
+    message.chat_jid = canonical.clone();
+    store.ensure_chat(&canonical, &chat_jid).ok();
+    if store.insert_message(&message).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut events = Vec::new();
+    if let Ok(Some(fresh)) = store.chat(&canonical) {
+        events.push(chat_upserted(fresh));
+    }
+    events.push(message_upserted(&message));
+    (events, Vec::new())
 }
 
 /// Extracts a reaction from one inbound envelope into the store. Answers
@@ -2016,6 +2089,54 @@ mod tests {
         let classified = classify_one(&content);
         assert_eq!(classified.kind, "placeholder");
         assert_eq!(classified.text, "Placeholder");
+    }
+
+    #[test]
+    fn a_view_once_envelope_becomes_the_notice_instead_of_a_media_row() {
+        let mut inner = wa::Message::default();
+        inner.image_message = MessageField::some(wa::message::ImageMessage::default());
+        let mut content = wa::Message::default();
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        content.view_once_message_v2 = MessageField::some(wrapper);
+        let classified = classify_one(&content);
+        assert_eq!(classified.kind, "view_once");
+        assert_eq!(classified.text, "One-time message");
+        assert!(classified.image.is_none());
+    }
+
+    #[test]
+    fn a_view_once_notice_lands_in_the_chat_as_its_own_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-wa-view-once-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("chats.db")).unwrap();
+        let identity = crate::identity::Identity::open(&dir);
+        let undecryptable = wacore::types::events::UndecryptableMessage::builder()
+            .info(Arc::new(info("VIEW1", false, 1_700_000_000_000)))
+            .is_unavailable(true)
+            .unavailable_type(UnavailableType::ViewOnce)
+            .decrypt_fail_mode(wacore::types::events::DecryptFailMode::Show)
+            .build();
+        let (events, _) = apply_event(
+            &store,
+            &identity,
+            &Event::UndecryptableMessage(undecryptable),
+        );
+        assert_eq!(events.len(), 2);
+        let row = store
+            .message("120363@g.us", "VIEW1")
+            .unwrap()
+            .expect("a row");
+        assert_eq!(row.kind, "view_once");
+        assert_eq!(row.text, "One-time message");
+        assert!(!row.from_me);
     }
 
     #[test]

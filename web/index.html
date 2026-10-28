@@ -3,9 +3,174 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Whatfast — WhatsApp de escritorio, liviano y privado</title>
-  <meta name="description" content="Un WhatsApp de escritorio liviano y privado: abre rápido, no ocupa la memoria de un navegador y guarda tus chats en tu propia computadora." />
+  <title>Whatfast — Cliente de WhatsApp para Windows y Linux</title>
+  <meta name="description" content="Whatfast es un cliente de WhatsApp para Windows y Linux: nativo, liviano y privado. Usa 92,3 MB de RAM y guarda tus chats en tu propio equipo, no en la nube." />
+  <link rel="canonical" href="https://what-fast.web.app/" />
+  <link rel="alternate" hreflang="es" href="https://what-fast.web.app/" />
+  <link rel="alternate" hreflang="x-default" href="https://what-fast.web.app/" />
   <link rel="icon" type="image/png" href="./assets/icon.png" />
+  <link rel="apple-touch-icon" href="./assets/icon.png" />
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+  <meta name="author" content="Whatfast" />
+  <meta name="application-name" content="Whatfast" />
+  <meta name="theme-color" content="#0b0c0e" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Whatfast" />
+  <meta property="og:locale" content="es_AR" />
+  <meta property="og:url" content="https://what-fast.web.app/" />
+  <meta property="og:title" content="Whatfast — Cliente de WhatsApp para Windows y Linux" />
+  <meta property="og:description" content="Whatfast es un cliente de WhatsApp para Windows y Linux: nativo, liviano y privado. Usa 92,3 MB de RAM y guarda tus chats en tu propio equipo, no en la nube." />
+  <meta property="og:image" content="https://what-fast.web.app/assets/og-image.png" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Whatfast, cliente de WhatsApp de escritorio para Windows y Linux" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Whatfast — Cliente de WhatsApp para Windows y Linux" />
+  <meta name="twitter:description" content="Whatfast es un cliente de WhatsApp para Windows y Linux: nativo, liviano y privado. Usa 92,3 MB de RAM y guarda tus chats en tu propio equipo, no en la nube." />
+  <meta name="twitter:image" content="https://what-fast.web.app/assets/og-image.png" />
+  <meta name="twitter:image:alt" content="Whatfast, cliente de WhatsApp de escritorio para Windows y Linux" />
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://what-fast.web.app/#website",
+      "url": "https://what-fast.web.app/",
+      "name": "Whatfast",
+      "description": "Cliente de WhatsApp de escritorio para Windows y Linux, nativo y liviano.",
+      "inLanguage": "es",
+      "publisher": {
+        "@id": "https://what-fast.web.app/#organization"
+      }
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://what-fast.web.app/#organization",
+      "name": "Whatfast",
+      "url": "https://what-fast.web.app/",
+      "logo": {
+        "@type": "ImageObject",
+        "url": "https://what-fast.web.app/assets/icon.png",
+        "width": 512,
+        "height": 512
+      },
+      "sameAs": [
+        "https://github.com/Owning01/whatfast-rs"
+      ]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://what-fast.web.app/#app",
+      "name": "Whatfast",
+      "alternateName": "Whatfast, cliente de WhatsApp de escritorio",
+      "description": "Whatfast es un cliente de WhatsApp para Windows y Linux: nativo, liviano y privado. Usa 92,3 MB de RAM y guarda tus chats en tu propio equipo, no en la nube.",
+      "applicationCategory": "CommunicationApplication",
+      "applicationSubCategory": "Cliente de WhatsApp de escritorio",
+      "operatingSystem": "Windows 10, Windows 11, Linux",
+      "processorRequirements": "x86_64",
+      "inLanguage": "es",
+      "isAccessibleForFree": true,
+      "license": "https://github.com/Owning01/whatfast-rs/blob/main/LICENSE",
+      "url": "https://what-fast.web.app/",
+      "downloadUrl": "https://github.com/Owning01/whatfast-rs/releases/latest/download/whatfast-setup.exe",
+      "installUrl": "https://github.com/Owning01/whatfast-rs/releases/latest",
+      "image": "https://what-fast.web.app/assets/og-image.png",
+      "screenshot": [
+        "https://what-fast.web.app/assets/02-conversacion.png",
+        "https://what-fast.web.app/assets/01-lista-de-chats.png"
+      ],
+      "featureList": [
+        "Cliente de WhatsApp de escritorio, sin navegador",
+        "Windows 10 y 11, Linux x86_64",
+        "Historial local en SQLite",
+        "Llamadas de voz y videollamadas",
+        "Estados, canales, grupos y stickers",
+        "Código abierto"
+      ],
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "publisher": {
+        "@id": "https://what-fast.web.app/#organization"
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://what-fast.web.app/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "¿Qué es Whatfast?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Whatfast es un cliente de WhatsApp de escritorio, nativo y de código abierto. Se vincula con el código QR de WhatsApp como cualquier otro dispositivo y muestra tus chats en una ventana propia, sin abrir un navegador."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿En qué se diferencia de WhatsApp Web?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "WhatsApp Web es una página dentro del navegador: necesita Chrome o Edge, descarga JavaScript y ocupa la memoria de un motor web. Whatfast dibuja la interfaz directamente en Windows o Linux. Medido en Windows 11, el conjunto completo usa 92,3 MB de RAM frente a los 432 MB del cliente anterior con WebView2."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Cómo se instala y se vincula?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Descargá el instalador de Windows o el paquete de Linux, abrí Whatfast y escaneá el código QR desde WhatsApp en el teléfono: Ajustes, Dispositivos vinculados, Vincular un dispositivo. No hay que crear ninguna cuenta."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Dónde se guardan mis mensajes?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "En tu computadora. El historial, las llaves y los archivos viven en un archivo local del perfil de Whatfast. No pasan por servidores propios: la conexión va directo a WhatsApp, igual que en el teléfono."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Es gratis?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Sí. Whatfast es software libre y el código está en GitHub. Podés leerlo, compilarlo y reportar problemas."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Sirve para llamadas y videollamadas?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Sí: llamadas de voz y videollamadas con la cámara del equipo, además de chats, grupos, canales, estados y stickers."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Qué sistemas operativos soporta?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Windows 10 y 11 de 64 bits, y Linux x86_64."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "¿Reemplaza a la app oficial de WhatsApp?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Es un cliente de escritorio más chico, más rápido y con los datos en tu disco. El README del repositorio lista lo que ya funciona y lo que todavía falta."
+          }
+        }
+      ]
+    }
+  ]
+}
+  </script>
   <style>
     /* Design Tokens & Theme — DeepSeek Harness Inspired */
     :root {
@@ -1034,6 +1199,59 @@
         white-space: nowrap;
       }
     }
+    /* Preguntas frecuentes: las respuestas visibles y los datos
+       estructurados dicen lo mismo, palabra por palabra. */
+    .faq-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-width: 860px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .faq-item {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 0 22px;
+      transition: border-color 0.2s ease, background-color 0.2s ease;
+    }
+    .faq-item:hover {
+      border-color: var(--border-medium);
+      background-color: var(--bg-card-hover);
+    }
+    .faq-item summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 0;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      cursor: pointer;
+      list-style: none;
+    }
+    .faq-item summary::-webkit-details-marker {
+      display: none;
+    }
+    .faq-item summary::after {
+      content: "+";
+      flex: 0 0 auto;
+      font-size: 1.4rem;
+      font-weight: 400;
+      line-height: 1;
+      color: var(--text-muted);
+    }
+    .faq-item[open] summary::after {
+      content: "\2212";
+    }
+    .faq-item p {
+      padding-bottom: 20px;
+      color: var(--text-secondary);
+      line-height: 1.65;
+      max-width: 72ch;
+    }
   </style>
 </head>
 <body>
@@ -1050,6 +1268,7 @@
         <div class="nav-links">
           <a href="#workbench" class="nav-link">Recorrido</a>
           <a href="#caracteristicas" class="nav-link">Ventajas</a>
+          <a href="#preguntas" class="nav-link">Preguntas</a>
           <a href="#descargar" class="nav-link">Descargar</a>
         </div>
 
@@ -1078,12 +1297,12 @@
       <div class="container">
 
         <h1 class="hero-title motion-enter">
-          WhatsApp nativo.<br />
+          WhatsApp nativo para Windows.<br />
           Rápido de verdad.
         </h1>
 
         <p class="hero-lead motion-enter motion-delay-1">
-          Un WhatsApp de escritorio liviano: abre rápido, no ocupa la memoria de un navegador y guarda tus chats en tu propia computadora. No hace falta crear ninguna cuenta: se vincula con el QR de WhatsApp, como cualquier otro dispositivo.
+          Un cliente de WhatsApp de escritorio liviano: abre rápido, no ocupa la memoria de un navegador y guarda tus chats en tu propia computadora. No hace falta crear ninguna cuenta: se vincula con el QR de WhatsApp, como cualquier otro dispositivo.
         </p>
 
         <div class="hero-cta-group motion-enter motion-delay-2">
@@ -1142,7 +1361,7 @@
               <div class="workbench-display">
                 <div class="viewer">
                   <div class="viewer-frame">
-                    <img id="active-screenshot" src="./assets/01-lista-de-chats.png" alt="Captura de la lista de chats de Whatfast" class="screenshot-frame" />
+                    <img id="active-screenshot" src="./assets/01-lista-de-chats.png" width="1475" height="950" fetchpriority="high" decoding="async" alt="Lista de chats de Whatfast, el cliente de WhatsApp de escritorio para Windows y Linux" class="screenshot-frame" />
                     <div class="viewer-zones" id="viewer-zones"></div>
                   </div>
                   <div class="viewer-caption">
@@ -1167,7 +1386,7 @@
       <div class="container">
         
         <div class="section-header motion-enter">
-          <h2 class="section-title">Liviano, rápido y con tus datos en tu compu.</h2>
+          <h2 class="section-title">Un cliente de WhatsApp liviano y con tus datos en tu compu.</h2>
           <p class="section-desc">
             Whatfast no trae un navegador adentro. Son dos programas chicos: uno dibuja la pantalla y el otro se ocupa de la conexión. Por eso abre rápido y no te come la memoria del equipo.
           </p>
@@ -1229,6 +1448,52 @@
 
         </div>
 
+      </div>
+    </section>
+
+    <!-- FAQ: el texto que busca la gente y el que lee Google -->
+    <section id="preguntas" class="section faq-section">
+      <div class="container">
+        <div class="section-header motion-enter">
+          <h2 class="section-title">Preguntas frecuentes sobre Whatfast</h2>
+          <p class="section-desc">
+            Lo que más se pregunta antes de instalar un cliente de WhatsApp para Windows o Linux.
+          </p>
+        </div>
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>¿Qué es Whatfast?</summary>
+            <p>Whatfast es un cliente de WhatsApp de escritorio, nativo y de código abierto. Se vincula con el código QR de WhatsApp como cualquier otro dispositivo y muestra tus chats en una ventana propia, sin abrir un navegador.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿En qué se diferencia de WhatsApp Web?</summary>
+            <p>WhatsApp Web es una página dentro del navegador: necesita Chrome o Edge, descarga JavaScript y ocupa la memoria de un motor web. Whatfast dibuja la interfaz directamente en Windows o Linux. Medido en Windows 11, el conjunto completo usa 92,3 MB de RAM frente a los 432 MB del cliente anterior con WebView2.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Cómo se instala y se vincula?</summary>
+            <p>Descargá el instalador de Windows o el paquete de Linux, abrí Whatfast y escaneá el código QR desde WhatsApp en el teléfono: Ajustes, Dispositivos vinculados, Vincular un dispositivo. No hay que crear ninguna cuenta.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Dónde se guardan mis mensajes?</summary>
+            <p>En tu computadora. El historial, las llaves y los archivos viven en un archivo local del perfil de Whatfast. No pasan por servidores propios: la conexión va directo a WhatsApp, igual que en el teléfono.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Es gratis?</summary>
+            <p>Sí. Whatfast es software libre y el código está en GitHub. Podés leerlo, compilarlo y reportar problemas.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Sirve para llamadas y videollamadas?</summary>
+            <p>Sí: llamadas de voz y videollamadas con la cámara del equipo, además de chats, grupos, canales, estados y stickers.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Qué sistemas operativos soporta?</summary>
+            <p>Windows 10 y 11 de 64 bits, y Linux x86_64.</p>
+          </details>
+          <details class="faq-item">
+            <summary>¿Reemplaza a la app oficial de WhatsApp?</summary>
+            <p>No. Es un cliente de escritorio más chico, más rápido y con los datos en tu disco. El README del repositorio lista lo que ya funciona y lo que todavía falta.</p>
+          </details>
+        </div>
       </div>
     </section>
 
@@ -1427,7 +1692,7 @@ Expand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\Programs\Whatfast" -Forc
       <div class="container">
         
         <div data-ui="cta-banner">
-          <h2 class="cta-heading">Descarga Whatfast</h2>
+          <h2 class="cta-heading">Descarga Whatfast para Windows y Linux</h2>
           <p class="cta-subtext">
             Para Windows 10 y 11 (64-bit) y para Linux (x86_64). Un cliente de mensajería liviano, privado y sin la carga de un navegador.
           </p>
@@ -1484,6 +1749,7 @@ Expand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\Programs\Whatfast" -Forc
           <ul class="footer-list">
             <li><a href="#workbench" class="footer-link">Recorrido por la interfaz</a></li>
             <li><a href="#caracteristicas" class="footer-link">Por qué es liviano</a></li>
+            <li><a href="#preguntas" class="footer-link">Preguntas frecuentes</a></li>
             <li><a href="#descargar" class="footer-link">Descargar</a></li>
             <li><a href="https://github.com/Owning01/whatfast-rs/releases" class="footer-link">Versiones anteriores</a></li>
           </ul>

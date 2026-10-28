@@ -19,10 +19,10 @@ use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, StatefulInteractiveElement as _, Styled as _, Window, div, px, rgba,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_component::{ActiveTheme as _, Icon, Sizable as _};
 
 use crate::icons::WhatfastIcon;
 use crate::tokens::normalized_ui_scale;
@@ -36,7 +36,9 @@ const RAIL_WIDTH: f32 = 56.0;
 /// The size of a button of the column, before the scale.
 ///
 /// port: `.icon-button { width: calc(34px * var(--scale)); height: ... }`.
-const BUTTON_SIZE: f32 = 34.0;
+/// The button of the reference is the grey circle around the glyph, so the
+/// circle is a little wider than the plain button of the web client.
+const BUTTON_SIZE: f32 = 40.0;
 
 /// The gap between the buttons, before the scale.
 ///
@@ -105,15 +107,14 @@ impl NavAction {
             // `ShieldCheck` for the privacy. El set propio de Whatfast trae
             // la burbuja del chat y el escudo, que son los mismos dibujos.
             NavAction::Chats => WhatfastIcon::Chat.into(),
-            NavAction::Search => IconName::Search.into(),
-            // The states are a circle of dashes, the same glyph the reference
-            // draws in its column of icons.
-            NavAction::States => IconName::LoaderCircle.into(),
-            // The channels are a bubble of messages, the glyph of the
-            // reference.
-            NavAction::Channels => WhatfastIcon::Messages.into(),
-            // The agents are a robot: the set of gpui_component has one.
-            NavAction::Agents => IconName::Bot.into(),
+            NavAction::Search => WhatfastIcon::Search.into(),
+            // The states are the ring of the reference: two circles, one
+            // inside the other, the same glyph of WhatsApp.
+            NavAction::States => WhatfastIcon::Status.into(),
+            // The channels are the bubble with the dot of the reference.
+            NavAction::Channels => WhatfastIcon::Channels.into(),
+            // The agents are a robot: the set of Whatfast has its own.
+            NavAction::Agents => WhatfastIcon::Bot.into(),
             // The archived conversations go into a box: the set of Whatfast
             // has the archive, the one of gpui_component no.
             NavAction::Archived => WhatfastIcon::Archive.into(),
@@ -163,6 +164,10 @@ pub(crate) struct NavButton {
     pub(crate) active: bool,
     /// Whether the button can be pressed.
     pub(crate) enabled: bool,
+    /// The unread messages of the destination, or zero for none.
+    pub(crate) badge: u32,
+    /// The green dot of the reference: there is something new there.
+    pub(crate) dot: bool,
 }
 
 /// The handler the buttons report to.
@@ -184,6 +189,10 @@ pub(crate) struct NavRail {
     archived_open: bool,
     /// The settings panel is open.
     settings_open: bool,
+    /// The unread messages of the list of chats.
+    unread: u32,
+    /// Whether there are states that were not seen.
+    states_unseen: bool,
     /// The scale of the interface.
     scale: f32,
     /// The handler the buttons report to.
@@ -217,6 +226,8 @@ impl NavRail {
             agents_open: false,
             archived_open: false,
             settings_open: false,
+            unread: 0,
+            states_unseen: false,
             scale: normalized_ui_scale(scale),
             on_action: None,
         }
@@ -301,6 +312,16 @@ impl NavRail {
         self.settings_open = open;
     }
 
+    /// The unread messages of the list of chats.
+    pub(crate) fn set_unread(&mut self, unread: u32) {
+        self.unread = unread;
+    }
+
+    /// Whether there are states that were not seen.
+    pub(crate) fn set_states_unseen(&mut self, unseen: bool) {
+        self.states_unseen = unseen;
+    }
+
     /// The scale of the interface.
     pub(crate) fn scale(&self) -> f32 {
         self.scale
@@ -332,11 +353,15 @@ impl NavRail {
                     && !self.agents_open
                     && !self.archived_open,
                 enabled: self.link == LinkState::Linked,
+                badge: self.unread,
+                dot: false,
             },
             NavButton {
                 action: NavAction::Search,
                 active: false,
                 enabled: self.link == LinkState::Linked,
+                badge: 0,
+                dot: false,
             },
             NavButton {
                 action: NavAction::States,
@@ -344,12 +369,17 @@ impl NavRail {
                 // is the one in front.
                 active: self.states_open,
                 enabled: self.link == LinkState::Linked,
+                badge: 0,
+                // El punto verde de la referencia: hay estados sin ver.
+                dot: self.states_unseen,
             },
             NavButton {
                 action: NavAction::Channels,
                 // The channels are their own view too.
                 active: self.channels_open,
                 enabled: self.link == LinkState::Linked,
+                badge: 0,
+                dot: false,
             },
             NavButton {
                 action: NavAction::Agents,
@@ -357,6 +387,8 @@ impl NavRail {
                 // and the tray of their drafts.
                 active: self.agents_open,
                 enabled: true,
+                badge: 0,
+                dot: false,
             },
         ]
     }
@@ -369,11 +401,15 @@ impl NavRail {
                 // The archived conversations are their own view.
                 active: self.archived_open,
                 enabled: self.link == LinkState::Linked,
+                badge: 0,
+                dot: false,
             },
             NavButton {
                 action: NavAction::Privacy,
                 active: false,
                 enabled: self.link == LinkState::Linked,
+                badge: 0,
+                dot: false,
             },
             NavButton {
                 action: NavAction::Settings,
@@ -381,6 +417,8 @@ impl NavRail {
                 // are open.
                 active: self.settings_open,
                 enabled: true,
+                badge: 0,
+                dot: false,
             },
         ]
     }
@@ -427,7 +465,6 @@ impl NavRail {
         let foreground = theme.foreground;
         let muted = theme.muted_foreground;
         let hover = theme.muted;
-        let radius = theme.radius;
 
         let action = button.action;
         let handler = self.on_action.clone();
@@ -436,11 +473,12 @@ impl NavRail {
 
         div()
             .id(format!("nav-rail-button-{}", action.label()))
+            .relative()
             .size(px(BUTTON_SIZE * scale))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(radius)
+            .rounded_full()
             .cursor_pointer()
             // El boton activo de la referencia es un cuadro gris claro con
             // el glifo claro: no lleva el color de acento.
@@ -462,6 +500,44 @@ impl NavRail {
                 }
             })
             .child(Icon::new(action.icon()).with_size(px(action.icon_size() * scale)))
+            // El circulo verde de los no leidos: el numero va blanco sobre el
+            // verde de WhatsApp, como en la referencia.
+            .when(button.badge > 0, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(-3. * scale))
+                        .right(px(-3. * scale))
+                        .h(px(16. * scale))
+                        .min_w(px(16. * scale))
+                        .px(px(3. * scale))
+                        .rounded_full()
+                        .bg(rgba(0x25d366ff))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10. * scale))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgba(0xffffffff))
+                        .child(if button.badge > 99 {
+                            "99+".to_string()
+                        } else {
+                            button.badge.to_string()
+                        }),
+                )
+            })
+            // El punto del mismo verde: hay estados sin ver.
+            .when(button.dot, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(1. * scale))
+                        .right(px(1. * scale))
+                        .size(px(9. * scale))
+                        .rounded_full()
+                        .bg(rgba(0x25d366ff)),
+                )
+            })
     }
 }
 
@@ -518,7 +594,9 @@ mod tests {
 
     #[test]
     fn the_measures_of_the_column_come_from_the_stylesheet() {
-        assert_eq!(BUTTON_SIZE, 34.0);
+        // The button is the grey circle of the reference: 34 pixels of the web
+        // client plus the ring that separates the glyph from its background.
+        assert_eq!(BUTTON_SIZE, 40.0);
         assert_eq!(BUTTON_GAP, 7.0);
         assert_eq!(RAIL_PADDING, 12.0);
         assert_eq!(ICON_SIZE, 20.0);

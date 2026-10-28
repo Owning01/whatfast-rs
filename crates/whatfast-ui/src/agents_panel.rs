@@ -213,7 +213,7 @@ impl AgentsPanel {
             Err(error) => {
                 state.error = Some(i18n::t_args(
                     "The drawer of the agents could not be opened: {error}",
-                    &[("error", error.as_str())],
+                    &[("error", crate::helpers::user_error(&error))],
                 ));
                 None
             }
@@ -225,7 +225,7 @@ impl AgentsPanel {
                 Err(error) => {
                     state.error = Some(i18n::t_args(
                         "The agents of this profile could not be read: {error}",
-                        &[("error", &error.to_string())],
+                        &[("error", crate::helpers::user_error(&error))],
                     ));
                 }
             }
@@ -273,7 +273,7 @@ impl AgentsPanel {
                 Err(error) => {
                     state.error = Some(i18n::t_args(
                         "The drafts of this profile could not be read: {error}",
-                        &[("error", &error.to_string())],
+                        &[("error", crate::helpers::user_error(&error))],
                     ));
                 }
             }
@@ -375,7 +375,7 @@ impl AgentsPanel {
             whatfast_protocol::rpc_response::Result::Error(error) => {
                 self.fail(i18n::t_args(
                     "The draft could not be sent: {error}",
-                    &[("error", &error.message)],
+                    &[("error", crate::helpers::user_error(&error.message))],
                 ));
                 false
             }
@@ -421,7 +421,7 @@ impl AgentsPanel {
             if let Err(error) = db.set_draft_state(send.draft_id, wanted) {
                 self.fail(i18n::t_args(
                     "The drawer of the agents could not be written: {error}",
-                    &[("error", &error.to_string())],
+                    &[("error", crate::helpers::user_error(&error))],
                 ));
             }
         }
@@ -516,9 +516,19 @@ impl AgentsPanel {
                     .rounded_full()
                     .bg(background)
                     .child(
-                        Icon::new(IconName::Bot)
-                            .with_size(px(18. * scale))
-                            .text_color(muted),
+                        // El logo del harness cuando su proyecto tiene una
+                        // marca; el robot de `gpui_component` cuando no.
+                        if crate::harness_logos::svg(id).is_some() {
+                            Icon::new(crate::harness_logos::HarnessLogo { id })
+                                .with_size(px(18. * scale))
+                                .text_color(muted)
+                                .into_any_element()
+                        } else {
+                            Icon::new(IconName::Bot)
+                                .with_size(px(18. * scale))
+                                .text_color(muted)
+                                .into_any_element()
+                        },
                     ),
             )
             .child(
@@ -1317,7 +1327,7 @@ pub(crate) fn connect(
         Err(error) => {
             app.agents_panel.fail(i18n::t_args(
                 "The path of this program could not be read: {error}",
-                &[("error", &error.to_string())],
+                &[("error", crate::helpers::user_error(&error))],
             ));
             return;
         }
@@ -1327,7 +1337,7 @@ pub(crate) fn connect(
         Err(error) => {
             app.agents_panel.fail(i18n::t_args(
                 "The token of the agent could not be made: {error}",
-                &[("error", &error.to_string())],
+                &[("error", crate::helpers::user_error(&error))],
             ));
             return;
         }
@@ -1335,7 +1345,7 @@ pub(crate) fn connect(
     if let Err(error) = whatfast_agents::token::write(spec.id, &token) {
         app.agents_panel.fail(i18n::t_args(
             "The token of the agent could not be written: {error}",
-            &[("error", &error.to_string())],
+            &[("error", crate::helpers::user_error(&error))],
         ));
         return;
     }
@@ -1343,14 +1353,14 @@ pub(crate) fn connect(
     let Ok(db) = open_database(&database_path()) else {
         app.agents_panel.fail(i18n::t_args(
             "The drawer of the agents could not be opened: {error}",
-            &[("error", &database_path().display().to_string())],
+            &[("error", crate::helpers::user_error(database_path().display()))],
         ));
         return;
     };
     if let Err(error) = db.connect_agent(spec.id, spec.id, &grant, token.as_str(), now_ms()) {
         app.agents_panel.fail(i18n::t_args(
             "The agent could not be saved in the profile: {error}",
-            &[("error", &error.to_string())],
+            &[("error", crate::helpers::user_error(&error))],
         ));
         return;
     }
@@ -1365,7 +1375,7 @@ pub(crate) fn connect(
         )),
         Err(error) => app.agents_panel.fail(i18n::t_args(
             "{name} is connected, but its configuration could not be written: {error}",
-            &[("name", spec.name), ("error", &error.to_string())],
+            &[("name", spec.name), ("error", crate::helpers::user_error(&error))],
         )),
     }
 }
@@ -1400,7 +1410,7 @@ pub(crate) fn write_server(
         )),
         Err(error) => app.agents_panel.fail(i18n::t_args(
             "The configuration could not be written: {error}",
-            &[("error", &error.to_string())],
+            &[("error", crate::helpers::user_error(&error))],
         )),
     }
     app.agents_panel.reload(window, cx);
@@ -1462,7 +1472,7 @@ pub(crate) fn pick_config(
                         )),
                         Err(error) => app.agents_panel.fail(i18n::t_args(
                             "The configuration could not be written: {error}",
-                            &[("error", &error.to_string())],
+                            &[("error", crate::helpers::user_error(&error))],
                         )),
                     }
                     app.agents_panel.reload(window, cx);
@@ -1489,7 +1499,7 @@ pub(crate) fn disconnect(
             if let Err(error) = db.revoke(id, now_ms()) {
                 app.agents_panel.fail(i18n::t_args(
                     "{name} could not be disconnected: {error}",
-                    &[("name", name), ("error", &error.to_string())],
+                    &[("name", name), ("error", crate::helpers::user_error(&error))],
                 ));
                 failed = true;
             }
@@ -1497,7 +1507,7 @@ pub(crate) fn disconnect(
         Err(error) => {
             app.agents_panel.fail(i18n::t_args(
                 "The drawer of the agents could not be opened: {error}",
-                &[("error", &error)],
+                &[("error", crate::helpers::user_error(&error))],
             ));
             failed = true;
         }
@@ -1505,7 +1515,7 @@ pub(crate) fn disconnect(
     if let Err(error) = whatfast_agents::token::revoke(id) {
         app.agents_panel.fail(i18n::t_args(
             "The token of {name} could not be removed: {error}",
-            &[("name", name), ("error", &error.to_string())],
+            &[("name", name), ("error", crate::helpers::user_error(&error))],
         ));
         failed = true;
     }
@@ -1549,7 +1559,7 @@ pub(crate) fn save_grant(app: &mut Whatfast, window: &mut Window, cx: &mut Conte
         Err(error) => {
             app.agents_panel.fail(i18n::t_args(
                 "The drawer of the agents could not be opened: {error}",
-                &[("error", &error)],
+                &[("error", crate::helpers::user_error(&error))],
             ));
             return;
         }
@@ -1563,7 +1573,7 @@ pub(crate) fn save_grant(app: &mut Whatfast, window: &mut Window, cx: &mut Conte
         }
         Err(error) => app.agents_panel.fail(i18n::t_args(
             "The permissions could not be saved: {error}",
-            &[("error", &error.to_string())],
+            &[("error", crate::helpers::user_error(&error))],
         )),
     }
 }
@@ -1575,7 +1585,7 @@ pub(crate) fn discard_draft(app: &mut Whatfast, draft_id: i64) {
         Err(error) => {
             app.agents_panel.fail(i18n::t_args(
                 "The drawer of the agents could not be opened: {error}",
-                &[("error", &error)],
+                &[("error", crate::helpers::user_error(&error))],
             ));
             return;
         }
@@ -1591,7 +1601,7 @@ pub(crate) fn discard_draft(app: &mut Whatfast, draft_id: i64) {
             .fail(i18n::t("That draft is not in the tray anymore.").to_string()),
         Err(error) => app.agents_panel.fail(i18n::t_args(
             "The draft could not be discarded: {error}",
-            &[("error", &error.to_string())],
+            &[("error", crate::helpers::user_error(&error))],
         )),
     }
 }

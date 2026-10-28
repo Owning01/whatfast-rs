@@ -441,7 +441,7 @@ fn render_participant(
                         .text_xs()
                         .text_color(muted)
                         .truncate()
-                        .child(participant.phone_number.clone()),
+                        .child(whatfast_core::phone::format(&participant.phone_number)),
                 ),
         );
 

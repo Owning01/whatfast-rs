@@ -49,13 +49,17 @@ use gpui_component::Root;
 
 mod agents_panel;
 mod app;
+mod app_lock;
 mod attachments;
 mod audio;
 mod automations_panel;
 mod call_audio;
+mod call_video;
 mod chat_drafts;
 mod composer_attachments;
+mod document;
 mod emoji_recent;
+mod harness_logos;
 mod helpers;
 mod icons;
 mod instance;

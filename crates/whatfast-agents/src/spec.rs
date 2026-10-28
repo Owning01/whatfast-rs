@@ -217,6 +217,21 @@ pub const CLIENTS: &[ClientSpec] = &[
         restart: "Reiniciá la ventana de VS Code para que tome el servidor.",
     },
     ClientSpec {
+        id: "antigravity",
+        name: "Antigravity",
+        // El IDE de Google guarda sus servidores en `~/.gemini/config`, con la
+        // misma forma de `mcpServers` que los otros clientes de JSON.
+        detect: Detect::BinOrFile("antigravity", home("~/.gemini/config/mcp_config.json")),
+        method: Method::Json {
+            file: home("~/.gemini/config/mcp_config.json"),
+            key: "mcpServers",
+        },
+        // Es una ventana, no una herramienta de terminal: lee y escribe por
+        // MCP, pero no atiende el modo rapido ni las automatizaciones.
+        run: None,
+        restart: "Reiniciá Antigravity para que tome el servidor.",
+    },
+    ClientSpec {
         id: "pi",
         name: "Pi",
         detect: Detect::Bin("pi"),

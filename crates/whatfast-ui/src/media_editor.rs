@@ -844,7 +844,7 @@ impl MediaEditor {
                     .justify_center()
                     .text_sm()
                     .child(if error {
-                        "The photo could not be edited"
+                        i18n::t("The photo could not be edited")
                     } else if working {
                         "Preparing."
                     } else {

@@ -24,6 +24,58 @@ pub const MAX_UI_SCALE: f32 = 1.5;
 /// The scale of a profile that never changed it.
 pub const DEFAULT_UI_SCALE: f32 = 1.0;
 
+/// The smallest radius of a bubble, in pixels.
+pub const MIN_BUBBLE_RADIUS: f32 = 0.0;
+
+/// The biggest radius of a bubble, in pixels.
+pub const MAX_BUBBLE_RADIUS: f32 = 20.0;
+
+/// The narrowest bubble, as a part of the width of the thread.
+pub const MIN_BUBBLE_WIDTH: f32 = 0.45;
+
+/// The widest bubble, as a part of the width of the thread.
+pub const MAX_BUBBLE_WIDTH: f32 = 0.85;
+
+/// The smallest text of the messages, as a part of the one of the
+/// interface.
+pub const MIN_MESSAGE_FONT_SCALE: f32 = 0.85;
+
+/// The biggest text of the messages, as a part of the one of the interface.
+pub const MAX_MESSAGE_FONT_SCALE: f32 = 1.3;
+
+/// Where the background of a conversation comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatBackground {
+    /// The pattern of the reference: the default of the application.
+    #[default]
+    Pattern,
+    /// A plain color of the profile.
+    Color,
+    /// Nothing: the background of the theme shows through.
+    None,
+}
+
+impl ChatBackground {
+    /// The background as the settings file spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pattern => "pattern",
+            Self::Color => "color",
+            Self::None => "none",
+        }
+    }
+
+    /// Reads a background, falling back to the pattern.
+    pub fn from_value(value: &str) -> Self {
+        match value {
+            "color" => Self::Color,
+            "none" => Self::None,
+            _ => Self::Pattern,
+        }
+    }
+}
+
 /// How much air the interface leaves between rows and messages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,6 +138,29 @@ pub struct Settings {
     pub battery_saver: bool,
     /// The themes the user made, as the JSON of `whatfast_core::theme`.
     pub custom_themes: Vec<serde_json::Value>,
+    /// The radius of the bubbles, in pixels; `-1` keeps the one of the
+    /// theme.
+    pub bubble_radius: f32,
+    /// The widest bubble, as a part of the width of the thread; `-1` keeps
+    /// the width of the reference.
+    pub bubble_width: f32,
+    /// The text of the messages, as a part of the text of the interface.
+    pub message_font_scale: f32,
+    /// Where the background of the conversation comes from.
+    pub chat_background: ChatBackground,
+    /// The color of the background when it is a plain one, as `#rrggbb`;
+    /// empty asks the theme.
+    pub chat_background_color: String,
+    /// The image of the background, relative to the profile; empty when
+    /// there is none.
+    pub chat_wallpaper: String,
+    /// How solid the image of the background is, from 0.15 to 1.
+    pub chat_wallpaper_opacity: f32,
+    /// The salt and the hash of the PIN of the app lock, in PBKDF2-SHA256.
+    /// Both empty means the lock is off; the PIN itself never touches the
+    /// disk.
+    pub app_lock_salt: String,
+    pub app_lock_hash: String,
 }
 
 impl Default for Settings {
@@ -103,6 +178,15 @@ impl Default for Settings {
             split_view: false,
             battery_saver: false,
             custom_themes: Vec::new(),
+            bubble_radius: -1.0,
+            bubble_width: -1.0,
+            message_font_scale: 1.0,
+            chat_background: ChatBackground::Pattern,
+            chat_background_color: String::new(),
+            chat_wallpaper: String::new(),
+            chat_wallpaper_opacity: 1.0,
+            app_lock_salt: String::new(),
+            app_lock_hash: String::new(),
         }
     }
 }
@@ -120,6 +204,42 @@ impl Settings {
         if self.language.is_empty() {
             self.language = "en".to_string();
         }
+        // A radius of `-1` is the theme's own: anything else is clamped to
+        // what the bubble can paint.
+        if !self.bubble_radius.is_finite() {
+            self.bubble_radius = -1.0;
+        }
+        if self.bubble_radius >= 0.0 {
+            self.bubble_radius = self.bubble_radius.clamp(MIN_BUBBLE_RADIUS, MAX_BUBBLE_RADIUS);
+        }
+        if !self.bubble_width.is_finite() {
+            self.bubble_width = -1.0;
+        }
+        if self.bubble_width >= 0.0 {
+            self.bubble_width = self.bubble_width.clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH);
+        }
+        if !self.message_font_scale.is_finite() {
+            self.message_font_scale = 1.0;
+        }
+        self.message_font_scale = self
+            .message_font_scale
+            .clamp(MIN_MESSAGE_FONT_SCALE, MAX_MESSAGE_FONT_SCALE);
+        self.chat_background_color = self.chat_background_color.trim().to_lowercase();
+        self.chat_wallpaper = self.chat_wallpaper.trim().to_string();
+        if !self.chat_wallpaper_opacity.is_finite() {
+            self.chat_wallpaper_opacity = 1.0;
+        }
+        self.chat_wallpaper_opacity = self.chat_wallpaper_opacity.clamp(0.15, 1.0);
+    }
+
+    /// The radius of the bubbles, or `None` for the one of the theme.
+    pub fn bubble_radius(&self) -> Option<f32> {
+        (self.bubble_radius >= 0.0).then_some(self.bubble_radius)
+    }
+
+    /// The width of the bubbles, or `None` for the one of the reference.
+    pub fn bubble_width(&self) -> Option<f32> {
+        (self.bubble_width >= 0.0).then_some(self.bubble_width)
     }
 }
 
@@ -236,6 +356,13 @@ mod tests {
             split_view: true,
             battery_saver: true,
             custom_themes: vec![serde_json::json!({ "id": "mine" })],
+            bubble_radius: 14.0,
+            bubble_width: 0.6,
+            message_font_scale: 1.1,
+            chat_background: super::ChatBackground::Color,
+            chat_background_color: "#101010".into(),
+            chat_wallpaper: "wallpapers/uno.png".into(),
+            chat_wallpaper_opacity: 0.6,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path, &legacy), settings);
@@ -299,11 +426,45 @@ mod tests {
     }
 
     #[test]
+    fn the_bubbles_of_a_file_without_them_keep_the_ones_of_the_theme() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let legacy = directory.path().join("settings");
+        fs::write(&path, r#"{ "ui_scale": 1.1 }"#).unwrap();
+        let settings = load_from(&path, &legacy);
+        assert_eq!(settings.bubble_radius(), None);
+        assert_eq!(settings.bubble_width(), None);
+        assert_eq!(settings.message_font_scale, 1.0);
+        assert_eq!(settings.chat_background, super::ChatBackground::Pattern);
+    }
+
+    #[test]
+    fn the_bubbles_are_clamped_to_what_the_window_paints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let legacy = directory.path().join("settings");
+        fs::write(
+            &path,
+            r##"{ "bubble_radius": 90.0, "bubble_width": 0.1, "message_font_scale": 9.0, "chat_background": "color", "chat_background_color": "#AABBCC" }"##,
+        )
+        .unwrap();
+        let settings = load_from(&path, &legacy);
+        assert_eq!(settings.bubble_radius(), Some(super::MAX_BUBBLE_RADIUS));
+        assert_eq!(settings.bubble_width(), Some(super::MIN_BUBBLE_WIDTH));
+        assert_eq!(settings.message_font_scale, super::MAX_MESSAGE_FONT_SCALE);
+        assert_eq!(settings.chat_background, super::ChatBackground::Color);
+        assert_eq!(settings.chat_background_color, "#aabbcc");
+    }
+
+    #[test]
     fn the_density_spells_itself_the_way_the_file_does() {
         assert_eq!(Density::Comfortable.as_str(), "comfortable");
         assert_eq!(Density::Compact.as_str(), "compact");
         assert_eq!(Density::from_value("compact"), Density::Compact);
         assert_eq!(Density::from_value("anything"), Density::Comfortable);
+        assert_eq!(super::ChatBackground::from_value("color"), super::ChatBackground::Color);
+        assert_eq!(super::ChatBackground::from_value("nada"), super::ChatBackground::Pattern);
+        assert_eq!(super::ChatBackground::None.as_str(), "none");
     }
 
     #[test]

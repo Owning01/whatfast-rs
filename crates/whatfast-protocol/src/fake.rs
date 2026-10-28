@@ -43,6 +43,7 @@ use crate::transport::{BridgeMessage, PROTOCOL_VERSION};
 use crate::{
     AttachmentContent, AttachmentKind, AuthStateResponse, BackendEvent, CallAcceptResponse,
     CallAudioResponse, CallHangupResponse, CallMuteResponse, CallPlaceResponse, CallRejectResponse,
+    CallVideoResponse,
     Chat, ChatKind, ChatParticipant, ChatUpserted, ConnectionState, Envelope,
     GetChatHistoryCoverageResponse, GetChatInfoResponse, GetHistoryOverviewResponse,
     GetIntegrityStatusResponse, GetMessageAttachmentResponse, GetMessageImageResponse,
@@ -1366,6 +1367,16 @@ pub fn fake_loop(
                     chat: Some(fixture_chat(&request.chat_id, Some(chat))),
                 })
             }
+            Some(rpc_request::Request::CreateGroup(request)) => {
+                let jid = format!("whatfast-fake-group-{}@g.us", chat_settings.len() + 1);
+                let mut chat = fixture_chat(&jid, None);
+                chat.title = request.subject.clone();
+                chat.kind = ChatKind::Group as i32;
+                chat_settings.insert(jid.clone(), chat.clone());
+                rpc_response::Result::CreateGroup(crate::CreateGroupResponse {
+                    chat: Some(fixture_chat(&jid, Some(&chat))),
+                })
+            }
             Some(rpc_request::Request::SendImage(request)) => {
                 rpc_response::Result::SendImage(SendImageResponse {
                     message: Some(Message {
@@ -1726,6 +1737,9 @@ pub fn fake_loop(
             }
             Some(rpc_request::Request::CallAudio(_)) => {
                 rpc_response::Result::CallAudio(CallAudioResponse {})
+            }
+            Some(rpc_request::Request::CallVideo(_)) => {
+                rpc_response::Result::CallVideo(CallVideoResponse {})
             }
         };
         if incoming

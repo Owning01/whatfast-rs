@@ -296,7 +296,7 @@ impl AutomationsPanel {
             if !response.error.is_empty() {
                 state.error = Some(i18n::t_args(
                     "The task could not be saved: {error}",
-                    &[("error", &response.error)],
+                    &[("error", crate::helpers::user_error(&response.error))],
                 ));
                 state.notice = None;
                 return false;
@@ -316,7 +316,7 @@ impl AutomationsPanel {
             if !response.error.is_empty() {
                 state.error = Some(i18n::t_args(
                     "The task could not be paused: {error}",
-                    &[("error", &response.error)],
+                    &[("error", crate::helpers::user_error(&response.error))],
                 ));
                 state.notice = None;
                 return false;
@@ -358,7 +358,7 @@ impl AutomationsPanel {
             PendingRequest::ScheduleRemove { .. } => "The task could not be removed: {error}",
             _ => return false,
         };
-        self.fail(i18n::t_args(key, &[("error", message)]));
+        self.fail(i18n::t_args(key, &[("error", crate::helpers::user_error(message))]));
         true
     }
 

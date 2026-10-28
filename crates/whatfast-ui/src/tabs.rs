@@ -132,12 +132,12 @@ impl TabEntry {
 /// The title of a chat.
 ///
 /// port: `chatName` of the oracle: the title of the chat, the phone number
-/// or "Chat".
+/// written as WhatsApp writes it, or "Chat".
 pub(crate) fn chat_title(chat: &whatfast_protocol::Chat) -> String {
     if !chat.title.is_empty() {
         chat.title.clone()
     } else if !chat.phone_number.is_empty() {
-        chat.phone_number.clone()
+        whatfast_core::phone::format(&chat.phone_number)
     } else {
         "Chat".to_string()
     }

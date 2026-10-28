@@ -56,6 +56,10 @@ rodio = { version = "0.23.0", default-features = false, features = [
     "wav",
 ] }
 qrcode = { version = "0.14", default-features = false }
+# El PIN del bloqueo de la aplicacion no se guarda: se guarda su PBKDF2 con
+# una sal aleatoria, y la comprobacion es la que desbloquea la ventana.
+pbkdf2 = "0.12"
+sha2 = "0.10"
 smol = "2"
 uuid = { version = "1.18", features = ["v4"] }
 # The custom themes of the profile are JSON inside the settings file.

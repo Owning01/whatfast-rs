@@ -69,6 +69,40 @@ pub(crate) fn viewer_picture_size(
     )
 }
 
+/// Percent-encodes a text for the query of a search engine: the spaces go as
+/// `+` and the rest of the bytes outside the unreserved set go as `%XX`.
+pub(crate) fn percent_encode(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            b' ' => encoded.push('+'),
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+/// The format of a picture file, read from its magic bytes: the clipboard of
+/// the viewer needs it to hand the bytes to the system.
+pub(crate) fn image_file_format(bytes: &[u8]) -> Option<gpui::ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(gpui::ImageFormat::Png);
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(gpui::ImageFormat::Jpeg);
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some(gpui::ImageFormat::Gif);
+    }
+    if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(gpui::ImageFormat::Webp);
+    }
+    None
+}
+
 /// The pixel size of a picture, read from its header: PNG, JPEG or WebP.
 /// Answers `None` for anything else or for a file that cannot be read.
 fn picture_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
@@ -276,10 +310,24 @@ pub(crate) fn avatar_element_of(
 /// goes in first, so a group created at 22:30 in Buenos Aires says the day it
 /// was created and not the next one, which is the day it has in UTC.
 pub(crate) fn format_epoch_date(timestamp_ms: i64) -> String {
-    let timestamp_ms = timestamp_ms + i64::from(local_offset_minutes(timestamp_ms)) * 60_000;
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
+    let (day, month, year) = civil_date(timestamp_ms);
+    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+}
+
+/// The same day, written as a numeric date like "24/10/2026": the header of
+/// the viewer of the pictures writes dates this way.
+pub(crate) fn format_epoch_date_numeric(timestamp_ms: i64) -> String {
+    let (day, month, year) = civil_date(timestamp_ms);
+    format!("{day:02}/{month:02}/{year}")
+}
+
+/// The civil day of an instant, in the zone of the machine: day, month and
+/// year.
+fn civil_date(timestamp_ms: i64) -> (i64, i64, i64) {
+    let timestamp_ms = timestamp_ms + i64::from(local_offset_minutes(timestamp_ms)) * 60_000;
     let days = timestamp_ms.div_euclid(86_400_000);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -290,8 +338,9 @@ pub(crate) fn format_epoch_date(timestamp_ms: i64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+    (day, month, year)
 }
+
 
 /// The human label of a disappearing-messages timer.
 pub(crate) fn format_disappearing_timer(seconds: u32) -> String {
@@ -316,6 +365,16 @@ pub(crate) fn connection_label(connection: ConnectionState) -> &'static str {
         ConnectionState::Connecting => "connecting…",
         _ => "local client",
     })
+}
+
+/// The line that the window shows when an action failed.
+///
+/// The details of the failure are for the log: the person in front of the
+/// window only needs to know that the action did not work and that trying
+/// again is the next step.
+pub(crate) fn user_error(detail: impl std::fmt::Display) -> &'static str {
+    eprintln!("whatfast: {detail}");
+    i18n::t("Try again.")
 }
 
 /// The glyph that the reference draws for the delivery state of a message.
@@ -419,9 +478,42 @@ mod tests {
     use whatfast_protocol::{ImageContent, MessageStatus};
 
     use super::{
-        StatusGlyph, image_needs_download, image_source_candidates, jpeg_dimensions,
-        message_status_glyph, png_dimensions, viewer_picture_size, webp_dimensions,
+        StatusGlyph, image_file_format, image_needs_download, image_source_candidates,
+        jpeg_dimensions, message_status_glyph, percent_encode, png_dimensions,
+        viewer_picture_size, webp_dimensions,
     };
+
+    /// La busqueda en la web lleva la epigrafe como consulta: los espacios y
+    /// los acentos tienen que viajar codificados.
+    #[test]
+    fn a_search_query_travels_percent_encoded() {
+        assert_eq!(percent_encode("hola mundo"), "hola+mundo");
+        assert_eq!(percent_encode("añil & oro"), "a%C3%B1il+%26+oro");
+        assert_eq!(percent_encode("A-Z_0.9~"), "A-Z_0.9~");
+    }
+
+    /// La foto del visor se copia al portapapeles con el formato que dice su
+    /// cabecera: el sistema no adivina el tipo de los bytes.
+    #[test]
+    fn a_picture_is_recognised_by_its_magic_bytes() {
+        assert_eq!(
+            image_file_format(b"\x89PNG\r\n\x1a\nrest"),
+            Some(gpui::ImageFormat::Png)
+        );
+        assert_eq!(
+            image_file_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some(gpui::ImageFormat::Jpeg)
+        );
+        assert_eq!(
+            image_file_format(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some(gpui::ImageFormat::Webp)
+        );
+        assert_eq!(
+            image_file_format(b"GIF89a"),
+            Some(gpui::ImageFormat::Gif)
+        );
+        assert_eq!(image_file_format(b"not a picture"), None);
+    }
 
     /// Un visor con el tamaño que trae el mensaje.
     fn viewer(width: u32, height: u32) -> crate::app::ImageViewer {
@@ -433,6 +525,9 @@ mod tests {
             sticker: false,
             width,
             height,
+            gallery: Vec::new(),
+            index: 0,
+            zoom: 1.,
         }
     }
 

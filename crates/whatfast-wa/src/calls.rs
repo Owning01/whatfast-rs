@@ -22,7 +22,9 @@ use wacore::types::call::IncomingCall;
 use whatfast_protocol::{BackendEvent, CallAudio, CallEnded, CallOffer, CallUpdate};
 use whatsapp_rust::Jid;
 use whatsapp_rust::client::Client;
-use whatsapp_rust::voip::{AudioSink, AudioSource, CallEvent, CallHandle};
+use whatsapp_rust::voip::{
+    AudioSink, AudioSource, CallEvent, CallHandle, VideoFrame, VideoSink, VideoSource,
+};
 
 /// The microphone half: the engine reads frames the desktop sends. Muting
 /// substitutes zeros at this boundary, so the engine never sees the diff.
@@ -71,6 +73,62 @@ impl AudioSink for BridgeSpeaker {
     }
 }
 
+/// The camera half: the desktop encodes the H.264 access units and the
+/// engine sends them. Full queues drop the unit, like the audio.
+struct BridgeVideo {
+    upstream: async_channel::Receiver<Vec<u8>>,
+}
+
+impl VideoSource for BridgeVideo {
+    fn frames(&self) -> async_channel::Receiver<Vec<u8>> {
+        // The desktop forwards the encoder's byte stream in arbitrary
+        // chunks: the splitter of the library cuts the access units, which
+        // is what the engine stamps and sends.
+        let (tx, rx) = async_channel::unbounded();
+        let upstream = self.upstream.clone();
+        tokio::spawn(async move {
+            let mut splitter = wacore::voip::h264::AnnexBAuSplitter::default();
+            while let Ok(chunk) = upstream.recv().await {
+                let mut units = Vec::new();
+                splitter.push(&chunk, &mut units);
+                for unit in units {
+                    if tx.send(unit).await.is_err() {
+                        return; // the call is over
+                    }
+                }
+            }
+        });
+        rx
+    }
+
+    fn rtp_timestamp_stride(&self) -> u32 {
+        // The desktop encodes at 15 frames per second, which is the stride
+        // the engine stamps between access units.
+        wacore::voip_control::ports::VIDEO_TS_STRIDE_15FPS
+    }
+}
+
+/// The peer's video half: the engine reassembles access units and the bridge
+/// drains them toward the desktop, where a decoder paints them.
+struct BridgeVideoSink {
+    downstream: async_channel::Sender<VideoFrame>,
+}
+
+impl VideoSink for BridgeVideoSink {
+    fn playout(&self) -> async_channel::Sender<VideoFrame> {
+        let (tx, rx) = async_channel::unbounded();
+        let downstream = self.downstream.clone();
+        tokio::spawn(async move {
+            while let Ok(frame) = rx.recv().await {
+                if downstream.send(frame).await.is_err() {
+                    return; // the call is over
+                }
+            }
+        });
+        tx
+    }
+}
+
 /// One live call: its handle and its two frame pipes.
 pub struct ActiveCall {
     pub call_id: String,
@@ -78,6 +136,9 @@ pub struct ActiveCall {
     pub handle: Arc<CallHandle>,
     pub mic: async_channel::Sender<Vec<i16>>,
     pub muted: Arc<AtomicBool>,
+    /// The camera pipe, when the call carries video: the desktop writes the
+    /// access units here and the engine sends them.
+    pub video: Option<async_channel::Sender<Vec<u8>>>,
 }
 
 /// The call registry: at most one live call, plus the offers still ringing.
@@ -112,8 +173,13 @@ impl Calls {
             },
         }
     }
-    pub fn offer(&self, incoming: IncomingCall) -> BackendEvent {
-        self.inner.offer(incoming)
+    pub fn offer(&self, incoming: IncomingCall, chat_id: String) -> BackendEvent {
+        self.inner.offer(incoming, chat_id)
+    }
+
+    /// Drops a ringing offer without answering it.
+    pub fn forget(&self, call_id: &str) -> bool {
+        self.inner.forget(call_id)
     }
 
     pub async fn place(
@@ -121,8 +187,9 @@ impl Calls {
         client: &Arc<Client>,
         events: async_channel::Sender<BackendEvent>,
         chat_id: &str,
+        video: bool,
     ) -> Result<String, (String, String, bool)> {
-        self.inner.place(client, events, chat_id).await
+        self.inner.place(client, events, chat_id, video).await
     }
 
     pub async fn accept(
@@ -130,8 +197,9 @@ impl Calls {
         client: &Arc<Client>,
         events: async_channel::Sender<BackendEvent>,
         call_id: &str,
+        video: bool,
     ) -> Result<(), (String, String, bool)> {
-        self.inner.accept(client, events, call_id).await
+        self.inner.accept(client, events, call_id, video).await
     }
 
     pub async fn reject(
@@ -152,6 +220,11 @@ impl Calls {
 
     pub fn audio_in(&self, call_id: &str, pcm: Vec<i16>) -> Result<(), (String, String, bool)> {
         self.inner.audio_in(call_id, pcm)
+    }
+
+    /// Feeds one access unit of the camera from the desktop.
+    pub fn video_in(&self, call_id: &str, au: Vec<u8>) -> Result<(), (String, String, bool)> {
+        self.inner.video_in(call_id, au)
     }
 }
 
@@ -201,6 +274,31 @@ fn spawn_speaker_drain(
                     CallAudio {
                         call_id: call_id.clone(),
                         pcm: to_le_bytes(&frame),
+                    },
+                )),
+            };
+            if events.send(event).await.is_err() {
+                return; // the bridge is closing
+            }
+        }
+    });
+}
+
+/// Forwards the peer's video access units to the desktop, which decodes them.
+fn spawn_video_drain(
+    out_rx: async_channel::Receiver<VideoFrame>,
+    events: async_channel::Sender<BackendEvent>,
+    call_id: String,
+) {
+    tokio::spawn(async move {
+        while let Ok(frame) = out_rx.recv().await {
+            let event = BackendEvent {
+                sequence: 0,
+                event: Some(whatfast_protocol::backend_event::Event::CallVideoOut(
+                    whatfast_protocol::CallVideo {
+                        call_id: call_id.clone(),
+                        au: frame.data,
+                        keyframe: frame.keyframe,
                     },
                 )),
             };
@@ -261,8 +359,17 @@ impl CallsInner {
     /// Registers a ringing offer the desktop may answer. Older offers make
     /// room once the map grows past a handful: the phone stops ringing the
     /// oldest ones anyway.
-    pub fn offer(&self, incoming: IncomingCall) -> BackendEvent {
-        let call_id = incoming.stanza_id.clone();
+    ///
+    /// The key is the call id of the action, not the stanza id: the accept,
+    /// the reject and the terminate of the same call carry that id, and they
+    /// are the ones that have to find this offer.
+    pub fn offer(&self, incoming: IncomingCall, chat_id: String) -> BackendEvent {
+        let action_id = incoming.action.call_id().to_owned();
+        let call_id = if action_id.is_empty() {
+            incoming.stanza_id.clone()
+        } else {
+            action_id
+        };
         let video = match &incoming.action {
             wacore::types::call::CallAction::Offer { is_video, .. } => *is_video,
             _ => false,
@@ -287,7 +394,7 @@ impl CallsInner {
             event: Some(whatfast_protocol::backend_event::Event::CallOffer(
                 CallOffer {
                     call_id,
-                    chat_id: String::new(),
+                    chat_id,
                     video,
                 },
             )),
@@ -298,12 +405,23 @@ impl CallsInner {
         self.pending.lock().expect("pending lock").remove(call_id)
     }
 
+    /// Drops a ringing offer without answering it, and tells whether it was
+    /// there: the caller of a call that ended before the answer.
+    pub fn forget(&self, call_id: &str) -> bool {
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .remove(call_id)
+            .is_some()
+    }
+
     /// Starts an outgoing call and reports it live through `events`.
     pub async fn place(
         &self,
         client: &Arc<Client>,
         events: async_channel::Sender<BackendEvent>,
         chat_id: &str,
+        video: bool,
     ) -> Result<String, (String, String, bool)> {
         if self.busy() {
             return Err(("busy".into(), "a call is already up".into(), false));
@@ -323,10 +441,24 @@ impl CallsInner {
             muted: Arc::clone(&muted),
         };
         let sink = BridgeSpeaker { downstream: out_tx };
-        let handle = client
-            .voip()
-            .call(&peer)
-            .audio(source, sink)
+        let voip = client.voip();
+        let mut call = voip.call(&peer).audio(source, sink);
+        // The video ports exist only when the call carries video: the engine
+        // refuses them on an offer that did not ask for video.
+        let video_ports = if video {
+            let (au_tx, au_rx) = async_channel::unbounded::<Vec<u8>>();
+            let (peer_tx, peer_rx) = async_channel::unbounded::<VideoFrame>();
+            call = call.video(
+                BridgeVideo { upstream: au_rx },
+                BridgeVideoSink {
+                    downstream: peer_tx,
+                },
+            );
+            Some((au_tx, peer_rx))
+        } else {
+            None
+        };
+        let handle = call
             .start()
             .await
             .map_err(|error| ("call_failed".into(), format!("{error}"), true))?;
@@ -338,6 +470,7 @@ impl CallsInner {
             handle: Arc::clone(&handle),
             mic: mic_tx,
             muted: Arc::clone(&muted),
+            video: video_ports.as_ref().map(|(au_tx, _)| au_tx.clone()),
         });
         let registry = self
             .self_ref
@@ -345,8 +478,16 @@ impl CallsInner {
             .expect("self ref lock")
             .upgrade()
             .expect("the registry outlives its calls");
-        spawn_call_watcher(registry, handle, events.clone(), call_id.clone());
-        spawn_speaker_drain(out_rx, events, call_id.clone());
+        spawn_call_watcher(
+            registry,
+            handle,
+            events.clone(),
+            call_id.clone(),
+        );
+        spawn_speaker_drain(out_rx, events.clone(), call_id.clone());
+        if let Some((_, peer_rx)) = video_ports {
+            spawn_video_drain(peer_rx, events, call_id.clone());
+        }
         Ok(call_id)
     }
 
@@ -356,6 +497,7 @@ impl CallsInner {
         client: &Arc<Client>,
         events: async_channel::Sender<BackendEvent>,
         call_id: &str,
+        video: bool,
     ) -> Result<(), (String, String, bool)> {
         if self.busy() {
             return Err(("busy".into(), "a call is already up".into(), false));
@@ -363,6 +505,13 @@ impl CallsInner {
         let incoming = self
             .take_offer(call_id)
             .ok_or_else(|| ("not_found".into(), "no such ringing call".into(), false))?;
+        // Answering with video needs an offer that carried it: the engine
+        // refuses the ports otherwise, and the call would not start at all.
+        let with_video = video
+            && matches!(
+                &incoming.action,
+                wacore::types::call::CallAction::Offer { is_video: true, .. }
+            );
         let (mic_tx, mic_rx) = async_channel::unbounded();
         let (out_tx, out_rx) = async_channel::unbounded();
         let muted = Arc::new(AtomicBool::new(false));
@@ -371,10 +520,22 @@ impl CallsInner {
             muted: Arc::clone(&muted),
         };
         let sink = BridgeSpeaker { downstream: out_tx };
-        let handle = client
-            .voip()
-            .accept(&incoming)
-            .audio(source, sink)
+        let voip = client.voip();
+        let mut call = voip.accept(&incoming).audio(source, sink);
+        let video_ports = if with_video {
+            let (au_tx, au_rx) = async_channel::unbounded::<Vec<u8>>();
+            let (peer_tx, peer_rx) = async_channel::unbounded::<VideoFrame>();
+            call = call.video(
+                BridgeVideo { upstream: au_rx },
+                BridgeVideoSink {
+                    downstream: peer_tx,
+                },
+            );
+            Some((au_tx, peer_rx))
+        } else {
+            None
+        };
+        let handle = call
             .start()
             .await
             .map_err(|error| ("call_failed".into(), format!("{error}"), true))?;
@@ -385,6 +546,7 @@ impl CallsInner {
             handle: Arc::clone(&handle),
             mic: mic_tx,
             muted: Arc::clone(&muted),
+            video: video_ports.as_ref().map(|(au_tx, _)| au_tx.clone()),
         });
         let registry = self
             .self_ref
@@ -392,8 +554,16 @@ impl CallsInner {
             .expect("self ref lock")
             .upgrade()
             .expect("the registry outlives its calls");
-        spawn_call_watcher(registry, handle, events.clone(), call_id.to_owned());
-        spawn_speaker_drain(out_rx, events, call_id.to_owned());
+        spawn_call_watcher(
+            registry,
+            handle,
+            events.clone(),
+            call_id.to_owned(),
+        );
+        spawn_speaker_drain(out_rx, events.clone(), call_id.to_owned());
+        if let Some((_, peer_rx)) = video_ports {
+            spawn_video_drain(peer_rx, events, call_id.to_owned());
+        }
         Ok(())
     }
 
@@ -455,6 +625,21 @@ impl CallsInner {
         Ok(())
     }
 
+    /// Feeds one access unit of the camera from the desktop. A call without
+    /// video ignores it: the frames of a camera that started late are not an
+    /// error.
+    pub fn video_in(&self, call_id: &str, au: Vec<u8>) -> Result<(), (String, String, bool)> {
+        let live = self.live.lock().expect("calls lock");
+        let call = live
+            .as_ref()
+            .filter(|call| call.call_id == call_id)
+            .ok_or_else(|| ("not_found".into(), "no such live call".into(), false))?;
+        if let Some(video) = &call.video {
+            let _ = video.try_send(au);
+        }
+        Ok(())
+    }
+
     fn install(&self, call: ActiveCall) {
         *self.live.lock().expect("calls lock") = Some(call);
     }
@@ -465,5 +650,37 @@ impl CallsInner {
         if live.as_ref().is_some_and(|call| call.call_id == call_id) {
             *live = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BridgeVideo;
+    use whatsapp_rust::voip::VideoSource as _;
+
+    #[tokio::test]
+    async fn the_camera_chunks_become_access_units() {
+        // The desktop forwards the encoder's stream in arbitrary chunks and
+        // the engine sends whole access units: the splitter in the middle is
+        // what makes the two ends agree.
+        let (chunks, upstream) = async_channel::unbounded::<Vec<u8>>();
+        let source = BridgeVideo { upstream };
+        let frames = source.frames();
+        let mut stream: Vec<u8> = Vec::new();
+        for _ in 0..3 {
+            // One access unit: the delimiter and an IDR slice.
+            stream.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0]);
+            stream.extend_from_slice(&[0, 0, 0, 1, 0x65, 1, 2, 3]);
+        }
+        for chunk in stream.chunks(5) {
+            chunks.send(chunk.to_vec()).await.expect("the chunk");
+        }
+        drop(chunks);
+        let first = frames.recv().await.expect("an access unit");
+        assert!(first.starts_with(&[0, 0, 0, 1, 0x09]));
+        let second = frames.recv().await.expect("a second access unit");
+        assert!(second.starts_with(&[0, 0, 0, 1, 0x09]));
+        // The last unit has no following delimiter that closes it.
+        assert!(frames.try_recv().is_err());
     }
 }

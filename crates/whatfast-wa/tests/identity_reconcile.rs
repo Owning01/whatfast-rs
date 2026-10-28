@@ -308,7 +308,7 @@ async fn the_agenda_never_erases_a_name_it_already_learned() {
 }
 
 #[tokio::test]
-async fn the_title_precedence_is_agenda_then_business_then_push() {
+async fn the_title_precedence_is_agenda_then_business_then_number() {
     let dir = profile_with_identity("precedence");
     let session = rusqlite::Connection::open(dir.join("session.db")).unwrap();
     session
@@ -329,7 +329,9 @@ async fn the_title_precedence_is_agenda_then_business_then_push() {
         ("5493815000001@s.whatsapp.net", "Nombre Completo"),
         ("5493815000002@s.whatsapp.net", "Solo Nombre"),
         ("5493815000003@s.whatsapp.net", "Negocio Tres"),
-        ("5493815000004@s.whatsapp.net", "Push Cuatro"),
+        // The name the contact chose is not a title: a chat that is not in the
+        // address book is shown with its number, formatted.
+        ("5493815000004@s.whatsapp.net", "+54 9 381 500-0004"),
     ];
     for (jid, _) in titles {
         store.ensure_chat(jid, jid).unwrap();

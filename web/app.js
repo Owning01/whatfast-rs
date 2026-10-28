@@ -207,10 +207,19 @@
         }
       });
 
-      Object.keys(VIEWS).forEach(function (key) {
-        var image = new Image();
-        image.src = VIEWS[key].img;
-      });
+      // Las capturas del recorrido se precargan después de la carga inicial:
+      // así el navegador no compite con la imagen del hero.
+      function preloadViews() {
+        Object.keys(VIEWS).forEach(function (key) {
+          var image = new Image();
+          image.src = VIEWS[key].img;
+        });
+      }
+      if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(preloadViews, { timeout: 3000 });
+      } else {
+        window.addEventListener('load', preloadViews);
+      }
 
       // El recorrido arranca pintado: sin esta llamada las zonas del lienzo
       // no existen hasta el primer clic, y el primer clic no tiene donde caer.

@@ -17,6 +17,15 @@ tracing.workspace = true
 async-channel.workspace = true
 # The generated Envelope types and framing constants of the bridge contract.
 whatfast-protocol = { path = "../whatfast-protocol" }
+# The link preview looks for the first link with the same parser the interface
+# underlines with, so the card and the blue text of the bubble always agree.
+whatfast-core = { path = "../whatfast-core" }
+# The page of a link is read once, on the send: the same TLS stack the
+# WhatsApp library already carries, without a second HTTP client.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# The picture of the card is decoded and shrunk to the JPEG the message
+# carries.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 # The agents database, their grants, the pace and the schedule of the
 # automations: the tables the local endpoint is guarded with.
 whatfast-auto = { path = "../whatfast-auto" }

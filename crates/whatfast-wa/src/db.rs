@@ -848,16 +848,20 @@ impl Store {
     pub fn mark_message_revoked(&self, chat_jid: &str, message_id: &str) -> rusqlite::Result<()> {
         let chat_jid = self.resolve_chat_id(chat_jid)?;
         self.write(|conn| {
+            // The row keeps its text: a revoked row never accepts a new one.
+            // What changes is that it is no longer visible: the pointer and the
+            // window skip the revoked messages.
             conn.execute(
                 "UPDATE messages SET revoked=1, kind='revoked' WHERE chat_jid=?1 AND id=?2",
                 params![chat_jid, message_id],
             )?;
             Ok(())
-        })
+        })?;
+        // The pointer of the chat goes back to the last message that can be
+        // seen.
+        self.refresh_chat_pointer(&chat_jid)
     }
 
-    /// Points one message's attachment (a video, an audio or a document) at
-    /// the cache file the download wrote. Only attachment rows accept it.
     pub fn set_media_local_path(
         &self,
         chat_jid: &str,
@@ -1490,15 +1494,15 @@ impl Store {
         self.write(|conn| {
             conn.execute(
                 "UPDATE chats SET
-                   last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+                   last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
                    last_message_text=COALESCE((SELECT CASE
                         WHEN text<>'' THEN text
                         WHEN image_caption<>'' THEN image_caption
                         WHEN media_caption<>'' THEN media_caption
                         ELSE '' END
-                      FROM messages WHERE chat_jid=?1 AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),''),
-                   last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),0),
-                   unread_count=(SELECT count(*) FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND unread=1)
+                      FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+                   last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),0),
+                   unread_count=(SELECT count(*) FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 AND unread=1)
                  WHERE jid=?1",
                 params![jid],
             )?;
@@ -2055,6 +2059,45 @@ impl Store {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(UnreadThrough::Rows(rows))
+        })
+    }
+
+    /// Returns all unread incoming rows of one conversation.
+    pub fn all_unread_rows(&self, chat_jid: &str) -> rusqlite::Result<Vec<UnreadRow>> {
+        let chat_jid = self.resolve_chat_id(chat_jid)?;
+        self.read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id,transport_jid,sender_jid,timestamp FROM messages
+                 WHERE chat_jid=?1 AND unread=1 AND from_me=0
+                 ORDER BY timestamp,id",
+            )?;
+            let rows = statement
+                .query_map(params![chat_jid], |row| {
+                    Ok(UnreadRow {
+                        id: row.get(0)?,
+                        transport_jid: row.get(1)?,
+                        sender_jid: row.get(2)?,
+                        timestamp: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Marks every message in the conversation read and resets unread_count to 0.
+    pub fn mark_all_read(&self, chat_jid: &str) -> rusqlite::Result<()> {
+        let chat_jid = self.resolve_chat_id(chat_jid)?;
+        self.write(|conn| {
+            conn.execute(
+                "UPDATE messages SET unread=0 WHERE chat_jid=?1",
+                params![chat_jid],
+            )?;
+            conn.execute(
+                "UPDATE chats SET unread_count=0 WHERE jid=?1",
+                params![chat_jid],
+            )?;
+            Ok(())
         })
     }
 

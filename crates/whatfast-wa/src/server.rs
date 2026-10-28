@@ -713,23 +713,31 @@ impl Server {
                 }
                 // The Go resolved the named message first and marked exactly
                 // the unread rows at or before it, refusing an outgoing
-                // anchor by name.
-                let unread = self
-                    .store
-                    .unread_through(&request.chat_id, &request.through_message_id)?;
-                let rows = match unread {
-                    crate::db::UnreadThrough::Missing => {
-                        return Err(Failure::fatal("not_found", "message is not stored"));
+                // anchor by name. When through_message_id is empty, all unread
+                // rows are marked read.
+                let rows = if request.through_message_id.is_empty() {
+                    self.store.all_unread_rows(&request.chat_id)?
+                } else {
+                    let unread = self
+                        .store
+                        .unread_through(&request.chat_id, &request.through_message_id)?;
+                    match unread {
+                        crate::db::UnreadThrough::Missing => {
+                            return Err(Failure::fatal("not_found", "message is not stored"));
+                        }
+                        crate::db::UnreadThrough::Outgoing => {
+                            return Err(Failure::fatal("internal", "message is outgoing"));
+                        }
+                        crate::db::UnreadThrough::Rows(rows) => rows,
                     }
-                    crate::db::UnreadThrough::Outgoing => {
-                        return Err(Failure::fatal("internal", "message is outgoing"));
-                    }
-                    crate::db::UnreadThrough::Rows(rows) => rows,
                 };
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
                 let receipt = self.mark_read_rows(&session, &request.chat_id, rows).await;
+                if request.through_message_id.is_empty() {
+                    let _ = self.store.mark_all_read(&request.chat_id);
+                }
                 // The Go published the counter after every attempt, including
                 // a partially persisted multi-sender read, so the chat state
                 // stays authoritative even when a later receipt fails.
@@ -826,14 +834,13 @@ impl Server {
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
-                if request.video {
-                    return Err(Failure::fatal(
-                        "video_unsupported",
-                        "video calls are not wired yet; place a voice call",
-                    ));
-                }
-                let call_id =
-                    calls_call_helper_place(&session, &self.events, &request.chat_id).await?;
+                let call_id = calls_call_helper_place(
+                    &session,
+                    &self.events,
+                    &request.chat_id,
+                    request.video,
+                )
+                .await?;
                 Ok(Handled {
                     result: rpc_response::Result::CallPlace(whatfast_protocol::CallPlaceResponse {
                         call_id,
@@ -845,7 +852,13 @@ impl Server {
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
-                calls_call_helper_accept(&session, &self.events, &request.call_id).await?;
+                calls_call_helper_accept(
+                    &session,
+                    &self.events,
+                    &request.call_id,
+                    request.video,
+                )
+                .await?;
                 Ok(Handled {
                     result: rpc_response::Result::CallAccept(
                         whatfast_protocol::CallAcceptResponse {},
@@ -915,6 +928,24 @@ impl Server {
                 Ok(Handled {
                     result: rpc_response::Result::CallAudio(
                         whatfast_protocol::CallAudioResponse {},
+                    ),
+                    exit_after: false,
+                })
+            }
+            Some(rpc_request::Request::CallVideo(request)) => {
+                let session = self.session.clone().ok_or_else(|| {
+                    Failure::retryable("not_connected", "WhatsApp is not connected")
+                })?;
+                session.calls.video_in(&request.call_id, request.data).map_err(
+                    |(code, message, retryable)| Failure {
+                        code,
+                        message,
+                        retryable,
+                    },
+                )?;
+                Ok(Handled {
+                    result: rpc_response::Result::CallVideo(
+                        whatfast_protocol::CallVideoResponse {},
                     ),
                     exit_after: false,
                 })
@@ -995,6 +1026,75 @@ impl Server {
                 Ok(Handled {
                     result: rpc_response::Result::SetChatBlock(
                         whatfast_protocol::SetChatBlockResponse {
+                            chat: Some(crate::wire::wire_chat(&chat)),
+                        },
+                    ),
+                    exit_after: false,
+                })
+            }
+            Some(rpc_request::Request::CreateGroup(request)) => {
+                let subject = request.subject.trim();
+                if subject.is_empty() || subject.len() > 100 {
+                    return Err(Failure::fatal(
+                        "invalid_argument",
+                        "the subject of the group is required, up to 100 bytes",
+                    ));
+                }
+                if request.participant_jids.is_empty() {
+                    return Err(Failure::fatal(
+                        "invalid_argument",
+                        "a group needs at least one participant",
+                    ));
+                }
+                if !self.connected() {
+                    return Err(Failure::retryable(
+                        "not_connected",
+                        "WhatsApp is not connected",
+                    ));
+                }
+                let session = self.session.clone().ok_or_else(|| {
+                    Failure::retryable("not_connected", "WhatsApp is not connected")
+                })?;
+                let mut options = whatsapp_rust::GroupCreateOptions::new(subject);
+                let mut participants = Vec::with_capacity(request.participant_jids.len());
+                for raw in &request.participant_jids {
+                    let raw = raw.trim();
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    let jid = raw.parse::<whatsapp_rust::Jid>().map_err(|error| {
+                        Failure::fatal(
+                            "invalid_argument",
+                            format!("not a WhatsApp JID ({raw}): {error}"),
+                        )
+                    })?;
+                    participants.push(whatsapp_rust::GroupParticipantOptions::new(jid));
+                }
+                if participants.is_empty() {
+                    return Err(Failure::fatal(
+                        "invalid_argument",
+                        "a group needs at least one participant",
+                    ));
+                }
+                options.participants = participants;
+                let created = session
+                    .client
+                    .groups()
+                    .create_group(options)
+                    .await
+                    .map_err(|error| Failure::retryable("internal", format!("{error}")))?;
+                let jid = crate::ingest::jid_text(&created.metadata.id);
+                self.store.ensure_chat(&jid, &jid)?;
+                if let Some(subject) = created.metadata.subject.as_deref() {
+                    self.store.set_chat_name(&jid, subject)?;
+                }
+                let chat = self.store.chat(&jid)?.ok_or_else(|| {
+                    Failure::retryable("internal", "the group was not stored")
+                })?;
+                self.push_event(crate::ingest::chat_upserted(chat.clone()));
+                Ok(Handled {
+                    result: rpc_response::Result::CreateGroup(
+                        whatfast_protocol::CreateGroupResponse {
                             chat: Some(crate::wire::wire_chat(&chat)),
                         },
                     ),
@@ -2151,17 +2251,19 @@ impl Server {
             };
             let sender_jid = sender.parse::<whatsapp_rust::Jid>().ok();
             let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-            session
-                .client
-                .mark_as_read(&chat, sender_jid.as_ref(), &ids)
-                .await
-                .map_err(|error| Failure::retryable("send_failed", format!("{error}")))?;
             let raw: Vec<String> = rows
                 .iter()
                 .filter(|row| row.transport_jid == transport && row.sender_jid == sender)
                 .map(|row| row.id.clone())
                 .collect();
-            self.store.mark_read_ids(chat_id, &raw)?;
+            let _ = self.store.mark_read_ids(chat_id, &raw);
+            if let Err(error) = session
+                .client
+                .mark_as_read(&chat, sender_jid.as_ref(), &ids)
+                .await
+            {
+                tracing::warn!("WhatsApp mark_as_read network call failed: {error}");
+            }
         }
         Ok(())
     }
@@ -3026,10 +3128,11 @@ async fn calls_call_helper_place(
     session: &Session,
     events: &async_channel::Sender<whatfast_protocol::BackendEvent>,
     chat_id: &str,
+    video: bool,
 ) -> Result<String, Failure> {
     session
         .calls
-        .place(&session.client, events.clone(), chat_id)
+        .place(&session.client, events.clone(), chat_id, video)
         .await
         .map_err(|(code, message, retryable)| Failure {
             code,
@@ -3042,10 +3145,11 @@ async fn calls_call_helper_accept(
     session: &Session,
     events: &async_channel::Sender<whatfast_protocol::BackendEvent>,
     call_id: &str,
+    video: bool,
 ) -> Result<(), Failure> {
     session
         .calls
-        .accept(&session.client, events.clone(), call_id)
+        .accept(&session.client, events.clone(), call_id, video)
         .await
         .map_err(|(code, message, retryable)| Failure {
             code,
@@ -3306,7 +3410,9 @@ fn status_identity(store: &Store, session: Option<&Session>, sender_jid: &str) -
     }
     let digits = crate::wire::phone_digits(sender_jid);
     let name = if name.is_empty() {
-        digits.clone()
+        // The number stands for the sender, written the way WhatsApp writes
+        // it: the digits of the jid alone were a run of thirteen digits.
+        whatfast_core::phone::format(&digits)
     } else {
         name
     };

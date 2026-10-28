@@ -2158,3 +2158,557 @@ reportada por el MCP instalado: `whatfast 0.2.19` con las diez herramientas.
   del usuario.
 - `has_blocks` existe para que un mensaje sin bloques se dibuje exactamente como
   antes: cualquier cambio de dibujo nuevo tiene que pasar por esa puerta.
+
+## 2026-10-27 — Los estados no se podian abrir: el visor no se dibujaba
+
+**Que cambio**
+
+- `whatfast-ui/src/render.rs`: el visor de un estado se dibuja sobre la
+  ventana cuando `status_strip.viewer_open()`. Antes `render_viewer` existia en
+  `statuses.rs` y **nadie lo llamaba**: el clic abria el visor en memoria y no
+  se pintaba nada.
+- `statuses.rs`: `StatusStripState.requested` (bool eterno) pasa a
+  `requested_at`; `should_request` reintenta cada `RETRY_AFTER` (10 s) mientras
+  la lista siga vacia. Antes, un primer pedido fallido dejaba la vista vacia
+  toda la sesion.
+
+**Evidencia**
+
+- 21 tests de statuses en verde (uno nuevo, `the_strip_asks_again_after_a_failed_request`), clippy `-D warnings` limpio.
+- La base real tiene 319 mensajes de estado en las ultimas 24 h de 73 autores,
+  y el chat `status@broadcast` existe: el backend tenia datos, el problema era
+  de dibujo.
+
+**Trampa**
+
+- Los estados no traen el archivo: 215 de 319 tienen solo la miniatura JPEG
+  (~3 KB) y 0 tienen `image_local_path`. El visor se abre con la miniatura o
+  el texto; falta pedir la descarga al abrir.
+
+## 2026-10-27 — Logos de los harnesses, Antigravity, y el arranque que se cuelga
+
+**Que cambio**
+
+- `whatfast-ui/src/harness_logos.rs` (nuevo): los SVG oficiales de los ocho
+  harnesses con marca (Claude Code, Claude Desktop, Codex, Cursor, OpenCode,
+  Pi, Antigravity, VS Code), embebidos en el binario y servidos por
+  `WhatfastAssets` bajo el path `harness/<id>`. La tarjeta de Agentes ya no
+  dibuja el mismo robot para todos; Hermes, sin marca publicada, cae al robot.
+- `whatfast-agents/src/spec.rs`: Antigravity entra al catalogo con su ruta real,
+  `~/.gemini/config/mcp_config.json` (clave `mcpServers`), sin modo headless.
+- `whatfast-ui/src/render.rs` y `statuses.rs`: el visor de los estados se dibuja
+  y la lista reintenta la carga (version 0.2.20).
+- Version 0.2.21 instalada.
+
+**Evidencia**
+
+- `whatfast 0.2.21` con las diez herramientas; 3 tests de logos (uno recorre el
+  catalogo entero), 33 de agentes y 38 del core en verde.
+- Lanzada desde `dist` en consola, la 0.2.21 abre ventana (handle 9046544) y se
+  conecta a WhatsApp.
+
+**Trampa**
+
+- Los logos salen de `@lobehub/icons-static-svg` y `simple-icons`; el de
+  VS Code ya no esta en la rama `develop` de simple-icons, hay que pedirlo a la
+  version 11.
+- Al 27/10 15:25 quedaron nueve procesos `whatfast` de la 0.2.20 sin ventana, sin
+  CPU y con 10-18 MB: no se sabe por que se cuelgan. Bloquean el `.exe`, que se
+  puede reemplazar igual moviendolo a `whatfast.exe.old` (Windows permite
+  renombrar un ejecutable en uso).
+- En el arbol hay codigo de otra sesion a medio hacer: `whatfast-ui/src/document.rs`
+  (15 KB, sin un solo llamador) y `whatfast-core/src/diagrams.rs` ya conectado al
+  parser. `clippy -D warnings` falla por las 18 constantes y funciones muertas de
+  `document.rs`.
+
+## 2026-10-27 — Un mensaje eliminado ya no se ve en el chat
+
+**Que cambio**
+
+- `whatfast-model/src/model.rs`: `revoke_message` saca el mensaje del hilo en
+  vez de marcarlo; `upsert_message` descarta lo que llega revocado, y
+  `prepend_messages` y `replace_message_window` filtran lo ya eliminado. Antes
+  la fila quedaba con "This message was deleted".
+- `whatfast-wa/src/db.rs`: `mark_message_revoked` refresca el puntero del chat,
+  y `refresh_chat_pointer` salta los revocados en las cuatro subconsultas. La
+  vista previa de la lista de chats vuelve al ultimo mensaje visible.
+
+**Por que**: el usuario pidio que al eliminar un mensaje —propio o ajeno— no
+quede nada visible en el chat.
+
+**Evidencia**
+
+- 3 tests nuevos en `model.rs` (sale del hilo, lo revocado por el otro nunca se
+  muestra, la ventana de la conversacion lo descarta) y 1 en
+  `tests/store.rs` (la vista previa vuelve al mensaje anterior). 69 del modelo y
+  36 del store en verde.
+- En la base real habia 1 chat de 786 con el ultimo mensaje revocado: su vista
+  previa mostraba el texto de un mensaje eliminado.
+
+**Trampa**
+
+- La fila conserva su `text` en la base: el test
+  `edit_updates_the_chat_preview_but_a_revoked_row_ignores_it` fija que una fila
+  revocada nunca acepta texto nuevo, y borrarlo rompia ese contrato. Lo que
+  cambia es la visibilidad, no el almacenamiento.
+- `message_text` sigue devolviendo "This message was deleted" para las citas y
+  las notificaciones; no se toco.
+
+## 2026-10-27 — Los videos de los estados se miran en el visor
+
+**Que cambio**
+
+- `statuses.rs`: `render_message` ya no cae al texto "Video" cuando el estado
+  trae un video; dibuja el reproductor de la burbuja en el visor. El visor le da
+  una caja de 800x640 (`video::status_box_size`) y colores claros sobre el fondo
+  oscuro. La leyenda del video va debajo, como en las fotos.
+- `app.rs`: `message_attachment` busca el adjunto en el hilo y en los estados,
+  asi el reproductor y la descarga encuentran el archivo; `tick_video` no corta
+  el video de un estado al ver que el chat seleccionado es otro.
+- El avance automatico de tres segundos no mueve el visor cuando el estado es un
+  video: queda hasta que el usuario toca la flecha o cierra.
+
+**Por que**: el usuario reporto que en los estados solo se veian las fotos.
+
+**Evidencia**
+
+- 2 tests nuevos (la caja del visor es mas grande que la burbuja y conserva la
+  proporcion; un estado de video no deja avanzar el visor). 280 tests de la
+  interfaz en verde.
+
+**Trampa**
+
+- Los videos de estado no tienen `media_local_path` hasta que se piden: el
+  reproductor se dibuja igual y la descarga arranca al tocar play. En la base
+  real habia 134 videos de estado y 0 con archivo.
+- `Store::message` de la interfaz no indexa los estados: hay que buscarlos en
+  `store.statuses()`.
+
+## 2026-10-27 — Los audios se bajan solos y no repiten "Voice message"
+
+**Que cambio**
+
+- `whatfast-wa/src/wire.rs`: la leyenda de un audio o un video sale solo de
+  `media_caption`. Antes, si estaba vacia, se usaba el texto de la fila, que es
+  el marcador del ingest ("🎤 Voice message", "🎬 Video"); la burbuja lo repetia
+  debajo de la tarjeta.
+- `whatfast-ui/src/render.rs`: la lista virtual pide solos los audios visibles
+  que no estan en el disco, con el mismo tope de 4 descargas a la vez que las
+  fotos. Cuando llega el archivo, la tarjeta se convierte en el reproductor.
+- `attachments.rs`: `audio_needs_download` decide si falta el archivo (ruta
+  vacia o inexistente).
+
+**Por que**: el usuario reporto que cada audio mostraba "🎤 Voice message" y
+que los audios tienen que descargarse automaticamente.
+
+**Evidencia**
+
+- 1 test nuevo en `wire.rs` (el marcador no es leyenda; la leyenda real de un
+  video sigue viajando) y 1 en `attachments.rs` (un audio sin archivo se pide,
+  uno de otro tipo no). 281 tests de la interfaz y 4 de wire en verde.
+- En la base real: 1985 notas de voz y 22 audios; solo 15 tenian archivo.
+
+**Trampa**
+
+- La vista previa de la lista de chats sigue mostrando el texto guardado
+  "🎤 Voice message": es el preview del chat, no la leyenda de la burbuja.
+- El tope de descargas simultaneas es 4 y la lista pide las visibles: al
+  desplazarse se piden las demas.
+
+## 2026-10-27 - Llamadas de voz arregladas y videollamadas con ffmpeg
+
+**Que cambio**
+
+- `whatfast-ui/src/app.rs`: el `CallPlace` guarda el `call_id` que devuelve el
+  sidecar (`CallState::placed`); antes la llamada saliente se quedaba en
+  `placing`, los `CallUpdate`/`CallEnded` no coincidian y colgar mandaba un id
+  vacio. Contestar cambia la fase en `store.call`, y un fallo de `CallPlace` o
+  `CallAccept` saca la barra.
+- `call_audio.rs`: el microfono acumula lo del dispositivo y entrega frames de
+  exactamente 960 muestras (60 ms a 16 kHz), que es lo unico que acepta el
+  motor; el `MUTE` global se resetea al terminar la llamada.
+- `whatfast-wa/src/session.rs`: solo `CallAction::Offer` timbra. Antes cada
+  `Event::IncomingCall` (accept, reject, terminate y cada candidato ICE)
+  creaba una oferta falsa y podia desalojar la real. Un terminate o reject de
+  una oferta pendiente la saca y emite `CallEnded`.
+- `calls.rs`: las ofertas se indexan por el id de llamada del action, no por
+  el stanza id, para que accept, reject y terminate encuentren la misma
+  entrada; la oferta lleva el chat resuelto y la barra muestra el contacto.
+- Video: `bridge.proto` suma `CallVideo`/`CallVideoOut` y `CallAccept.video`.
+  El sidecar expone `BridgeVideo`/`BridgeVideoSink` y corta los trozos del
+  desktop con `AnnexBAuSplitter`. El desktop (`call_video.rs`) captura con
+  ffmpeg (dshow, libx264 baseline 640x360@15, 800 kbps, AUD y headers
+  repetidos), decodifica al otro lado y decodifica la vista propia.
+
+**Por que**: el usuario reporto que las llamadas y videollamadas no
+funcionaban, y eligio ffmpeg para el video.
+
+**Evidencia**
+
+- 284 tests de UI, 70 del modelo, 8 de i18n y 69+ del sidecar en verde; 1 test
+  nuevo del splitter (trozos arbitrarios -> access units).
+- Prueba manual del codec: camara "Redmi Note 13 Pro (Windows Virtual
+  Camera)" -> 30 frames en 2 s -> decodificados 30 cuadros de 640x360 BGRA.
+
+**Trampa**
+
+- `-fflags nobuffer` en el decodificador deja la salida vacia; con
+  `-probesize 32 -analyzeduration 0` anda.
+- ffmpeg se busca en `WHATFAST_FFMPEG`, junto al ejecutable (copia en la
+  carpeta de instalacion) y en el PATH. Sin ffmpeg la llamada sale de voz.
+- La app tiene que cerrarse para instalar el .exe nuevo: lo esta usando.
+
+## 2026-10-28 - Videos de estado derechos, texto con CR en líneas y errores en el idioma del usuario
+
+**Qué se cambió**
+
+- `whatfast-ui/src/video.rs`: `unpack_size` lee el ancho de los 32 bits altos
+  del `MF_MT_FRAME_SIZE` y `pack_size` lo escribe igual; `shrink` devuelve las
+  dimensiones reales del cuadro, no las pedidas. Sin eso los cuadros salían
+  con franjas y estirados.
+- `whatfast-wa/src/wire.rs`: `normalize_newlines` pasa `\r\n` y `\r` a `\n`
+  en el texto, los epígrafes y el preview del chat. `render.rs` lo repite como
+  defensa en `message_html_with_mentions` y `measure_message_heights`.
+- Errores: `helpers::user_error` manda el detalle técnico a `eprintln!` y
+  devuelve una frase corta. Los toasts de `app.rs` usan un texto por acción
+  (timeouts, envíos, descargas, agente, video) y los de agentes,
+  automatizaciones y borradores usan `user_error`. También se tradujeron las
+  etiquetas del visor, la burbuja de imágenes, `recording.rs` y
+  `media_editor.rs`.
+- Locales: 57 claves nuevas en `en`/`es`/`zh` y los valores con `{error}`
+  pasaron de `: {error}` a `. {error}` para que la frase cierre bien.
+
+**Por qué**
+
+El usuario reportó videos de estado deformados, una fecha suelta y filas
+encimadas al borrar mensajes, y mensajes de error en inglés poco claros.
+
+**Evidencia**
+
+- Tests nuevos: `the_size_of_a_frame_keeps_the_width_in_the_high_bits`,
+  `the_line_breaks_of_a_text_arrive_as_lf` (sidecar, 5 verdes) y
+  `the_html_of_a_message_splits_a_carriage_return_in_lines` (UI, 10 verdes).
+- Decoding real: `media-b53cf572f8cbe4fc.mp4` (576x1024) y
+  `media-44a4bbfbd482099f.mp4` (960x1280) dan cuadros derechos.
+- 286 tests de UI y 8 de i18n en verde; `scripts\idiomas.py --strict` dice
+  100 % en los tres idiomas (493/526/496 textos).
+- `dist\whatfast.exe` 16942080 bytes y `dist\whatfast-backend.exe` 13335040
+  bytes; los dos instalados como 0.2.28.
+
+**Trampa**
+
+- Media Foundation guarda el ancho en los bits altos: leerlo al derecho
+  deforma el cuadro y deja franjas.
+- El backend y la UI tienen que ser la misma versión; 0.2.28 con 0.2.27
+  muestra "versiones distintas" y no deja usar la app.
+- `scripts\build.cmd` sale con código 1 aunque compile: hay que mirar `dist\`.
+- El proceso `whatfast.exe mcp --agent opencode` mantiene el .exe en uso; se
+  puede renombrar e instalar al lado, pero el `.old` queda hasta que salga.
+
+**Pendiente**
+
+Probar en la app los videos de estado, borrar mensajes y los textos de error.
+
+## 2026-10-28 - Tarjetas de link al compartir, armadas antes de enviar
+
+**Qué se cambió**
+
+- `whatfast-wa/src/link_preview.rs` (nuevo): busca el primer link del texto
+  con `whatfast_core::whatsapp_formatting::parse_whatsapp_text`, baja la
+  página (3 s), lee Open Graph (`og:title`, `og:description`, `og:image`),
+  resuelve URLs relativas y decodifica entidades. El thumbnail va a JPEG de
+  320 px de lado, calidad 70, porque el campo del protocolo es
+  `jpeg_thumbnail`.
+- `send.rs`: `send_text` calcula el preview en `spawn_blocking` y
+  `text_message` arma el `extendedTextMessage` con `matchedText`, título,
+  descripción y thumbnail. Sin thumbnail manda `PreviewType::NONE`. Las
+  columnas `link_preview_*` guardan lo mismo para la base local.
+- Dependencias nuevas de `whatfast-wa`: `whatfast-core`, `ureq 3.3`
+  (rustls) e `image 0.25` (jpeg/png/webp).
+
+**Por qué**
+
+WhatsApp arma la tarjeta desde el cliente que envía, no solo al recibir.
+Sin esto el mensaje llegaba como texto pelado a los demás clientes.
+
+**Evidencia**
+
+- `cargo test -p whatfast-wa`: 199 verdes y 2 ignorados en 7 suites.
+- Prueba real de red: `https://www.rust-lang.org/` devolvió título,
+  descripción y un thumbnail JPEG de 12096 bytes en 320x320.
+
+**Trampa**
+
+- La interfaz subraya el link con el mismo parser que arma la tarjeta: si
+  se cambia uno hay que cambiar el otro.
+- Un texto sin link no abre hilo ni toca la red.
+- Si la página no responde, el mensaje sale sin tarjeta: el envío no se
+  bloquea. El tope es 3 s de página más 2 s de imagen.
+
+**Pendiente**
+
+Compilar el release e instalar; la app instalada (0.2.28) no tiene el
+preview todavía.
+
+## 2026-10-28 - SEO del sitio what-fast.web.app
+
+**Qué se cambió**
+
+- `web/index.html`: título "Whatfast — Cliente de WhatsApp para Windows y
+  Linux" (51 caracteres) y descripción con la keyword y el dato de RAM (157),
+  canonical, `hreflang`, robots, Open Graph y Twitter card con
+  `assets/og-image.png` (1200x630), y JSON-LD con `WebSite`, `Organization`,
+  `SoftwareApplication` y `FAQPage`.
+- Sección "Preguntas frecuentes" con 8 respuestas; el JSON-LD repite el
+  mismo texto palabra por palabra. El nav y el pie llevan el ancla
+  `#preguntas`.
+- H1 con "Windows" y los H2 de `#caracteristicas` y `#descargar` con
+  "cliente de WhatsApp" y "Windows y Linux". La captura del hero lleva
+  `width`/`height` y `fetchpriority="high"`.
+- `web/app.js`: las capturas del recorrido se precargan en
+  `requestIdleCallback`, no antes del primer pintado.
+- `web/robots.txt` y `web/sitemap.xml` nuevos.
+
+**Por qué**
+
+El título no decía qué es el producto y el sitio no aparecía buscando
+"cliente de WhatsApp para Windows".
+
+**Evidencia**
+
+- Validación en el navegador con la CSP de `firebase.json`: 4 tipos en el
+  JSON-LD, 8 preguntas, 1 H1, 6 H2 y cero errores de consola.
+- `html.parser`: 361 etiquetas abiertas, 0 sin cerrar, 0 ids duplicados y
+  0 imágenes sin `alt`.
+- `web/assets/og-image.png`: 1200x630, 179 KB.
+
+**Trampa**
+
+- Google pide que la respuesta del `FAQPage` sea idéntica al texto visible:
+  si se toca una, se toca la otra.
+- 432 MB es el cliente anterior con WebView2, no WhatsApp Web. El
+  comparador del sitio usa 690 MB para la pestaña de WhatsApp Web.
+- `cleanUrls: true` redirige `/index.html` a `/`; el canonical ya apunta a
+  `/`.
+
+**Pendiente**
+
+Publicar con `firebase deploy --only hosting` en el proyecto `what-fast`.
+
+
+## 2026-10-28 - Iconos de WhatsApp en el rail y la foto de quien sube el estado
+
+**Que cambio**
+
+- `icons.rs`: `BOT`, `CHANNELS` y `STATUS` nuevos; `ALL` pasa a 41
+  glifos. Chats usa `CHAT`, Agentes `BOT`, Estados un anillo (disco con un
+  agujero) y Canales una burbuja con `) · (` adentro.
+- `navrail.rs`: boton circular de 40 px y el circulo verde con el numero de
+  no leidos; el punto verde del mismo color marca los estados sin ver.
+- `statuses.rs`: la tira y el visor pintan la foto real de quien sube el
+  estado (`participant_avatar_path`) dentro del anillo verde. Los avatares
+  se separaron en `render_ring` y `render_status_row`; el visor usa
+  `VIEWER_AVATAR_SIZE = 44`.
+- `app.rs`: `sync_shell` suma los no leidos de la lista y consulta los
+  estados sin ver para alimentar los dos indicadores.
+- Version 0.2.29.
+
+**Por que**
+
+Los botones usaban glifos genericos de la libreria y el estado mostraba la
+inicial en vez de la foto de quien lo subio.
+
+**Evidencia**
+
+- `cargo test -p whatfast-ui`: 286 verdes, 1 ignorado.
+- Rail dibujado a 20 y 96 px y comparado con la referencia antes y despues
+  de cambiar el anillo de Estados.
+
+**Trampa**
+
+- `the_path_of_the_icon_is_the_join_of_its_shapes` exige que `path` sea
+  exactamente `main` + `cutout` + `overlay`: al tocar una forma se tocan
+  las dos.
+- `the_measures_of_the_column_come_from_the_stylesheet` fija
+  `BUTTON_SIZE = 40`: si se cambia el tamano del boton, se cambia el test.
+
+
+## 2026-10-28 - El numero de quien no esta agendado, con el formato de WhatsApp
+
+**Que cambio**
+
+- `whatfast-core/src/phone.rs` nuevo: `phone::format` escribe `+54 9 381
+  604-1868` con el codigo de pais y los grupos de cada pais (54, 55, 56,
+  57, 58, 51, 52, 53, 591, 593, 595, 598, 1, 33, 34, 39, 44, 49, 351,
+  353). `phone::digits` saca el mas, los espacios y los guiones.
+- `wire.rs::chat_title`: el titulo de un chat directo es el nombre agendado,
+  despues el nombre del negocio, despues el nombre guardado y al final el
+  numero con formato. El nombre que el contacto eligio (`push_name`) ya no
+  es titulo.
+- La interfaz formatea el numero en la tira de chats, el subtitulo, el
+  panel del contacto, los miembros del grupo, el remitente de un mensaje,
+  el autor de un estado, el reenvio y el aviso de escritorio.
+- `message_actions::chat_matches` encuentra el numero escrito con el mas o
+  con los digitos pelados.
+
+**Por que**
+
+469 de los 722 chats directos no tienen nombre agendado. 427 mostraban los
+digitos pegados del jid (`5493816041868`) y 42 mostraban el nombre que el
+contacto se puso a si mismo, que puede ser un punto.
+
+**Evidencia**
+
+- `cargo test -p whatfast-core phone::`: 7 verdes.
+- `cargo test -p whatfast-wa`: 199 verdes, 2 ignorados.
+- `cargo test -p whatfast-ui`: 286 verdes, 1 ignorado.
+
+**Trampa**
+
+- `format` devuelve el texto tal cual si ya tiene el mas y un espacio, asi
+  que se puede llamar sobre un valor de origen desconocido sin formatearlo
+  dos veces.
+- Un numero de un pais que no esta en la tabla queda como vino, y un numero
+  con mas digitos que el pais admite (`265867099152617@lid`) tambien: un
+  agrupado inventado es peor que ninguno.
+- El telefono del protocolo sigue crudo a proposito (lo usan la busqueda y
+  los enlaces); el formato es cosa de la interfaz.
+
+**Pendiente**
+
+Instalar 0.2.29 y probar con un chat sin agendar.
+
+## 2026-10-28 - Visualizacion unica, visor de fotos y menu de tres puntos
+
+**Que cambio**
+
+- `whatfast-wa/src/ingest.rs`: un sobre `view_once` ya no se descarta. Se
+  guarda una fila `kind = "view_once"` con el texto "One-time message" y la
+  interfaz dibuja el aviso. La rama de `Event::UndecryptableMessage` con
+  `UnavailableType::ViewOnce` tambien lo guarda.
+- `render.rs::render_view_once`: el circulo "1" punteado, el texto en cursiva
+  y el enlace "Mas informacion", como WhatsApp. `chat_preview` traduce la
+  clave al idioma activo.
+- El visor de fotos (`render_image_viewer`) es una capa a pantalla completa:
+  encabezado con avatar, nombre y fecha, barra de iconos sin fondo, flechas,
+  contador, tira de miniaturas con borde verde y reacciones rapidas.
+  `ImageViewer` guarda la galeria (`Vec<ViewerItem>`), el indice y el zoom.
+- El menu de tres puntos (`render_image_menu`) tiene Copiar, Compartir, Abrir
+  con, Info. del mensaje, Ir al mensaje, Guardar como, Buscar en la web.
+  "Guardar como" abre el dialogo del sistema (`cx.prompt_for_new_path`) y la
+  copia muere en un `.part`: el archivo aparece entero o no aparece.
+- "Abrir con" usa `cx.open_with_system`, sin `explorer.exe` ni consola.
+  El clic derecho sobre la foto sigue con Copiar y Descargar.
+- Claves nuevas en `en`/`es`/`zh` y tests de la galeria del visor, del aviso
+  y de los bytes magicos de la foto.
+
+**Por que**
+
+El telefono retiene el contenido de una visualizacion unica: el dispositivo
+vinculado solo recibe `<unavailable type="view_once">`, asi que no hay archivo
+que descargar ni abrir. El aviso es lo unico honesto que se puede mostrar.
+
+**Evidencia**
+
+- `cargo test -p whatfast-ui`: 289 verdes, 1 ignorado.
+- `cargo test -p whatfast-wa`: 84 verdes, 1 ignorado.
+- `cargo test -p whatfast-i18n`: 8 verdes.
+- `scripts\build.cmd`: `dist\whatfast.exe` del 28/10 10:29:52, 17.014.784
+  bytes.
+
+**Trampa**
+
+- El dialogo de "Guardar como" necesita una carpeta inicial que exista: si la
+  configurada no esta, cae en Descargas y despues en la carpeta del usuario.
+- `scripts\build.cmd` sale con codigo 1 aunque compile; hay que mirar `dist\`.
+- El visor todavia no reproduce videos: solo fotos y stickers.
+
+**Pendiente**
+
+Instalar 0.2.29: hay que cerrar `whatfast.exe` y el proceso
+`whatfast.exe mcp --agent opencode`.
+## 2026-10-28 - Burbujas sin solaparse, pildora de grabacion y menus de la columna
+
+**Que cambio**
+
+- `render.rs::measure_message_heights`: la burbuja apila sus hijos con un
+  hueco de 4 px y la cuenta no lo tenia. La tarjeta del link se mide segun su
+  contenido (62 px sin descripcion, 82 con ella, mas 144 con miniatura) y el
+  tabulador se expande a cuatro espacios igual que en `message_html`.
+- La grabacion de la nota de voz es una pildora centrada y redondeada: tacho
+  outline a la izquierda, punto, reloj blanco, onda en vivo, pausa coral y
+  enviar redondo. Ya no dice "Grabando" ni ocupa el ancho del campo.
+- `recording.rs`: el callback del microfono deja un pico de nivel por bloque;
+  los comandos `Pause` y `Resume` llaman a `cpal::StreamTrait`. `elapsed_seconds`
+  descuenta el tiempo pausado.
+- `render_chat_list_menu`: Nuevo grupo, Mensajes destacados, Seleccionar chats,
+  Marcar todos como leidos, Bloqueo de aplicacion y Cerrar sesion. Las cuatro
+  acciones sin backend o sin pantalla se ven apagadas y avisan "Todavia no
+  esta disponible".
+- `mark_all_chats_read` manda `MarkRead` sin `through_message_id` por cada chat
+  con no leidos. `render_logout_confirm` confirma antes de `request_logout`.
+- "Mas informacion" del aviso de visualizacion unica abre una tarjeta interna
+  en vez de la pagina de WhatsApp, y el menu del mensaje solo ofrece eliminar.
+- Icono nuevo `TrashOutline` (el lleno queda para los menus).
+
+**Por que**
+
+La medicion corta hacia que la fila siguiente se dibujara encima de la ultima
+linea del texto; el grabador no se parecia al de WhatsApp; la columna de los
+chats no tenia su menu, y el aviso de visualizacion unica mandaba al navegador.
+
+**Evidencia**
+
+- `cargo test -p whatfast-ui`: 291 verdes, 1 ignorado.
+- `cargo test -p whatfast-wa`: 84 verdes, 1 ignorado.
+- `cargo test -p whatfast-i18n`: 8 verdes.
+- `scripts\build.cmd`: `dist\whatfast.exe` del 28/10 10:59:50, 17.050.624
+  bytes.
+
+**Trampa**
+
+- El backend no tiene creacion de grupos ni bloqueo de aplicacion: esos dos
+  items quedan apagados a proposito, no rotos.
+- Pausar el stream de `cpal` detiene el callback pero no cierra el microfono:
+  las muestras ya guardadas se codifican igual al mandar.
+- El ancho de la pildora es 420 px sin escalar; con una ventana angosta manda
+  `max_w_full`.
+- `scripts\build.cmd` sale con codigo 1 aunque compile; hay que mirar `dist\`.
+
+**Pendiente**
+
+Instalar 0.2.29 (hay que cerrar `whatfast.exe` y el MCP) y probar con una foto
+de una sola vez y con una nota de voz pausada.
+## 2026-10-28 - 0.2.29 instalada y commit 7364b24
+
+**Que**
+
+- `dist\whatfast.exe` (17.107.968 bytes) y `dist\whatfast-backend.exe`
+  (14.856.704) copiados a `%LOCALAPPDATA%\Programs\Whatfast`.
+- El `.exe` en uso se renombro a `whatfast.exe.old-20261028-1148`: no se cerro
+  ningun proceso.
+- Commit `7364b24` con 60 archivos; el hook de secretos dio "nada en lo
+  preparado".
+
+**Por que**
+
+La app instalada era 0.2.28 y no tenia el visor, los menus, los grupos, el PIN
+ni la seleccion multiple.
+
+**Evidencia**
+
+- sha256 del `whatfast.exe` instalado igual al de `dist\`:
+  `36884F309D92FB8F598BA36F5F9EDF3562A35853399B97247366D2FA38BAAB51`.
+- Cadenas `App lock`, `Create group`, `Select chats` y `Enter your PIN`
+  presentes en el binario.
+
+**Trampa**
+
+- Los procesos que ya estaban corriendo siguen con el binario viejo hasta que
+  se reinicien, incluidos los `whatfast.exe mcp --agent ...`.
+- El proximo arranque de la app usa 0.2.29; no hace falta cerrar nada ahora.
+
+**Pendiente**
+
+Probar en la app nueva: una foto de visualizacion unica, una nota de voz
+pausada, crear un grupo y activar el PIN.

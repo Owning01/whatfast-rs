@@ -109,6 +109,25 @@ pub struct CallState {
     /// True when the call came from the peer: the overlay shows answer and
     /// decline instead of mute and hang up.
     pub incoming: bool,
+    /// True when the call carries video in either direction: the overlay
+    /// shows the panel of the camera and of the peer.
+    pub video: bool,
+}
+
+impl CallState {
+    /// Records the id that the backend gave to the call being placed.
+    ///
+    /// Every later event carries that id: without it the call never leaves
+    /// the `placing` phase, the audio never starts, and the hang up does not
+    /// find the call.
+    pub fn placed(&mut self, call_id: String) {
+        if self.call_id.is_empty() {
+            self.call_id = call_id;
+            if self.phase == "placing" {
+                self.phase = "dialing".into();
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -362,6 +381,14 @@ impl Store {
         if self.selected_chat_id.as_deref() != Some(message.chat_id.as_str()) {
             return;
         }
+        // Un mensaje eliminado no se dibuja: el hilo lo salta. El backend
+        // conserva la fila para la historia; la ventana no la pinta.
+        if message.revoked {
+            let chat_id = message.chat_id.clone();
+            let id = message.id.clone();
+            self.remove_message(&chat_id, &id);
+            return;
+        }
         for heights in self.message_height_cache.values_mut() {
             heights.remove(&message.id);
         }
@@ -393,6 +420,12 @@ impl Store {
             .map(|message| (message.id.clone(), message))
             .collect();
         for mut message in incoming {
+            // Un mensaje eliminado no entra al hilo, ni siquiera en la
+            // historia que se pide al abrir la conversacion.
+            if message.revoked {
+                by_id.remove(&message.id);
+                continue;
+            }
             for heights in self.message_height_cache.values_mut() {
                 heights.remove(&message.id);
             }
@@ -423,6 +456,12 @@ impl Store {
             .map(|message| (message.id.clone(), message))
             .collect();
         for mut message in incoming {
+            // Un mensaje eliminado no entra al hilo, ni siquiera en la
+            // historia que se pide al abrir la conversacion.
+            if message.revoked {
+                by_id.remove(&message.id);
+                continue;
+            }
             for heights in self.message_height_cache.values_mut() {
                 heights.remove(&message.id);
             }
@@ -450,6 +489,8 @@ impl Store {
         has_older: bool,
         has_newer: bool,
     ) {
+        // Lo que ya venia eliminado no se dibuja.
+        messages.retain(|message| !message.revoked);
         messages.sort_by(compare_messages);
         if messages.len() > MAX_ACTIVE_MESSAGES {
             messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
@@ -532,20 +573,34 @@ impl Store {
         image_path: String,
         thumbnail_path: String,
     ) -> bool {
+        let mut updated = false;
+        for group in &mut self.statuses {
+            for message in &mut group.messages {
+                if message.id == message_id {
+                    if let Some(whatfast_protocol::message::Content::Image(image)) =
+                        message.content.as_mut()
+                    {
+                        image.local_path = image_path.clone();
+                        image.thumbnail_path = thumbnail_path.clone();
+                        updated = true;
+                    }
+                }
+            }
+        }
         let Some(message) = self
             .message_index
             .get(message_id)
             .and_then(|index| self.messages.get_mut(*index))
             .filter(|message| message.chat_id == chat_id)
         else {
-            return false;
+            return updated;
         };
         let Some(whatfast_protocol::message::Content::Image(image)) = message.content.as_mut()
         else {
-            return false;
+            return updated;
         };
         if image.local_path == image_path && image.thumbnail_path == thumbnail_path {
-            return false;
+            return updated;
         }
         image.local_path = image_path;
         image.thumbnail_path = thumbnail_path;
@@ -862,21 +917,34 @@ impl Store {
         message_id: &str,
         path: String,
     ) -> bool {
+        let mut updated = false;
+        for group in &mut self.statuses {
+            for message in &mut group.messages {
+                if message.id == message_id {
+                    if let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+                        message.content.as_mut()
+                    {
+                        attachment.local_path = path.clone();
+                        updated = true;
+                    }
+                }
+            }
+        }
         let Some(message) = self
             .message_index
             .get(message_id)
             .and_then(|index| self.messages.get_mut(*index))
             .filter(|message| message.chat_id == chat_id)
         else {
-            return false;
+            return updated;
         };
         let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
             message.content.as_mut()
         else {
-            return false;
+            return updated;
         };
         if attachment.local_path == path {
-            return false;
+            return updated;
         }
         attachment.local_path = path;
         true
@@ -939,25 +1007,41 @@ impl Store {
         true
     }
 
-    /// Marks one message as revoked, the way a delete looks locally, and
-    /// returns the message it replaced so the caller can roll it back.
+    /// Drops one message of the open conversation and reindexes the rest.
     ///
-    /// port: the origin sets `{ ...current, revoked: true, content: null }`.
-    pub fn revoke_message(
+    /// A message that was deleted disappears from the thread: the window does
+    /// not draw it, the same way WhatsApp hides a message deleted for
+    /// everyone. The caller keeps the copy it needs to put it back when the
+    /// backend refuses the change.
+    pub fn remove_message(
         &mut self,
         chat_id: &str,
         message_id: &str,
     ) -> Option<whatfast_protocol::Message> {
         let index = self.message_index.get(message_id).copied()?;
-        let message = self.messages.get_mut(index)?;
-        if message.chat_id != chat_id {
+        if self.messages.get(index)?.chat_id != chat_id {
             return None;
         }
-        let previous = message.clone();
-        message.revoked = true;
-        message.content = None;
+        let previous = self.messages.remove(index);
         self.invalidate_message_height(message_id);
+        self.reindex_messages();
+        self.rebuild_reply_metadata();
+        self.rebuild_message_sizes();
         Some(previous)
+    }
+
+    /// Drops one message the way a delete looks in the thread, and returns the
+    /// message it took out so the caller can roll it back.
+    ///
+    /// port: the origin marked the message as revoked and kept the row saying
+    /// "this message was deleted"; here the row leaves the thread, because the
+    /// user asked not to see a deleted message at all.
+    pub fn revoke_message(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Option<whatfast_protocol::Message> {
+        self.remove_message(chat_id, message_id)
     }
 
     /// Puts a message back where it was, after a failed change.
@@ -1401,6 +1485,26 @@ mod tests {
         assert_eq!(store.messages.len(), MAX_ACTIVE_MESSAGES);
         assert_eq!(store.messages.first().unwrap().id, "50");
         assert!(store.has_older_messages);
+    }
+
+    #[test]
+    fn a_placed_call_takes_the_id_the_backend_gave_it() {
+        let mut call = CallState {
+            phase: "placing".into(),
+            ..Default::default()
+        };
+        call.placed("call-1".into());
+        assert_eq!(call.call_id, "call-1");
+        assert_eq!(call.phase, "dialing");
+        // An incoming call already carries the id of the offer: it stays.
+        let mut incoming = CallState {
+            call_id: "offer-1".into(),
+            phase: "incoming".into(),
+            ..Default::default()
+        };
+        incoming.placed("other".into());
+        assert_eq!(incoming.call_id, "offer-1");
+        assert_eq!(incoming.phase, "incoming");
     }
 
     #[test]
@@ -2474,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_message_is_revoked_and_can_be_put_back() {
+    fn a_deleted_message_leaves_the_thread_and_can_be_put_back() {
         let mut store = Store {
             selected_chat_id: Some("chat".into()),
             ..Default::default()
@@ -2484,13 +2588,49 @@ mod tests {
         let previous = store
             .revoke_message("chat", "1")
             .expect("the message is there");
-        assert!(store.messages[0].revoked);
-        assert!(store.messages[0].content.is_none());
+        // El mensaje borrado no queda en el hilo: no hay fila que diga
+        // "mensaje eliminado".
+        assert!(store.messages.is_empty());
+        assert!(store.message("1").is_none());
         assert_eq!(previous.id, "1");
 
         store.restore_message(previous);
+        assert_eq!(store.messages.len(), 1);
         assert!(!store.messages[0].revoked);
         assert!(store.revoke_message("other", "1").is_none());
+    }
+
+    #[test]
+    fn a_message_revoked_by_the_other_side_is_never_shown() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut borrado = message(2);
+        borrado.revoked = true;
+        store.upsert_message(borrado);
+        assert!(store.messages.is_empty());
+
+        // Y si llega despues de estar en el hilo, se va.
+        store.upsert_message(message(3));
+        assert_eq!(store.messages.len(), 1);
+        let mut borrado = message(3);
+        borrado.revoked = true;
+        store.upsert_message(borrado);
+        assert!(store.messages.is_empty());
+    }
+
+    #[test]
+    fn the_window_of_a_conversation_drops_what_was_deleted() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        let mut borrado = message(2);
+        borrado.revoked = true;
+        store.replace_message_window(vec![message(1), borrado, message(3)], false, false);
+        assert_eq!(store.messages.len(), 2);
+        assert!(store.messages.iter().all(|message| !message.revoked));
     }
 
     #[test]

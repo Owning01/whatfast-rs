@@ -140,6 +140,273 @@ pub fn has_blocks(text: &str) -> bool {
         .any(|block| !matches!(block, Block::Paragraph(_)))
 }
 
+/// The marks of a rule, drawn with box characters: the view of text of the
+/// window has no line of its own, and a rule that is text is always visible.
+const RULE: &str = "────────────────────────";
+
+/// The HTML of a message, for the view of text of the window.
+///
+/// This is the only place that knows both parsers: the blocks of this module
+/// and the inline marks of [`crate::whatsapp_formatting`]. Every string is
+/// escaped, so a message can never inject markup.
+///
+/// It returns `None` when the message carries no block of a document, so the
+/// caller keeps the plain bubble of a message with only text and marks.
+pub fn to_html(
+    text: &str,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) -> Option<String> {
+    if !has_blocks(text) {
+        return None;
+    }
+    let mut html = String::new();
+    for block in parse(text) {
+        push_block(&mut html, block, options);
+    }
+    Some(html)
+}
+
+/// One piece of the drawing of a message.
+///
+/// The window draws the blocks of text with its view of text, but a diagram
+/// is boxes and arrows: the message is cut where a diagram starts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    /// Blocks of text, as the HTML of [`to_html`].
+    Html(String),
+    /// A diagram of [`crate::diagrams`].
+    Diagram(crate::diagrams::Diagram),
+}
+
+/// The pieces of a message, in the order they appear.
+///
+/// It returns `None` when the message carries no block of a document, so the
+/// caller keeps the plain bubble. A fence of `mermaid` or `flow` that the
+/// parser of diagrams does not understand stays a block of code: the window
+/// shows what the person wrote, never an empty box.
+pub fn parts(
+    text: &str,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) -> Option<Vec<Part>> {
+    if !has_blocks(text) {
+        return None;
+    }
+    let mut parts: Vec<Part> = Vec::new();
+    let mut html = String::new();
+    let flush = |parts: &mut Vec<Part>, html: &mut String| {
+        if !html.is_empty() {
+            parts.push(Part::Html(std::mem::take(html)));
+        }
+    };
+    for block in parse(text) {
+        if let Block::Code { language, text } = &block
+            && matches!(language.to_ascii_lowercase().as_str(), "mermaid" | "flow")
+            && let Some(diagram) = crate::diagrams::parse(text)
+        {
+            flush(&mut parts, &mut html);
+            parts.push(Part::Diagram(diagram));
+            continue;
+        }
+        push_block(&mut html, block, options);
+    }
+    flush(&mut parts, &mut html);
+    Some(parts)
+}
+
+/// Writes one block as HTML.
+fn push_block(
+    html: &mut String,
+    block: Block,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) {
+    match block {
+        Block::Paragraph(lines) => {
+            html.push_str("<p>");
+            push_lines(html, &lines, options);
+            html.push_str("</p>");
+        }
+        Block::Heading { level, text } => {
+            let level = level.clamp(1, 6);
+            html.push_str(&format!("<h{level}>"));
+            push_inline(html, &text, options);
+            html.push_str(&format!("</h{level}>"));
+        }
+        Block::Code { text, .. } => {
+            html.push_str("<pre>");
+            html.push_str(&escape_html(&text));
+            html.push_str("</pre>");
+        }
+        Block::List {
+            ordered,
+            start,
+            items,
+        } => {
+            if ordered {
+                html.push_str(&format!("<ol start=\"{start}\">"));
+            } else {
+                html.push_str("<ul>");
+            }
+            for item in items {
+                html.push_str("<li>");
+                push_inline(html, &item, options);
+                html.push_str("</li>");
+            }
+            html.push_str(if ordered { "</ol>" } else { "</ul>" });
+        }
+        Block::Quote(lines) => {
+            html.push_str("<blockquote>");
+            push_lines(html, &lines, options);
+            html.push_str("</blockquote>");
+        }
+        Block::Table(table) => push_table(html, &table, options),
+        Block::Rule => {
+            html.push_str("<p>");
+            html.push_str(RULE);
+            html.push_str("</p>");
+        }
+    }
+}
+
+/// The width of every row of a table, in columns: a short row is filled with
+/// empty cells so the columns of the grid stay where the header put them.
+fn push_table(
+    html: &mut String,
+    table: &Table,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) {
+    let columns = table
+        .rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(table.header.len()))
+        .max()
+        .unwrap_or(0);
+    html.push_str("<table><thead><tr>");
+    for column in 0..columns {
+        html.push_str("<th>");
+        push_cell(html, table.header.get(column), options);
+        html.push_str("</th>");
+    }
+    html.push_str("</tr></thead><tbody>");
+    for row in &table.rows {
+        html.push_str("<tr>");
+        for column in 0..columns {
+            html.push_str("<td>");
+            push_cell(html, row.get(column), options);
+            html.push_str("</td>");
+        }
+        html.push_str("</tr>");
+    }
+    html.push_str("</tbody></table>");
+}
+
+/// One cell of a table. An empty cell carries a zero width space: the view of
+/// text drops a cell with no children, and the column would lose its place.
+fn push_cell(
+    html: &mut String,
+    cell: Option<&String>,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) {
+    match cell.map(String::as_str) {
+        Some(cell) if !cell.trim().is_empty() => push_inline(html, cell, options),
+        _ => html.push_str("&#8203;"),
+    }
+}
+
+/// The lines of a paragraph or of a quote, one break between them.
+fn push_lines(
+    html: &mut String,
+    lines: &[String],
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) {
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            html.push_str("<br>");
+        }
+        push_inline(html, line, options);
+    }
+}
+
+/// One line of text with the inline marks of WhatsApp, as HTML.
+fn push_inline(
+    html: &mut String,
+    text: &str,
+    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
+) {
+    let mut wrote_any = false;
+    for block in crate::whatsapp_formatting::parse_whatsapp_text(text, options) {
+        match block {
+            crate::whatsapp_formatting::WhatsAppTextBlock::CodeBlock { text } => {
+                html.push_str("<code>");
+                html.push_str(&escape_html(&text));
+                html.push_str("</code>");
+                wrote_any = true;
+            }
+            crate::whatsapp_formatting::WhatsAppTextBlock::BlankLine => {}
+            block => {
+                for segment in block.segments() {
+                    push_segment(html, segment);
+                    wrote_any = true;
+                }
+            }
+        }
+    }
+    if !wrote_any {
+        html.push_str(&escape_html(text));
+    }
+}
+
+/// One run of text with its styles, as HTML.
+fn push_segment(html: &mut String, segment: &crate::whatsapp_formatting::WhatsAppInlineSegment) {
+    use crate::whatsapp_formatting::{WhatsAppInlineSegment, WhatsAppInlineStyle};
+
+    let body = match segment {
+        WhatsAppInlineSegment::Link { text, href, .. } => {
+            format!("<a href=\"{}\">{}</a>", escape_html(href), escape_html(text))
+        }
+        // A mention is not a link to anywhere: the label is what the person
+        // reads, and the window does not open a chat from the bubble.
+        WhatsAppInlineSegment::Mention { text, .. } => {
+            format!("<a href=\"#\">{}</a>", escape_html(text))
+        }
+        WhatsAppInlineSegment::Text { text, .. } => escape_html(text),
+    };
+    let styles = segment.styles();
+    let mut wrapped = body;
+    // The order is the one of the reference: the bold outside, the code
+    // inside, so the borders of the code stay inside the weight.
+    if styles.contains(&WhatsAppInlineStyle::Monospace)
+        || styles.contains(&WhatsAppInlineStyle::InlineCode)
+    {
+        wrapped = format!("<code>{wrapped}</code>");
+    }
+    if styles.contains(&WhatsAppInlineStyle::Strikethrough) {
+        wrapped = format!("<del>{wrapped}</del>");
+    }
+    if styles.contains(&WhatsAppInlineStyle::Italic) {
+        wrapped = format!("<em>{wrapped}</em>");
+    }
+    if styles.contains(&WhatsAppInlineStyle::Bold) {
+        wrapped = format!("<strong>{wrapped}</strong>");
+    }
+    html.push_str(&wrapped);
+}
+
+/// The text a person typed, as inert HTML.
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 /// The opening fence of a code block, when the line is one.
 fn fence_of(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("```")?;
@@ -503,5 +770,84 @@ mod tests {
         assert!(has_blocks("- uno\n- dos"));
         assert!(has_blocks("| a |\n|---|\n| 1 |"));
         assert!(!has_blocks("solo *negrita* y un link https://ejemplo.com"));
+    }
+
+    use crate::whatsapp_formatting::WhatsAppParseOptions;
+    use crate::{diagrams::Diagram, markdown::Part, markdown::parts};
+
+    fn html(text: &str) -> String {
+        to_html(text, &WhatsAppParseOptions::default()).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_plain_message_has_no_html_of_blocks() {
+        assert_eq!(to_html("hola", &WhatsAppParseOptions::default()), None);
+    }
+
+    #[test]
+    fn every_block_becomes_its_tag() {
+        assert!(html("# Título").starts_with("<h1>Título</h1>"));
+        assert_eq!(html("## Dos"), "<h2>Dos</h2>");
+        assert_eq!(html("- uno\n- dos"), "<ul><li>uno</li><li>dos</li></ul>");
+        assert_eq!(html("3. tres"), "<ol start=\"3\"><li>tres</li></ol>");
+        assert_eq!(html("> cita"), "<blockquote>cita</blockquote>");
+        assert_eq!(html("```\nfn main() {}\n```"), "<pre>fn main() {}</pre>");
+        assert!(html("---").starts_with("<p>──"));
+    }
+
+    #[test]
+    fn the_inline_marks_of_whatsapp_are_html_now() {
+        let rendered = html("# *negrita* y _itálica_");
+        assert!(rendered.contains("<strong>negrita</strong>"), "{rendered}");
+        assert!(rendered.contains("<em>itálica</em>"), "{rendered}");
+    }
+
+    #[test]
+    fn a_table_keeps_its_columns_when_a_row_is_short() {
+        let rendered = html("| a | b |\n|---|---|\n| 1 |\n| 2 | 3 |");
+        assert!(rendered.starts_with("<table><thead><tr><th>a</th><th>b</th></tr></thead>"));
+        // The empty cell of the second row is a zero width space, not a gap.
+        assert!(rendered.contains("<tr><td>1</td><td>&#8203;</td></tr>"), "{rendered}");
+        assert!(rendered.contains("<tr><td>2</td><td>3</td></tr>"), "{rendered}");
+    }
+
+    #[test]
+    fn a_message_cannot_inject_markup() {
+        let rendered = html("# <script>alert('x')</script>");
+        assert!(!rendered.contains("<script>"), "{rendered}");
+        assert!(rendered.contains("&lt;script&gt;"), "{rendered}");
+    }
+
+    #[test]
+    fn a_message_with_a_diagram_is_cut_where_the_diagram_starts() {
+        let parts = parts(
+            "# Red\n```mermaid\nflowchart TD\n A --> B\n```\ndespués",
+            &WhatsAppParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(matches!(&parts[0], Part::Html(html) if html.starts_with("<h1>Red</h1>")));
+        assert!(matches!(&parts[1], Part::Diagram(Diagram::Flow(chart)) if chart.nodes.len() == 2));
+        assert!(matches!(&parts[2], Part::Html(html) if html.contains("después")));
+    }
+
+    #[test]
+    fn a_diagram_the_parser_does_not_know_stays_a_block_of_code() {
+        let parts = parts(
+            "```mermaid\nnot a diagram\n```",
+            &WhatsAppParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], Part::Html(html) if html.contains("<pre>not a diagram</pre>")));
+    }
+
+    #[test]
+    fn a_link_inside_a_block_stays_a_link() {
+        let rendered = html("- https://ejemplo.com/x");
+        assert!(
+            rendered.contains("<a href=\"https://ejemplo.com/x\">"),
+            "{rendered}"
+        );
     }
 }

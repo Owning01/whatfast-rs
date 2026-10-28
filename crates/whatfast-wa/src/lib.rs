@@ -10,6 +10,7 @@ pub mod guard;
 pub mod guides;
 pub mod identity;
 pub mod ingest;
+pub mod link_preview;
 pub mod media;
 pub mod meta;
 pub mod reconcile;

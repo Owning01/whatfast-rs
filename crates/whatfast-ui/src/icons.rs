@@ -72,6 +72,34 @@ const BELL: Glyph = Glyph {
     )],
 };
 
+const BOT: Glyph = Glyph {
+    path: "M6 8h12a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3z M12 2.4a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6z M11.4 4.4h1.2V8h-1.2z M8.6 12.6a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4z M15.4 12.6a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4z M9.2 16.8h5.6v1.2H9.2z",
+    main: &[
+        "M6 8h12a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3z",
+        "M12 2.4a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6z",
+        "M11.4 4.4h1.2V8h-1.2z",
+    ],
+    cutout: &[
+        "M8.6 12.6a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4z",
+        "M15.4 12.6a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4z",
+        "M9.2 16.8h5.6v1.2H9.2z",
+    ],
+    overlay: &[],
+};
+
+const CHANNELS: Glyph = Glyph {
+    path: "M3 5.6C3 3.6 4.9 2 7.3 2h9.4C19.1 2 21 3.6 21 5.6v8.6c0 2-1.9 3.6-4.3 3.6H9.6l-4.4 3.2.7-3.6C4 16.9 3 15.4 3 13.4z M9.5 7.8c-1.5 1.1-2.4 2.5-2.4 4.2s.9 3.1 2.4 4.2l.7-1.2c-1.1-.9-1.7-1.8-1.7-3s.6-2.1 1.7-3z M12 10.5a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3z M14.5 7.8c1.5 1.1 2.4 2.5 2.4 4.2s-.9 3.1-2.4 4.2l-.7-1.2c1.1-.9 1.7-1.8 1.7-3s-.6-2.1-1.7-3z",
+    main: &[
+        "M3 5.6C3 3.6 4.9 2 7.3 2h9.4C19.1 2 21 3.6 21 5.6v8.6c0 2-1.9 3.6-4.3 3.6H9.6l-4.4 3.2.7-3.6C4 16.9 3 15.4 3 13.4z",
+    ],
+    cutout: &[
+        "M9.5 7.8c-1.5 1.1-2.4 2.5-2.4 4.2s.9 3.1 2.4 4.2l.7-1.2c-1.1-.9-1.7-1.8-1.7-3s.6-2.1 1.7-3z",
+        "M12 10.5a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3z",
+        "M14.5 7.8c1.5 1.1 2.4 2.5 2.4 4.2s-.9 3.1-2.4 4.2l-.7-1.2c1.1-.9 1.7-1.8 1.7-3s-.6-2.1-1.7-3z",
+    ],
+    overlay: &[],
+};
+
 const CHAT: Glyph = Glyph {
     path: "M3 5.8C3 3.7 5 2 7.4 2h9.2C19 2 21 3.7 21 5.8v7.4c0 2.1-2 3.8-4.4 3.8H11l-5.7 4.2.9-4.5C4.3 16.2 3 14.9 3 13.2z M6.8 5h10.4c.7 0 1.3.4 1.6.9H5.2c.3-.5.9-.9 1.6-.9z",
     main: &[
@@ -355,6 +383,13 @@ const SPLIT: Glyph = Glyph {
     overlay: &[("M4 5h6v1H4zm10 0h6v1h-6z", 0.38)],
 };
 
+const STATUS: Glyph = Glyph {
+    path: "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z M4.4 12a7.6 7.6 0 1 0 15.2 0a7.6 7.6 0 1 0 -15.2 0z",
+    main: &["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z"],
+    cutout: &["M4.4 12a7.6 7.6 0 1 0 15.2 0a7.6 7.6 0 1 0 -15.2 0z"],
+    overlay: &[],
+};
+
 const STICKER: Glyph = Glyph {
     path: "M3 2h18v12.5L13.5 22H3z M13 14h6.5L13 20.5z M6.8 8a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0z M13.3 8a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0 -2.4 0z M7 11h8c-.6 2-1.9 3-4 3s-3.4-1-4-3z",
     main: &["M3 2h18v12.5L13.5 22H3z"],
@@ -384,6 +419,24 @@ const TRASH: Glyph = Glyph {
     path: "M5 7h14l-1 15H6zM3 3h18v3H3zm5-2h8v3H8z M9 10h2v8H9zm4 0h2v8h-2z",
     main: &["M5 7h14l-1 15H6zM3 3h18v3H3zm5-2h8v3H8z"],
     cutout: &["M9 10h2v8H9zm4 0h2v8h-2z"],
+    overlay: &[],
+};
+
+/// The trash of the recorder, with the lines of the reference: the filled
+/// one is the icon of the menus, and WhatsApp draws the recorder with an
+/// outline so it does not look like a red alert.
+const TRASH_OUTLINE: Glyph = Glyph {
+    path: "M4 5h16v2H4z M8 3h8v2H8z M6 7h2v13H6z M16 7h2v13h-2z M6 18h12v2H6z M9 10h2v6H9z M13 10h2v6h-2z",
+    main: &[
+        "M4 5h16v2H4z",
+        "M8 3h8v2H8z",
+        "M6 7h2v13H6z",
+        "M16 7h2v13h-2z",
+        "M6 18h12v2H6z",
+        "M9 10h2v6H9z",
+        "M13 10h2v6h-2z",
+    ],
+    cutout: &[],
     overlay: &[],
 };
 
@@ -418,6 +471,8 @@ pub enum WhatfastIcon {
     Archive,
     Attach,
     Bell,
+    Bot,
+    Channels,
     Chat,
     Check,
     CheckDouble,
@@ -448,19 +503,23 @@ pub enum WhatfastIcon {
     Sidebar,
     Smile,
     Split,
+    Status,
     Sticker,
     Storage,
     Trash,
+    TrashOutline,
     Video,
     Warning,
 }
 
 impl WhatfastIcon {
     /// Every icon of the set.
-    pub const ALL: [WhatfastIcon; 38] = [
+    pub const ALL: [WhatfastIcon; 42] = [
         WhatfastIcon::Archive,
         WhatfastIcon::Attach,
         WhatfastIcon::Bell,
+        WhatfastIcon::Bot,
+        WhatfastIcon::Channels,
         WhatfastIcon::Chat,
         WhatfastIcon::Check,
         WhatfastIcon::CheckDouble,
@@ -491,9 +550,11 @@ impl WhatfastIcon {
         WhatfastIcon::Sidebar,
         WhatfastIcon::Smile,
         WhatfastIcon::Split,
+        WhatfastIcon::Status,
         WhatfastIcon::Sticker,
         WhatfastIcon::Storage,
         WhatfastIcon::Trash,
+        WhatfastIcon::TrashOutline,
         WhatfastIcon::Video,
         WhatfastIcon::Warning,
     ];
@@ -504,6 +565,8 @@ impl WhatfastIcon {
             WhatfastIcon::Archive => "archive",
             WhatfastIcon::Attach => "attach",
             WhatfastIcon::Bell => "bell",
+            WhatfastIcon::Bot => "bot",
+            WhatfastIcon::Channels => "channels",
             WhatfastIcon::Chat => "chat",
             WhatfastIcon::Check => "check",
             WhatfastIcon::CheckDouble => "check-double",
@@ -534,9 +597,11 @@ impl WhatfastIcon {
             WhatfastIcon::Sidebar => "sidebar",
             WhatfastIcon::Smile => "smile",
             WhatfastIcon::Split => "split",
+            WhatfastIcon::Status => "status",
             WhatfastIcon::Sticker => "sticker",
             WhatfastIcon::Storage => "storage",
             WhatfastIcon::Trash => "trash",
+            WhatfastIcon::TrashOutline => "trash-outline",
             WhatfastIcon::Video => "video",
             WhatfastIcon::Warning => "warning",
         }
@@ -594,6 +659,8 @@ impl WhatfastIcon {
             WhatfastIcon::Archive => &ARCHIVE,
             WhatfastIcon::Attach => &ATTACH,
             WhatfastIcon::Bell => &BELL,
+            WhatfastIcon::Bot => &BOT,
+            WhatfastIcon::Channels => &CHANNELS,
             WhatfastIcon::Chat => &CHAT,
             WhatfastIcon::Check => &CHECK,
             WhatfastIcon::CheckDouble => &CHECK_DOUBLE,
@@ -624,9 +691,11 @@ impl WhatfastIcon {
             WhatfastIcon::Sidebar => &SIDEBAR,
             WhatfastIcon::Smile => &SMILE,
             WhatfastIcon::Split => &SPLIT,
+            WhatfastIcon::Status => &STATUS,
             WhatfastIcon::Sticker => &STICKER,
             WhatfastIcon::Storage => &STORAGE,
             WhatfastIcon::Trash => &TRASH,
+            WhatfastIcon::TrashOutline => &TRASH_OUTLINE,
             WhatfastIcon::Video => &VIDEO,
             WhatfastIcon::Warning => &WARNING,
         }
@@ -686,6 +755,12 @@ impl AssetSource for WhatfastAssets {
         if let Some(icon) = WhatfastIcon::from_path_data(path) {
             return Ok(Some(Cow::Owned(icon.svg_document().into_bytes())));
         }
+        // Los logos de los harnesses: el path es `harness/<id>` y el documento
+        // ya esta escrito en el binario. Un harness sin marca contesta que no
+        // tiene asset, para que la tarjeta dibuje el robot.
+        if let Some(id) = path.strip_prefix("harness/") {
+            return Ok(crate::harness_logos::svg(id).map(|logo| Cow::Borrowed(logo.as_bytes())));
+        }
         self.inner.load(path)
     }
 
@@ -699,6 +774,30 @@ mod tests {
     use super::*;
 
     /// The number of arguments of every command of a path.
+    #[test]
+    fn the_assets_serve_the_logos_of_the_harnesses() {
+        let assets = WhatfastAssets::new();
+        let logo = assets
+            .load("harness/cursor")
+            .expect("the source answers")
+            .expect("cursor has a logo");
+        let text = String::from_utf8(logo.into_owned()).expect("utf-8");
+        assert!(text.starts_with("<svg"), "the logo is not a document");
+        assert!(text.contains("currentColor"), "the logo has a fixed color");
+        // Un harness sin marca no inventa una: la tarjeta dibuja el robot.
+        assert!(
+            assets.load("harness/hermes").expect("the source answers").is_none(),
+            "hermes must fall back to the robot"
+        );
+        // Y un icono propio sigue saliendo por su camino de siempre.
+        assert!(
+            assets
+                .load(crate::icons::WhatfastIcon::Search.path_data())
+                .expect("the source answers")
+                .is_some()
+        );
+    }
+
     fn arguments(command: char) -> Option<usize> {
         match command {
             'M' | 'm' | 'L' | 'l' | 'T' | 't' => Some(2),
@@ -886,6 +985,8 @@ mod tests {
                 "archive",
                 "attach",
                 "bell",
+                "bot",
+                "channels",
                 "chat",
                 "check",
                 "check-double",
@@ -919,9 +1020,11 @@ mod tests {
                 "sidebar",
                 "smile",
                 "split",
+                "status",
                 "sticker",
                 "storage",
                 "trash",
+                "trash-outline",
                 "video",
                 "warning",
             ]

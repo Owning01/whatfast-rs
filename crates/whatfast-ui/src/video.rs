@@ -29,6 +29,13 @@ const BUBBLE_MAX_WIDTH: f32 = 420.;
 /// El alto maximo de la caja de la burbuja, antes de la escala.
 const BUBBLE_MAX_HEIGHT: f32 = 320.;
 
+/// The width of the box of a video in the viewer of the statuses. It matches
+/// the pictures of the same viewer.
+const STATUS_MAX_WIDTH: f32 = 800.;
+
+/// The height of the box of a video in the viewer of the statuses.
+const STATUS_MAX_HEIGHT: f32 = 640.;
+
 /// La proporcion de la caja cuando el mensaje no trae el tamaño del video.
 const DEFAULT_ASPECT: f32 = 16. / 9.;
 
@@ -80,8 +87,24 @@ pub(crate) fn is_video(attachment: &whatfast_protocol::AttachmentContent) -> boo
 /// La caja del video en la burbuja: la proporcion del archivo, topada por el
 /// ancho y el alto de la referencia.
 pub(crate) fn video_box_size(width: u32, height: u32, scale: f32) -> (f32, f32) {
-    let max_width = (BUBBLE_MAX_WIDTH * scale).max(1.);
-    let max_height = (BUBBLE_MAX_HEIGHT * scale).max(1.);
+    fit_box(width, height, scale, BUBBLE_MAX_WIDTH, BUBBLE_MAX_HEIGHT)
+}
+
+/// The box of the video of a status: the viewer fills the window, so the box
+/// grows past the width of a bubble.
+pub(crate) fn status_box_size(width: u32, height: u32, scale: f32) -> (f32, f32) {
+    fit_box(width, height, scale, STATUS_MAX_WIDTH, STATUS_MAX_HEIGHT)
+}
+
+fn fit_box(
+    width: u32,
+    height: u32,
+    scale: f32,
+    max_width: f32,
+    max_height: f32,
+) -> (f32, f32) {
+    let max_width = (max_width * scale).max(1.);
+    let max_height = (max_height * scale).max(1.);
     let (source_width, source_height) = if width == 0 || height == 0 {
         (DEFAULT_ASPECT, 1.)
     } else {
@@ -566,6 +589,20 @@ mod windows_mf {
     }
 
     /// El tamaño nativo del primer stream de video.
+    /// El tamano de un cuadro, como lo guarda `MF_MT_FRAME_SIZE`.
+    ///
+    /// Media Foundation lo empaqueta con el ancho en los 32 bits altos y el
+    /// alto en los bajos (`MFSetAttributeSize`). Leerlo al reves decodifica
+    /// un video vertical como si fuera horizontal y las filas se corren.
+    pub(super) fn unpack_size(packed: u64) -> (u32, u32) {
+        ((packed >> 32) as u32, packed as u32)
+    }
+
+    /// El camino de ida: el ancho en los 32 bits altos.
+    pub(super) fn pack_size(width: u32, height: u32) -> u64 {
+        u64::from(width) << 32 | u64::from(height)
+    }
+
     unsafe fn native_size(reader: &IMFSourceReader) -> Result<(u32, u32), String> {
         let media_type = unsafe {
             reader
@@ -574,7 +611,7 @@ mod windows_mf {
         };
         let packed = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }
             .map_err(|error| format!("The size of the video is unknown: {error}"))?;
-        Ok(((packed & 0xFFFF_FFFF) as u32, (packed >> 32) as u32))
+        Ok(unpack_size(packed))
     }
 
     /// El ancho y el alto que se decodifican: el nativo o el que entra en el
@@ -622,8 +659,7 @@ mod windows_mf {
     unsafe fn current_size(reader: &IMFSourceReader) -> Option<(u32, u32)> {
         let media_type = unsafe { reader.GetCurrentMediaType(VIDEO_STREAM) }.ok()?;
         let packed = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }.ok()?;
-        let width = (packed & 0xFFFF_FFFF) as u32;
-        let height = (packed >> 32) as u32;
+        let (width, height) = unpack_size(packed);
         (width > 0 && height > 0).then_some((width, height))
     }
 
@@ -637,10 +673,7 @@ mod windows_mf {
                 .and_then(|()| media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32))
                 .and_then(|()| {
                     if width > 0 && height > 0 {
-                        media_type.SetUINT64(
-                            &MF_MT_FRAME_SIZE,
-                            u64::from(height) << 32 | u64::from(width),
-                        )
+                        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
                     } else {
                         Ok(())
                     }
@@ -683,7 +716,10 @@ mod windows_mf {
         // una sexta parte del tiempo de `resize`, y en una burbuja no se
         // nota la diferencia.
         let small = image::imageops::thumbnail(&buffer, MAX_WIDTH, target_height);
-        (small.into_raw(), MAX_WIDTH, target_height)
+        // `thumbnail` conserva la proporcion y puede devolver un pixel menos:
+        // el tamano que se informa es el del buffer, o las filas se corren.
+        let (width, height) = small.dimensions();
+        (small.into_raw(), width, height)
     }
 
     unsafe fn sample_bytes(
@@ -736,7 +772,7 @@ pub(crate) fn trim_video(
 
 #[cfg(test)]
 mod tests {
-    use super::{VideoPlayback, is_video, video_box_size};
+    use super::{VideoPlayback, is_video, status_box_size, video_box_size};
     use whatfast_protocol::AttachmentContent;
 
     fn attachment(mime: &str) -> AttachmentContent {
@@ -756,6 +792,21 @@ mod tests {
         let mut note = attachment("video/mp4");
         note.voice_note = true;
         assert!(!is_video(&note));
+    }
+
+    #[test]
+    fn the_viewer_gives_a_video_more_room_than_a_bubble() {
+        // The same landscape file: the bubble stops at 420 and the viewer at
+        // 800, so the status is not a postage stamp on a full window.
+        let (bubble_width, _) = video_box_size(1920, 1080, 1.0);
+        let (viewer_width, viewer_height) = status_box_size(1920, 1080, 1.0);
+        assert!((bubble_width - 420.).abs() < 0.5, "ancho {bubble_width}");
+        assert!((viewer_width - 800.).abs() < 0.5, "ancho {viewer_width}");
+        assert!((viewer_height - 450.).abs() < 0.5, "alto {viewer_height}");
+        // A portrait video keeps its shape and stays inside the box.
+        let (width, height) = status_box_size(576, 1024, 1.0);
+        assert!(height <= 640. && width <= 800., "{width}x{height}");
+        assert!((height / width - 1024. / 576.).abs() < 0.01);
     }
 
     #[test]
@@ -780,6 +831,17 @@ mod tests {
         let (small, _) = video_box_size(1920, 1080, 1.0);
         let (large, _) = video_box_size(1920, 1080, 2.0);
         assert!((large - small * 2.).abs() < 0.5);
+    }
+
+    /// Media Foundation guarda el ancho en los 32 bits altos: leerlo al
+    /// reves decodifica un video vertical como horizontal y corre las filas.
+    #[cfg(windows)]
+    #[test]
+    fn the_size_of_a_frame_keeps_the_width_in_the_high_bits() {
+        let packed = u64::from(576u32) << 32 | u64::from(1024u32);
+        assert_eq!(super::windows_mf::unpack_size(packed), (576, 1024));
+        assert_eq!(super::windows_mf::pack_size(576, 1024), packed);
+        assert_eq!(super::windows_mf::unpack_size(packed).1, 1024);
     }
 
     #[test]

@@ -1165,3 +1165,26 @@ fn insert_message_adopts_a_missing_chat() {
     assert_eq!(chat.unread_count, 1);
     assert_eq!(chat.last_message_id, "m1");
 }
+
+#[test]
+fn the_preview_of_a_chat_skips_a_message_that_was_deleted() {
+    let (_dir, store) = temp_store("revoked-preview");
+    store
+        .insert_message(&message("a@x", "m1", 10, false, "hola"))
+        .unwrap();
+    store
+        .insert_message(&message("a@x", "m2", 20, false, "chau"))
+        .unwrap();
+    assert_eq!(
+        store.chat("a@x").unwrap().unwrap().last_message_text,
+        "chau"
+    );
+
+    store.mark_message_revoked("a@x", "m2").unwrap();
+    let chat = store.chat("a@x").unwrap().unwrap();
+    assert_eq!(
+        chat.last_message_id, "m1",
+        "the pointer goes back to the last message that can be seen"
+    );
+    assert_eq!(chat.last_message_text, "hola");
+}

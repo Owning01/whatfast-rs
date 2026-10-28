@@ -29,7 +29,7 @@ use gpui::{
     Subscription, UniformListScrollHandle, WeakEntity, Window, actions, point, px,
 };
 use gpui_component::{
-    Theme, ThemeMode, VirtualListScrollHandle,
+    ActiveTheme as _, Theme, ThemeMode, VirtualListScrollHandle,
     input::{InputEvent, InputState},
 };
 use smol::Timer;
@@ -41,7 +41,7 @@ use whatfast_model::{
     emoji_picker::{EmojiCategory, filtered as filter_emojis},
     favorites,
     model::{CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
-    settings::{self, Density, Settings},
+    settings::{self, ChatBackground, Density, Settings},
     starred, sticker,
 };
 use whatfast_protocol::{
@@ -264,6 +264,24 @@ pub(crate) struct ReactionDetails {
     pub(crate) reactions: Rc<Vec<whatfast_protocol::Reaction>>,
 }
 
+/// Una foto de la conversacion que el visor puede mostrar: la que esta
+/// abierta y las vecinas que ofrece el carrusel de miniaturas.
+#[derive(Clone, Debug)]
+pub(crate) struct ViewerItem {
+    pub(crate) message_id: String,
+    pub(crate) path: String,
+    pub(crate) caption: String,
+    pub(crate) sticker: bool,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) from_me: bool,
+    /// The name of the sender of the picture, already resolved: the viewer
+    /// never guesses it from the jid.
+    pub(crate) sender_name: String,
+    pub(crate) sender_avatar: String,
+    pub(crate) timestamp_ms: i64,
+}
+
 /// The image the user is looking at, full size.
 #[derive(Clone, Debug)]
 pub(crate) struct ImageViewer {
@@ -276,6 +294,78 @@ pub(crate) struct ImageViewer {
     /// it did not, and the viewer then reads the file header instead.
     pub(crate) width: u32,
     pub(crate) height: u32,
+    /// Every picture of the conversation, in the order of the messages: the
+    /// arrows and the strip of thumbnails walk this list.
+    pub(crate) gallery: Vec<ViewerItem>,
+    /// The position of the picture on screen inside `gallery`.
+    pub(crate) index: usize,
+    /// The zoom of the picture over its natural fit.
+    pub(crate) zoom: f32,
+}
+
+impl ImageViewer {
+    /// The picture on screen.
+    pub(crate) fn current(&self) -> Option<&ViewerItem> {
+        self.gallery.get(self.index)
+    }
+
+    /// Shows another picture of the gallery and copies its data to the flat
+    /// fields, which are the ones that measure the picture.
+    pub(crate) fn show(&mut self, index: usize) {
+        let Some(item) = self.gallery.get(index) else {
+            return;
+        };
+        self.index = index;
+        self.message_id = item.message_id.clone();
+        self.path = item.path.clone();
+        self.caption = item.caption.clone();
+        self.sticker = item.sticker;
+        self.width = item.width;
+        self.height = item.height;
+        self.zoom = 1.;
+    }
+
+    /// Whether there is a picture before or after this one.
+    pub(crate) fn has_previous(&self) -> bool {
+        self.index > 0
+    }
+
+    pub(crate) fn has_next(&self) -> bool {
+        self.index + 1 < self.gallery.len()
+    }
+}
+
+
+/// The multiple selection of the chat list: the menu of the column picks
+/// several chats and then applies one action to all of them.
+#[derive(Default)]
+pub(crate) struct ChatSelection {
+    pub(crate) ids: HashSet<String>,
+}
+
+/// What the PIN dialog does: turn the lock on for the first time, or off.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum PinDialogMode {
+    Enable,
+    Disable,
+}
+
+/// The dialog of the PIN lock.
+pub(crate) struct PinDialog {
+    pub(crate) mode: PinDialogMode,
+    pub(crate) pin: Entity<InputState>,
+    pub(crate) repeat: Entity<InputState>,
+    pub(crate) error: Option<String>,
+}
+
+/// The creation of a group: the name and the contacts the user marks in the
+/// list.
+pub(crate) struct CreateGroupState {
+    pub(crate) name: Entity<InputState>,
+    /// The transport jids of the participants that are marked.
+    pub(crate) selected: HashSet<String>,
+    /// The request is on its way: the button of the dialog waits.
+    pub(crate) pending: bool,
 }
 
 /// The voice note that the microphone is keeping.
@@ -291,12 +381,25 @@ pub(crate) struct RecordingState {
     /// of the encoder, even if a `Stop` was already queued before the
     /// `Cancel`.
     pub(crate) discarded: bool,
+    /// Whether the capture is paused: the clock and the wave stay still.
+    pub(crate) paused: bool,
+    /// When the current pause started, to take it out of the clock.
+    pub(crate) paused_at: Option<Instant>,
+    /// The time that the note spent paused, before the current pause.
+    pub(crate) paused_total: Duration,
+    /// The loudness of the latest ticks, from zero to one: the wave of the
+    /// pill paints them from left to right.
+    pub(crate) levels: Vec<f32>,
 }
 
 impl RecordingState {
     /// The length of the note so far, in seconds.
     pub(crate) fn elapsed_seconds(&self) -> f32 {
-        self.started.elapsed().as_secs_f32()
+        let mut elapsed = self.started.elapsed().saturating_sub(self.paused_total);
+        if let Some(paused_at) = self.paused_at {
+            elapsed = elapsed.saturating_sub(paused_at.elapsed());
+        }
+        elapsed.as_secs_f32()
     }
 }
 
@@ -380,6 +483,14 @@ pub(crate) struct ChatContextMenu {
     /// The conversation the menu works on.
     pub(crate) chat_id: String,
     /// Where the pointer was when the menu opened, in pixels of the window.
+    pub(crate) position: Point<Pixels>,
+}
+
+/// The menu that the right click opens over the picture of the viewer.
+///
+/// WhatsApp offers the copy of the picture where the pointer is: the viewer
+/// works on the picture on screen, so the menu only remembers the place.
+pub(crate) struct ImageContextMenu {
     pub(crate) position: Point<Pixels>,
 }
 
@@ -668,6 +779,16 @@ impl ReactionDetails {
     }
 }
 
+/// The picture of a call converted to what the atlas of the interface paints:
+/// both ends use the fixed geometry of the call.
+fn call_image(decoded: crate::call_video::Decoded) -> Option<Arc<gpui::RenderImage>> {
+    crate::video::render_image(crate::video::VideoFrame {
+        width: crate::call_video::WIDTH,
+        height: crate::call_video::HEIGHT,
+        bgra: decoded.bgra,
+    })
+}
+
 /// The state of the application.
 pub(crate) struct Whatfast {
     pub(crate) rpc: RpcClient,
@@ -678,6 +799,19 @@ pub(crate) struct Whatfast {
     call_playback: Option<Arc<crate::call_audio::Playback>>,
     /// The id whose audio the pump task is carrying.
     call_audio_id: Option<String>,
+    /// The live call's video: the camera, the decoder of the peer and the
+    /// decoder of the local preview. All three exist only with video on.
+    call_camera: Option<crate::call_video::Camera>,
+    call_decoder: Option<crate::call_video::Decoder>,
+    local_decoder: Option<crate::call_video::Decoder>,
+    /// The id whose video the pump task is carrying.
+    call_video_id: Option<String>,
+    /// Bumped whenever the video stops: a pump of an older generation exits
+    /// at its next step, so two calls never paint each other.
+    call_video_generation: u64,
+    /// What the overlay paints: the pictures of both ends and the reason the
+    /// video is not there, when it is not.
+    pub(crate) call_video: crate::call_video::CallVideo,
     pub(crate) composer: Entity<InputState>,
     /// The pictures that the user pasted or picked and that wait for the
     /// button of the send, the same way the reference shows them over the
@@ -701,6 +835,11 @@ pub(crate) struct Whatfast {
     pub(crate) emoji_target: Option<EmojiTarget>,
     pub(crate) reaction_details: Option<ReactionDetails>,
     pub(crate) image_viewer: Option<ImageViewer>,
+    pub(crate) image_context_menu: Option<ImageContextMenu>,
+    /// Whether the row of quick reactions of the viewer is open.
+    pub(crate) viewer_reactions_open: bool,
+    /// Whether the card with the information of the message is open.
+    pub(crate) viewer_info_open: bool,
     pub(crate) replying_to_message_id: Option<String>,
     pub(crate) chat_drafts: HashMap<String, ChatDraft>,
     pub(crate) recent_chat_ids: Vec<String>,
@@ -721,6 +860,9 @@ pub(crate) struct Whatfast {
     /// The air between rows and messages, mirrored for the hot path of the
     /// drawing.
     pub(crate) density: Density,
+    /// The width of the thread of the messages, as the last frame measured
+    /// it: the bubble asks for its widest part of it.
+    pub(crate) message_wrap_width: gpui::Pixels,
     /// Whether a plain Enter sends the message.
     pub(crate) enter_to_send: bool,
     /// Whether the chat list stays beside the conversation.
@@ -733,6 +875,12 @@ pub(crate) struct Whatfast {
     pub(crate) custom_themes: Vec<AppTheme>,
     /// The custom theme whose colors are being edited.
     pub(crate) editing_theme: Option<String>,
+    /// The token of the theme whose value the field of the editor holds.
+    pub(crate) editing_token: Option<ThemeToken>,
+    /// The hex value the user is typing for [`Self::editing_token`].
+    pub(crate) theme_token_draft: String,
+    /// The field of the value of a token.
+    pub(crate) theme_token_input: Entity<InputState>,
     /// The queue of the toasts of the system.
     pub(crate) notifier: Notifier,
     pub(crate) chat_scroll: UniformListScrollHandle,
@@ -799,6 +947,24 @@ pub(crate) struct Whatfast {
     /// Whether the column of the chats is hidden, so the conversation takes
     /// the whole window.
     pub(crate) sidebar_hidden: bool,
+    /// Whether the menu of the three dots of the column of the chats is open.
+    pub(crate) chat_list_menu: bool,
+    /// Whether the dialog that confirms the logout is open.
+    pub(crate) confirm_logout_open: bool,
+    /// Whether the card that explains the view-once messages is open.
+    pub(crate) view_once_info_open: bool,
+    /// The dialog that creates a group, when it is open.
+    pub(crate) create_group: Option<CreateGroupState>,
+    /// The multiple selection of the chat list, while the mode is on.
+    pub(crate) selection: Option<ChatSelection>,
+    /// Whether the window is covered by the PIN of the app lock.
+    pub(crate) locked: bool,
+    /// The digits of the PIN written in the lock screen.
+    pub(crate) pin_buffer: String,
+    /// The error of the last unlock attempt.
+    pub(crate) lock_error: Option<String>,
+    /// The dialog that turns the PIN on or off, when it is open.
+    pub(crate) pin_dialog: Option<PinDialog>,
     /// Whether the border of the column of the chats is being dragged.
     pub(crate) sidebar_dragging: bool,
     /// The voice note that the window is playing, when there is one.
@@ -943,6 +1109,12 @@ impl Whatfast {
                 .placeholder(i18n::t("Search or start a new chat"))
                 .clean_on_escape()
         });
+        // The field of the value of a token of a theme, in the editor.
+        let theme_token_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(i18n::t("#rrggbb"))
+                .clean_on_escape()
+        });
         let focus_handle = cx.focus_handle();
         // GPUI only routes key events along the focused path. Anchor focus to
         // the app root from the start so shortcuts work before (and after) any
@@ -1060,6 +1232,19 @@ impl Whatfast {
                     }
                 }
             }),
+            // The value of a token of the editor of the themes.
+            cx.subscribe_in(&theme_token_input, window, {
+                let theme_token_input = theme_token_input.clone();
+                move |this, _, event, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.theme_token_draft = theme_token_input.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.apply_theme_token(window, cx);
+                    }
+                }
+            }),
             // The return key of the card of the fast mode asks the question,
             // the same way the button of the card does.
             cx.subscribe_in(&quick_ask_input, window, {
@@ -1110,12 +1295,21 @@ impl Whatfast {
         })
         .detach();
 
+        // The lock screen starts on when the profile has a PIN: the window
+        // shows nothing until the PIN is written.
+        let locked = !settings.app_lock_hash.is_empty();
         let mut this = Self {
             rpc,
             store: Store::default(),
             call_capture: None,
             call_playback: None,
             call_audio_id: None,
+            call_camera: None,
+            call_decoder: None,
+            local_decoder: None,
+            call_video_id: None,
+            call_video_generation: 0,
+            call_video: crate::call_video::CallVideo::default(),
             composer,
             pending_images: PendingImages::default(),
             search_input,
@@ -1136,6 +1330,9 @@ impl Whatfast {
             emoji_target: None,
             reaction_details: None,
             image_viewer: None,
+    image_context_menu: None,
+    viewer_reactions_open: false,
+    viewer_info_open: false,
             replying_to_message_id: None,
             chat_drafts: HashMap::new(),
             recent_chat_ids: Vec::new(),
@@ -1153,12 +1350,16 @@ impl Whatfast {
             ui_scale,
             settings,
             density,
+            message_wrap_width: px(536.),
             enter_to_send,
             split_view,
             battery_saver,
             theme_id,
             custom_themes,
             editing_theme: None,
+            editing_token: None,
+            theme_token_draft: String::new(),
+            theme_token_input,
             notifier: Notifier::new(),
             chat_scroll: UniformListScrollHandle::new(),
             chat_smooth_scroll: SmoothScrollState::default(),
@@ -1200,6 +1401,15 @@ impl Whatfast {
             video_tick: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hidden: false,
+            chat_list_menu: false,
+            confirm_logout_open: false,
+            view_once_info_open: false,
+            create_group: None,
+            selection: None,
+            locked,
+            pin_buffer: String::new(),
+            lock_error: None,
+            pin_dialog: None,
             sidebar_dragging: false,
             voice: VoiceState::default(),
             voice_audio: VoiceAudio::new(),
@@ -1236,9 +1446,11 @@ impl Whatfast {
             attachment_bar,
             _subscriptions,
         };
-        if let Some(error) = startup_error {
+        if startup_error.is_some() {
             this.store.screen = Screen::Fatal;
-            this.store.fatal_error = Some(format!("Could not start the local backend: {error}"));
+            this.store.fatal_error = Some(
+                i18n::t("Whatfast could not start its local backend. Restart Whatfast.").into(),
+            );
             return this;
         }
         // The favorites belong to the profile, not to the account: they come
@@ -1401,8 +1613,7 @@ impl Whatfast {
                 PendingRequest::Hello | PendingRequest::Auth => {
                     self.store.screen = Screen::Fatal;
                     self.store.fatal_error = Some(
-                        "The local backend stopped responding during startup. Restart Whatfast to reconnect."
-                            .into(),
+                        i18n::t("The local backend stopped responding during startup. Restart Whatfast to reconnect.").into(),
                     );
                 }
                 PendingRequest::Avatar { chat_id } => {
@@ -1416,7 +1627,8 @@ impl Whatfast {
                         && state.chat_id == chat_id
                     {
                         state.loading = false;
-                        state.error = Some("Loading chat info timed out. Try again.".into());
+                        state.error =
+                            Some(i18n::t("Loading chat info timed out. Try again.").into());
                     }
                 }
                 PendingRequest::MentionDirectory { chat_id } => {
@@ -1436,16 +1648,16 @@ impl Whatfast {
                     self.image_failures.insert(
                         (chat_id, message_id),
                         if sticker {
-                            "Sticker download timed out · Click to retry".into()
+                            i18n::t("Sticker download timed out · Click to retry").into()
                         } else {
-                            "Photo download timed out · Click to retry".into()
+                            i18n::t("Photo download timed out · Click to retry").into()
                         },
                     );
                 }
                 PendingRequest::Search { generation, .. }
                     if generation == self.search_generation =>
                 {
-                    self.search_error = Some("Search timed out. Try again.".into());
+                    self.search_error = Some(i18n::t("Search timed out. Try again.").into());
                 }
                 PendingRequest::SendText {
                     chat_id,
@@ -1469,8 +1681,9 @@ impl Whatfast {
                         window,
                         cx,
                     );
-                    self.store.toast_error =
-                        Some("Sending timed out. Your draft was restored; try again.".into());
+                    self.store.toast_error = Some(
+                        i18n::t("Sending timed out. Your draft was restored; try again.").into(),
+                    );
                 }
                 PendingRequest::SendImage {
                     chat_id,
@@ -1485,8 +1698,9 @@ impl Whatfast {
                         window,
                         cx,
                     );
-                    self.store.toast_error =
-                        Some("Sending timed out. Your draft was restored; try again.".into());
+                    self.store.toast_error = Some(
+                        i18n::t("Sending timed out. Your draft was restored; try again.").into(),
+                    );
                 }
                 PendingRequest::SendReaction {
                     chat_id,
@@ -1518,11 +1732,18 @@ impl Whatfast {
                 PendingRequest::MessagesAfter { .. } => {
                     self.newer_load_failed = true;
                     self.store.toast_error =
-                        Some("Loading newer messages timed out. Try again.".into());
+                        Some(i18n::t("Loading newer messages timed out. Try again.").into());
                 }
                 PendingRequest::Logout => {
                     self.confirming_logout = false;
                     self.store.toast_error = Some(i18n::t("Logout timed out. Try again.").into());
+                }
+                PendingRequest::CreateGroup => {
+                    if let Some(state) = self.create_group.as_mut() {
+                        state.pending = false;
+                    }
+                    self.store.toast_error =
+                        Some(i18n::t("The group could not be created").into());
                 }
                 PendingRequest::Search { .. } => {}
                 // Best-effort presence broadcast; peers expire it on their own.
@@ -1541,7 +1762,7 @@ impl Whatfast {
                 } => {
                     self.store.set_chat_archived(&chat_id, previous_archived);
                     self.store.toast_error =
-                        Some("Archiving the chat timed out. Try again.".into());
+                        Some(i18n::t("Archiving the chat timed out. Try again.").into());
                 }
                 PendingRequest::SetChatMute {
                     chat_id,
@@ -1572,7 +1793,7 @@ impl Whatfast {
                         self.store.restore_message(previous);
                     }
                     self.store.toast_error =
-                        Some("Deleting the message timed out. Try again.".into());
+                        Some(i18n::t("Deleting the message timed out. Try again.").into());
                 }
                 PendingRequest::VotePoll {
                     chat_id,
@@ -1589,7 +1810,8 @@ impl Whatfast {
                 } => {
                     self.restore_failed_edit(&chat_id, &message_id, &draft_text, window, cx);
                     self.store.toast_error = Some(
-                        "Editing the message timed out. Your draft was restored; try again.".into(),
+                        i18n::t("Editing the message timed out. Your draft was restored; try again.")
+                            .into(),
                     );
                 }
                 PendingRequest::OlderHistory { chat_id } => {
@@ -1598,28 +1820,28 @@ impl Whatfast {
                         self.rpc.request_history_coverage(chat_id.clone()),
                     );
                     self.store.toast_error =
-                        Some("Asking for older history timed out. Try again.".into());
+                        Some(i18n::t("Asking for older history timed out. Try again.").into());
                 }
                 PendingRequest::Reconnect => {
                     self.store.connection = ConnectionState::Offline;
-                    self.store.connection_detail = "Reconnect failed".into();
+                    self.store.connection_detail = i18n::t("Reconnect failed").into();
                     self.store.toast_error =
                         Some(i18n::t("Reconnect timed out. Try again.").into());
                 }
                 PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache => {
                     self.integrity_checking = false;
                     self.store.toast_error =
-                        Some("Checking the local storage timed out. Try again.".into());
+                        Some(i18n::t("Checking the local storage timed out. Try again.").into());
                 }
                 PendingRequest::Stickers => {
                     self.sticker_library_loading = false;
                     self.store.toast_error =
-                        Some("Loading the stickers timed out. Try again.".into());
+                        Some(i18n::t("Loading the stickers timed out. Try again.").into());
                 }
                 PendingRequest::Newsletters => {
                     self.newsletters_loading = false;
                     self.store.toast_error =
-                        Some("Loading the newsletters timed out. Try again.".into());
+                        Some(i18n::t("Loading the newsletters timed out. Try again.").into());
                 }
                 PendingRequest::MessageAttachment {
                     chat_id,
@@ -1632,7 +1854,7 @@ impl Whatfast {
                     forget_attachment_request(&mut self.attachment_save_requested, &key);
                     self.attachment_failures.insert(
                         key,
-                        "Downloading the file timed out · Click to retry".into(),
+                        i18n::t("Downloading the file timed out · Click to retry").into(),
                     );
                 }
                 PendingRequest::AgentAsk { .. } => {
@@ -1810,11 +2032,11 @@ impl Whatfast {
                 self.handle_response(pending, response, window, cx)
             }
             RpcIncoming::Event(event) => self.handle_event(event, window, cx),
-            RpcIncoming::Exited(error) => {
+            RpcIncoming::Exited(_) => {
                 self.store.connection = ConnectionState::Failed;
-                self.store.connection_detail = error;
-                self.store.toast_error =
-                    Some("Backend stopped. Restart Whatfast to reconnect.".into());
+                let message = i18n::t("Backend stopped. Restart Whatfast to reconnect.");
+                self.store.connection_detail = message.into();
+                self.store.toast_error = Some(message.into());
             }
             RpcIncoming::Invalid => {
                 self.store.toast_error = Some(i18n::t("Ignored an invalid backend envelope").into())
@@ -1850,7 +2072,7 @@ impl Whatfast {
         if let rpc_response::Result::Error(error) = result {
             if let PendingRequest::Search { generation, .. } = &pending {
                 if *generation == self.search_generation {
-                    self.search_error = Some(error.message);
+                    self.search_error = Some(i18n::t("The search failed. Try again.").into());
                 }
                 return;
             }
@@ -1864,7 +2086,8 @@ impl Whatfast {
                 self.search_target_message_id = None;
                 self.pending_search_scroll_id = None;
                 self.load_selected_chat(chat_id.clone());
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The message could not be found.").into());
                 return;
             }
             if matches!(&pending, PendingRequest::MessagesAfter { .. }) {
@@ -1873,10 +2096,8 @@ impl Whatfast {
             // The fast mode and the automations keep their own line of error:
             // a toast at the corner does not say which card it belongs to.
             if let PendingRequest::AgentAsk { .. } = &pending {
-                self.quick_ask.fail(i18n::t_args(
-                    "The agent did not answer: {error}",
-                    &[("error", &error.message)],
-                ));
+                self.quick_ask
+                    .fail(i18n::t("The agent did not answer. Try again.").to_string());
                 cx.notify();
                 return;
             }
@@ -1975,7 +2196,8 @@ impl Whatfast {
                     && state.chat_id == *chat_id
                 {
                     state.loading = false;
-                    state.error = Some(error.message);
+                    state.error =
+                        Some(i18n::t("The chat information could not be loaded. Try again.").into());
                 }
                 return;
             }
@@ -2042,13 +2264,13 @@ impl Whatfast {
                 self.image_failures.insert(
                     (chat_id.clone(), message_id.clone()),
                     if sticker && error.retryable {
-                        "Couldn't load sticker · Click to retry".into()
+                        i18n::t("Couldn't load sticker · Click to retry").into()
                     } else if sticker {
-                        "Sticker is no longer available".into()
+                        i18n::t("That sticker is no longer available").into()
                     } else if error.retryable {
-                        "Couldn't load photo · Click to retry".into()
+                        i18n::t("Couldn't load photo · Click to retry").into()
                     } else {
-                        "Photo is no longer available".into()
+                        i18n::t("Photo is no longer available").into()
                     },
                 );
                 return;
@@ -2063,13 +2285,22 @@ impl Whatfast {
             }
             // The changes below are optimistic: the client shows them before
             // the backend answers, so a failure has to put them back.
+            if matches!(pending, PendingRequest::CreateGroup) {
+                if let Some(state) = self.create_group.as_mut() {
+                    state.pending = false;
+                }
+                self.store.toast_error =
+                    Some(i18n::t("The group could not be created").into());
+                return;
+            }
             if let PendingRequest::SetChatPin {
                 chat_id,
                 previous_pinned,
             } = &pending
             {
                 self.store.set_chat_pinned(chat_id, *previous_pinned);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The chat could not be pinned. Try again.").into());
                 return;
             }
             if let PendingRequest::SetChatArchive {
@@ -2078,7 +2309,8 @@ impl Whatfast {
             } = &pending
             {
                 self.store.set_chat_archived(chat_id, *previous_archived);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The chat could not be archived. Try again.").into());
                 return;
             }
             if let PendingRequest::SetChatMute {
@@ -2089,7 +2321,8 @@ impl Whatfast {
             {
                 self.store
                     .set_chat_muted(chat_id, *previous_muted, *previous_mute_until_ms);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The chat could not be muted. Try again.").into());
                 return;
             }
             if let PendingRequest::SetChatBlock {
@@ -2098,7 +2331,8 @@ impl Whatfast {
             } = &pending
             {
                 self.store.set_chat_blocked(chat_id, *previous_blocked);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The chat could not be blocked. Try again.").into());
                 return;
             }
             if let PendingRequest::DeleteMessage {
@@ -2112,7 +2346,8 @@ impl Whatfast {
                 {
                     self.store.restore_message(previous);
                 }
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The message could not be deleted. Try again.").into());
                 return;
             }
             if let PendingRequest::VotePoll {
@@ -2122,7 +2357,8 @@ impl Whatfast {
             } = &pending
             {
                 self.rollback_poll_vote(chat_id, poll_message_id, *generation);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The vote could not be sent. Try again.").into());
                 return;
             }
             if let PendingRequest::EditMessage {
@@ -2132,7 +2368,8 @@ impl Whatfast {
             } = &pending
             {
                 self.restore_failed_edit(chat_id, message_id, draft_text, window, cx);
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.toast_error =
+                    Some(i18n::t("The message could not be edited. Try again.").into());
                 return;
             }
             if let PendingRequest::OlderHistory { chat_id } = &pending {
@@ -2142,13 +2379,15 @@ impl Whatfast {
                     &mut self.store,
                     self.rpc.request_history_coverage(chat_id.clone()),
                 );
-                self.store.toast_error = Some(error.message.clone());
+                self.store.toast_error =
+                    Some(i18n::t("The old messages could not be loaded. Try again.").into());
                 return;
             }
             if let PendingRequest::Reconnect = &pending {
                 self.store.connection = ConnectionState::Offline;
-                self.store.connection_detail = "Reconnect failed".into();
-                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                self.store.connection_detail = i18n::t("Reconnect failed").into();
+                self.store.toast_error =
+                    Some(i18n::t("WhatsApp could not connect. Try again.").into());
                 return;
             }
             if let PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache = &pending {
@@ -2173,31 +2412,45 @@ impl Whatfast {
                 self.attachment_failures.insert(
                     key,
                     if error.retryable {
-                        "Couldn't download the file · Click to retry".into()
+                        i18n::t("Couldn't download the file · Click to retry").into()
                     } else {
-                        "That file is no longer available".into()
+                        i18n::t("That file is no longer available").into()
                     },
                 );
+                return;
+            }
+            if matches!(
+                &pending,
+                PendingRequest::CallPlace | PendingRequest::CallAccept
+            ) {
+                // A call that the backend refused leaves no bar behind.
+                self.store.call = None;
+                self.stop_call_audio();
+                self.stop_call_video();
+            }
+            if matches!(&pending, PendingRequest::CallAudio | PendingRequest::CallVideo) {
+                // Fire-and-forget frames: a lost one is not an error to show.
                 return;
             }
             if matches!(&pending, PendingRequest::Logout) {
                 self.confirming_logout = false;
                 self.store.screen = Screen::Fatal;
-                self.store.fatal_error = Some(format!(
-                    "Logout stopped because local account data could not be safely cleared ({}: {}). Whatfast will not re-pair until this is resolved.",
-                    error.code, error.message
-                ));
+                self.store.fatal_error = Some(
+                    i18n::t("Logout stopped because the local account data could not be cleared. Restart Whatfast.")
+                        .into(),
+                );
                 return;
             }
             if matches!(&pending, PendingRequest::Messages { prepend: true, .. }) {
                 self.pending_prepend_anchor = None;
             }
-            let message = format!("{}: {}", error.code, error.message);
             if matches!(pending, PendingRequest::Hello) {
-                self.store.fatal_error = Some(message);
+                self.store.fatal_error =
+                    Some(i18n::t("Whatfast could not start. Restart Whatfast.").into());
                 self.store.screen = Screen::Fatal;
             } else {
-                self.store.toast_error = Some(message);
+                self.store.toast_error =
+                    Some(i18n::t("Something went wrong. Try again.").into());
             }
             return;
         }
@@ -2205,10 +2458,10 @@ impl Whatfast {
             (PendingRequest::Hello, rpc_response::Result::Hello(hello)) => {
                 if hello.protocol_version != PROTOCOL_VERSION {
                     self.store.screen = Screen::Fatal;
-                    self.store.fatal_error = Some(format!(
-                        "Protocol mismatch: desktop v{PROTOCOL_VERSION}, backend v{}",
-                        hello.protocol_version
-                    ));
+                    self.store.fatal_error = Some(
+                        i18n::t("Whatfast and its backend are different versions. Restart Whatfast.")
+                            .into(),
+                    );
                 } else {
                     self.request(
                         rpc_request::Request::GetAuthState(
@@ -2354,14 +2607,9 @@ impl Whatfast {
                 } else {
                     self.pending_top_scroll_id = Some(page.first_unread_message_id);
                 }
-                // At the newest with nothing unread the open already counts
-                // as seen: mark it without waiting for a list render, so a
-                // stuck badge heals on open even if the render gate never
-                // fires. With unread pending the scroll to them renders and
-                // the list gate marks on view instead.
-                if window.is_window_active() {
-                    self.mark_read();
-                }
+                // Mark read on open unconditionally so the badge clears
+                // even if list render gate has not fired.
+                self.mark_read();
             }
             (
                 PendingRequest::MessagesAfter {
@@ -2486,9 +2734,9 @@ impl Whatfast {
                             matches!(content, whatfast_protocol::message::Content::Image(image) if image.sticker)
                         });
                     let label = if sticker {
-                        "Sticker is no longer available"
+                        i18n::t("That sticker is no longer available")
                     } else {
-                        "Photo is no longer available"
+                        i18n::t("Photo is no longer available")
                     };
                     self.image_failures.insert(key, label.into());
                 } else {
@@ -2591,7 +2839,7 @@ impl Whatfast {
                 // deja su motivo a la vista, y nunca pisa una conexion viva.
                 if !reconnect.started && self.store.connection != ConnectionState::Connected {
                     self.store.connection_detail =
-                        "Reconnect is already running or this device is not linked".into();
+                        i18n::t("WhatsApp is not linked on this device").into();
                 }
             }
             (PendingRequest::SendAttachment { .. }, rpc_response::Result::SendAttachment(sent)) => {
@@ -2620,10 +2868,11 @@ impl Whatfast {
                     if self.attachment_play_requested.as_ref() == Some(&key) {
                         self.attachment_play_requested = None;
                         self.video.waiting = false;
-                        self.video.error = Some("That file is no longer available".into());
+                        self.video.error =
+                            Some(i18n::t("That file is no longer available").into());
                     }
                     self.attachment_failures
-                        .insert(key, "That file is no longer available".into());
+                        .insert(key, i18n::t("That file is no longer available").into());
                 } else {
                     self.attachment_failures.remove(&key);
                     self.store.set_message_attachment_path(
@@ -2790,6 +3039,7 @@ impl Whatfast {
             }
             (PendingRequest::Statuses, rpc_response::Result::ListStatuses(response)) => {
                 self.store.set_statuses(response.chat_id, response.groups);
+                cx.notify();
             }
             (
                 PendingRequest::SubscribeNewsletter,
@@ -2894,6 +3144,40 @@ impl Whatfast {
                 self.automations_panel.take_remove(&response);
                 crate::automations_panel::load(self);
             }
+            (PendingRequest::CallPlace, rpc_response::Result::CallPlace(response)) => {
+                // A placed call has no id until this answer: the updates and
+                // the hang up of the backend carry the one it gives here.
+                match self.store.call.as_mut() {
+                    Some(call) => call.placed(response.call_id),
+                    // The user hung up before the id arrived: the call would
+                    // keep ringing on the other phone with nobody to end it.
+                    None => self.request(
+                        rpc_request::Request::CallHangup(whatfast_protocol::CallHangupRequest {
+                            call_id: response.call_id,
+                        }),
+                        PendingRequest::CallHangup,
+                    ),
+                }
+            }
+            (PendingRequest::CallAccept, rpc_response::Result::CallAccept(_)) => {
+                if let Some(call) = self.store.call.as_mut() {
+                    call.phase = "connecting".into();
+                }
+            }
+            (PendingRequest::CreateGroup, rpc_response::Result::CreateGroup(response)) => {
+                if let Some(state) = self.create_group.as_mut() {
+                    state.pending = false;
+                }
+                let Some(chat) = response.chat else {
+                    self.store.toast_error =
+                        Some(i18n::t("The group could not be created").into());
+                    return;
+                };
+                let chat_id = chat.id.clone();
+                self.store.upsert_chat(chat);
+                self.create_group = None;
+                self.open_chat(chat_id, window, cx);
+            }
             _ => {}
         }
     }
@@ -2932,34 +3216,52 @@ impl Whatfast {
     // Calls (v22)
     // ------------------------------------------------------------------
 
-    /// Places a voice call to the selected conversation.
-    pub(crate) fn call_place(&mut self, chat_id: String) {
+    /// Places a call to the selected conversation, with video when asked.
+    pub(crate) fn call_place(&mut self, chat_id: String, video: bool) {
         if self.store.call.is_some() {
             return;
         }
+        // Video needs the encoder and the decoder of this machine: without
+        // them the call goes out as a voice call instead of failing late.
+        let video = video && crate::call_video::ffmpeg().is_some();
+        // The sidecar calls the transport jid: the local id of a chat is not
+        // always the address that WhatsApp routes the call through.
+        let transport = self
+            .store
+            .chat(&chat_id)
+            .map(|chat| chat.transport_jid.clone())
+            .filter(|jid| !jid.is_empty())
+            .unwrap_or_else(|| chat_id.clone());
         self.store.call = Some(whatfast_model::model::CallState {
             chat_id: chat_id.clone(),
             phase: "placing".into(),
+            video,
             ..whatfast_model::model::CallState::default()
         });
         self.request(
             rpc_request::Request::CallPlace(whatfast_protocol::CallPlaceRequest {
-                chat_id,
-                video: false,
+                chat_id: transport,
+                video,
             }),
             PendingRequest::CallPlace,
         );
     }
 
     pub(crate) fn call_accept(&mut self) {
-        let Some(call) = self.store.call.clone() else {
+        let Some(call) = self.store.call.as_mut() else {
             return;
         };
-        let mut call = call;
+        // Answering with video needs the offer to carry it and the codec of
+        // this machine to be there.
+        let video = call.video && crate::call_video::ffmpeg().is_some();
+        call.video = video;
+        let call_id = call.call_id.clone();
+        // The bar changes now, not when the next update of the backend lands.
         call.phase = "connecting".into();
         self.request(
             rpc_request::Request::CallAccept(whatfast_protocol::CallAcceptRequest {
-                call_id: call.call_id,
+                call_id,
+                video,
             }),
             PendingRequest::CallAccept,
         );
@@ -2969,6 +3271,7 @@ impl Whatfast {
         let Some(call) = self.store.call.take() else {
             return;
         };
+        self.stop_call_video();
         self.request(
             rpc_request::Request::CallReject(whatfast_protocol::CallRejectRequest {
                 call_id: call.call_id,
@@ -2981,14 +3284,19 @@ impl Whatfast {
         let Some(call) = self.store.call.clone() else {
             return;
         };
-        self.request(
-            rpc_request::Request::CallHangup(whatfast_protocol::CallHangupRequest {
-                call_id: call.call_id,
-            }),
-            PendingRequest::CallHangup,
-        );
+        // A call that has no id yet is still being placed: the answer of the
+        // backend ends it, so no request goes with an empty id.
+        if !call.call_id.is_empty() {
+            self.request(
+                rpc_request::Request::CallHangup(whatfast_protocol::CallHangupRequest {
+                    call_id: call.call_id,
+                }),
+                PendingRequest::CallHangup,
+            );
+        }
         self.store.call = None;
         self.stop_call_audio();
+        self.stop_call_video();
     }
 
     pub(crate) fn call_toggle_mute(&mut self) {
@@ -3013,6 +3321,34 @@ impl Whatfast {
         }
     }
 
+    /// Turns the camera of a video call off, or back on.
+    ///
+    /// Off drops the encoder and stops sending: the peer keeps the last
+    /// picture, which is what a camera that is off looks like.
+    pub(crate) fn call_toggle_camera(&mut self) {
+        let Some(call) = self.store.call.as_ref() else {
+            return;
+        };
+        if !call.video {
+            return;
+        }
+        if self.call_video.camera_on {
+            self.call_video.camera_on = false;
+            self.call_camera = None; // dropping it kills ffmpeg
+            self.local_decoder = None;
+            self.call_video.local = None;
+            return;
+        }
+        self.call_video.camera_on = true;
+        match crate::call_video::Camera::open() {
+            Ok(camera) => self.call_camera = Some(camera),
+            Err(error) => {
+                eprintln!("call video: {error}");
+                self.call_video.error = Some(i18n::t("The camera could not open.").into());
+            }
+        }
+    }
+
     /// Opens the microphone and the speaker for the live call, and starts
     /// the pump task that carries the microphone frames to the bridge.
     fn start_call_audio(&mut self, call_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -3028,6 +3364,10 @@ impl Whatfast {
                 return;
             }
         };
+        // The mute of the last call does not follow the new one: the capture
+        // starts at the state the bar shows.
+        let muted = self.store.call.as_ref().is_some_and(|call| call.muted);
+        capture.set_muted(muted);
         let playback = match crate::call_audio::Playback::open() {
             Ok(playback) => Arc::new(playback),
             Err(error) => {
@@ -3040,7 +3380,6 @@ impl Whatfast {
         self.call_playback = Some(Arc::clone(&playback));
         self.call_capture = Some(capture);
         self.call_audio_id = Some(call_id.to_owned());
-        let _view = cx.entity();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 Timer::after(std::time::Duration::from_millis(20)).await;
@@ -3079,11 +3418,162 @@ impl Whatfast {
 
     fn stop_call_audio(&mut self) {
         self.call_audio_id = None;
+        if let Some(capture) = &self.call_capture {
+            // The mute is a static flag that outlives the capture: it does
+            // not follow the next call.
+            capture.set_muted(false);
+        }
         self.call_capture = None; // dropping closes the microphone and ends the pump
         if let Some(playback) = &self.call_playback {
             playback.flush();
         }
         self.call_playback = None;
+    }
+
+    /// Opens the camera and the two decoders of a video call.
+    ///
+    /// The local preview decodes the very stream that leaves toward the
+    /// bridge: one encode, one extra decode, and no second open of the camera.
+    fn start_call_video(&mut self, call_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let wants_video = self.store.call.as_ref().is_some_and(|call| call.video);
+        if !wants_video || self.call_video_id.as_deref() == Some(call_id) {
+            return;
+        }
+        self.call_video_id = Some(call_id.to_owned());
+        self.call_video.on = true;
+        self.call_video.error = None;
+        if crate::call_video::ffmpeg().is_none() {
+            self.call_video.on = false;
+            self.call_video.error =
+                Some(i18n::t("Video calls need ffmpeg, which is not installed.").into());
+            if let Some(call) = self.store.call.as_mut() {
+                call.video = false;
+            }
+            return;
+        }
+        match crate::call_video::Camera::open() {
+            Ok(camera) => {
+                match crate::call_video::Decoder::open() {
+                    Ok(decoder) => self.local_decoder = Some(decoder),
+                    Err(error) => eprintln!("call video: {error}"),
+                }
+                self.call_camera = Some(camera);
+                self.call_video.camera_on = true;
+            }
+            Err(error) => {
+                eprintln!("call video: {error}");
+                self.call_video.camera_on = false;
+                self.call_video.error = Some(i18n::t("The camera could not open.").into());
+            }
+        }
+        self.start_call_video_pump(window, cx);
+    }
+
+    /// The clock of the video: the camera out, the pictures in.
+    fn start_call_video_pump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.call_video_generation = self.call_video_generation.wrapping_add(1);
+        let generation = self.call_video_generation;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                Timer::after(std::time::Duration::from_millis(20)).await;
+                let Ok(live) = this.update(cx, |app, cx| {
+                    if app.call_video_generation != generation {
+                        return false;
+                    }
+                    app.pump_call_video(cx);
+                    app.call_video_id.is_some()
+                }) else {
+                    return; // the window closed
+                };
+                if !live {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// One step of the video pump: the camera toward the bridge and the
+    /// decoded pictures toward the overlay.
+    fn pump_call_video(&mut self, cx: &mut Context<Self>) {
+        let Some(call_id) = self.call_video_id.clone() else {
+            return;
+        };
+        if let Some(camera) = self.call_camera.take() {
+            let mut batch: Vec<Vec<u8>> = Vec::new();
+            while let Some(chunk) = camera.try_take() {
+                batch.push(chunk);
+            }
+            let failed = camera.failed();
+            let ended = camera.ended();
+            if failed {
+                self.call_video.camera_on = false;
+                self.call_video.error = Some(i18n::t("The camera could not open.").into());
+            } else if ended {
+                self.call_video.camera_on = false;
+                self.call_video.error = Some(i18n::t("The camera stopped.").into());
+            } else {
+                self.call_camera = Some(camera);
+            }
+            for chunk in batch {
+                if let Some(local) = &self.local_decoder {
+                    local.push(chunk.clone());
+                }
+                self.request(
+                    rpc_request::Request::CallVideo(whatfast_protocol::CallVideoRequest {
+                        call_id: call_id.clone(),
+                        data: chunk,
+                    }),
+                    PendingRequest::CallVideo,
+                );
+            }
+        }
+        let mut painted = false;
+        // A decoder that died gets a new process: the encoder repeats its
+        // headers, so the next keyframe resynchronizes it.
+        if self.local_decoder.is_none() && self.call_camera.is_some() {
+            match crate::call_video::Decoder::open() {
+                Ok(decoder) => self.local_decoder = Some(decoder),
+                Err(error) => eprintln!("call video: {error}"),
+            }
+        }
+        if let Some(decoder) = self.local_decoder.as_mut() {
+            let alive = decoder.alive();
+            while let Some(decoded) = decoder.try_take() {
+                if let Some(image) = call_image(decoded) {
+                    self.call_video.local = Some(image);
+                    painted = true;
+                }
+            }
+            if !alive {
+                self.local_decoder = None;
+            }
+        }
+        if let Some(decoder) = self.call_decoder.as_mut() {
+            let alive = decoder.alive();
+            while let Some(decoded) = decoder.try_take() {
+                if let Some(image) = call_image(decoded) {
+                    self.call_video.remote = Some(image);
+                    painted = true;
+                }
+            }
+            if !alive {
+                self.call_decoder = None;
+            }
+        }
+        if painted {
+            cx.notify();
+        }
+    }
+
+    fn stop_call_video(&mut self) {
+        self.call_video_id = None;
+        // The pump of this call stops at its next step.
+        self.call_video_generation = self.call_video_generation.wrapping_add(1);
+        self.call_camera = None;
+        self.call_decoder = None;
+        self.local_decoder = None;
+        self.call_video.reset();
     }
 
     pub(crate) fn handle_event(
@@ -3112,11 +3602,15 @@ impl Whatfast {
             Some(backend_event::Event::ConnectionChanged(connection)) => {
                 let state = connection.state();
                 self.store.connection = state;
-                self.store.connection_detail = connection.detail;
+                // The detail of the backend is a technical line in English
+                // (`Disconnected(ConnectionClosed)`, for example). The header
+                // says the state of the connection with its own label.
+                self.store.connection_detail.clear();
                 if state == ConnectionState::LoggedOut {
                     if self.rpc.logout_pending() {
                         self.store.connection_detail =
-                            "Logged out; securely clearing local account data…".into();
+                            i18n::t("Logged out; securely clearing the local account data…")
+                                .into();
                     } else {
                         self.begin_pairing();
                     }
@@ -3168,9 +3662,12 @@ impl Whatfast {
                         self.load_chats(String::new());
                     }
                 } else {
-                    self.store.connection_detail = format!(
-                        "Importing older history… {} chats · {} messages",
-                        self.store.sync_chats, self.store.sync_messages
+                    self.store.connection_detail = i18n::t_args(
+                        "Importing older history… {chats} chats · {messages} messages",
+                        &[
+                            ("chats", &self.store.sync_chats.to_string()),
+                            ("messages", &self.store.sync_messages.to_string()),
+                        ],
                     );
                     self.load_chats(String::new());
                 }
@@ -3334,6 +3831,7 @@ impl Whatfast {
                         chat_id: offer.chat_id,
                         phase: "incoming".into(),
                         muted: false,
+                        video: offer.video,
                         incoming: true,
                     });
                     self.notifier.show(Note {
@@ -3343,26 +3841,51 @@ impl Whatfast {
                 }
             }
             Some(backend_event::Event::CallUpdate(update)) => {
-                if let Some(call) = self.store.call.as_mut()
-                    && call.call_id == update.call_id
-                {
-                    call.phase = update.phase.clone();
-                    if update.phase == "active" {
-                        self.start_call_audio(&update.call_id, window, cx);
+                let ours = self
+                    .store
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.call_id == update.call_id);
+                if ours {
+                    if update.phase == "failed" || update.phase == "ended" {
+                        // The media never came up: the bar goes away and the
+                        // user reads why, instead of a call stuck in a phase.
+                        self.store.call = None;
+                        self.stop_call_audio();
+                        self.stop_call_video();
+                        self.store.toast_error =
+                            Some(i18n::t("The call could not connect.").into());
+                    } else {
+                        if let Some(call) = self.store.call.as_mut() {
+                            call.phase = update.phase.clone();
+                        }
+                        if update.phase == "active" {
+                            self.start_call_audio(&update.call_id, window, cx);
+                            self.start_call_video(&update.call_id, window, cx);
+                        }
                     }
                     cx.notify();
                 }
             }
             Some(backend_event::Event::CallEnded(ended)) => {
-                if self
+                let ended_call = self
                     .store
                     .call
                     .as_ref()
-                    .is_some_and(|call| call.call_id == ended.call_id)
-                {
+                    .is_some_and(|call| call.call_id == ended.call_id);
+                // Only the call that owns the media stops it: a stale end of
+                // another call does not cut the one that is up.
+                let ended_audio = self.call_audio_id.as_deref() == Some(ended.call_id.as_str());
+                let ended_video = self.call_video_id.as_deref() == Some(ended.call_id.as_str());
+                if ended_call {
                     self.store.call = None;
                 }
-                self.stop_call_audio();
+                if ended_call || ended_audio {
+                    self.stop_call_audio();
+                }
+                if ended_call || ended_video {
+                    self.stop_call_video();
+                }
                 cx.notify();
             }
             Some(backend_event::Event::CallAudioOut(audio)) => {
@@ -3383,6 +3906,41 @@ impl Whatfast {
                         .map(|pair| i16::from_le_bytes(*pair))
                         .collect();
                     playback.play(frame);
+                }
+            }
+            Some(backend_event::Event::CallVideoOut(video)) => {
+                // The frames of a call that is up arrive before the camera
+                // warms up, so the id of the pump is not the gate: the call
+                // itself is, and it must carry video.
+                let belongs = self
+                    .store
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.call_id == video.call_id && call.video);
+                if !belongs {
+                    return;
+                }
+                // A decoder starts on a keyframe with its parameter sets, and
+                // restarts the same way when the process died.
+                let dead = self
+                    .call_decoder
+                    .as_mut()
+                    .is_some_and(|decoder| !decoder.alive());
+                if dead {
+                    self.call_decoder = None;
+                }
+                if self.call_decoder.is_none() && video.keyframe {
+                    match crate::call_video::Decoder::open() {
+                        Ok(decoder) => self.call_decoder = Some(decoder),
+                        Err(error) => {
+                            eprintln!("call video: {error}");
+                            self.call_video.error =
+                                Some(i18n::t("The video could not start.").into());
+                        }
+                    }
+                }
+                if let Some(decoder) = &self.call_decoder {
+                    decoder.push(video.au);
                 }
             }
             None => {}
@@ -3466,8 +4024,279 @@ impl Whatfast {
 
     pub(crate) fn open_image_viewer(&mut self, viewer: ImageViewer) {
         self.image_viewer = Some(viewer);
+        self.image_context_menu = None;
+        self.viewer_reactions_open = false;
+        self.viewer_info_open = false;
         self.emoji_target = None;
         self.reaction_details = None;
+    }
+
+    /// Reacts to the picture on screen with one of the quick reactions of the
+    /// viewer, the way the smile of WhatsApp does.
+    pub(crate) fn react_to_viewed_image(&mut self, emoji: &str) {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return;
+        };
+        let chat_id = viewer.chat_id.clone();
+        let message_id = viewer.message_id.clone();
+        self.send_reaction_request(
+            chat_id,
+            message_id,
+            emoji.to_string(),
+            Uuid::new_v4().to_string(),
+            0,
+        );
+        self.viewer_reactions_open = false;
+    }
+
+    /// Opens the viewer of a picture of the conversation with every picture
+    /// of the conversation in the gallery: the arrows and the strip of
+    /// thumbnails walk them, the way WhatsApp does it.
+    pub(crate) fn open_chat_image(&mut self, chat_id: String, message_id: String) {
+        let mut gallery: Vec<ViewerItem> = self
+            .store
+            .messages
+            .iter()
+            .filter_map(crate::render::viewer_item)
+            .collect();
+        let Some(index) = gallery
+            .iter()
+            .position(|item| item.message_id == message_id)
+        else {
+            return;
+        };
+        // The header of the viewer names the sender: a direct chat without a
+        // saved name falls back to the title of the conversation, and the
+        // avatar falls back to the avatar of the chat.
+        let (title, avatar) = self
+            .store
+            .chat(&chat_id)
+            .map(|chat| (chat.title.clone(), chat.avatar_path.clone()))
+            .unwrap_or_default();
+        for item in &mut gallery {
+            if item.from_me {
+                item.sender_name = i18n::t("You").to_string();
+            } else if item.sender_name.is_empty() {
+                item.sender_name = title.clone();
+            }
+            if item.sender_avatar.is_empty() {
+                item.sender_avatar = avatar.clone();
+            }
+        }
+        let mut viewer = ImageViewer {
+            chat_id,
+            message_id,
+            path: String::new(),
+            caption: String::new(),
+            sticker: false,
+            width: 0,
+            height: 0,
+            gallery,
+            index: 0,
+            zoom: 1.,
+        };
+        viewer.show(index);
+        self.open_image_viewer(viewer);
+    }
+
+    /// Moves the viewer to the previous or the next picture of the gallery.
+    pub(crate) fn step_image_viewer(&mut self, forward: bool) {
+        let Some(viewer) = self.image_viewer.as_mut() else {
+            return;
+        };
+        let target = if forward {
+            viewer.index + 1
+        } else {
+            viewer.index.saturating_sub(1)
+        };
+        viewer.show(target);
+    }
+
+    /// Zooms the picture of the viewer over its natural fit.
+    pub(crate) fn zoom_image_viewer(&mut self, factor: f32) {
+        if let Some(viewer) = self.image_viewer.as_mut() {
+            viewer.zoom = (viewer.zoom * factor).clamp(0.5, 4.);
+        }
+    }
+
+    /// Copies the picture on screen to the clipboard, the way WhatsApp does
+    /// from the right click of the viewer.
+    pub(crate) fn copy_viewed_image(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return;
+        };
+        let path = PathBuf::from(&viewer.path);
+        let copied = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| crate::helpers::image_file_format(&bytes).map(|format| (format, bytes)))
+            .map(|(format, bytes)| gpui::Image::from_bytes(format, bytes));
+        match copied {
+            Some(image) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                self.store.toast_info = Some(i18n::t("Photo copied").into());
+                self.clear_toast_info_later(cx);
+            }
+            None => {
+                self.store.toast_error = Some(i18n::t("The photo could not be copied.").into());
+            }
+        }
+        self.image_context_menu = None;
+    }
+
+    /// Opens a file with the default application of the system: the "Open
+    /// with" of the menu of the viewer.
+    pub(crate) fn open_file_externally(&mut self, path: &str, cx: &mut Context<Self>) {
+        let path = Path::new(path);
+        if path.as_os_str().is_empty() || !path.is_file() {
+            self.store.toast_error =
+                Some(i18n::t("That file is no longer available").into());
+            self.image_context_menu = None;
+            return;
+        }
+        cx.open_with_system(path);
+        self.image_context_menu = None;
+    }
+
+    /// Saves the picture on screen where the user chooses: the "Save as…" of
+    /// the viewer opens the dialog of the system, the way WhatsApp does.
+    pub(crate) fn save_viewed_image_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return;
+        };
+        let source = PathBuf::from(&viewer.path);
+        if !source.is_file() {
+            self.store.toast_error =
+                Some(i18n::t("That file is no longer available").into());
+            self.image_context_menu = None;
+            cx.notify();
+            return;
+        }
+        let caption = viewer.caption.trim().to_string();
+        let stem = {
+            let caption = sanitize_file_name(&caption.chars().take(60).collect::<String>());
+            if caption.is_empty() {
+                "photo".to_string()
+            } else {
+                caption
+            }
+        };
+        let extension = source
+            .extension()
+            .map(|extension| extension.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "jpg".to_string());
+        let suggested = format!("{stem}.{extension}");
+        let directory = self.download_directory();
+        let selected = cx.prompt_for_new_path(&directory, Some(&suggested));
+        self.image_context_menu = None;
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let Ok(Ok(Some(destination))) = selected.await else {
+                return;
+            };
+            let copy_source = source.clone();
+            let copy_destination = destination.clone();
+            let result = window
+                .background_spawn(async move {
+                    // La copia muere en un `.part`: el archivo elegido aparece
+                    // entero o no aparece, nunca a medias.
+                    let partial = copy_destination
+                        .with_file_name(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
+                    let result = std::fs::copy(&copy_source, &partial)
+                        .and_then(|_| std::fs::rename(&partial, &copy_destination));
+                    if result.is_err() {
+                        let _ = std::fs::remove_file(&partial);
+                    }
+                    result.map(|_| copy_destination)
+                })
+                .await;
+            window
+                .update(|_window, cx| {
+                    view.update(cx, |this, cx| {
+                        match result {
+                            Ok(destination) => {
+                                this.store.toast_error = None;
+                                this.store.toast_info = Some(i18n::t_args(
+                                    "Saved to {path}",
+                                    &[("path", &destination.display().to_string())],
+                                ));
+                                this.clear_toast_info_later(cx);
+                            }
+                            Err(error) => {
+                                this.store.toast_error = Some(format!(
+                                    "{}: {error}",
+                                    i18n::t("The file could not be saved")
+                                ));
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok()
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// La carpeta donde arranca el dialogo de "Guardar como…": la de las
+    /// descargas configurada, o la del sistema.
+    fn download_directory(&self) -> PathBuf {
+        let configured = PathBuf::from(self.settings.download_dir.trim());
+        if configured.is_dir() {
+            return configured;
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            let downloads = home.join("Downloads");
+            if downloads.is_dir() {
+                return downloads;
+            }
+            if home.is_dir() {
+                return home;
+            }
+        }
+        std::env::temp_dir()
+    }
+
+    /// Closes the viewer and leaves the conversation on the message of the
+    /// photo: the "Go to message" of the menu.
+    pub(crate) fn go_to_viewed_message(&mut self) {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return;
+        };
+        let message_id = viewer.message_id.clone();
+        self.image_viewer = None;
+        self.image_context_menu = None;
+        self.scroll_to_message(&message_id);
+    }
+
+    /// Searches the caption of the photo on the web; with no caption it opens
+    /// the images page of the search engine.
+    pub(crate) fn search_viewed_image(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return;
+        };
+        let caption = viewer.caption.trim().to_string();
+        let url = if caption.is_empty() {
+            "https://www.google.com/imghp".to_string()
+        } else {
+            format!(
+                "https://www.google.com/search?q={}",
+                crate::helpers::percent_encode(&caption)
+            )
+        };
+        cx.open_url(&url);
+        self.image_context_menu = None;
+    }
+
+    pub(crate) fn advance_status_viewer(&mut self, cx: &mut Context<Self>) {
+        let state = self.status_strip.state();
+        let groups = self.store.statuses().to_vec();
+        crate::statuses::move_viewer(self, &state, true, &groups, cx);
+    }
+
+    pub(crate) fn previous_status_viewer(&mut self, cx: &mut Context<Self>) {
+        let state = self.status_strip.state();
+        let groups = self.store.statuses().to_vec();
+        crate::statuses::move_viewer(self, &state, false, &groups, cx);
     }
 
     pub(crate) fn repair_recent_reactions(&mut self, chat_id: String) {
@@ -3969,6 +4798,27 @@ impl Whatfast {
         }
     }
 
+    /// The size of the text of the messages: the one of the interface times
+    /// the scale of the profile.
+    pub(crate) fn message_font_size(&self, cx: &App) -> Pixels {
+        px(f32::from(cx.theme().font_size) * self.settings.message_font_scale)
+    }
+
+    /// The widest bubble of the thread.
+    ///
+    /// Without a preference it is the width of the reference; with one it is
+    /// that part of the thread, never narrower than a short line of text.
+    pub(crate) fn bubble_max_width(&self) -> Pixels {
+        match self.settings.bubble_width() {
+            // Never narrower than an attachment card: a bubble that is
+            // narrower than its content pushes the layout of the thread.
+            Some(part) => {
+                px((f32::from(self.message_wrap_width) * part).max(320. * self.ui_scale))
+            }
+            None => px(560.),
+        }
+    }
+
     /// The theme in use, as the settings ask.
     pub(crate) fn active_theme(&self) -> AppTheme {
         tokens::theme_by_id(&self.theme_id, &self.custom_themes)
@@ -4243,6 +5093,311 @@ impl Whatfast {
             self.apply_active_theme(window, cx);
         }
         self.save_settings();
+        cx.notify();
+    }
+
+    /// Sets the radius of the bubbles; `None` keeps the one of the theme.
+    pub(crate) fn set_bubble_radius(&mut self, radius: Option<f32>, cx: &mut Context<Self>) {
+        self.settings.bubble_radius = radius.unwrap_or(-1.0);
+        self.settings.normalize();
+        self.store.invalidate_all_message_heights();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Sets the widest bubble, as a part of the width of the thread;
+    /// `None` keeps the width of the reference.
+    pub(crate) fn set_bubble_width(&mut self, width: Option<f32>, cx: &mut Context<Self>) {
+        self.settings.bubble_width = width.unwrap_or(-1.0);
+        self.settings.normalize();
+        self.store.invalidate_all_message_heights();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Sets the size of the text of the messages, as a part of the one of
+    /// the interface.
+    pub(crate) fn set_message_font_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
+        self.settings.message_font_scale = scale;
+        self.settings.normalize();
+        self.store.invalidate_all_message_heights();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Chooses where the background of the conversation comes from.
+    pub(crate) fn set_chat_background(
+        &mut self,
+        background: ChatBackground,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.chat_background == background {
+            return;
+        }
+        self.settings.chat_background = background;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Paints the plain background of the conversation; an empty value asks
+    /// the theme.
+    pub(crate) fn set_chat_background_color(&mut self, color: String, cx: &mut Context<Self>) {
+        self.settings.chat_background_color = color;
+        self.settings.normalize();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Asks the user for the image of the background.
+    ///
+    /// The image is copied into the profile, so moving the profile or
+    /// importing a theme never breaks it: the setting keeps a name relative
+    /// to the profile, never the path the user picked.
+    pub(crate) fn choose_chat_wallpaper(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(i18n::t("Choose an image for the background").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let paths = selected.await.ok()?.ok()??;
+            let path = paths.into_iter().next()?;
+            window
+                .update(|window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.copy_chat_wallpaper(&path, window, cx);
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Copies an image into the profile and makes it the background.
+    fn copy_chat_wallpaper(&mut self, path: &Path, _window: &mut Window, cx: &mut Context<Self>) {
+        let extension = path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+            .filter(|extension| matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+            .unwrap_or_else(|| "png".to_string());
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.store.toast_error =
+                    Some(format!("{}: {error}", i18n::t("Could not read the image")));
+                return;
+            }
+        };
+        // The name is the hash of the content: the same picture picked
+        // twice is one file, and the name never depends on the folder.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&bytes, &mut hasher);
+        let name = format!("{:016x}.{extension}", std::hash::Hasher::finish(&hasher));
+        let directory = whatfast_model::paths::config_dir().join("wallpapers");
+        if let Err(error) = std::fs::create_dir_all(&directory)
+            .and_then(|()| std::fs::write(directory.join(&name), &bytes))
+        {
+            self.store.toast_error =
+                Some(format!("{}: {error}", i18n::t("Could not copy the image")));
+            return;
+        }
+        self.settings.chat_wallpaper = format!("wallpapers/{name}");
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// How solid the image of the background is.
+    pub(crate) fn set_chat_wallpaper_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        self.settings.chat_wallpaper_opacity = opacity;
+        self.settings.normalize();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Takes the image of the background out, back to the pattern.
+    pub(crate) fn clear_chat_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.settings.chat_wallpaper.clear();
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Copies a theme under a new name, so the user paints a copy instead of
+    /// starting from an empty palette.
+    pub(crate) fn duplicate_theme(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source = whatfast_core::theme::builtin_themes()
+            .iter()
+            .find(|theme| theme.id == id)
+            .cloned()
+            .or_else(|| {
+                self.custom_themes
+                    .iter()
+                    .find(|theme| theme.id == id)
+                    .cloned()
+            });
+        let Some(source) = source else {
+            return;
+        };
+        let count = self.custom_themes.len() + 1;
+        let number = count.to_string();
+        let name = i18n::t_args("My theme {count}", &[("count", &number)]);
+        let mut theme = whatfast_core::theme::clone_theme(&source, &name);
+        theme.id = format!("custom-{}", Uuid::new_v4());
+        let id = theme.id.clone();
+        self.custom_themes.push(theme);
+        self.theme_id = id.clone();
+        self.editing_theme = Some(id);
+        self.editing_token = None;
+        self.apply_active_theme(window, cx);
+        self.save_settings();
+    }
+
+    /// Writes the JSON of a theme where the user picks.
+    pub(crate) fn export_theme(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = whatfast_core::theme::builtin_themes()
+            .iter()
+            .find(|theme| theme.id == id)
+            .cloned()
+            .or_else(|| {
+                self.custom_themes
+                    .iter()
+                    .find(|theme| theme.id == id)
+                    .cloned()
+            });
+        let Some(theme) = theme else {
+            return;
+        };
+        let json = whatfast_core::theme::export_theme(&theme);
+        let directory = if self.settings.download_dir.trim().is_empty() {
+            whatfast_model::paths::config_dir()
+        } else {
+            PathBuf::from(self.settings.download_dir.trim())
+        };
+        let suggested = format!("{}.json", theme.id);
+        let selected = cx.prompt_for_new_path(&directory, Some(&suggested));
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let path = selected.await.ok()?.ok()??;
+            let failure = std::fs::write(&path, json)
+                .err()
+                .map(|error| error.to_string());
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Some(error) = failure {
+                            this.store.toast_error =
+                                Some(format!("{}: {error}", i18n::t("Could not save the theme")));
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Reads a theme file of the user and adds it to the catalog.
+    ///
+    /// The file is normalized on the way in: a token that is not a plain
+    /// value falls back to the one of the base theme, so a theme file cannot
+    /// paint something the window cannot read.
+    pub(crate) fn import_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(i18n::t("Choose a theme file").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            window
+                .update(|window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.add_imported_theme(value, window, cx);
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Adds the theme of a file, with an id of its own.
+    fn add_imported_theme(
+        &mut self,
+        value: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut theme) = whatfast_core::theme::normalize_theme(&value) else {
+            self.store.toast_error = Some(i18n::t("That file is not a theme").to_string());
+            return;
+        };
+        theme.id = format!("custom-{}", Uuid::new_v4());
+        theme.builtin = None;
+        let id = theme.id.clone();
+        self.custom_themes.push(theme);
+        self.theme_id = id.clone();
+        self.editing_theme = Some(id);
+        self.editing_token = None;
+        self.apply_active_theme(window, cx);
+        self.save_settings();
+    }
+
+    /// Starts editing one token of the theme being edited.
+    pub(crate) fn begin_editing_token(
+        &mut self,
+        token: ThemeToken,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = self.editing_theme.as_deref().and_then(|id| {
+            self.custom_themes
+                .iter()
+                .find(|theme| theme.id == id)
+                .cloned()
+        });
+        let Some(theme) = theme else {
+            return;
+        };
+        let value = theme.tokens.get(token).to_string();
+        self.editing_token = Some(token);
+        self.theme_token_draft = value.clone();
+        self.theme_token_input.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Writes the value of the field into the token being edited.
+    ///
+    /// The value is checked before it lands: a theme file cannot carry a
+    /// declaration, and the same rule holds for the field.
+    pub(crate) fn apply_theme_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(token), Some(id)) = (self.editing_token, self.editing_theme.clone()) else {
+            return;
+        };
+        let value = self.theme_token_draft.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        if let Some(theme) = self.custom_themes.iter_mut().find(|theme| theme.id == id) {
+            theme.tokens.set(token, &value);
+        }
+        if self.theme_id == id {
+            self.apply_active_theme(window, cx);
+        }
+        self.save_settings();
     }
 
     /// Changes the filter of the column of chats.
@@ -4375,12 +5530,292 @@ impl Whatfast {
     /// marked read through its last incoming message, and any other one
     /// loses its count of unread messages.
     pub(crate) fn mark_chat_read(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str()) {
-            self.mark_read();
+        let previous_unread = self.store.mark_chat_read_locally(&chat_id).unwrap_or(0);
+        cx.notify();
+        self.request(
+            rpc_request::Request::MarkRead(whatfast_protocol::MarkReadRequest {
+                chat_id: chat_id.clone(),
+                through_message_id: String::new(),
+            }),
+            PendingRequest::MarkRead {
+                chat_id,
+                previous_unread,
+            },
+        );
+    }
+
+    /// Marks every conversation with unread messages as read: the action of
+    /// the menu of the list of chats.
+    pub(crate) fn mark_all_chats_read(&mut self, cx: &mut Context<Self>) {
+        self.chat_list_menu = false;
+        let unread: Vec<String> = self
+            .store
+            .chats
+            .iter()
+            .filter(|chat| chat.unread_count > 0)
+            .map(|chat| chat.id.clone())
+            .collect();
+        if unread.is_empty() {
+            self.store.toast_info = Some(i18n::t("All chats are read").into());
+            self.clear_toast_info_later(cx);
+            cx.notify();
             return;
         }
-        self.store.mark_chat_read_locally(&chat_id);
+        for chat_id in unread {
+            self.mark_chat_read(chat_id, cx);
+        }
         cx.notify();
+    }
+
+    /// Opens the dialog that confirms the logout of the menu of the chats.
+    pub(crate) fn ask_logout(&mut self, cx: &mut Context<Self>) {
+        self.chat_list_menu = false;
+        self.confirm_logout_open = true;
+        cx.notify();
+    }
+
+    /// Checks the PIN of the lock screen and opens the window.
+    pub(crate) fn try_unlock(&mut self, cx: &mut Context<Self>) {
+        let pin = self.pin_buffer.clone();
+        if crate::app_lock::verify(&pin, &self.settings.app_lock_salt, &self.settings.app_lock_hash) {
+            self.locked = false;
+            self.lock_error = None;
+        } else {
+            self.lock_error = Some(i18n::t("Wrong PIN. Try again.").to_string());
+        }
+        self.pin_buffer.clear();
+        cx.notify();
+    }
+
+    /// Takes one key of the lock screen: the digits, backspace and enter. It
+    /// returns whether the key belonged to the screen.
+    pub(crate) fn lock_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        match key {
+            "enter" => self.try_unlock(cx),
+            "backspace" => {
+                self.pin_buffer.pop();
+                self.lock_error = None;
+                cx.notify();
+            }
+            "escape" => {}
+            _ => {
+                let mut characters = key.chars();
+                let (Some(character), None) = (characters.next(), characters.next()) else {
+                    return false;
+                };
+                if !character.is_ascii_digit()
+                    || self.pin_buffer.len() >= crate::app_lock::MAX_PIN_LENGTH
+                {
+                    return false;
+                }
+                self.pin_buffer.push(character);
+                self.lock_error = None;
+                cx.notify();
+            }
+        }
+        true
+    }
+
+    /// Opens the PIN dialog: the setup when there is no PIN yet, and the
+    /// removal when there is one.
+    pub(crate) fn open_pin_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_list_menu = false;
+        let mode = if self.settings.app_lock_hash.is_empty() {
+            PinDialogMode::Enable
+        } else {
+            PinDialogMode::Disable
+        };
+        let pin = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(i18n::t("PIN"))
+                .masked(true)
+        });
+        let repeat = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(i18n::t("Repeat the PIN"))
+                .masked(true)
+        });
+        pin.update(cx, |input, cx| input.focus(window, cx));
+        self.pin_dialog = Some(PinDialog {
+            mode,
+            pin,
+            repeat,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Closes the PIN dialog without a change.
+    pub(crate) fn close_pin_dialog(&mut self, cx: &mut Context<Self>) {
+        self.pin_dialog = None;
+        cx.notify();
+    }
+
+    /// Stores the new PIN, or deletes the one that was there.
+    pub(crate) fn submit_pin_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.pin_dialog.as_ref() else {
+            return;
+        };
+        let pin = dialog.pin.read(cx).value().trim().to_string();
+        let repeat = dialog.repeat.read(cx).value().trim().to_string();
+        match dialog.mode {
+            PinDialogMode::Enable => {
+                if !crate::app_lock::is_valid_pin(&pin) {
+                    if let Some(dialog) = self.pin_dialog.as_mut() {
+                        dialog.error = Some(i18n::t("The PIN needs 4 to 8 digits").to_string());
+                    }
+                    cx.notify();
+                    return;
+                }
+                if pin != repeat {
+                    if let Some(dialog) = self.pin_dialog.as_mut() {
+                        dialog.error = Some(i18n::t("The two PINs are not the same").to_string());
+                    }
+                    cx.notify();
+                    return;
+                }
+                let salt = crate::app_lock::new_salt();
+                let hash = crate::app_lock::hash_pin(&pin, &salt);
+                self.settings.app_lock_salt = salt;
+                self.settings.app_lock_hash = hash;
+            }
+            PinDialogMode::Disable => {
+                if !crate::app_lock::verify(
+                    &pin,
+                    &self.settings.app_lock_salt,
+                    &self.settings.app_lock_hash,
+                ) {
+                    if let Some(dialog) = self.pin_dialog.as_mut() {
+                        dialog.error = Some(i18n::t("Wrong PIN. Try again.").to_string());
+                    }
+                    cx.notify();
+                    return;
+                }
+                self.settings.app_lock_salt.clear();
+                self.settings.app_lock_hash.clear();
+                self.locked = false;
+            }
+        }
+        self.pin_dialog = None;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Opens the dialog that creates a group, from the menu of the column.
+    pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_list_menu = false;
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Group name")));
+        name.update(cx, |input, cx| input.focus(window, cx));
+        self.create_group = Some(CreateGroupState {
+            name,
+            selected: HashSet::new(),
+            pending: false,
+        });
+        cx.notify();
+    }
+
+    /// Closes the group dialog without creating anything.
+    pub(crate) fn close_create_group(&mut self, cx: &mut Context<Self>) {
+        self.create_group = None;
+        cx.notify();
+    }
+
+    /// Marks or unmarks one contact of the list of the group.
+    pub(crate) fn toggle_group_participant(&mut self, jid: String, cx: &mut Context<Self>) {
+        let Some(state) = self.create_group.as_mut() else {
+            return;
+        };
+        if !state.selected.remove(&jid) {
+            state.selected.insert(jid);
+        }
+        cx.notify();
+    }
+
+    /// Sends the creation of the group with the name and the marked contacts.
+    pub(crate) fn submit_create_group(&mut self, cx: &mut Context<Self>) {        let Some(state) = self.create_group.as_ref() else {
+            return;
+        };
+        if state.pending {
+            return;
+        }
+        let subject = state.name.read(cx).value().trim().to_string();
+        if subject.is_empty() || state.selected.is_empty() {
+            return;
+        }
+        let participant_jids: Vec<String> = state.selected.iter().cloned().collect();
+        if let Some(state) = self.create_group.as_mut() {
+            state.pending = true;
+        }
+        self.request(
+            rpc_request::Request::CreateGroup(whatfast_protocol::CreateGroupRequest {
+                subject,
+                participant_jids,
+            }),
+            PendingRequest::CreateGroup,
+        );
+        cx.notify();
+    }
+
+    /// Turns the multiple selection of the chat list on.
+    pub(crate) fn start_chat_selection(&mut self, cx: &mut Context<Self>) {
+        self.chat_list_menu = false;
+        self.selection = Some(ChatSelection::default());
+        cx.notify();
+    }
+
+    /// Turns the multiple selection off and drops what was marked.
+    pub(crate) fn cancel_chat_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection = None;
+        cx.notify();
+    }
+
+    /// Marks or unmarks one conversation of the selection.
+    pub(crate) fn toggle_chat_selection(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        if !selection.ids.remove(&chat_id) {
+            selection.ids.insert(chat_id);
+        }
+        cx.notify();
+    }
+
+    /// Applies one action to every marked conversation and turns the
+    /// selection off.
+    pub(crate) fn selection_mark_read(&mut self, cx: &mut Context<Self>) {
+        for chat_id in self.take_selected_chats() {
+            self.mark_chat_read(chat_id, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn selection_mute(&mut self, cx: &mut Context<Self>) {
+        for chat_id in self.take_selected_chats() {
+            self.set_chat_muted(chat_id, true, None);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn selection_archive(&mut self, cx: &mut Context<Self>) {
+        for chat_id in self.take_selected_chats() {
+            self.set_chat_archived(chat_id, true);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn selection_pin(&mut self, cx: &mut Context<Self>) {
+        for chat_id in self.take_selected_chats() {
+            self.set_chat_pinned(chat_id, true);
+        }
+        cx.notify();
+    }
+
+    /// Takes the marked chats and turns the selection off.
+    fn take_selected_chats(&mut self) -> Vec<String> {
+        self.selection
+            .take()
+            .map(|selection| selection.ids.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Runs one action of the menu of a row of the list of conversations.
@@ -4654,8 +6089,19 @@ impl Whatfast {
         if record_recent {
             record_recent_chat(&mut self.recent_chat_ids, &chat_id);
         }
+        let previous_unread = self.store.chat(&chat_id).map(|c| c.unread_count).unwrap_or(0);
         self.load_selected_chat(chat_id.clone());
         self.store.mark_selected_chat_read_locally();
+        self.request(
+            rpc_request::Request::MarkRead(whatfast_protocol::MarkReadRequest {
+                chat_id: chat_id.clone(),
+                through_message_id: String::new(),
+            }),
+            PendingRequest::MarkRead {
+                chat_id: chat_id.clone(),
+                previous_unread,
+            },
+        );
         // The pictures of the tray belong to the conversation that was open:
         // the reference drops them when the user moves to another chat.
         if switching_chat {
@@ -4809,7 +6255,7 @@ impl Whatfast {
         self.load_selected_chat(chat_id);
     }
 
-    pub(crate) fn jump_to_bottom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn jump_to_bottom(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.stop_smooth_scroll(ScrollSurface::Messages);
         self.messages_scrolled_up = false;
         self.pending_top_scroll_id = None;
@@ -4823,9 +6269,7 @@ impl Whatfast {
                 self.message_scroll
                     .scroll_to_item(count - 1, ScrollStrategy::Bottom);
             }
-            if window.is_window_active() {
-                self.mark_read();
-            }
+            self.mark_read();
         }
         cx.notify();
     }
@@ -4874,8 +6318,18 @@ impl Whatfast {
             cx.notify();
             return;
         }
+        // Dentro del visor, escape cierra primero lo que flota encima de la
+        // foto (el menu, la info, las reacciones) y no la foto entera.
         if self.image_viewer.is_some() {
-            self.image_viewer = None;
+            if self.image_context_menu.is_some() {
+                self.image_context_menu = None;
+            } else if self.viewer_info_open {
+                self.viewer_info_open = false;
+            } else if self.viewer_reactions_open {
+                self.viewer_reactions_open = false;
+            } else {
+                self.image_viewer = None;
+            }
             cx.notify();
             return;
         }
@@ -5555,20 +7009,23 @@ impl Whatfast {
             return;
         };
         let previous_unread = self.store.mark_selected_chat_read_locally().unwrap_or(0);
-        let Some(last) = self
+        let through_message_id = self
             .store
             .messages
             .iter()
             .rev()
             .find(|message| !message.from_me)
-        else {
-            return;
-        };
-        let through_message_id = last.id.clone();
-        if self.store.last_mark_read_id.as_deref() == Some(through_message_id.as_str()) {
+            .map(|message| message.id.clone())
+            .unwrap_or_default();
+        if !through_message_id.is_empty()
+            && self.store.last_mark_read_id.as_deref() == Some(through_message_id.as_str())
+            && previous_unread == 0
+        {
             return;
         }
-        self.store.last_mark_read_id = Some(through_message_id.clone());
+        if !through_message_id.is_empty() {
+            self.store.last_mark_read_id = Some(through_message_id.clone());
+        }
         self.request(
             rpc_request::Request::MarkRead(whatfast_protocol::MarkReadRequest {
                 chat_id,
@@ -5718,8 +7175,42 @@ impl Whatfast {
             finishing: false,
             chat_id,
             discarded: false,
+            paused: false,
+            paused_at: None,
+            paused_total: Duration::ZERO,
+            levels: Vec::new(),
         });
         self.start_recording_tick(window, cx);
+        cx.notify();
+    }
+
+    /// Pauses the capture: the clock stops and the wave stays still.
+    pub(crate) fn pause_voice_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.recording.as_mut() else {
+            return;
+        };
+        if state.paused || state.finishing {
+            return;
+        }
+        state.paused = true;
+        state.paused_at = Some(Instant::now());
+        self.recorder.pause();
+        cx.notify();
+    }
+
+    /// Goes on with the capture after a pause.
+    pub(crate) fn resume_voice_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.recording.as_mut() else {
+            return;
+        };
+        if !state.paused || state.finishing {
+            return;
+        }
+        if let Some(paused_at) = state.paused_at.take() {
+            state.paused_total += paused_at.elapsed();
+        }
+        state.paused = false;
+        self.recorder.resume();
         cx.notify();
     }
 
@@ -5791,6 +7282,22 @@ impl Whatfast {
                     self.recording = None;
                 }
             }
+        }
+        // La onda de la pildora: cada tick suma una barra con el pico de las
+        // muestras que llegaron desde el tick anterior. La escala de la voz
+        // normal queda baja, asi que el pico se estira para que la barra se
+        // vea.
+        let new_levels = self.recorder.take_levels();
+        let peak = new_levels.iter().fold(0f32, |peak, level| peak.max(*level));
+        let bar = (peak * 4.0).clamp(0.08, 1.0);
+        if let Some(state) = self.recording.as_mut()
+            && !state.paused
+            && !state.finishing
+        {
+            if state.levels.len() >= crate::audio::WAVE_BARS {
+                state.levels.remove(0);
+            }
+            state.levels.push(bar);
         }
         // The note of the reference stops on its own at fifteen minutes: the
         // client keeps five, because the samples wait in memory.
@@ -5955,18 +7462,43 @@ impl Whatfast {
         self.load_message_attachment(chat_id, message_id);
     }
 
-    /// El adjunto de un mensaje, si es un video.
-    fn video_attachment(&self, message_id: &str) -> Option<whatfast_protocol::AttachmentContent> {
+    /// Whether the message is one of the statuses of the profile.
+    fn is_status_message(&self, message_id: &str) -> bool {
+        self.store
+            .statuses()
+            .iter()
+            .flat_map(|group| group.messages.iter())
+            .any(|message| message.id == message_id)
+    }
+
+    /// The attachment of a message, if it has one.
+    ///
+    /// The message can be in the open thread or in the statuses, which live in
+    /// another list: the player and the download use the same attachment.
+    fn message_attachment(&self, message_id: &str) -> Option<whatfast_protocol::AttachmentContent> {
+        let attachment_of = |message: &whatfast_protocol::Message| match message.content.as_ref() {
+            Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
+                Some(attachment.clone())
+            }
+            _ => None,
+        };
         self.store
             .message(message_id)
-            .and_then(|message| match message.content.as_ref() {
-                Some(whatfast_protocol::message::Content::Attachment(attachment))
-                    if crate::video::is_video(attachment) =>
-                {
-                    Some(attachment.clone())
-                }
-                _ => None,
+            .and_then(attachment_of)
+            .or_else(|| {
+                self.store
+                    .statuses()
+                    .iter()
+                    .flat_map(|group| group.messages.iter())
+                    .find(|message| message.id == message_id)
+                    .and_then(attachment_of)
             })
+    }
+
+    /// The attachment of a message, if it is a video.
+    fn video_attachment(&self, message_id: &str) -> Option<whatfast_protocol::AttachmentContent> {
+        self.message_attachment(message_id)
+            .filter(crate::video::is_video)
     }
 
     /// El primer boton del video: reproduce, pausa o sigue donde estaba.
@@ -6091,9 +7623,12 @@ impl Whatfast {
 
     /// Recoge los cuadros que el hilo del video dejo listos.
     pub(crate) fn tick_video(&mut self, cx: &mut Context<Self>) {
-        // El video se mira en su conversacion: al cambiar de chat se corta.
-        if let Some((chat_id, _)) = self.video.key.clone()
+        // A video is watched in its conversation: it stops when the chat
+        // changes. A status is the exception: it is watched over whatever chat
+        // is open.
+        if let Some((chat_id, message_id)) = self.video.key.clone()
             && self.store.selected_chat_id.as_deref() != Some(chat_id.as_str())
+            && !self.is_status_message(&message_id)
         {
             self.stop_video();
             cx.notify();
@@ -6124,8 +7659,11 @@ impl Whatfast {
                     }
                 }
                 crate::video::VideoEvent::Failed { key, message } => {
+                    // The engine explains the failure in English for the log;
+                    // the bubble says it in one line the reader understands.
+                    eprintln!("video: {message}");
                     if self.video.is_for(&key) {
-                        self.video.error = Some(message);
+                        self.video.error = Some(i18n::t("The video could not be played.").into());
                         self.video.playing = false;
                         self.video.active = false;
                         self.video.waiting = false;
@@ -6155,19 +7693,11 @@ impl Whatfast {
         if self.attachment_failures.remove(&key).is_some() {
             self.attachment_download_attempted.remove(&key);
         }
-        let Some(path) =
-            self.store
-                .message(&message_id)
-                .and_then(|message| match message.content.as_ref() {
-                    Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
-                        Some(attachment.local_path.clone())
-                    }
-                    _ => None,
-                })
-        else {
+        let Some(attachment) = self.message_attachment(&message_id) else {
             // The message has no attachment: there is nothing to open.
             return;
         };
+        let path = attachment.local_path;
         if !path.is_empty() && Path::new(&path).is_file() {
             self.open_file_with_the_system(&path, cx);
             return;
@@ -6201,16 +7731,7 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(attachment) =
-            self.store
-                .message(&message_id)
-                .and_then(|message| match message.content.as_ref() {
-                    Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
-                        Some(attachment.clone())
-                    }
-                    _ => None,
-                })
-        else {
+        let Some(attachment) = self.message_attachment(&message_id) else {
             self.store.toast_error = Some(i18n::t("That file is no longer available").into());
             cx.notify();
             return;
@@ -6416,7 +7937,7 @@ impl Whatfast {
     }
 
     /// Takes the green notice out after a moment.
-    fn clear_toast_info_later(&self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_toast_info_later(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
@@ -6548,7 +8069,7 @@ impl Whatfast {
         };
         if delete_for_everyone && !message.from_me {
             self.store.toast_error =
-                Some("Only your own messages can be deleted for everyone".into());
+                Some(i18n::t("Only your own messages can be deleted for everyone").into());
             return;
         }
         let Some(previous) = self.store.revoke_message(&chat_id, &message_id) else {
@@ -7000,6 +8521,23 @@ impl Whatfast {
         let channels_open = self.channels_open;
         let archived_open = self.archived_open;
         let agents_open = self.agents_open;
+        // Los no leidos de la lista y los estados sin ver: los dos datos que
+        // la referencia pinta como el circulo del numero y el punto verde.
+        let unread: u32 = self
+            .store
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.unread_count)
+            .sum();
+        let states_unseen = {
+            let state = self.status_strip.state();
+            let state = state.borrow();
+            self.store
+                .statuses()
+                .iter()
+                .any(|group| !crate::statuses::has_seen(&state, &group.sender_id))
+        };
         self.nav_rail.update(cx, |rail, _| {
             rail.set_link(link);
             rail.set_sidebar_open(true);
@@ -7008,6 +8546,8 @@ impl Whatfast {
             rail.set_channels_open(channels_open);
             rail.set_archived_open(archived_open);
             rail.set_agents_open(agents_open);
+            rail.set_unread(unread);
+            rail.set_states_unseen(states_unseen);
         });
         let entries: Vec<TabEntry> = self
             .recent_chat_ids
@@ -7368,9 +8908,10 @@ impl Whatfast {
 /// fields of the application at the same time: the store it writes and the
 /// client it asks.
 fn report_failed_request(store: &mut Store, request: anyhow::Result<u64>) {
-    if let Err(error) = request {
+    if request.is_err() {
         store.screen = Screen::Fatal;
-        store.fatal_error = Some(error.to_string());
+        store.fatal_error =
+            Some(i18n::t("Whatfast lost the connection with its backend. Restart Whatfast.").into());
     }
 }
 
@@ -7431,11 +8972,13 @@ fn notification_title(chat: &Chat, message: &Message) -> String {
     for candidate in [
         chat.title.as_str(),
         message.sender_name.as_str(),
-        chat.phone_number.as_str(),
     ] {
         if !candidate.is_empty() {
             return candidate.to_string();
         }
+    }
+    if !chat.phone_number.is_empty() {
+        return whatfast_core::phone::format(&chat.phone_number);
     }
     i18n::t("New WhatsApp message").to_string()
 }
@@ -7499,6 +9042,9 @@ fn notification_body(message: &Message, show_preview: bool) -> String {
                 } else {
                     i18n::t("Location").to_string()
                 }
+            }
+            Content::Unsupported(unsupported) if unsupported.type_name == "view_once" => {
+                i18n::t("One-time message").to_string()
             }
             Content::Unsupported(unsupported) => {
                 if !unsupported.fallback_text.is_empty() {
@@ -7587,6 +9133,46 @@ fn sanitize_file_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// El visor recorre su galeria: pasar de foto copia los datos de la nueva
+    /// y devuelve el zoom a su sitio; fuera de la galeria no cambia nada.
+    #[test]
+    fn the_viewer_walks_its_gallery_and_resets_the_zoom() {
+        let item = |id: &str| ViewerItem {
+            message_id: id.into(),
+            path: format!("{id}.jpg"),
+            caption: String::new(),
+            sticker: false,
+            width: 10,
+            height: 20,
+            from_me: false,
+            sender_name: String::new(),
+            sender_avatar: String::new(),
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let mut viewer = ImageViewer {
+            chat_id: "chat".into(),
+            message_id: "a".into(),
+            path: "a.jpg".into(),
+            caption: String::new(),
+            sticker: false,
+            width: 10,
+            height: 20,
+            gallery: vec![item("a"), item("b")],
+            index: 0,
+            zoom: 2.,
+        };
+        assert!(!viewer.has_previous());
+        assert!(viewer.has_next());
+        viewer.show(1);
+        assert_eq!(viewer.message_id, "b");
+        assert_eq!(viewer.path, "b.jpg");
+        assert_eq!(viewer.zoom, 1.);
+        assert!(viewer.has_previous());
+        assert!(!viewer.has_next());
+        viewer.show(9);
+        assert_eq!(viewer.message_id, "b");
+    }
+
     /// The instant of the clock is what the client uses to say until when a
     /// conversation stays muted.
     #[test]
@@ -7604,7 +9190,12 @@ mod tests {
         report_failed_request(&mut store, Err(anyhow::anyhow!("the sidecar is gone")));
 
         assert_eq!(store.screen, Screen::Fatal);
-        assert_eq!(store.fatal_error.as_deref(), Some("the sidecar is gone"));
+        assert_eq!(
+            store.fatal_error.as_deref(),
+            Some(i18n::t(
+                "Whatfast lost the connection with its backend. Restart Whatfast."
+            ))
+        );
     }
 
     /// A request that was queued leaves the screen alone.
@@ -7627,6 +9218,10 @@ mod tests {
             finishing: true,
             chat_id: "chat-a".into(),
             discarded: false,
+            paused: false,
+            paused_at: None,
+            paused_total: std::time::Duration::ZERO,
+            levels: Vec::new(),
         };
         assert_eq!(note_target(Some(&state)), Some("chat-a"));
         assert_eq!(note_target(None), None);
@@ -7637,6 +9232,30 @@ mod tests {
             ..state
         };
         assert_eq!(note_target(Some(&thrown_away)), None);
+    }
+
+    /// La pausa no suma al reloj de la nota: el contador de la pildora tiene
+    /// que mostrar el audio grabado, no el tiempo con la ventana abierta.
+    #[test]
+    fn the_clock_of_the_note_leaves_the_pause_out() {
+        let state = RecordingState {
+            started: std::time::Instant::now(),
+            finishing: false,
+            chat_id: "chat-a".into(),
+            discarded: false,
+            paused: false,
+            paused_at: None,
+            paused_total: std::time::Duration::from_secs(30),
+            levels: Vec::new(),
+        };
+        assert!(state.elapsed_seconds() < 1.0);
+
+        let paused = RecordingState {
+            paused: true,
+            paused_at: Some(std::time::Instant::now()),
+            ..state
+        };
+        assert!(paused.elapsed_seconds() < 1.0);
     }
 
     /// A download that failed must not leave a save waiting: the next time

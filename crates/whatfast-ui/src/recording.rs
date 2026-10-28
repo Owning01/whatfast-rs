@@ -10,6 +10,7 @@
 //! `crate::audio` does: the handle of the stream is not `Send` on every
 //! platform, and the window must never wait for the microphone.
 
+use std::collections::VecDeque;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,7 @@ use async_channel::{Receiver, Sender};
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{SampleFormat, StreamConfig};
 use opus_pure::{Application, MAX_PACKET_BYTES, OggOpusWriter, OpusEncoder, OpusHead};
+use whatfast_i18n as i18n;
 
 /// The rate of every Opus stream, in hertz.
 pub(crate) const OPUS_RATE: u32 = 48_000;
@@ -46,6 +48,11 @@ pub(crate) const MAX_DURATION_SECONDS: f32 = 300.0;
 /// One command for the thread of the microphone.
 enum Command {
     Start,
+    /// Stops the capture without closing the device: the note keeps its
+    /// samples and its length up to this point.
+    Pause,
+    /// Goes on with the capture after a pause.
+    Resume,
     /// Stops the capture and codes the note.
     Stop,
     /// Drops the capture without coding anything.
@@ -68,7 +75,14 @@ pub(crate) enum RecorderEvent {
 pub(crate) struct VoiceRecorder {
     commands: Sender<Command>,
     events: Receiver<RecorderEvent>,
+    /// The loudness of the latest chunks of the microphone, for the wave of
+    /// the pill that draws the recording.
+    levels: Arc<Mutex<VecDeque<f32>>>,
 }
+
+/// How many levels the shared buffer keeps: at the rate of the audio callback
+/// it covers the few hundred milliseconds that the window reads on each tick.
+const LEVELS_BUFFER: usize = 240;
 
 impl VoiceRecorder {
     /// Starts the thread of the microphone. The device opens with the first
@@ -76,17 +90,33 @@ impl VoiceRecorder {
     pub(crate) fn new() -> Self {
         let (commands, command_receiver) = async_channel::unbounded();
         let (event_sender, events) = async_channel::unbounded();
+        let levels = Arc::new(Mutex::new(VecDeque::with_capacity(LEVELS_BUFFER)));
+        let thread_levels = levels.clone();
         // A thread that cannot start only leaves the notes silent: the
         // window keeps working, so the failure is not fatal.
         let _ = std::thread::Builder::new()
             .name("whatfast-recorder".into())
-            .spawn(move || run_recorder(command_receiver, event_sender));
-        Self { commands, events }
+            .spawn(move || run_recorder(command_receiver, event_sender, thread_levels));
+        Self {
+            commands,
+            events,
+            levels,
+        }
     }
 
     /// Opens the microphone and starts keeping the samples.
     pub(crate) fn start(&self) {
         let _ = self.commands.send_blocking(Command::Start);
+    }
+
+    /// Stops the capture without closing the device.
+    pub(crate) fn pause(&self) {
+        let _ = self.commands.send_blocking(Command::Pause);
+    }
+
+    /// Goes on with the capture after a pause.
+    pub(crate) fn resume(&self) {
+        let _ = self.commands.send_blocking(Command::Resume);
     }
 
     /// Closes the microphone and codes the note.
@@ -99,6 +129,14 @@ impl VoiceRecorder {
         let _ = self.commands.send_blocking(Command::Cancel);
     }
 
+    /// Takes the levels that the microphone kept since the last call.
+    pub(crate) fn take_levels(&self) -> Vec<f32> {
+        self.levels
+            .lock()
+            .map(|mut levels| levels.drain(..).collect())
+            .unwrap_or_default()
+    }
+
     /// Takes the next message of the thread, if there is one.
     pub(crate) fn try_recv(&self) -> Option<RecorderEvent> {
         self.events.try_recv().ok()
@@ -107,8 +145,9 @@ impl VoiceRecorder {
 
 /// The samples of the note that is being recorded.
 struct Session {
-    /// Dropping the stream closes the microphone.
-    _stream: cpal::Stream,
+    /// Pausing the stream stops the microphone without losing the samples
+    /// that are already in the buffer.
+    stream: cpal::Stream,
     samples: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     channels: usize,
@@ -116,7 +155,7 @@ struct Session {
 
 impl Session {
     /// Opens the default microphone of the system.
-    fn open() -> anyhow::Result<Self> {
+    fn open(levels: Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -133,24 +172,34 @@ impl Session {
         let config: StreamConfig = supported.into();
         let samples = Arc::new(Mutex::new(Vec::new()));
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, config, samples.clone()),
-            SampleFormat::F64 => build::<f64>(&device, config, samples.clone()),
-            SampleFormat::I16 => build::<i16>(&device, config, samples.clone()),
-            SampleFormat::U16 => build::<u16>(&device, config, samples.clone()),
-            SampleFormat::I32 => build::<i32>(&device, config, samples.clone()),
-            SampleFormat::U32 => build::<u32>(&device, config, samples.clone()),
-            SampleFormat::I8 => build::<i8>(&device, config, samples.clone()),
-            SampleFormat::U8 => build::<u8>(&device, config, samples.clone()),
+            SampleFormat::F32 => build::<f32>(&device, config, samples.clone(), levels),
+            SampleFormat::F64 => build::<f64>(&device, config, samples.clone(), levels),
+            SampleFormat::I16 => build::<i16>(&device, config, samples.clone(), levels),
+            SampleFormat::U16 => build::<u16>(&device, config, samples.clone(), levels),
+            SampleFormat::I32 => build::<i32>(&device, config, samples.clone(), levels),
+            SampleFormat::U32 => build::<u32>(&device, config, samples.clone(), levels),
+            SampleFormat::I8 => build::<i8>(&device, config, samples.clone(), levels),
+            SampleFormat::U8 => build::<u8>(&device, config, samples.clone(), levels),
             other => bail!("the microphone samples in a format that is not supported: {other:?}"),
         }
         .context("the microphone could not be opened")?;
         stream.play().context("the microphone could not start")?;
         Ok(Self {
-            _stream: stream,
+            stream,
             samples,
             sample_rate,
             channels,
         })
+    }
+
+    /// Stops the capture without closing the device.
+    fn pause(&self) {
+        let _ = self.stream.pause();
+    }
+
+    /// Goes on with the capture after a pause.
+    fn resume(&self) {
+        let _ = self.stream.play();
     }
 
     /// The samples that the microphone kept, and their length.
@@ -172,6 +221,7 @@ fn build<T>(
     device: &cpal::Device,
     config: StreamConfig,
     samples: Arc<Mutex<Vec<f32>>>,
+    levels: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample + ToAmplitude,
@@ -183,7 +233,21 @@ where
             let Ok(mut target) = samples.lock() else {
                 return;
             };
-            target.extend(data.iter().map(|sample| sample.to_amplitude()));
+            // The loudest sample of the chunk is one bar of the wave of the
+            // pill: the window reads these levels on every tick.
+            let mut peak = 0f32;
+            target.reserve(data.len());
+            for sample in data {
+                let value = sample.to_amplitude();
+                peak = peak.max(value.abs());
+                target.push(value);
+            }
+            if let Ok(mut levels) = levels.lock() {
+                if levels.len() >= LEVELS_BUFFER {
+                    levels.pop_front();
+                }
+                levels.push_back(peak);
+            }
         },
         move |_error| {
             // A device that disappears stops the samples: the window learns
@@ -248,7 +312,11 @@ impl ToAmplitude for u8 {
 }
 
 /// The body of the thread of the microphone.
-fn run_recorder(commands: Receiver<Command>, events: Sender<RecorderEvent>) {
+fn run_recorder(
+    commands: Receiver<Command>,
+    events: Sender<RecorderEvent>,
+    levels: Arc<Mutex<VecDeque<f32>>>,
+) {
     let mut session: Option<Session> = None;
     while let Ok(command) = commands.recv_blocking() {
         match command {
@@ -256,16 +324,27 @@ fn run_recorder(commands: Receiver<Command>, events: Sender<RecorderEvent>) {
                 if session.is_some() {
                     continue;
                 }
-                match Session::open() {
+                match Session::open(levels.clone()) {
                     Ok(open) => {
                         session = Some(open);
                         let _ = events.send_blocking(RecorderEvent::Started);
                     }
                     Err(error) => {
-                        let _ = events.send_blocking(RecorderEvent::Failed(format!(
-                            "The microphone could not be used: {error:#}"
-                        )));
+                        eprintln!("recording: {error:#}");
+                        let _ = events.send_blocking(RecorderEvent::Failed(
+                            i18n::t("The microphone could not be used.").to_string(),
+                        ));
                     }
+                }
+            }
+            Command::Pause => {
+                if let Some(open) = session.as_ref() {
+                    open.pause();
+                }
+            }
+            Command::Resume => {
+                if let Some(open) = session.as_ref() {
+                    open.resume();
                 }
             }
             Command::Stop => {
@@ -275,7 +354,7 @@ fn run_recorder(commands: Receiver<Command>, events: Sender<RecorderEvent>) {
                 let (samples, _) = open.take();
                 if samples.is_empty() {
                     let _ = events.send_blocking(RecorderEvent::Failed(
-                        "The microphone did not record anything".into(),
+                        i18n::t("The microphone did not record anything").to_string(),
                     ));
                     continue;
                 }
@@ -285,9 +364,10 @@ fn run_recorder(commands: Receiver<Command>, events: Sender<RecorderEvent>) {
                         let _ = events.send_blocking(RecorderEvent::Finished { path, duration });
                     }
                     Err(error) => {
-                        let _ = events.send_blocking(RecorderEvent::Failed(format!(
-                            "The voice note could not be saved: {error:#}"
-                        )));
+                        eprintln!("recording: {error:#}");
+                        let _ = events.send_blocking(RecorderEvent::Failed(
+                            i18n::t("The voice note could not be saved.").to_string(),
+                        ));
                     }
                 }
             }
