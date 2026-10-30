@@ -271,6 +271,8 @@ fn every_request() -> Vec<rpc_request::Request> {
         rpc_request::Request::Reconnect(Default::default()),
         rpc_request::Request::GetIntegrityStatus(GetIntegrityStatusRequest::default()),
         rpc_request::Request::RepairLocalCache(RepairLocalCacheRequest::default()),
+        rpc_request::Request::StorageUsage(Default::default()),
+        rpc_request::Request::ClearMediaCache(Default::default()),
         rpc_request::Request::DeleteMessage(DeleteMessageRequest {
             chat_id: "chat-0".into(),
             message_id: "message-1".into(),
@@ -452,11 +454,64 @@ fn fake_event_emission_is_monotonic() {
 }
 
 #[test]
+fn the_storage_panel_measures_and_clears_only_the_media_tree() {
+    let profile = profile_dir("storage-panel");
+    let media = profile.join("media");
+    std::fs::create_dir_all(media.join("nested")).expect("create the media tree");
+    std::fs::write(media.join("media-aaa.jpg"), vec![0u8; 1_000]).unwrap();
+    std::fs::write(media.join("media-bbb.mp4"), vec![0u8; 4_000]).unwrap();
+    std::fs::write(media.join("avatar-1-normal.jpg"), vec![0u8; 200]).unwrap();
+    std::fs::write(media.join("nested").join("nota.opus"), vec![0u8; 50]).unwrap();
+    // A file outside the media tree: the panel and its cleanup never see it.
+    std::fs::write(profile.join("chats.db"), b"keep me").unwrap();
+
+    let harness = Harness::start(&profile);
+    let rpc_response::Result::StorageUsage(usage) =
+        harness.ask(rpc_request::Request::StorageUsage(Default::default()))
+    else {
+        panic!("the fake did not answer the usage of the media");
+    };
+    assert_eq!(usage.total_bytes, 5_250);
+    assert_eq!(usage.total_files, 4);
+    let bytes = |kind: &str| {
+        usage
+            .buckets
+            .iter()
+            .find(|bucket| bucket.kind == kind)
+            .map(|bucket| bucket.bytes)
+            .unwrap_or(0)
+    };
+    assert_eq!(bytes("photo"), 1_000);
+    assert_eq!(bytes("video"), 4_000);
+    assert_eq!(bytes("audio"), 50);
+    assert_eq!(bytes("avatar"), 200);
+    assert_eq!(usage.folder, media.to_string_lossy());
+
+    let rpc_response::Result::ClearMediaCache(cleared) =
+        harness.ask(rpc_request::Request::ClearMediaCache(Default::default()))
+    else {
+        panic!("the fake did not answer the cleanup");
+    };
+    assert_eq!(cleared.deleted_files, 4);
+    assert_eq!(cleared.freed_bytes, 5_250);
+    assert_eq!(
+        cleared.usage.map(|usage| usage.total_files),
+        Some(0),
+        "the cleanup answers what is left, which is nothing"
+    );
+    assert!(std::fs::read(profile.join("chats.db")).is_ok());
+    assert!(
+        !media.join("media-aaa.jpg").exists(),
+        "the files of the cache are gone"
+    );
+}
+
+#[test]
 fn fake_answers_every_request_of_the_protocol() {
     let profile = profile_dir("every-request");
     let harness = Harness::start(&profile);
     let requests = every_request();
-    assert_eq!(requests.len(), 50);
+    assert_eq!(requests.len(), 52);
     for (index, request) in requests.iter().enumerate() {
         harness
             .outgoing
@@ -487,7 +542,7 @@ fn fake_answers_every_request_of_the_protocol() {
             BridgeMessage::Exited(_) => panic!("the fake backend exited"),
         }
     }
-    assert_eq!(answers.len(), 50);
+    assert_eq!(answers.len(), 52);
     for (request_id, result) in &answers {
         assert!(
             !matches!(result, rpc_response::Result::Error(_)),
@@ -707,6 +762,23 @@ fn fake_pagination_and_windows_follow_the_dataset() {
     assert_eq!(messages.messages[0].id, "message-997");
     assert_eq!(messages.messages[2].id, "message-999");
     assert!(messages.has_more);
+
+    // The page before the oldest message of the last one: the app sends the
+    // timestamp and the id, and the answer has to be the previous three.
+    let oldest = &messages.messages[0];
+    let rpc_response::Result::ListMessages(older) =
+        harness.ask(rpc_request::Request::ListMessages(ListMessagesRequest {
+            chat_id: "chat-0".into(),
+            before_timestamp_ms: oldest.timestamp_ms,
+            before_message_id: oldest.id.clone(),
+            limit: 3,
+        }))
+    else {
+        panic!("the older messages were not listed");
+    };
+    let ids: Vec<&str> = older.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["message-994", "message-995", "message-996"]);
+    assert!(older.has_more);
 
     let rpc_response::Result::OpenMessageWindow(window) = harness.ask(
         rpc_request::Request::OpenMessageWindow(OpenMessageWindowRequest {

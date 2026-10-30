@@ -1,6 +1,10 @@
 //! The store's own unit tests: paging, unread counters, reactions, and the
 //! last-message pointer, exercised on a temporary database.
 
+use whatsapp_rust::waproto::buffa::MessageField;
+use whatsapp_rust::waproto::whatsapp as wa;
+use whatfast_wa::db::Store;
+
 fn temp_store(label: &str) -> (std::path::PathBuf, whatfast_wa::db::Store) {
     let dir = std::env::temp_dir().join(format!(
         "whatfast-wa-store-{label}-{}-{}",
@@ -473,7 +477,7 @@ fn chat_flags_create_the_conversation_before_the_first_message() {
 }
 
 #[test]
-fn search_groups_ranks_fuzzy_matches_beyond_the_first_page() {
+fn search_chats_ranks_fuzzy_matches_beyond_the_first_page() {
     let (_dir, store) = temp_store("search-groups");
     for index in 0..501 {
         let jid = format!("g{index}@g.us");
@@ -498,10 +502,77 @@ fn search_groups_ranks_fuzzy_matches_beyond_the_first_page() {
         .unwrap();
 
     // A typo still matches, and the oldest group is past the first chat page.
-    let hits = store.search_groups("eqipo", 6).unwrap();
+    let hits = store.search_chats("eqipo", 6).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].jid, "g0@g.us");
     assert_eq!(hits[0].name, "Equipo de Rust");
+}
+
+#[test]
+fn search_chats_finds_direct_conversations_by_the_saved_name() {
+    let (_dir, store) = temp_store("search-direct");
+    store
+        .ensure_chat("5493813495950@s.whatsapp.net", "5493813495950@s.whatsapp.net")
+        .unwrap();
+    store
+        .learn_contact(
+            "5493813495950@s.whatsapp.net",
+            "EL MERCADO DEL CERDO",
+            "",
+            "",
+        )
+        .unwrap();
+    store
+        .insert_message(&message(
+            "5493813495950@s.whatsapp.net",
+            "m1",
+            10,
+            false,
+            "hola",
+        ))
+        .unwrap();
+
+    // The name of a direct chat comes from the address book, not from the
+    // subject the server sent: the search has to read the joined row.
+    let hits = store.search_chats("cerdo", 6).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].display_title(), "EL MERCADO DEL CERDO");
+}
+
+#[test]
+fn search_contacts_lists_one_row_per_person() {
+    let (_dir, store) = temp_store("search-contacts");
+    store
+        .ensure_chat("5493813495950@s.whatsapp.net", "5493813495950@s.whatsapp.net")
+        .unwrap();
+    store
+        .learn_contact(
+            "5493813495950@s.whatsapp.net",
+            "EL MERCADO DEL CERDO",
+            "",
+            "",
+        )
+        .unwrap();
+    // The same person, stored again under its hidden identity.
+    store
+        .learn_contact("87767807692931@lid", "EL MERCADO DEL CERDO", "", "")
+        .unwrap();
+    store
+        .learn_contact("5493811111111@s.whatsapp.net", "Otra Persona", "", "")
+        .unwrap();
+
+    let hits = store.search_contacts("cerdo", 8).unwrap();
+    assert_eq!(hits.len(), 1, "the two addresses are one contact");
+    assert_eq!(hits[0].display_name, "EL MERCADO DEL CERDO");
+    assert_eq!(
+        hits[0].chat_id, "5493813495950@s.whatsapp.net",
+        "the row with the conversation wins"
+    );
+    assert_eq!(hits[0].phone_number, "5493813495950");
+
+    // A typo still finds the person, like the reference.
+    assert_eq!(store.search_contacts("serdo", 8).unwrap().len(), 1);
+    assert!(store.search_contacts("zzz", 8).unwrap().is_empty());
 }
 
 #[test]
@@ -546,6 +617,44 @@ fn search_messages_matches_typos_captions_and_file_names() {
     // Zero means the Go default of twenty, and a short needle is ignored.
     assert!(store.search_messages("pl", 0).unwrap().is_empty());
     assert!(store.search_messages("planning", 0).unwrap().len() <= 20);
+}
+
+/// El indice trigram sigue a las filas: lo que se edita se encuentra con la
+/// palabra nueva y lo que se borra no se encuentra mas.
+#[test]
+fn the_search_index_follows_an_edit_and_a_delete() {
+    let (_dir, store) = temp_store("search-index");
+    let chat = "index@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    store
+        .insert_message(&message(chat, "edited", 10, false, "manzana verde"))
+        .unwrap();
+    store
+        .insert_message(&message(chat, "gone", 11, false, "pera madura"))
+        .unwrap();
+    assert_eq!(store.search_messages("manzana", 20).unwrap()[0].1.id, "edited");
+    assert_eq!(store.search_messages("pera", 20).unwrap()[0].1.id, "gone");
+
+    store
+        .write(|conn| {
+            conn.execute(
+                "UPDATE messages SET text='banana amarilla' WHERE id='edited'",
+                [],
+            )?;
+            conn.execute("DELETE FROM messages WHERE id='gone'", [])
+        })
+        .unwrap();
+
+    let updated = store.search_messages("banana", 20).unwrap();
+    assert_eq!(updated[0].1.id, "edited");
+    assert!(
+        store.search_messages("manzana", 20).unwrap().is_empty(),
+        "la palabra vieja ya no esta en el indice"
+    );
+    assert!(
+        store.search_messages("pera", 20).unwrap().is_empty(),
+        "la fila borrada sale del indice"
+    );
 }
 
 #[test]
@@ -737,6 +846,36 @@ fn local_path_updates_are_kind_scoped() {
             .media_local_path,
         "/aud"
     );
+}
+
+#[test]
+fn clearing_the_media_cache_forgets_the_local_paths_and_keeps_the_descriptors() {
+    let (_dir, store) = temp_store("clear-media");
+    store.ensure_chat("a@x", "a@x").unwrap();
+    let mut image = message("a@x", "image", 10, false, "");
+    image.kind = "image".into();
+    image.image_direct_path = "/v/t62".into();
+    store.insert_message(&image).unwrap();
+    let mut video = message("a@x", "video", 20, false, "");
+    video.kind = "video".into();
+    video.media_direct_path = "/v/t62-video".into();
+    store.insert_message(&video).unwrap();
+    store.set_image_local_path("a@x", "image", "/img").unwrap();
+    store.set_media_local_path("a@x", "video", "/vid").unwrap();
+
+    assert_eq!(store.clear_media_paths().unwrap(), 2);
+
+    let image = store.message("a@x", "image").unwrap().unwrap();
+    assert_eq!(image.image_local_path, "");
+    assert_eq!(
+        image.image_direct_path, "/v/t62",
+        "the direct path is what the next download needs"
+    );
+    let video = store.message("a@x", "video").unwrap().unwrap();
+    assert_eq!(video.media_local_path, "");
+    assert_eq!(video.media_direct_path, "/v/t62-video");
+    // A second cleanup has nothing left to forget.
+    assert_eq!(store.clear_media_paths().unwrap(), 0);
 }
 
 #[test]
@@ -1188,3 +1327,204 @@ fn the_preview_of_a_chat_skips_a_message_that_was_deleted() {
     );
     assert_eq!(chat.last_message_text, "hola");
 }
+
+/// A payload that carries the association of an HD upload's second half.
+fn hd_child_payload(kind: wa::message_association::AssociationType, parent: &str) -> Vec<u8> {
+    let mut association = wa::MessageAssociation::default();
+    association.association_type = Some(kind);
+    let mut key = wa::MessageKey::default();
+    key.id = Some(parent.to_string());
+    association.parent_message_key = MessageField::some(key);
+    let mut context = wa::MessageContextInfo::default();
+    context.message_association = MessageField::some(association);
+    let mut content = wa::Message::default();
+    content.message_context_info = MessageField::some(context);
+    whatsapp_rust::waproto::codec::message_to_vec(&content)
+}
+
+fn hd_video(chat: &str, id: &str, ts: i64, direct_path: &str, width: i64) -> whatfast_wa::db::MessageRow {
+    let mut row = message(chat, id, ts, false, "🎬 Video");
+    row.kind = "video".into();
+    row.media_mime = "video/mp4".into();
+    row.media_direct_path = direct_path.into();
+    row.media_width = width;
+    row.media_height = width * 2;
+    row.media_size = width * 1000;
+    row.media_duration = 28;
+    row
+}
+
+#[test]
+fn the_hd_half_of_a_video_folds_into_its_parent() {
+    let (_dir, store) = temp_store("hd-adopt");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let parent = hd_video(chat, "parent", 100, "/v/standard", 480);
+    store.insert_message(&parent).unwrap();
+
+    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD,
+        "parent",
+    );
+
+    let outcome = store.adopt_hd_child(&child).unwrap();
+    assert_eq!(outcome, whatfast_wa::db::HdChild::Adopted("parent".into()));
+    assert!(
+        store.message(chat, "child").unwrap().is_none(),
+        "the child is not a message"
+    );
+    let parent = store.message(chat, "parent").unwrap().unwrap();
+    assert_eq!(parent.media_direct_path, "/v/hd");
+    assert_eq!(parent.media_width, 720);
+    assert_eq!(parent.id, "parent");
+}
+
+#[test]
+fn a_downloaded_video_keeps_its_file_and_the_hd_half_is_dropped() {
+    let (_dir, store) = temp_store("hd-dropped");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let parent = hd_video(chat, "parent", 100, "/v/standard", 480);
+    store.insert_message(&parent).unwrap();
+    store
+        .set_media_local_path(chat, "parent", "/media/standard.mp4")
+        .unwrap();
+
+    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD,
+        "parent",
+    );
+
+    let outcome = store.adopt_hd_child(&child).unwrap();
+    assert_eq!(outcome, whatfast_wa::db::HdChild::Dropped);
+    let parent = store.message(chat, "parent").unwrap().unwrap();
+    assert_eq!(parent.media_direct_path, "/v/standard");
+    assert_eq!(parent.media_local_path, "/media/standard.mp4");
+}
+
+#[test]
+fn the_hevc_copy_of_a_video_is_dropped_and_the_parent_keeps_its_file() {
+    let (_dir, store) = temp_store("hevc-dropped");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let parent = hd_video(chat, "parent", 100, "/v/avc", 720);
+    store.insert_message(&parent).unwrap();
+    let mut child = hd_video(chat, "child", 114, "/v/hevc", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::HEVC_VIDEO_DUAL_UPLOAD,
+        "parent",
+    );
+
+    assert_eq!(
+        store.adopt_hd_child(&child).unwrap(),
+        whatfast_wa::db::HdChild::Dropped
+    );
+    let parent = store.message(chat, "parent").unwrap().unwrap();
+    assert_eq!(parent.media_direct_path, "/v/avc");
+}
+
+#[test]
+fn an_hd_half_without_its_parent_stays_as_its_own_message() {
+    let (_dir, store) = temp_store("hd-orphan");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD,
+        "missing",
+    );
+
+    assert_eq!(
+        store.adopt_hd_child(&child).unwrap(),
+        whatfast_wa::db::HdChild::Orphan
+    );
+}
+
+#[test]
+fn the_album_half_of_a_message_is_never_folded() {
+    let (_dir, store) = temp_store("hd-album");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let parent = hd_video(chat, "parent", 100, "/v/standard", 480);
+    store.insert_message(&parent).unwrap();
+    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::MEDIA_ALBUM,
+        "parent",
+    );
+
+    // An album item is a message of its own: the store leaves it alone.
+    assert_eq!(
+        store.adopt_hd_child(&child).unwrap(),
+        whatfast_wa::db::HdChild::Orphan
+    );
+    store.insert_message(&child).unwrap();
+    assert!(store.message(chat, "child").unwrap().is_some());
+}
+
+#[test]
+fn opening_an_old_profile_folds_the_hd_halves_it_already_stored() {
+    let (dir, store) = temp_store("hd-migrate");
+    let chat = "a@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    let parent = hd_video(chat, "parent", 100, "/v/standard", 480);
+    store.insert_message(&parent).unwrap();
+    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
+    child.payload = hd_child_payload(
+        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD,
+        "parent",
+    );
+    store.insert_message(&child).unwrap();
+    assert!(store.message(chat, "child").unwrap().is_some());
+    store
+        .write(|conn| conn.execute("UPDATE schema_version SET version=2", []))
+        .unwrap();
+    drop(store);
+
+    let store = whatfast_wa::db::Store::open(&dir.join("chats.db")).unwrap();
+    assert!(
+        store.message(chat, "child").unwrap().is_none(),
+        "the duplicate of the old profile goes away"
+    );
+    let parent = store.message(chat, "parent").unwrap().unwrap();
+    assert_eq!(parent.media_direct_path, "/v/hd");
+    let version: i64 = store
+        .read(|conn| conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(version, 4, "el esquema sube al indice de busqueda");
+}
+
+/// The migration against a copy of a real profile.
+///
+/// Runs only when `WHATFAST_STORE_SAMPLE` names a chats.db: the profile of
+/// the machine is never touched by the tests.
+#[test]
+#[ignore]
+fn a_real_profile_loses_the_hd_halves_it_stored() {
+    let Ok(path) = std::env::var("WHATFAST_STORE_SAMPLE") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    // The pair of statuses of 29/10: the parent is the H.264 video and the
+    // child is the HEVC copy that used to paint a second bubble.
+    let chat = "status@broadcast";
+    let parent = "A50819F3F27712289E0C797E80F25AAC";
+    let child = "A5E53827BA9680C4474E68EEAE075F37";
+    // The open runs the migration of version 3 on the copy.
+    let store = Store::open(path).unwrap();
+    assert!(
+        store.message(chat, child).unwrap().is_none(),
+        "the HEVC copy is gone"
+    );
+    assert!(
+        store.message(chat, parent).unwrap().is_some(),
+        "the parent stays"
+    );
+    let version: i64 = store
+        .read(|conn| conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(version, 4, "el esquema sube al indice de busqueda");
+}
+

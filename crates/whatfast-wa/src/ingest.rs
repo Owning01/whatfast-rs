@@ -20,7 +20,7 @@ use whatfast_protocol::{
 };
 use whatsapp_rust::waproto::whatsapp as wa;
 
-use crate::db::{ChatFlag, ChatRow, MessageRow, ReactionRow, Store};
+use crate::db::{ChatFlag, ChatRow, HdChild, MessageRow, ReactionRow, Store};
 
 /// The status a freshly stored inbound message carries until a receipt or
 /// its own send record says otherwise. The Go stored `Delivered` for peers'
@@ -570,6 +570,47 @@ fn fallback_message_content(message: &wa::Message, stanza_type: &str) -> (String
     (label.to_lowercase().replace(' ', "_"), label)
 }
 
+/// The inner message of an envelope that only carries routing data.
+///
+/// The history sync delivers the photos and videos of an album inside
+/// `associatedChildMessage`; a status shared in a chat arrives inside
+/// `groupStatusMessage` or `groupStatusMessageV2`; an animated sticker inside
+/// `lottieStickerMessage`; a disappearing message inside `ephemeralMessage`;
+/// and a message sent from another device of the account inside
+/// `deviceSentMessage`. The bubble is always the inner message: the wrapper
+/// has no content of its own. The `viewOnce` envelopes stay out: their media
+/// key never leaves the phone, so they keep their own notice.
+fn envelope_message(message: &wa::Message) -> Option<&wa::Message> {
+    let future_proof = [
+        message.associated_child_message.as_option(),
+        message.group_status_message.as_option(),
+        message.group_status_message_v2.as_option(),
+        message.lottie_sticker_message.as_option(),
+        message.ephemeral_message.as_option(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|wrapper| wrapper.message.as_option());
+    future_proof.or_else(|| {
+        message
+            .device_sent_message
+            .as_option()
+            .and_then(|sent| sent.message.as_option())
+    })
+}
+
+/// Peels the envelopes of one payload, bounded so a payload that wraps
+/// itself cannot recurse forever.
+fn unwrap_envelope(mut message: &wa::Message) -> &wa::Message {
+    for _ in 0..4 {
+        let Some(inner) = envelope_message(message) else {
+            break;
+        };
+        message = inner;
+    }
+    message
+}
+
 /// The Go's `passiveMessage`: payloads that only carry protocol or state
 /// signals WhatsApp itself never renders as a chat bubble.
 ///
@@ -577,6 +618,7 @@ fn fallback_message_content(message: &wa::Message, stanza_type: &str) -> (String
 /// to the polls table yet: dropping it leaves no bubble, like the oracle, and
 /// the option returns with the next full sync.
 fn passive_message(message: &wa::Message) -> bool {
+    let message = unwrap_envelope(message);
     if let Some(protocol) = message.protocol_message.as_option() {
         let kind = protocol.r#type;
         return !(kind == Some(wa::message::protocol_message::Type::Revoke)
@@ -596,9 +638,70 @@ fn passive_message(message: &wa::Message) -> bool {
     inline_text(message).is_empty() && message_content_field_name(message).is_empty()
 }
 
+/// What the second half of a dual upload does with the message it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DualUpload {
+    /// The child holds a better copy of the file (an HD photo or video): its
+    /// descriptor replaces the one of the parent.
+    Better(String),
+    /// The child holds another encoding of the same file (the HEVC video):
+    /// the parent keeps its file, because the compatible copy is the one the
+    /// reader plays.
+    Same(String),
+}
+
+/// The parent of a message that WhatsApp sent as the second half of a dual
+/// upload, when it is one.
+///
+/// A photo or a video sent in HD arrives twice: the parent carries the
+/// standard file and the child carries the HD one with a `messageAssociation`
+/// that names the parent. A video sent in HEVC arrives the same way, with the
+/// H.265 copy as the child. The clients paint one bubble, so the child must
+/// never become a message of its own.
+pub(crate) fn dual_upload(message: &wa::Message) -> Option<DualUpload> {
+    // The association travels on the envelope (the wrapper that says how the
+    // message got here); the content is inside. Both levels are read.
+    if let Some(dual) = dual_upload_in(message) {
+        return Some(dual);
+    }
+    let content = unwrap_envelope(message);
+    if std::ptr::eq(content, message) {
+        return None;
+    }
+    dual_upload_in(content)
+}
+
+fn dual_upload_in(message: &wa::Message) -> Option<DualUpload> {
+    let association = message
+        .message_context_info
+        .as_option()?
+        .message_association
+        .as_option()?;
+    let better = match association.association_type? {
+        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD
+        | wa::message_association::AssociationType::HD_IMAGE_DUAL_UPLOAD => true,
+        wa::message_association::AssociationType::HEVC_VIDEO_DUAL_UPLOAD => false,
+        _ => return None,
+    };
+    let parent = association
+        .parent_message_key
+        .as_option()?
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())?;
+    Some(if better {
+        DualUpload::Better(parent.to_string())
+    } else {
+        DualUpload::Same(parent.to_string())
+    })
+}
+
 /// Classifies one (possibly wrapped) content message into the store's shape,
 /// mirroring the Go's `extractMessageContent` order and fallback texts.
 fn classify(content: &wa::Message, stanza_type: &str) -> Content {
+    // What travels inside an envelope is the message: the wrapper only says
+    // how it got here, and the bubble is the inner content.
+    let content = unwrap_envelope(content);
     let mut out = Content::default();
 
     // The bubble says what the message is, not what it carried: the media
@@ -1135,8 +1238,9 @@ pub fn inbound_to_row(inbound: &InboundMessage, mine: &str) -> Option<Ingested> 
         ..MessageRow::default()
     };
     // The quoted message the author answered: the Go copied it off the first
-    // populated content field's ContextInfo.
-    if let Some(context) = message_context_info(content) {
+    // populated content field's ContextInfo. An envelope keeps that context
+    // on the inner message, so the lookup peels the wrapper first.
+    if let Some(context) = message_context_info(unwrap_envelope(content)) {
         message.reply_to_id = s(&context.stanza_id);
         message.reply_to_chat_id = s(&context.remote_jid);
         let score = i64::from(context.forwarding_score.unwrap_or(0));
@@ -1198,6 +1302,54 @@ pub fn inbound_to_row(inbound: &InboundMessage, mine: &str) -> Option<Ingested> 
     };
     let _ = mine;
     Some(Ingested { chat, message })
+}
+
+/// The kinds a stored payload turns into when it carries a real bubble.
+///
+/// A signal (a revoke, a vote, a placeholder, a mention notice) only mutates
+/// state: it has no bubble in WhatsApp either, so the recovery leaves it
+/// hidden. A label with no content behind it (the name of an envelope nobody
+/// opened) is not a bubble either.
+fn recovered_bubble(content: &Content) -> bool {
+    content.image.is_some()
+        || content.attachment.is_some()
+        || content.location.is_some()
+        || content.poll.is_some()
+        || !content.contacts.is_empty()
+        || (matches!(content.kind.as_str(), "text" | "album")
+            && !content.text.trim().is_empty())
+}
+
+/// Rewrites the rows an older build stored as an opaque envelope.
+///
+/// Before the envelopes were peeled, a photo of an album, a status shared in
+/// a chat or an animated sticker landed as a row with an empty bubble: the
+/// media descriptor stayed inside `payload`, so the message never showed and
+/// nothing could be downloaded. This pass reads the stored payload once more
+/// and writes the bubble it should have been. A payload that only carries a
+/// signal becomes `signal`: hidden like before, and skipped by the next
+/// start.
+pub fn recover_legacy_messages(store: &Store) -> rusqlite::Result<usize> {
+    let rows = store.opaque_messages()?;
+    let mut recovered = 0;
+    for mut row in rows {
+        let classified = whatsapp_rust::waproto::codec::message_decode(&row.payload)
+            .ok()
+            .map(|message| classify(&message, ""));
+        let Some(classified) = classified.filter(recovered_bubble) else {
+            // The row stays hidden, but under a name the next pass skips.
+            row.kind = "signal".into();
+            row.text.clear();
+            store.insert_message(&row)?;
+            continue;
+        };
+        row.kind = classified.kind.clone();
+        row.text = classified.text.clone();
+        apply_content(&mut row, &classified);
+        store.insert_message(&row)?;
+        recovered += 1;
+    }
+    Ok(recovered)
 }
 
 /// Persists the definition of one stored poll message — question, options,
@@ -1495,6 +1647,13 @@ pub fn store_conversation(
         let mut row = message.clone();
         row.chat_jid = canonical.clone();
         row.reply_to_chat_id = reply_chat_id(store, identity, &canonical, &row);
+        // The history sync carries both halves of an HD upload: the child
+        // folds into the parent and never becomes a second bubble.
+        match store.adopt_hd_child(&row) {
+            Ok(HdChild::Orphan) => {}
+            Ok(_) => continue,
+            Err(_) => {}
+        }
         store.insert_message(&row)?;
         persist_poll_definition(store, &row);
     }
@@ -1702,6 +1861,19 @@ pub fn apply_event(
                 message.chat_jid = canonical.clone();
                 message.reply_to_chat_id = reply_chat_id(store, identity, &canonical, &message);
                 store.ensure_chat(&canonical, &chat.preferred_jid).ok();
+                // The child half of an HD upload is not a message: it folds
+                // into the parent it names, and the parent is announced again
+                // because its file may have changed.
+                match store.adopt_hd_child(&message) {
+                    Ok(HdChild::Adopted(parent_id)) => {
+                        if let Ok(Some(parent)) = store.message(&canonical, &parent_id) {
+                            events.push(message_upserted(&parent));
+                        }
+                        continue;
+                    }
+                    Ok(HdChild::Dropped) => continue,
+                    _ => {}
+                }
                 // The store advances the chat pointer forward-only and grows
                 // the unread counter from the row's own flag; the reducer must
                 // not write the pointer itself or an out-of-order message
@@ -2137,6 +2309,130 @@ mod tests {
         assert_eq!(row.kind, "view_once");
         assert_eq!(row.text, "One-time message");
         assert!(!row.from_me);
+    }
+
+    #[test]
+    fn an_album_child_of_the_history_sync_keeps_its_photo() {
+        let mut photo = wa::message::ImageMessage::default();
+        photo.mimetype = Some("image/jpeg".into());
+        photo.direct_path = Some("/v/t62.1084-24/photo".into());
+        photo.caption = Some("la playa".into());
+        photo.file_length = Some(278_812);
+        photo.width = Some(1600);
+        photo.height = Some(1600);
+        let mut inner = wa::Message::default();
+        inner.image_message = MessageField::some(photo);
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        let mut content = wa::Message::default();
+        content.associated_child_message = MessageField::some(wrapper);
+
+        let classified = classify_one(&content);
+        assert_eq!(classified.kind, "image");
+        assert_eq!(classified.text, "la playa");
+        let (parts, sticker) = classified.image.expect("the photo of the album");
+        assert!(!sticker);
+        assert_eq!(parts.direct_path, "/v/t62.1084-24/photo");
+        assert_eq!(parts.file_size, 278_812);
+    }
+
+    #[test]
+    fn a_status_shared_in_the_chat_arrives_with_its_photo() {
+        let mut photo = wa::message::ImageMessage::default();
+        photo.mimetype = Some("image/jpeg".into());
+        photo.direct_path = Some("/v/t24/status".into());
+        let mut inner = wa::Message::default();
+        inner.image_message = MessageField::some(photo);
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        let mut content = wa::Message::default();
+        content.group_status_message_v2 = MessageField::some(wrapper);
+
+        let classified = classify_one(&content);
+        assert_eq!(classified.kind, "image");
+        let (parts, _) = classified.image.expect("the photo of the status");
+        assert_eq!(parts.direct_path, "/v/t24/status");
+    }
+
+    #[test]
+    fn a_lottie_sticker_is_a_sticker_again() {
+        let mut sticker = wa::message::StickerMessage::default();
+        sticker.mimetype = Some("image/webp".into());
+        sticker.direct_path = Some("/v/t62/lottie".into());
+        let mut content = wa::Message::default();
+        content.sticker_message = MessageField::some(sticker);
+        let mut sent = wa::message::DeviceSentMessage::default();
+        sent.message = MessageField::some(content);
+        let mut inner = wa::Message::default();
+        inner.device_sent_message = MessageField::some(sent);
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        let mut envelope = wa::Message::default();
+        envelope.lottie_sticker_message = MessageField::some(wrapper);
+
+        let classified = classify_one(&envelope);
+        assert_eq!(classified.kind, "sticker");
+        assert_eq!(classified.text, "Sticker");
+        let (parts, sticker) = classified.image.expect("the sticker");
+        assert!(sticker);
+        assert_eq!(parts.direct_path, "/v/t62/lottie");
+    }
+
+    #[test]
+    fn the_startup_pass_rebuilds_the_bubbles_an_older_build_left_opaque() {
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-wa-recover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("chats.db")).unwrap();
+
+        let mut photo = wa::message::ImageMessage::default();
+        photo.mimetype = Some("image/jpeg".into());
+        photo.direct_path = Some("/v/t62.1084-24/photo".into());
+        let mut inner = wa::Message::default();
+        inner.image_message = MessageField::some(photo);
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        let mut wrapped = wa::Message::default();
+        wrapped.associated_child_message = MessageField::some(wrapper);
+
+        let mut opaque = MessageRow {
+            id: "LEGACY1".into(),
+            chat_jid: "120363@g.us".into(),
+            transport_jid: "120363@g.us".into(),
+            sender_jid: "5491100000000@s.whatsapp.net".into(),
+            timestamp: 1_700_000_000_000,
+            kind: "unsupported".into(),
+            payload: whatsapp_rust::waproto::codec::message_to_vec(&wrapped),
+            ..MessageRow::default()
+        };
+        store.insert_message(&opaque).unwrap();
+
+        let mut vote = wa::Message::default();
+        vote.poll_update_message = MessageField::some(Default::default());
+        opaque.id = "LEGACY2".into();
+        opaque.payload = whatsapp_rust::waproto::codec::message_to_vec(&vote);
+        store.insert_message(&opaque).unwrap();
+
+        assert_eq!(recover_legacy_messages(&store).unwrap(), 1);
+
+        let recovered = store.message("120363@g.us", "LEGACY1").unwrap().unwrap();
+        assert_eq!(recovered.kind, "image");
+        assert_eq!(recovered.image_direct_path, "/v/t62.1084-24/photo");
+        assert_eq!(recovered.image_mime, "image/jpeg");
+
+        // A payload that only mutates state stays out of the chat.
+        let signal = store.message("120363@g.us", "LEGACY2").unwrap().unwrap();
+        assert_eq!(signal.kind, "signal");
+        assert!(signal.text.is_empty());
+
+        // The next start finds nothing left to rebuild.
+        assert_eq!(recover_legacy_messages(&store).unwrap(), 0);
     }
 
     #[test]

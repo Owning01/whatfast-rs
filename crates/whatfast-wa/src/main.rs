@@ -24,7 +24,7 @@ use whatfast_wa::{
     bridge::{FrameError, read_frame, write_frame},
     db, drafts,
     guard::{self, Guard, Who},
-    guides, scheduler, schedules,
+    guides, ingest, scheduler, schedules,
     server::{Outcome, Server},
     socket::{self, Origin},
 };
@@ -156,6 +156,12 @@ fn run() -> Result<ExitCode, Failure> {
     // backend off this directory.
     let profile_lock = acquire_profile_lock(&data_dir)?;
     init_logging(log_file.as_deref())?;
+    // A panic inside one task does not stop the process, and the default hook
+    // writes to stderr, which the desktop never reads: the log file is the
+    // only place where a dead task can be seen.
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("panic: {info}");
+    }));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -166,6 +172,15 @@ fn run() -> Result<ExitCode, Failure> {
     let chats_db = db::Store::open(&data_dir.join("chats.db"))
         .map_err(|error| anyhow::anyhow!("opening chats.db: {error}"))
         .map(Arc::new)?;
+    // The rows an older build stored as an opaque envelope keep the photo of
+    // an album or the status of a chat inside `payload`: the pass rebuilds
+    // the bubble and its download descriptor once, before the desktop reads
+    // any conversation.
+    match ingest::recover_legacy_messages(&chats_db) {
+        Ok(0) => {}
+        Ok(recovered) => tracing::info!("{recovered} messages recovered from opaque payloads"),
+        Err(error) => tracing::warn!("opaque message recovery failed: {error}"),
+    }
     let code = runtime.block_on(serve(data_dir, chats_db, args.stdio, args.idle_exit));
     // The lock outlives the runtime teardown on purpose: releasing it before
     // the store flushes would invite a successor onto a hot database.
@@ -520,7 +535,23 @@ async fn route(
             return None;
         }
     }
+    if tracing::enabled!(tracing::Level::DEBUG)
+        && let Some(request) = request.as_ref()
+    {
+        let shown = format!("{request:?}");
+        tracing::debug!("request {}", shown.split('(').next().unwrap_or("?"));
+    }
     let outcome = srv.handle(envelope).await;
+    // A request that holds the loop for seconds freezes every other answer,
+    // and the desktop only sees its own deadlines expire. The name of the
+    // request is the only clue the log can keep.
+    if started.elapsed() >= std::time::Duration::from_secs(2)
+        && let Some(request) = request.as_ref()
+    {
+        let debug = format!("{request:?}");
+        let name = debug.split('(').next().unwrap_or("a request");
+        tracing::warn!("{name} held the loop for {} ms", started.elapsed().as_millis());
+    }
     match outcome {
         Outcome::Respond(mut response) => {
             let hello = hello_response(&response);
@@ -799,6 +830,7 @@ fn init_logging(log_file: Option<&std::path::Path>) -> anyhow::Result<()> {
         restrict_private(path, 0o600).context("restricting the log file")?;
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_ansi(false)
             .with_writer(std::sync::Mutex::new(Tee::new(file)))
             .try_init()
     } else {

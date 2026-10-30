@@ -84,6 +84,10 @@ pub struct Server {
     /// one runs answers `history_busy`. Shared with the expiry task, which
     /// releases the slot when the request ends.
     older_history: Arc<Mutex<Option<(String, i64)>>>,
+    /// The jids whose profile picture is being fetched in the background: a
+    /// second request for the same jid answers at once instead of starting
+    /// another lookup and waiting again.
+    avatar_fetches: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Server {
@@ -102,6 +106,7 @@ impl Server {
             events,
             session: None,
             older_history: Arc::new(Mutex::new(None)),
+            avatar_fetches: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -400,9 +405,21 @@ impl Server {
                 }
                 let groups = self
                     .store
-                    .search_groups(&query, 6)?
+                    .search_chats(&query, 6)?
                     .iter()
                     .map(crate::wire::wire_chat)
+                    .collect::<Vec<_>>();
+                let contacts = self
+                    .store
+                    .search_contacts(&query, 8)?
+                    .into_iter()
+                    .map(|contact| whatfast_protocol::ContactSearchResult {
+                        contact_jid: contact.jid,
+                        chat_id: contact.chat_id,
+                        display_name: contact.display_name,
+                        secondary_name: contact.secondary_name,
+                        phone_number: contact.phone_number,
+                    })
                     .collect::<Vec<_>>();
                 let messages = self
                     .store
@@ -434,7 +451,7 @@ impl Server {
                 Ok(Handled {
                     result: rpc_response::Result::SearchLocal(
                         whatfast_protocol::SearchLocalResponse {
-                            contacts: Vec::new(),
+                            contacts,
                             groups,
                             messages,
                         },
@@ -1856,6 +1873,34 @@ impl Server {
                     exit_after: false,
                 })
             }
+            Some(rpc_request::Request::StorageUsage(_)) => {
+                let usage = crate::storage::scan(&self.media_dir);
+                Ok(Handled {
+                    result: rpc_response::Result::StorageUsage(
+                        usage.to_response(&self.media_dir),
+                    ),
+                    exit_after: false,
+                })
+            }
+            Some(rpc_request::Request::ClearMediaCache(_)) => {
+                // Only the copies on this computer: the account and the phone
+                // are not part of this. The rows that pointed at the deleted
+                // files go back to "not downloaded" so the app fetches them
+                // again.
+                let (freed_bytes, deleted_files) = crate::storage::clear(&self.media_dir);
+                self.store.clear_media_paths()?;
+                let usage = crate::storage::scan(&self.media_dir);
+                Ok(Handled {
+                    result: rpc_response::Result::ClearMediaCache(
+                        whatfast_protocol::ClearMediaCacheResponse {
+                            freed_bytes,
+                            deleted_files,
+                            usage: Some(usage.to_response(&self.media_dir)),
+                        },
+                    ),
+                    exit_after: false,
+                })
+            }
             Some(rpc_request::Request::RequestOlderHistory(request)) => {
                 let coverage = self.request_older_history(&request.chat_id).await?;
                 Ok(Handled {
@@ -2203,14 +2248,49 @@ impl Server {
         jid: &str,
         group: bool,
     ) -> Result<String, Failure> {
-        if crate::meta::avatar_known(&self.media_dir, jid)
-            && avatar_answer_is_fresh(&self.media_dir, jid)
-        {
-            return Ok(crate::meta::cached_avatar_path(&self.media_dir, jid));
+        // A picture already on the disk is shown even when it is old: it is
+        // better than an empty box while the new one arrives.
+        let cached = crate::meta::avatar_known(&self.media_dir, jid)
+            .then(|| crate::meta::cached_avatar_path(&self.media_dir, jid));
+        if cached.is_some() && avatar_answer_is_fresh(&self.media_dir, jid) {
+            return Ok(cached.unwrap_or_default());
         }
-        crate::meta::ensure_avatar(&session.client, &self.media_dir, jid, group)
-            .await
-            .map_err(|(_, message, _)| Failure::retryable("avatar_unavailable", message))
+        // The fetch runs on its own task even when it does not finish in
+        // time: it warms the cache, and the retry of the desktop hits the
+        // fast path above. The request loop is free for the next request.
+        // One fetch per jid: a second request while it runs answers at once.
+        {
+            let mut running = self
+                .avatar_fetches
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !running.insert(jid.to_owned()) {
+                return match cached {
+                    Some(path) => Ok(path),
+                    None => Err(Failure::retryable(
+                        "avatar_unavailable",
+                        "the profile picture is still on its way",
+                    )),
+                };
+            }
+        }
+        let client = session.client.clone();
+        let media_dir = self.media_dir.clone();
+        let running = Arc::clone(&self.avatar_fetches);
+        let key = jid.to_owned();
+        tokio::spawn(async move {
+            let _ = crate::meta::ensure_avatar(&client, &media_dir, &key, group).await;
+            running
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&key);
+        });
+        // The answer does not wait: waiting here holds the loop for every
+        // other request, and the desktop retries when the fetch warms the
+        // cache.
+        cached.ok_or_else(|| {
+            Failure::retryable("avatar_unavailable", "the profile picture is on its way")
+        })
     }
 
     /// Sends the read receipts for the unread rows the desktop acknowledged,
@@ -2250,20 +2330,26 @@ impl Server {
                 ));
             };
             let sender_jid = sender.parse::<whatsapp_rust::Jid>().ok();
-            let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
             let raw: Vec<String> = rows
                 .iter()
                 .filter(|row| row.transport_jid == transport && row.sender_jid == sender)
                 .map(|row| row.id.clone())
                 .collect();
             let _ = self.store.mark_read_ids(chat_id, &raw);
-            if let Err(error) = session
-                .client
-                .mark_as_read(&chat, sender_jid.as_ref(), &ids)
-                .await
-            {
-                tracing::warn!("WhatsApp mark_as_read network call failed: {error}");
-            }
+            // La confirmacion de leido es una llamada a la red: va en su
+            // propia tarea para que el pedido conteste en cuanto la base
+            // quedo marcada. El bucle atiende un pedido por vez, y una
+            // llamada lenta deja a la ventana esperando por todo lo demas.
+            let client = session.client.clone();
+            tokio::spawn(async move {
+                let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                if let Err(error) = client
+                    .mark_as_read(&chat, sender_jid.as_ref(), &ids)
+                    .await
+                {
+                    tracing::warn!("WhatsApp mark_as_read network call failed: {error}");
+                }
+            });
         }
         Ok(())
     }

@@ -28,8 +28,10 @@ use gpui_component::{
     h_flex,
     input::Input,
     scroll::{ScrollableElement as _, ScrollbarAxis},
+    slider::Slider,
     switch::Switch,
     text::{TextView, TextViewStyle},
+    tooltip::Tooltip,
     v_flex, v_virtual_list,
 };
 use qrcode::QrCode;
@@ -55,9 +57,9 @@ use crate::app::{
     ACCENT_SWATCHES, ChatContextAction, ChatMenuAction, CycleRecentChat, CycleRecentChatReverse,
     DARK_GREEN, EMOJI_COLUMNS, EmojiTarget, EscapeAction, FocusComposerAction, FocusSearch,
     MAX_UI_SCALE, MIN_UI_SCALE, OpenQuickAsk, OpenSettingsAction, PANEL, PageDownMessages,
-    PageUpMessages, PanelTab, PinDialogMode, ScrollSurface, ScrollToBottomAction, ScrollToTopAction,
-    SearchResultRow, SelectNextChat, SelectPreviousChat, ToggleAgents, ToggleArchived,
-    ToggleChannels, ToggleStates, UI_SCALE_STEP, Whatfast,
+    PageUpMessages, PanelTab, PinDialogMode, ScrollSurface, ScrollToBottomAction,
+    ScrollToTopAction, SearchResultRow, SelectNextChat, SelectPreviousChat, ToggleAgents,
+    ToggleArchived, ToggleChannels, ToggleStates, UI_SCALE_STEP, UpdatePhase, Whatfast,
 };
 use crate::emoji_recent;
 use crate::helpers::{
@@ -282,10 +284,7 @@ impl Whatfast {
                                 // ringing call does not open the camera yet.
                                 .when(
                                     call.video
-                                        && matches!(
-                                            call.phase.as_str(),
-                                            "connecting" | "active"
-                                        ),
+                                        && matches!(call.phase.as_str(), "connecting" | "active"),
                                     |column| column.child(render_call_video(self, cx)),
                                 ),
                         ),
@@ -1662,8 +1661,7 @@ impl Whatfast {
                                 .h(px(38. * ui_scale))
                                 .rounded_full()
                                 .bg(cx.theme().input)
-                                .border_1()
-                                .border_color(cx.theme().border)
+                                .cleanable(true)
                                 .prefix(
                                     Icon::new(IconName::Search)
                                         .with_size(px(17. * ui_scale))
@@ -1749,44 +1747,51 @@ impl Whatfast {
             )
             // El pie de la columna lleva el estado de la sincronizacion, como
             // la franja del cliente web y como la referencia (que no la
-            // muestra arriba del todo).
-            .child(
-                v_flex()
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .px_3()
-                            .pt_2()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(local_status),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(3.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .bg(cx.theme().secondary)
-                            .when(self.store.sync_active, |track| {
-                                track.flex().justify_center().child(
-                                    div()
-                                        .h_full()
-                                        .w(px(72.))
-                                        .rounded_full()
-                                        .bg(cx.theme().accent),
-                                )
-                            })
-                            .when(self.store.sync_complete, |track| {
-                                track.child(
-                                    div().h_full().w_full().rounded_full().bg(cx.theme().accent),
-                                )
-                            }),
-                    ),
-            )
+            // muestra arriba del todo). Mientras el buscador esta abierto no
+            // se pinta: la referencia solo muestra los resultados.
+            .when(!search_active, |column| {
+                column.child(
+                    v_flex()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .px_3()
+                                .pt_2()
+                                .truncate()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(local_status),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(3.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(cx.theme().secondary)
+                                .when(self.store.sync_active, |track| {
+                                    track.flex().justify_center().child(
+                                        div()
+                                            .h_full()
+                                            .w(px(72.))
+                                            .rounded_full()
+                                            .bg(cx.theme().accent),
+                                    )
+                                })
+                                .when(self.store.sync_complete, |track| {
+                                    track.child(
+                                        div()
+                                            .h_full()
+                                            .w_full()
+                                            .rounded_full()
+                                            .bg(cx.theme().accent),
+                                    )
+                                }),
+                        ),
+                )
+            })
             // El menu flota sobre la columna, anclado arriba a la derecha.
             .when(self.chat_list_menu, |column| {
                 column.child(self.render_chat_list_menu(cx))
@@ -1796,7 +1801,10 @@ impl Whatfast {
     /// La barra de la seleccion multiple, debajo del titulo de la columna:
     /// cuantos chats hay marcados y las acciones en lote.
     fn render_chat_selection_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.selection.as_ref().map_or(0, |selection| selection.ids.len());
+        let count = self
+            .selection
+            .as_ref()
+            .map_or(0, |selection| selection.ids.len());
         let enabled = count > 0;
         h_flex()
             .items_center()
@@ -1818,7 +1826,10 @@ impl Whatfast {
                     .truncate()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(i18n::t_args("{count} selected", &[("count", &count.to_string())])),
+                    .child(i18n::t_args(
+                        "{count} selected",
+                        &[("count", &count.to_string())],
+                    )),
             )
             .child(
                 Button::new("selection-mark-read")
@@ -2007,7 +2018,11 @@ impl Whatfast {
     /// La confirmacion de "Cerrar sesion", cuando sale del menu de la columna
     /// de los chats: la sesion del dispositivo se desvincula y los mensajes
     /// que ya estan en disco no se tocan.
-    fn render_logout_confirm(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_logout_confirm(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let scale = self.ui_scale;
         let muted = cx.theme().muted_foreground;
         let panel = cx.theme().popover;
@@ -2109,23 +2124,17 @@ impl Whatfast {
                     .text_color(muted)
                     .child(i18n::t("Enter your PIN to open WhatsApp")),
             )
-            .child(
-                h_flex()
-                    .h(px(40. * scale))
-                    .gap_3()
-                    .items_center()
-                    .children((0..crate::app_lock::MIN_PIN_LENGTH.max(self.pin_buffer.len())).map(
-                        |index| {
-                            let filled = index < self.pin_buffer.len();
-                            div()
-                                .size(px(12. * scale))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(muted)
-                                .when(filled, |dot| dot.bg(cx.theme().foreground))
-                        },
-                    )),
-            )
+            .child(h_flex().h(px(40. * scale)).gap_3().items_center().children(
+                (0..crate::app_lock::MIN_PIN_LENGTH.max(self.pin_buffer.len())).map(|index| {
+                    let filled = index < self.pin_buffer.len();
+                    div()
+                        .size(px(12. * scale))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(muted)
+                        .when(filled, |dot| dot.bg(cx.theme().foreground))
+                }),
+            ))
             .when_some(error, |column, error| {
                 column.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
@@ -2137,11 +2146,9 @@ impl Whatfast {
                         this.try_unlock(cx);
                     })),
             )
-            .child(
-                div().text_xs().text_color(muted).child(i18n::t(
-                    "The PIN is local to this device. It is not the PIN of your WhatsApp account.",
-                )),
-            )
+            .child(div().text_xs().text_color(muted).child(i18n::t(
+                "The PIN is local to this device. It is not the PIN of your WhatsApp account.",
+            )))
             .into_any_element()
     }
 
@@ -2299,7 +2306,11 @@ impl Whatfast {
 
     /// El dialogo que crea un grupo: el nombre y la lista de contactos con
     /// los que se marca quien entra.
-    fn render_create_group(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_create_group(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let Some(state) = self.create_group.as_ref() else {
             return div().into_any_element();
         };
@@ -2312,7 +2323,9 @@ impl Whatfast {
         let name = state.name.read(cx).value().trim().to_string();
         let pending = state.pending;
         let selected_count = state.selected.len();
-        let can_create = !pending && !name.is_empty() && selected_count > 0
+        let can_create = !pending
+            && !name.is_empty()
+            && selected_count > 0
             && self.store.connection == proto::ConnectionState::Connected;
         // Los contactos de la lista: los chats directos con su jid de
         // transporte, que es el que entiende el backend.
@@ -2417,12 +2430,7 @@ impl Whatfast {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.toggle_group_participant(click_jid.clone(), cx);
                                         }))
-                                        .child(avatar_element(
-                                            &title,
-                                            &avatar,
-                                            px(30. * scale),
-                                            cx,
-                                        ))
+                                        .child(avatar_element(&title, &avatar, px(30. * scale), cx))
                                         .child(div().flex_1().truncate().text_sm().child(title))
                                         .child(
                                             div()
@@ -2447,7 +2455,9 @@ impl Whatfast {
                             )),
                     )
                     .child(
-                        h_flex().justify_end().gap_2()
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
                             .child(
                                 Button::new("create-group-cancel")
                                     .label(i18n::t("Cancel"))
@@ -2500,9 +2510,9 @@ impl Whatfast {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(if query_len < 3 {
-                        "No contacts or groups found · type 3 characters to search messages"
+                        i18n::t("No contacts or chats found")
                     } else {
-                        "No local results"
+                        i18n::t("No local results")
                     }),
             );
         }
@@ -2512,9 +2522,11 @@ impl Whatfast {
             rows.iter()
                 .map(|row| {
                     let height = match row {
-                        SearchResultRow::Header { .. } => 30.,
-                        SearchResultRow::Contact { .. } | SearchResultRow::Group { .. } => 58.,
-                        SearchResultRow::Message { .. } => 68.,
+                        SearchResultRow::Header { .. } => SEARCH_HEADER_HEIGHT,
+                        SearchResultRow::Contact { .. } => SEARCH_CONTACT_HEIGHT,
+                        SearchResultRow::Group { .. } | SearchResultRow::Message { .. } => {
+                            SEARCH_RESULT_HEIGHT
+                        }
                     };
                     size(px(1.), px(height * self.ui_scale))
                 })
@@ -2591,6 +2603,25 @@ impl Whatfast {
                                                 }
                                             }
                                         }
+                                        Some(SearchResultRow::Message { source_index, .. }) => {
+                                            if let Some(chat) = this
+                                                .search_results
+                                                .messages
+                                                .get(*source_index)
+                                                .and_then(|message| message.chat.as_ref())
+                                            {
+                                                let has_avatar = this
+                                                    .store
+                                                    .chat(&chat.id)
+                                                    .is_some_and(|c| !c.avatar_path.is_empty())
+                                                    || !chat.avatar_path.is_empty();
+                                                if !has_avatar
+                                                    && !this.avatar_attempted.contains(&chat.id)
+                                                {
+                                                    this.load_avatar(chat.id.clone());
+                                                }
+                                            }
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -2619,6 +2650,10 @@ impl Whatfast {
         content
     }
 
+    /// One row of the list of results. Every section paints the same shape of
+    /// the reference: the avatar, the name, the time of the last message and
+    /// one line of text, with the part the query matched in the color of the
+    /// accent.
     fn render_search_result_row(
         &self,
         row: SearchResultRow,
@@ -2626,18 +2661,21 @@ impl Whatfast {
     ) -> Option<gpui::AnyElement> {
         let selected_background = cx.theme().secondary;
         let hover_background = cx.theme().muted;
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let query = self.search_query.trim().to_string();
         match row {
-            SearchResultRow::Header { title, count } => Some(
+            SearchResultRow::Header { title } => Some(
                 h_flex()
-                    .h(px(30. * self.ui_scale))
+                    .w_full()
+                    .h(px(SEARCH_HEADER_HEIGHT * self.ui_scale))
                     .px_3()
-                    .items_center()
-                    .justify_between()
-                    .bg(cx.theme().secondary)
+                    .items_end()
+                    .pb_1()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
                     .child(title)
-                    .child(count.to_string())
                     .into_any_element(),
             ),
             SearchResultRow::Contact {
@@ -2645,21 +2683,6 @@ impl Whatfast {
                 source_index,
             } => {
                 let contact = self.search_results.contacts.get(source_index)?.clone();
-                let subtitle = match (
-                    contact.secondary_name.is_empty(),
-                    contact.phone_number.is_empty(),
-                ) {
-                    (false, false) => {
-                        format!(
-                            "{} · {}",
-                            contact.secondary_name,
-                            whatfast_core::phone::format(&contact.phone_number)
-                        )
-                    }
-                    (false, true) => contact.secondary_name.clone(),
-                    (true, false) => whatfast_core::phone::format(&contact.phone_number),
-                    (true, true) => i18n::t("WhatsApp contact").into(),
-                };
                 let cached_avatar = if !contact.chat_id.is_empty() {
                     self.store
                         .chat(&contact.chat_id)
@@ -2673,7 +2696,8 @@ impl Whatfast {
                 Some(
                     h_flex()
                         .id(("search-contact", result_index))
-                        .h(px(58. * self.ui_scale))
+                        .w_full()
+                        .h(px(SEARCH_CONTACT_HEIGHT * self.ui_scale))
                         .overflow_hidden()
                         .px_3()
                         .gap_3()
@@ -2690,30 +2714,16 @@ impl Whatfast {
                         .child(avatar_element(
                             &contact.display_name,
                             avatar_path,
-                            px(38.),
+                            px(49. * self.ui_scale),
                             cx,
                         ))
                         .child(
-                            v_flex()
-                                .min_w_0()
+                            div()
                                 .flex_1()
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(one_line(&contact.display_name)),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(one_line(&subtitle)),
-                                ),
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(search_highlighted(&contact.display_name, &query, accent)),
                         )
                         .into_any_element(),
                 )
@@ -2724,16 +2734,25 @@ impl Whatfast {
             } => {
                 let chat = self.search_results.groups.get(source_index)?.clone();
                 let preview = if chat.last_message_preview.is_empty() {
-                    "No messages yet".to_string()
+                    i18n::t("No messages yet").to_string()
+                } else if chat.last_message_from_me {
+                    format!(
+                        "{}: {}",
+                        i18n::t("You"),
+                        chat_preview(&chat.last_message_preview)
+                    )
                 } else {
                     chat_preview(&chat.last_message_preview)
                 };
                 let cached_avatar = self.store.chat(&chat.id).map(|c| c.avatar_path.as_str());
                 let avatar_path = cached_avatar.unwrap_or(chat.avatar_path.as_str());
+                let time = chat_time_label(chat.last_message_timestamp_ms, now_ms());
+                let group = chat.kind() == proto::ChatKind::Group;
                 Some(
                     h_flex()
-                        .id(("search-group", result_index))
-                        .h(px(58. * self.ui_scale))
+                        .id(("search-chat", result_index))
+                        .w_full()
+                        .h(px(SEARCH_RESULT_HEIGHT * self.ui_scale))
                         .overflow_hidden()
                         .px_3()
                         .gap_3()
@@ -2747,18 +2766,42 @@ impl Whatfast {
                             this.search_highlighted = result_index;
                             this.activate_search_result(window, cx);
                         }))
-                        .child(avatar_element(&chat.title, avatar_path, px(38.), cx))
+                        .child(avatar_element_of(
+                            &chat.title,
+                            avatar_path,
+                            px(49. * self.ui_scale),
+                            group,
+                            cx,
+                        ))
                         .child(
                             v_flex()
-                                .min_w_0()
                                 .flex_1()
+                                .min_w_0()
+                                .gap_1()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w_full()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(one_line(&chat.title)),
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(search_highlighted(
+                                                    &chat.title,
+                                                    &query,
+                                                    accent,
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(time),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -2766,16 +2809,9 @@ impl Whatfast {
                                         .min_w_0()
                                         .truncate()
                                         .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(one_line(&preview)),
+                                        .text_color(muted)
+                                        .child(search_highlighted(&preview, &query, accent)),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if chat.archived { "Archived" } else { "Group" }),
                         )
                         .into_any_element(),
                 )
@@ -2785,18 +2821,44 @@ impl Whatfast {
                 source_index,
             } => {
                 let message = self.search_results.messages.get(source_index)?.clone();
-                let meta = if message.archived {
-                    format!("{} · Archived", message.sender_name)
+                let group = message
+                    .chat
+                    .as_ref()
+                    .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+                let avatar_path = message
+                    .chat
+                    .as_ref()
+                    .and_then(|chat| {
+                        self.store
+                            .chat(&chat.id)
+                            .map(|stored| stored.avatar_path.clone())
+                            .filter(|path| !path.is_empty())
+                            .or_else(|| {
+                                (!chat.avatar_path.is_empty()).then(|| chat.avatar_path.clone())
+                            })
+                    })
+                    .unwrap_or_default();
+                let sender = if message.sender_name == "You" {
+                    i18n::t("You").to_string()
                 } else {
                     message.sender_name.clone()
                 };
+                let snippet = one_line(&message.snippet);
+                let preview = if group && !sender.is_empty() {
+                    format!("{sender}: {snippet}")
+                } else {
+                    snippet
+                };
+                let time = chat_time_label(message.timestamp_ms, now_ms());
                 Some(
-                    v_flex()
+                    h_flex()
                         .id(("search-message", result_index))
-                        .h(px(68. * self.ui_scale))
+                        .w_full()
+                        .h(px(SEARCH_RESULT_HEIGHT * self.ui_scale))
                         .overflow_hidden()
                         .px_3()
-                        .py_2()
+                        .gap_3()
+                        .items_center()
                         .cursor_pointer()
                         .when(result_index == self.search_highlighted, |row| {
                             row.bg(selected_background)
@@ -2806,34 +2868,52 @@ impl Whatfast {
                             this.search_highlighted = result_index;
                             this.activate_search_result(window, cx);
                         }))
+                        .child(avatar_element_of(
+                            &message.chat_title,
+                            &avatar_path,
+                            px(49. * self.ui_scale),
+                            group,
+                            cx,
+                        ))
                         .child(
-                            h_flex()
-                                .justify_between()
-                                .gap_2()
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
                                 .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(one_line(&message.chat_title)),
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(search_highlighted(
+                                                    &message.chat_title,
+                                                    &query,
+                                                    accent,
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(time),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(one_line(&meta)),
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(search_highlighted(&preview, &query, accent)),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(one_line(&message.snippet)),
                         )
                         .into_any_element(),
                 )
@@ -3288,19 +3368,6 @@ impl Whatfast {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            // El modo rapido del chat: una pregunta sobre
-                            // esta conversacion, con la respuesta en el
-                            // cuadro de escribir.
-                            .child(
-                                Button::new("ask-agent")
-                                    .small()
-                                    .label(i18n::t("Ask an agent"))
-                                    .tooltip(i18n::t("Ask the agent about this chat"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_quick_ask(window, cx);
-                                        cx.notify();
-                                    })),
-                            )
                             .when(!is_group, |row| {
                                 row.child(
                                     Button::new("call-chat")
@@ -3456,13 +3523,10 @@ impl Whatfast {
                                         .clone()
                                         .filter_map(|index| this.store.messages.get(index))
                                         .filter_map(|message| match message.content.as_ref() {
-                                            Some(proto::message::Content::Attachment(attachment))
-                                                if attachments::audio_needs_download(attachment) =>
-                                            {
-                                                Some((
-                                                    message.chat_id.clone(),
-                                                    message.id.clone(),
-                                                ))
+                                            Some(proto::message::Content::Attachment(
+                                                attachment,
+                                            )) if attachments::audio_needs_download(attachment) => {
+                                                Some((message.chat_id.clone(), message.id.clone()))
                                             }
                                             _ => None,
                                         })
@@ -3500,8 +3564,7 @@ impl Whatfast {
                                             || this.store.newer_activity)
                                     {
                                         this.load_newer_messages();
-                                    } else if range.end == this.store.messages.len()
-                                    {
+                                    } else if range.end == this.store.messages.len() {
                                         this.mark_read();
                                     }
                                     range.map(|index| this.render_message(index, cx)).collect()
@@ -3660,7 +3723,9 @@ impl Whatfast {
                                                         .disabled(!connected)
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
-                                                                this.start_voice_recording(window, cx);
+                                                                this.start_voice_recording(
+                                                                    window, cx,
+                                                                );
                                                                 cx.notify();
                                                             },
                                                         )),
@@ -3845,12 +3910,7 @@ impl Whatfast {
                             .justify_center()
                             .gap(px(6. * scale))
                             .items_center()
-                            .child(
-                                div()
-                                    .size(px(8. * scale))
-                                    .rounded_full()
-                                    .bg(danger),
-                            )
+                            .child(div().size(px(8. * scale)).rounded_full().bg(danger))
                             .child(
                                 div()
                                     .text_base()
@@ -4784,6 +4844,90 @@ impl Whatfast {
                 this.child(div().text_sm().text_color(muted).child(integrity_line))
             });
 
+        // The space the media cache takes on this device. The numbers come
+        // from the sidecar, which only counts the files of this computer:
+        // clearing them never touches the account, the phone or a message.
+        let usage = self.storage_usage.as_ref();
+        let total_bytes = usage.map(|usage| usage.total_bytes).unwrap_or(0);
+        let total_files = usage.map(|usage| usage.total_files).unwrap_or(0);
+        let total_line: SharedString = match usage {
+            None => i18n::t("Reading the space of the media...").into(),
+            Some(_) if total_files == 0 => i18n::t("There are no downloaded files.").into(),
+            Some(_) => {
+                let size_text = attachments::format_bytes(total_bytes);
+                let files_text = total_files.to_string();
+                i18n::t_args(
+                    "{size} in {files} files",
+                    &[("size", size_text.as_str()), ("files", files_text.as_str())],
+                )
+                .into()
+            }
+        };
+        let mut storage_media_control = v_flex()
+            .mt_1()
+            .gap_2()
+            .child(div().text_sm().child(total_line));
+        if let Some(usage) = usage {
+            // One row per kind: the label of the kind and what it takes. A
+            // kind with no file is not a row, so the panel stays short.
+            for bucket in &usage.buckets {
+                if bucket.files == 0 {
+                    continue;
+                }
+                let label: SharedString = match bucket.kind.as_str() {
+                    "photo" => i18n::t("Photos").into(),
+                    "video" => i18n::t("Videos").into(),
+                    "audio" => i18n::t("Audio").into(),
+                    "document" => i18n::t("Documents").into(),
+                    "avatar" => i18n::t("Avatars").into(),
+                    _ => i18n::t("Other files").into(),
+                };
+                storage_media_control = storage_media_control.child(
+                    h_flex()
+                        .justify_between()
+                        .gap_4()
+                        .child(div().text_sm().text_color(muted).child(label))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(attachments::format_bytes(bucket.bytes)),
+                        ),
+                );
+            }
+            if !usage.folder.is_empty() {
+                storage_media_control = storage_media_control.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(usage.folder.clone()),
+                );
+            }
+        }
+        storage_media_control = storage_media_control.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("refresh-media-cache")
+                        .small()
+                        .label(i18n::t("Refresh"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.load_storage_usage();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("clear-media-cache")
+                        .small()
+                        .label(i18n::t("Clear media cache"))
+                        .disabled(self.storage_clearing || total_files == 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.clear_media_cache();
+                            cx.notify();
+                        })),
+                ),
+        );
+
         // The catalog: the builtin themes and the ones the user made.
         let mut themes: Vec<AppTheme> = whatfast_core::theme::builtin_themes().to_vec();
         themes.extend(self.custom_themes.iter().cloned());
@@ -4940,6 +5084,101 @@ impl Whatfast {
                 })),
         );
 
+        // The self-update: the version of this copy and the steps that
+        // replace it. A check of the start only leaves a note when it finds
+        // something; the panel is where the rest happens.
+        let update_line = match self.update_phase {
+            UpdatePhase::Idle => {
+                i18n::t("The app asks the release for a newer version when it starts.").to_string()
+            }
+            UpdatePhase::Checking => i18n::t("Checking for updates\u{2026}").to_string(),
+            UpdatePhase::UpToDate => i18n::t("Whatfast is up to date.").to_string(),
+            UpdatePhase::Available => i18n::t_args(
+                "Whatfast {version} is available.",
+                &[("version", &self.update_version)],
+            ),
+            UpdatePhase::Downloading => {
+                let received = self.update_received as f64 / (1024.0 * 1024.0);
+                if self.update_total > 0 {
+                    let total = self.update_total as f64 / (1024.0 * 1024.0);
+                    i18n::t_args(
+                        "Downloading {received} of {total} MB\u{2026}",
+                        &[
+                            ("received", &format!("{received:.1}")),
+                            ("total", &format!("{total:.1}")),
+                        ],
+                    )
+                } else {
+                    i18n::t_args(
+                        "Downloading {received} MB\u{2026}",
+                        &[("received", &format!("{received:.1}"))],
+                    )
+                }
+            }
+            UpdatePhase::Ready => i18n::t_args(
+                "Whatfast {version} is ready. Restart to install it.",
+                &[("version", &self.update_version)],
+            ),
+            UpdatePhase::Installing => i18n::t("Installing the update\u{2026}").to_string(),
+            UpdatePhase::Unsupported => {
+                i18n::t("This platform has no package for the automatic update.").to_string()
+            }
+            UpdatePhase::Failed => i18n::t_args(
+                "The update failed: {error}",
+                &[("error", &self.update_error)],
+            ),
+        };
+        let mut update_buttons = h_flex().gap_2();
+        match self.update_phase {
+            UpdatePhase::Available => {
+                update_buttons = update_buttons.child(
+                    Button::new("download-update")
+                        .small()
+                        .label(i18n::t("Download"))
+                        .on_click(cx.listener(|this, _, _, cx| this.start_update_download(cx))),
+                );
+            }
+            UpdatePhase::Ready => {
+                update_buttons = update_buttons.child(
+                    Button::new("install-update")
+                        .small()
+                        .label(i18n::t("Restart and install"))
+                        .on_click(cx.listener(|this, _, _, cx| this.install_update(cx))),
+                );
+            }
+            UpdatePhase::Checking | UpdatePhase::Downloading | UpdatePhase::Installing => {
+                update_buttons = update_buttons.child(
+                    Button::new("update-busy")
+                        .small()
+                        .label(i18n::t("Please wait\u{2026}"))
+                        .disabled(true),
+                );
+            }
+            _ => {
+                update_buttons = update_buttons.child(
+                    Button::new("check-updates")
+                        .small()
+                        .label(i18n::t("Check now"))
+                        .on_click(cx.listener(|this, _, _, cx| this.start_update_check(false, cx))),
+                );
+            }
+        }
+        let update_control = v_flex()
+            .mt_1()
+            .gap_2()
+            .child(div().text_sm().child(update_line))
+            .child(div().text_xs().text_color(muted).child(i18n::t(
+                "The update replaces the two executables and restarts Whatfast.",
+            )))
+            .child(update_buttons)
+            .child(toggle(
+                "check-updates",
+                i18n::t("Check for updates when Whatfast starts"),
+                self.check_updates,
+                false,
+                Whatfast::set_check_updates,
+            ));
+
         // The about: the version and the privacy line.
         let about_control = v_flex()
             .mt_1()
@@ -5065,10 +5304,18 @@ impl Whatfast {
                                 notifications_control,
                             ))
                             .child(section(
-                                WhatfastIcon::Storage,
+                                WhatfastIcon::Download,
                                 i18n::t("Downloads"),
                                 i18n::t("The folder of \"Save to folder\"."),
                                 storage_control,
+                            ))
+                            .child(section(
+                                WhatfastIcon::Storage,
+                                i18n::t("Media cache"),
+                                i18n::t(
+                                    "The photos, videos, audio and documents this device downloaded.",
+                                ),
+                                storage_media_control,
                             ))
                             .child(section(
                                 WhatfastIcon::CheckDouble,
@@ -5089,6 +5336,12 @@ impl Whatfast {
                                 i18n::t("Account"),
                                 i18n::t("Sign out of this device and clear the local data."),
                                 account_control,
+                            ))
+                            .child(section(
+                                WhatfastIcon::Download,
+                                i18n::t("Updates"),
+                                i18n::t("The version of Whatfast and its updates."),
+                                update_control,
                             ))
                             .child(section(
                                 WhatfastIcon::Shield,
@@ -5366,13 +5619,11 @@ impl Whatfast {
                                         !participant.phone_number.is_empty() && !participant.is_me,
                                         |details| {
                                             details.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .truncate()
-                                                    .child(whatfast_core::phone::format(
+                                                div().text_xs().text_color(muted).truncate().child(
+                                                    whatfast_core::phone::format(
                                                         &participant.phone_number,
-                                                    )),
+                                                    ),
+                                                ),
                                             )
                                         },
                                     ),
@@ -5661,11 +5912,7 @@ impl Whatfast {
     /// quien la mando y la fecha, la tira de iconos, las flechas y el
     /// carrusel de miniaturas al pie. El fondo tapa la ventana entera y es
     /// negro neutro para no alterar el color de la foto.
-    fn render_image_viewer(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_image_viewer(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(viewer) = self.image_viewer.as_ref() else {
             return div().into_any_element();
         };
@@ -5786,29 +6033,41 @@ impl Whatfast {
                     .items_center()
                     .gap_1()
                     .child(
-                        viewer_icon_button(("viewer-zoom-out", index), Icon::new(IconName::Minus), scale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.zoom_image_viewer(0.8);
-                                cx.notify();
-                            })),
+                        viewer_icon_button(
+                            ("viewer-zoom-out", index),
+                            Icon::new(IconName::Minus),
+                            scale,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.zoom_image_viewer(0.8);
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        viewer_icon_button(("viewer-zoom-in", index), Icon::new(IconName::Plus), scale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.zoom_image_viewer(1.25);
-                                cx.notify();
-                            })),
+                        viewer_icon_button(
+                            ("viewer-zoom-in", index),
+                            Icon::new(IconName::Plus),
+                            scale,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.zoom_image_viewer(1.25);
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        viewer_icon_button(("viewer-reply", index), Icon::new(WhatfastIcon::Reply), scale)
-                            .on_click(cx.listener({
-                                let message_id = message_id.clone();
-                                move |this, _, _, cx| {
-                                    this.start_reply(message_id.clone());
-                                    this.image_viewer = None;
-                                    cx.notify();
-                                }
-                            })),
+                        viewer_icon_button(
+                            ("viewer-reply", index),
+                            Icon::new(WhatfastIcon::Reply),
+                            scale,
+                        )
+                        .on_click(cx.listener({
+                            let message_id = message_id.clone();
+                            move |this, _, _, cx| {
+                                this.start_reply(message_id.clone());
+                                this.image_viewer = None;
+                                cx.notify();
+                            }
+                        })),
                     )
                     .child(
                         viewer_icon_button(
@@ -5835,32 +6094,44 @@ impl Whatfast {
                         })),
                     )
                     .child(
-                        viewer_icon_button(("viewer-pin", index), Icon::new(WhatfastIcon::Pin), scale)
-                            .on_click(cx.listener({
-                                let message_id = message_id.clone();
-                                move |this, _, _, cx| {
-                                    this.set_message_pin(message_id.clone(), !pinned);
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(
-                        viewer_icon_button(("viewer-react", index), Icon::new(WhatfastIcon::Smile), scale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.viewer_reactions_open = !this.viewer_reactions_open;
+                        viewer_icon_button(
+                            ("viewer-pin", index),
+                            Icon::new(WhatfastIcon::Pin),
+                            scale,
+                        )
+                        .on_click(cx.listener({
+                            let message_id = message_id.clone();
+                            move |this, _, _, cx| {
+                                this.set_message_pin(message_id.clone(), !pinned);
                                 cx.notify();
-                            })),
+                            }
+                        })),
                     )
                     .child(
-                        viewer_icon_button(("viewer-delete", index), Icon::new(WhatfastIcon::Trash), scale)
-                            .on_click(cx.listener({
-                                let message_id = message_id.clone();
-                                move |this, _, _, cx| {
-                                    this.delete_message(message_id.clone(), false);
-                                    this.image_viewer = None;
-                                    cx.notify();
-                                }
-                            })),
+                        viewer_icon_button(
+                            ("viewer-react", index),
+                            Icon::new(WhatfastIcon::Smile),
+                            scale,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.viewer_reactions_open = !this.viewer_reactions_open;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        viewer_icon_button(
+                            ("viewer-delete", index),
+                            Icon::new(WhatfastIcon::Trash),
+                            scale,
+                        )
+                        .on_click(cx.listener({
+                            let message_id = message_id.clone();
+                            move |this, _, _, cx| {
+                                this.delete_message(message_id.clone(), false);
+                                this.image_viewer = None;
+                                cx.notify();
+                            }
+                        })),
                     )
                     .child(
                         viewer_icon_button(
@@ -5900,11 +6171,15 @@ impl Whatfast {
                         )),
                     )
                     .child(
-                        viewer_icon_button(("viewer-close", index), Icon::new(WhatfastIcon::Close), scale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.image_viewer = None;
-                                cx.notify();
-                            })),
+                        viewer_icon_button(
+                            ("viewer-close", index),
+                            Icon::new(WhatfastIcon::Close),
+                            scale,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.image_viewer = None;
+                            cx.notify();
+                        })),
                     ),
             );
 
@@ -5917,26 +6192,29 @@ impl Whatfast {
             .justify_center()
             .gap_1()
             .bg(rgb(VIEWER_BAR))
-            .children(VIEWER_QUICK_REACTIONS.iter().enumerate().map(
-                |(position, emoji)| {
-                    let emoji = *emoji;
-                    div()
-                        .id(("viewer-reaction", position))
-                        .size(px(34. * scale))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_lg()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgba(0xffffff1f)))
-                        .child(emoji)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.react_to_viewed_image(emoji);
-                            cx.notify();
-                        }))
-                },
-            ));
+            .children(
+                VIEWER_QUICK_REACTIONS
+                    .iter()
+                    .enumerate()
+                    .map(|(position, emoji)| {
+                        let emoji = *emoji;
+                        div()
+                            .id(("viewer-reaction", position))
+                            .size(px(34. * scale))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_lg()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0xffffff1f)))
+                            .child(emoji)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.react_to_viewed_image(emoji);
+                                cx.notify();
+                            }))
+                    }),
+            );
 
         let picture = img(PathBuf::from(path.clone()))
             .w(picture_width)
@@ -5983,20 +6261,17 @@ impl Whatfast {
                     .justify_center()
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(picture)
-                    .on_aux_click(cx.listener(
-                        move |this, event: &ClickEvent, window, cx| {
-                            if !event.is_secondary() {
-                                return;
-                            }
-                            let position = event
-                                .mouse_position()
-                                .unwrap_or_else(|| window.mouse_position());
-                            this.image_context_menu =
-                                Some(crate::app::ImageContextMenu { position });
-                            cx.stop_propagation();
-                            cx.notify();
-                        },
-                    )),
+                    .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if !event.is_secondary() {
+                            return;
+                        }
+                        let position = event
+                            .mouse_position()
+                            .unwrap_or_else(|| window.mouse_position());
+                        this.image_context_menu = Some(crate::app::ImageContextMenu { position });
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
             )
             .when(!caption.is_empty(), |column| {
                 column.child(
@@ -6032,12 +6307,13 @@ impl Whatfast {
                     .justify_center()
                     .when(viewer.has_previous(), |slot| {
                         slot.child(
-                            viewer_arrow_button(("viewer-previous", index), true, scale)
-                                .on_click(cx.listener(|this, _, _, cx| {
+                            viewer_arrow_button(("viewer-previous", index), true, scale).on_click(
+                                cx.listener(|this, _, _, cx| {
                                     this.step_image_viewer(false);
                                     cx.stop_propagation();
                                     cx.notify();
-                                })),
+                                }),
+                            ),
                         )
                     }),
             )
@@ -6051,12 +6327,13 @@ impl Whatfast {
                     .justify_center()
                     .when(viewer.has_next(), |slot| {
                         slot.child(
-                            viewer_arrow_button(("viewer-next", index), false, scale)
-                                .on_click(cx.listener(|this, _, _, cx| {
+                            viewer_arrow_button(("viewer-next", index), false, scale).on_click(
+                                cx.listener(|this, _, _, cx| {
                                     this.step_image_viewer(true);
                                     cx.stop_propagation();
                                     cx.notify();
-                                })),
+                                }),
+                            ),
                         )
                     }),
             );
@@ -6204,8 +6481,275 @@ impl Whatfast {
             })
             .child(body)
             .when(total > 1, |overlay| overlay.child(footer))
-            .when(self.viewer_info_open, |overlay| {
-                overlay.child(info_card)
+            .when(self.viewer_info_open, |overlay| overlay.child(info_card))
+            .into_any_element()
+    }
+
+    /// El visor del video: el cuadro ocupa la ventana y los controles van
+    /// abajo, sobre el mismo fondo oscuro de WhatsApp.
+    ///
+    /// El reproductor es el de la burbuja: el mismo hilo decodifica, el mismo
+    /// estado dice si corre y el mismo boton del centro pausa. El visor solo
+    /// le da mas lugar al cuadro.
+    fn render_video_viewer(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(key) = self.video.key.clone().filter(|_| self.video_fullscreen) else {
+            return div().into_any_element();
+        };
+        let Some(attachment) = self.video_attachment(&key.1) else {
+            return div().into_any_element();
+        };
+        let scale = self.ui_scale;
+        let viewport = window.viewport_size();
+        let (width, height) = crate::video::viewer_box_size(
+            attachment.width,
+            attachment.height,
+            (viewport.width - px(120. * scale)).max(px(320.)).into(),
+            (viewport.height - px(140. * scale)).max(px(180.)).into(),
+        );
+        let frame = self.video.frame.clone();
+        let has_frame = frame.is_some();
+        let playing = self.video.is_running();
+        let waiting = self.video.waiting;
+        let silent = self.video.muted || self.video.volume <= 0.0;
+        let position = self.video.position;
+        let duration = self
+            .video
+            .duration
+            .max(0.0)
+            .max(attachment.duration_seconds as f32);
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let title = if attachment.file_name.trim().is_empty() {
+            i18n::t("Video").to_string()
+        } else {
+            attachment.file_name.clone()
+        };
+        let error = self.video.error.clone();
+        let play_chat_id = key.0.clone();
+        let play_message_id = key.1.clone();
+
+        div()
+            .id("video-viewer-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x0b0f10))
+            .text_color(rgb(0xffffff))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(64. * scale))
+                    .px(px(20. * scale))
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("video-viewer-close")
+                            .p(px(6. * scale))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0xffffff1a)))
+                            .child(
+                                Icon::new(WhatfastIcon::Close)
+                                    .with_size(px(20. * scale))
+                                    .text_color(rgb(0xffffff)),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_video_fullscreen(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("video-viewer-body")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(24. * scale))
+                    // El fondo que rodea al cuadro lo cierra con un clic.
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_video_fullscreen(cx);
+                    }))
+                    .child(
+                        div()
+                            .id("video-viewer-frame")
+                            .relative()
+                            .w(px(width))
+                            .max_w_full()
+                            .h(px(height))
+                            .max_h_full()
+                            .rounded_lg()
+                            .overflow_hidden()
+                            .bg(rgb(0x000000))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_video_playback(
+                                    play_chat_id.clone(),
+                                    play_message_id.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }))
+                            .when_some(frame, |player, frame| {
+                                player.child(
+                                    img(frame).w_full().h_full().object_fit(ObjectFit::Contain),
+                                )
+                            })
+                            .when(!has_frame, |player| {
+                                player.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Icon::new(WhatfastIcon::Video)
+                                                .with_size(px(56. * scale))
+                                                .text_color(rgba(0xffffff59)),
+                                        ),
+                                )
+                            })
+                            // El boton del centro: reproducir o pausar.
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size(px(68. * scale))
+                                            .rounded_full()
+                                            .bg(rgba(0x00000099))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Icon::new(if playing {
+                                                    WhatfastIcon::Pause
+                                                } else {
+                                                    WhatfastIcon::Play
+                                                })
+                                                .with_size(px(32. * scale))
+                                                .text_color(rgb(0xffffff)),
+                                            ),
+                                    ),
+                            )
+                            // El reloj y la barra, pegados al borde de abajo.
+                            .child(
+                                v_flex()
+                                    .absolute()
+                                    .bottom_0()
+                                    .left_0()
+                                    .right_0()
+                                    .px(px(12. * scale))
+                                    .pb(px(8. * scale))
+                                    .gap(px(5. * scale))
+                                    .child(
+                                        h_flex()
+                                            .id("video-viewer-volume")
+                                            .gap(px(8. * scale))
+                                            .items_center()
+                                            .text_xs()
+                                            .text_color(rgba(0xffffffcc))
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.stop_propagation();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .id("video-viewer-mute")
+                                                    .p(px(4. * scale))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgba(0xffffff1a)))
+                                                    .tooltip({
+                                                        let label: gpui::SharedString = if silent {
+                                                            i18n::t("Unmute")
+                                                        } else {
+                                                            i18n::t("Mute")
+                                                        }
+                                                        .into();
+                                                        move |window, cx| {
+                                                            Tooltip::new(label.clone())
+                                                                .build(window, cx)
+                                                        }
+                                                    })
+                                                    .child(
+                                                        Icon::new(if silent {
+                                                            WhatfastIcon::VolumeMute
+                                                        } else {
+                                                            WhatfastIcon::Volume
+                                                        })
+                                                        .with_size(px(18. * scale))
+                                                        .text_color(rgb(0xffffff)),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.toggle_video_mute(window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(div().w(px(120. * scale)).child(
+                                                Slider::new(&self.volume_slider).horizontal(),
+                                            ))
+                                            .child(div().flex_1())
+                                            .child(format!(
+                                                "{} / {}",
+                                                attachments::format_clock(position),
+                                                attachments::format_clock(duration)
+                                            ))
+                                            .when(waiting, |row| {
+                                                row.child(i18n::t("Downloading the video"))
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .h(px(3. * scale))
+                                            .w_full()
+                                            .rounded_full()
+                                            .bg(rgba(0xffffff33))
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .w(relative(progress))
+                                                    .rounded_full()
+                                                    .bg(rgb(0x25d366)),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+            .when_some(error, |viewer, error| {
+                viewer.child(
+                    div()
+                        .flex_none()
+                        .px(px(20. * scale))
+                        .pb(px(12. * scale))
+                        .text_sm()
+                        .text_color(rgba(0xff8a8aff))
+                        .child(error),
+                )
             })
             .into_any_element()
     }
@@ -6213,11 +6757,7 @@ impl Whatfast {
     /// El menu de tres puntos del visor, con las mismas acciones que ofrece
     /// WhatsApp sobre la foto: compartir, abrir con, info del mensaje, ir al
     /// mensaje, guardar como, buscar en la web y copiar.
-    fn render_image_menu(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_image_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(menu) = self.image_context_menu.as_ref() else {
             return div().into_any_element();
         };
@@ -6424,50 +6964,72 @@ impl Whatfast {
                 preview.jpeg_thumbnail,
             ))
         });
+        // La tarjeta vive dentro de la burbuja: toma el color de su burbuja y
+        // el color de su texto, no los del tema de la ventana. El tema de
+        // `gpui_component` puede estar en claro mientras la burbuja es oscura,
+        // y la tarjeta quedaba blanca con el titulo blanco encima.
+        let from_me = self
+            .store
+            .messages
+            .get(index)
+            .is_some_and(|message| message.from_me);
+        let theme = self.active_theme();
+        let (incoming, outgoing) = tokens::bubble_colors(&theme);
+        let (incoming_text, outgoing_text) = tokens::bubble_text_colors(&theme);
+        let bubble: gpui::Hsla = if from_me {
+            outgoing.into()
+        } else {
+            incoming.into()
+        };
+        let text: gpui::Hsla = if from_me {
+            outgoing_text.into()
+        } else {
+            incoming_text.into()
+        };
+        // El fondo de la tarjeta es la burbuja un poco mas oscura: el borde
+        // de la imagen no se pierde y el titulo sigue teniendo contraste.
+        let card_bg = bubble.blend(gpui::black().opacity(0.18));
+        let soft = text.opacity(0.78);
+        let faint = text.opacity(0.58);
         v_flex()
             .id(("link-preview", index))
             .w(px(320.))
             .max_w_full()
             .overflow_hidden()
             .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .bg(card_bg)
             .when_some(thumbnail, |card, thumbnail| {
                 card.child(
-                    img(thumbnail)
+                    div()
                         .w_full()
-                        .h(px(144.))
-                        .object_fit(ObjectFit::Cover),
+                        .h(px(150.))
+                        .overflow_hidden()
+                        .child(img(thumbnail).size_full().object_fit(ObjectFit::Cover)),
                 )
             })
             .child(
                 v_flex()
-                    .p_2()
+                    .px_3()
+                    .py_2()
                     .gap_1()
                     .child(
                         div()
-                            .truncate()
+                            .line_clamp(2)
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text)
                             .child(title),
                     )
                     .when(!preview.description.trim().is_empty(), |details| {
                         details.child(
                             div()
-                                .truncate()
+                                .line_clamp(2)
                                 .text_xs()
-                                .text_color(cx.theme().muted_foreground)
+                                .text_color(soft)
                                 .child(preview.description),
                         )
                     })
-                    .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(host),
-                    ),
+                    .child(div().truncate().text_xs().text_color(faint).child(host)),
             )
             .when_some(target, |card, target| {
                 card.cursor_pointer()
@@ -7339,10 +7901,10 @@ impl Whatfast {
                 let link_preview_height = match self.store.messages[index].content.as_ref() {
                     Some(proto::message::Content::Text(text)) if text.link_preview.is_some() => {
                         let preview = text.link_preview.as_ref();
-                        let thumbnail = preview
-                            .is_some_and(|preview| !preview.jpeg_thumbnail.is_empty());
-                        let description = preview
-                            .is_some_and(|preview| !preview.description.trim().is_empty());
+                        let thumbnail =
+                            preview.is_some_and(|preview| !preview.jpeg_thumbnail.is_empty());
+                        let description =
+                            preview.is_some_and(|preview| !preview.description.trim().is_empty());
                         // La tarjeta suma el borde, el relleno, los huecos y
                         // las lineas (titulo, descripcion si hay, dominio).
                         // Medirla de menos corria la fila siguiente encima de
@@ -7401,8 +7963,8 @@ impl Whatfast {
                         )
                     };
                     let block = format!("{notice}\n{}", i18n::t("More information"));
-                    let wrap = px((VIEW_ONCE_WIDTH - VIEW_ONCE_BADGE - 8.) * self.ui_scale)
-                        .max(px(60.));
+                    let wrap =
+                        px((VIEW_ONCE_WIDTH - VIEW_ONCE_BADGE - 8.) * self.ui_scale).max(px(60.));
                     let shared: SharedString = block.as_str().into();
                     let run = window.text_style().to_run(block.len());
                     let measured = window
@@ -7826,8 +8388,7 @@ impl Render for Whatfast {
                         "arrowleft" | "left" | "arrowright" | "right"
                     )
                 {
-                    let forward =
-                        matches!(event.keystroke.key.as_str(), "arrowright" | "right");
+                    let forward = matches!(event.keystroke.key.as_str(), "arrowright" | "right");
                     this.step_image_viewer(forward);
                     cx.stop_propagation();
                     cx.notify();
@@ -7964,6 +8525,9 @@ impl Render for Whatfast {
             .when(self.reaction_details.is_some(), |root| {
                 root.child(self.render_reaction_details(cx))
             })
+            .when(self.video_fullscreen, |root| {
+                root.child(self.render_video_viewer(window, cx))
+            })
             .when(self.image_viewer.is_some(), |root| {
                 root.child(self.render_image_viewer(window, cx))
             })
@@ -8085,6 +8649,109 @@ fn now_ms() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0)
+}
+
+/// La altura de la etiqueta que separa las secciones del buscador.
+const SEARCH_HEADER_HEIGHT: f32 = 42.;
+
+/// La altura de un resultado de conversacion o de mensaje.
+const SEARCH_RESULT_HEIGHT: f32 = 76.;
+
+/// La altura de un contacto del buscador: el nombre es la unica linea.
+const SEARCH_CONTACT_HEIGHT: f32 = 68.;
+
+/// Las partes de un texto que el buscador marco, como rangos de bytes.
+///
+/// La consulta entera gana cuando esta en el texto. Cuando no esta —el store
+/// encontro una errata o un fragmento— se marca el trozo mas largo que los dos
+/// comparten, que es lo que resalta la referencia en sus coincidencias difusas.
+fn search_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let query: Vec<char> = query.trim().chars().collect();
+    if query.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    let characters: Vec<char> = text.chars().collect();
+    let mut found = occurrences(&characters, &query);
+    if found.is_empty() {
+        let Some(fragment) = longest_common_fragment(&characters, &query) else {
+            return Vec::new();
+        };
+        found = occurrences(&characters, &fragment);
+    }
+    let offsets: Vec<usize> = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    found
+        .into_iter()
+        .map(|(start, end)| offsets[start]..offsets[end])
+        .collect()
+}
+
+/// La minuscula de un caracter, como la compara el buscador.
+fn search_lower(character: char) -> char {
+    character.to_lowercase().next().unwrap_or(character)
+}
+
+/// Las posiciones de `needle` dentro de `haystack`, de izquierda a derecha y
+/// sin solaparse.
+fn occurrences(haystack: &[char], needle: &[char]) -> Vec<(usize, usize)> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index + needle.len() <= haystack.len() {
+        if needle.iter().enumerate().all(|(offset, character)| {
+            search_lower(haystack[index + offset]) == search_lower(*character)
+        }) {
+            found.push((index, index + needle.len()));
+            index += needle.len();
+        } else {
+            index += 1;
+        }
+    }
+    found
+}
+
+/// El trozo mas largo de caracteres que el texto y la consulta comparten,
+/// cuando es lo bastante largo como para merecer un resaltado.
+fn longest_common_fragment(text: &[char], query: &[char]) -> Option<Vec<char>> {
+    let mut best = (0usize, 0usize);
+    let mut previous = vec![0usize; text.len() + 1];
+    let mut current = vec![0usize; text.len() + 1];
+    for character in query {
+        for (index, candidate) in text.iter().enumerate() {
+            current[index + 1] = if search_lower(*character) == search_lower(*candidate) {
+                previous[index] + 1
+            } else {
+                0
+            };
+            if current[index + 1] > best.0 {
+                best = (current[index + 1], index + 1);
+            }
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+    let minimum = query.len().clamp(2, 3);
+    (best.0 >= minimum).then(|| text[best.1 - best.0..best.1].to_vec())
+}
+
+/// El texto de una fila con las partes que coinciden con la consulta en el
+/// color del acento, como la referencia pinta su propio buscador.
+fn search_highlighted(text: &str, query: &str, accent: gpui::Hsla) -> gpui::StyledText {
+    let ranges = search_match_ranges(text, query);
+    gpui::StyledText::new(text.to_string()).with_highlights(ranges.into_iter().map(|range| {
+        (
+            range,
+            gpui::HighlightStyle {
+                color: Some(accent),
+                ..Default::default()
+            },
+        )
+    }))
 }
 
 /// The time of the last message of a conversation, the way the reference
@@ -8681,10 +9348,7 @@ fn render_call_bar(
 
 /// El panel del video de una llamada: la imagen del otro lado, la vista chica
 /// de la camara propia y, cuando algo falla, el motivo.
-fn render_call_video(
-    this: &mut Whatfast,
-    _cx: &mut gpui::Context<Whatfast>,
-) -> gpui::AnyElement {
+fn render_call_video(this: &mut Whatfast, _cx: &mut gpui::Context<Whatfast>) -> gpui::AnyElement {
     let scale = this.ui_scale;
     let remote = this.call_video.remote.clone();
     let local = this.call_video.local.clone();
@@ -8763,7 +9427,25 @@ fn render_call_video(
 
 #[cfg(test)]
 mod tests {
-    use super::{bubble_time_label, message_html};
+    use super::{bubble_time_label, message_html, search_match_ranges};
+
+    #[test]
+    fn the_search_marks_the_query_and_its_fuzzy_fragment() {
+        let text = "EL MERCADO DEL CERDO";
+        let ranges = search_match_ranges(text, "cerdo");
+        assert_eq!(ranges, vec![15..20], "the whole query wins");
+        assert_eq!(&text[15..20], "CERDO");
+
+        // The store matches "cerda" against "cerdo"; the row marks the run
+        // both share, like the reference.
+        let text = "Ya esta cerda";
+        let ranges = search_match_ranges(text, "cerdo");
+        assert_eq!(ranges, vec![8..12]);
+        assert_eq!(&text[8..12], "cerd");
+
+        // A text with nothing in common keeps its color.
+        assert!(search_match_ranges("Papa", "cerdo").is_empty());
+    }
 
     #[test]
     fn the_html_of_a_message_escapes_the_markup() {

@@ -31,6 +31,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, Theme, ThemeMode, VirtualListScrollHandle,
     input::{InputEvent, InputState},
+    slider::{SliderEvent, SliderState},
 };
 use smol::Timer;
 use std::sync::Arc;
@@ -335,7 +336,6 @@ impl ImageViewer {
     }
 }
 
-
 /// The multiple selection of the chat list: the menu of the column picks
 /// several chats and then applies one action to all of them.
 #[derive(Default)]
@@ -579,7 +579,6 @@ pub(crate) struct SearchResults {
 pub(crate) enum SearchResultRow {
     Header {
         title: &'static str,
-        count: usize,
     },
     Contact {
         result_index: usize,
@@ -634,8 +633,7 @@ impl SearchResults {
         let mut rows = Vec::with_capacity(self.len() + 3);
         if !self.contacts.is_empty() {
             rows.push(SearchResultRow::Header {
-                title: "Contacts",
-                count: self.contacts.len(),
+                title: i18n::t("Contacts"),
             });
             rows.extend(self.contacts.iter().enumerate().map(|(result_index, _)| {
                 SearchResultRow::Contact {
@@ -646,8 +644,7 @@ impl SearchResults {
         }
         if !self.groups.is_empty() {
             rows.push(SearchResultRow::Header {
-                title: "Groups",
-                count: self.groups.len(),
+                title: i18n::t("Chats"),
             });
             rows.extend(
                 self.groups
@@ -661,8 +658,7 @@ impl SearchResults {
         }
         if !self.messages.is_empty() {
             rows.push(SearchResultRow::Header {
-                title: "Messages",
-                count: self.messages.len(),
+                title: i18n::t("Messages"),
             });
             rows.extend(self.messages.iter().enumerate().map(|(offset, _)| {
                 SearchResultRow::Message {
@@ -789,6 +785,34 @@ fn call_image(decoded: crate::call_video::Decoded) -> Option<Arc<gpui::RenderIma
     })
 }
 
+/// Where the self-update of the app stands.
+///
+/// The phase drives both the lines of the settings panel and which button it
+/// offers: the check, the download and the install are three steps that the
+/// user can leave between.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum UpdatePhase {
+    /// Nothing asked yet.
+    #[default]
+    Idle,
+    /// The manifest is on its way.
+    Checking,
+    /// The published version is this one.
+    UpToDate,
+    /// A newer version is published.
+    Available,
+    /// The two files are on their way.
+    Downloading,
+    /// The files are on disk and the restart installs them.
+    Ready,
+    /// The files are moving into place.
+    Installing,
+    /// This platform has no package that the app can install itself.
+    Unsupported,
+    /// The last step failed; `update_error` says why.
+    Failed,
+}
+
 /// The state of the application.
 pub(crate) struct Whatfast {
     pub(crate) rpc: RpcClient,
@@ -857,6 +881,25 @@ pub(crate) struct Whatfast {
     pub(crate) ui_scale: f32,
     /// The settings of the profile, as the file keeps them.
     pub(crate) settings: Settings,
+    /// Whether the app asks the releases for a newer version when it starts.
+    pub(crate) check_updates: bool,
+    /// Where the self-update stands: the settings panel paints it.
+    pub(crate) update_phase: UpdatePhase,
+    /// The version of the release that is available, when there is one.
+    pub(crate) update_version: String,
+    /// The reason of the last failure, as the panel shows it.
+    pub(crate) update_error: String,
+    /// The release that is downloaded or ready to install.
+    pub(crate) update_manifest: Option<crate::update::Manifest>,
+    /// The folder with the two files of the release.
+    pub(crate) update_staging: Option<PathBuf>,
+    /// The bytes of the download that arrived, and the size of the file.
+    pub(crate) update_received: u64,
+    pub(crate) update_total: u64,
+    /// When the files became ready. A click that started on the Download
+    /// button must not install them by landing on the button that replaced
+    /// it: the install waits a moment.
+    pub(crate) update_ready_at: Option<Instant>,
     /// The air between rows and messages, mirrored for the hot path of the
     /// drawing.
     pub(crate) density: Density,
@@ -938,10 +981,20 @@ pub(crate) struct Whatfast {
     pub(crate) attachment_play_requested: Option<VideoKey>,
     /// El video que la ventana esta reproduciendo, cuando hay uno.
     pub(crate) video: VideoPlayback,
+    /// Whether the video is being watched in the viewer that fills the window.
+    pub(crate) video_fullscreen: bool,
     /// El hilo que decodifica el video.
     pub(crate) video_engine: VideoEngine,
+    /// El volumen de los videos, de 0 a 1, y si estan en silencio: el video
+    /// que se abre despues arranca con el mismo sonido.
+    pub(crate) video_volume: f32,
+    pub(crate) video_muted: bool,
+    /// La barra del volumen del reproductor de video.
+    pub(crate) volume_slider: Entity<SliderState>,
     /// Whether the tick that moves the frames of the video is running.
     pub(crate) video_tick: bool,
+    /// The icon of the application in the tray, when the shell took it.
+    pub(crate) tray: Option<crate::tray::Tray>,
     /// The width of the column of the chats, before the scale of the screen.
     pub(crate) sidebar_width: f32,
     /// Whether the column of the chats is hidden, so the conversation takes
@@ -981,6 +1034,10 @@ pub(crate) struct Whatfast {
     pub(crate) recording_tick: bool,
     /// Whether the health of the local database is being checked.
     pub(crate) integrity_checking: bool,
+    /// The space the media cache takes on this device, when it was read.
+    pub(crate) storage_usage: Option<whatfast_protocol::StorageUsageResponse>,
+    /// Whether the media cache is being cleared.
+    pub(crate) storage_clearing: bool,
     /// Whether the library of stickers is being loaded.
     pub(crate) sticker_library_loading: bool,
     /// Whether the newsletters are being loaded.
@@ -1079,6 +1136,7 @@ impl Whatfast {
         let enter_to_send = settings.enter_to_send;
         let split_view = settings.split_view;
         let battery_saver = settings.battery_saver;
+        let check_updates = settings.check_updates;
         let theme_id = settings.theme_id.clone();
         let fake = std::env::args().any(|arg| arg == "--fake-backend")
             || std::env::var_os("WHATFAST_FAKE").is_some();
@@ -1164,6 +1222,14 @@ impl Whatfast {
         // the only way to hear it.
         let quick_ask = QuickAsk::new(window, cx);
         let quick_ask_input = quick_ask.input().clone();
+        // La barra del volumen del video empieza con todo el sonido.
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(1.0)
+                .step(0.05)
+                .default_value(1.0)
+        });
         let _subscriptions = vec![
             cx.subscribe_in(&composer, window, {
                 let composer = composer.clone();
@@ -1330,9 +1396,9 @@ impl Whatfast {
             emoji_target: None,
             reaction_details: None,
             image_viewer: None,
-    image_context_menu: None,
-    viewer_reactions_open: false,
-    viewer_info_open: false,
+            image_context_menu: None,
+            viewer_reactions_open: false,
+            viewer_info_open: false,
             replying_to_message_id: None,
             chat_drafts: HashMap::new(),
             recent_chat_ids: Vec::new(),
@@ -1349,6 +1415,15 @@ impl Whatfast {
             settings_open: false,
             ui_scale,
             settings,
+            check_updates,
+            update_phase: UpdatePhase::Idle,
+            update_version: String::new(),
+            update_error: String::new(),
+            update_manifest: None,
+            update_staging: None,
+            update_received: 0,
+            update_total: 0,
+            update_ready_at: None,
             density,
             message_wrap_width: px(536.),
             enter_to_send,
@@ -1397,8 +1472,13 @@ impl Whatfast {
             attachment_save_requested: None,
             attachment_play_requested: None,
             video: VideoPlayback::default(),
+            video_fullscreen: false,
             video_engine: VideoEngine::new(),
+            video_volume: 1.0,
+            video_muted: false,
+            volume_slider: volume_slider.clone(),
             video_tick: false,
+            tray: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hidden: false,
             chat_list_menu: false,
@@ -1418,6 +1498,8 @@ impl Whatfast {
             recording: None,
             recording_tick: false,
             integrity_checking: false,
+            storage_usage: None,
+            storage_clearing: false,
             sticker_library_loading: false,
             newsletters_loading: false,
             selected_newsletter: None,
@@ -1446,6 +1528,17 @@ impl Whatfast {
             attachment_bar,
             _subscriptions,
         };
+        // El icono de la bandeja: cerrar la ventana la esconde y la
+        // aplicacion sigue con la sesion del telefono.
+        this.tray = crate::tray::Tray::install(window, &*cx);
+        // La barra del volumen del video es la que manda: cada vez que el
+        // usuario la mueve, el sonido del reproductor la sigue.
+        let volume = cx.subscribe(&this.volume_slider, |this, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                this.set_video_volume(value.end(), cx);
+            }
+        });
+        this._subscriptions.push(volume);
         if startup_error.is_some() {
             this.store.screen = Screen::Fatal;
             this.store.fatal_error = Some(
@@ -1469,6 +1562,19 @@ impl Whatfast {
             }),
             PendingRequest::Hello,
         );
+        // A download that was waiting for a restart is offered again, and the
+        // start asks the release for a newer version unless the profile
+        // turned the check off.
+        if let Some((manifest, folder)) = crate::update::ready() {
+            this.update_version = manifest.version.clone();
+            this.update_manifest = Some(manifest);
+            this.update_staging = Some(folder);
+            this.update_phase = UpdatePhase::Ready;
+            this.update_ready_at = Some(Instant::now());
+        }
+        if this.check_updates && this.update_phase == UpdatePhase::Idle {
+            this.start_update_check(true, cx);
+        }
         this
     }
 
@@ -1742,8 +1848,7 @@ impl Whatfast {
                     if let Some(state) = self.create_group.as_mut() {
                         state.pending = false;
                     }
-                    self.store.toast_error =
-                        Some(i18n::t("The group could not be created").into());
+                    self.store.toast_error = Some(i18n::t("The group could not be created").into());
                 }
                 PendingRequest::Search { .. } => {}
                 // Best-effort presence broadcast; peers expire it on their own.
@@ -1810,8 +1915,10 @@ impl Whatfast {
                 } => {
                     self.restore_failed_edit(&chat_id, &message_id, &draft_text, window, cx);
                     self.store.toast_error = Some(
-                        i18n::t("Editing the message timed out. Your draft was restored; try again.")
-                            .into(),
+                        i18n::t(
+                            "Editing the message timed out. Your draft was restored; try again.",
+                        )
+                        .into(),
                     );
                 }
                 PendingRequest::OlderHistory { chat_id } => {
@@ -1832,6 +1939,12 @@ impl Whatfast {
                     self.integrity_checking = false;
                     self.store.toast_error =
                         Some(i18n::t("Checking the local storage timed out. Try again.").into());
+                }
+                PendingRequest::StorageUsage | PendingRequest::ClearMediaCache => {
+                    self.storage_clearing = false;
+                    self.store.toast_error = Some(
+                        i18n::t("Reading the space of the media timed out. Try again.").into(),
+                    );
                 }
                 PendingRequest::Stickers => {
                     self.sticker_library_loading = false;
@@ -2086,8 +2199,7 @@ impl Whatfast {
                 self.search_target_message_id = None;
                 self.pending_search_scroll_id = None;
                 self.load_selected_chat(chat_id.clone());
-                self.store.toast_error =
-                    Some(i18n::t("The message could not be found.").into());
+                self.store.toast_error = Some(i18n::t("The message could not be found.").into());
                 return;
             }
             if matches!(&pending, PendingRequest::MessagesAfter { .. }) {
@@ -2196,8 +2308,9 @@ impl Whatfast {
                     && state.chat_id == *chat_id
                 {
                     state.loading = false;
-                    state.error =
-                        Some(i18n::t("The chat information could not be loaded. Try again.").into());
+                    state.error = Some(
+                        i18n::t("The chat information could not be loaded. Try again.").into(),
+                    );
                 }
                 return;
             }
@@ -2289,8 +2402,7 @@ impl Whatfast {
                 if let Some(state) = self.create_group.as_mut() {
                     state.pending = false;
                 }
-                self.store.toast_error =
-                    Some(i18n::t("The group could not be created").into());
+                self.store.toast_error = Some(i18n::t("The group could not be created").into());
                 return;
             }
             if let PendingRequest::SetChatPin {
@@ -2393,6 +2505,9 @@ impl Whatfast {
             if let PendingRequest::IntegrityStatus | PendingRequest::RepairLocalCache = &pending {
                 self.integrity_checking = false;
             }
+            if let PendingRequest::StorageUsage | PendingRequest::ClearMediaCache = &pending {
+                self.storage_clearing = false;
+            }
             if let PendingRequest::Stickers = &pending {
                 self.sticker_library_loading = false;
             }
@@ -2428,7 +2543,10 @@ impl Whatfast {
                 self.stop_call_audio();
                 self.stop_call_video();
             }
-            if matches!(&pending, PendingRequest::CallAudio | PendingRequest::CallVideo) {
+            if matches!(
+                &pending,
+                PendingRequest::CallAudio | PendingRequest::CallVideo
+            ) {
                 // Fire-and-forget frames: a lost one is not an error to show.
                 return;
             }
@@ -2449,8 +2567,7 @@ impl Whatfast {
                     Some(i18n::t("Whatfast could not start. Restart Whatfast.").into());
                 self.store.screen = Screen::Fatal;
             } else {
-                self.store.toast_error =
-                    Some(i18n::t("Something went wrong. Try again.").into());
+                self.store.toast_error = Some(i18n::t("Something went wrong. Try again.").into());
             }
             return;
         }
@@ -2459,8 +2576,10 @@ impl Whatfast {
                 if hello.protocol_version != PROTOCOL_VERSION {
                     self.store.screen = Screen::Fatal;
                     self.store.fatal_error = Some(
-                        i18n::t("Whatfast and its backend are different versions. Restart Whatfast.")
-                            .into(),
+                        i18n::t(
+                            "Whatfast and its backend are different versions. Restart Whatfast.",
+                        )
+                        .into(),
                     );
                 } else {
                     self.request(
@@ -2834,6 +2953,42 @@ impl Whatfast {
                     self.refresh_latest();
                 }
             }
+            (PendingRequest::StorageUsage, rpc_response::Result::StorageUsage(response)) => {
+                self.storage_usage = Some(response);
+            }
+            (PendingRequest::ClearMediaCache, rpc_response::Result::ClearMediaCache(response)) => {
+                let freed = response.freed_bytes;
+                let files = response.deleted_files;
+                self.storage_usage = response.usage;
+                self.storage_clearing = false;
+                // The files of the avatars went with the rest of the cache:
+                // the paths of this session would paint a hole, so they go
+                // back to empty and the next paint asks for the picture.
+                self.store.forget_avatars();
+                self.avatar_attempted.clear();
+                self.participant_avatar_attempted.clear();
+                // The rows that pointed at the deleted files were reset by
+                // the sidecar: the next paint of a bubble asks for the file
+                // again, so the open conversation reloads its messages.
+                if self.store.selected_chat_id.is_some() {
+                    self.refresh_latest();
+                }
+                let freed = crate::attachments::format_bytes(freed);
+                if files == 0 {
+                    self.store.toast_info = Some(i18n::t("There was nothing to clear.").into());
+                } else if freed.is_empty() {
+                    let files = files.to_string();
+                    self.store.toast_info = Some(i18n::t_args(
+                        "The media cache was cleared. {files} files deleted.",
+                        &[("files", files.as_str())],
+                    ));
+                } else {
+                    self.store.toast_info = Some(i18n::t_args(
+                        "The media cache was cleared. {size} freed.",
+                        &[("size", freed.as_str())],
+                    ));
+                }
+            }
             (PendingRequest::Reconnect, rpc_response::Result::Reconnect(reconnect)) => {
                 // El arranque tambien pide reconectar: solo un rechazo real
                 // deja su motivo a la vista, y nunca pisa una conexion viva.
@@ -2868,8 +3023,7 @@ impl Whatfast {
                     if self.attachment_play_requested.as_ref() == Some(&key) {
                         self.attachment_play_requested = None;
                         self.video.waiting = false;
-                        self.video.error =
-                            Some(i18n::t("That file is no longer available").into());
+                        self.video.error = Some(i18n::t("That file is no longer available").into());
                     }
                     self.attachment_failures
                         .insert(key, i18n::t("That file is no longer available").into());
@@ -3169,8 +3323,7 @@ impl Whatfast {
                     state.pending = false;
                 }
                 let Some(chat) = response.chat else {
-                    self.store.toast_error =
-                        Some(i18n::t("The group could not be created").into());
+                    self.store.toast_error = Some(i18n::t("The group could not be created").into());
                     return;
                 };
                 let chat_id = chat.id.clone();
@@ -3609,8 +3762,7 @@ impl Whatfast {
                 if state == ConnectionState::LoggedOut {
                     if self.rpc.logout_pending() {
                         self.store.connection_detail =
-                            i18n::t("Logged out; securely clearing the local account data…")
-                                .into();
+                            i18n::t("Logged out; securely clearing the local account data…").into();
                     } else {
                         self.begin_pairing();
                     }
@@ -4128,7 +4280,9 @@ impl Whatfast {
         let path = PathBuf::from(&viewer.path);
         let copied = std::fs::read(&path)
             .ok()
-            .and_then(|bytes| crate::helpers::image_file_format(&bytes).map(|format| (format, bytes)))
+            .and_then(|bytes| {
+                crate::helpers::image_file_format(&bytes).map(|format| (format, bytes))
+            })
             .map(|(format, bytes)| gpui::Image::from_bytes(format, bytes));
         match copied {
             Some(image) => {
@@ -4148,8 +4302,7 @@ impl Whatfast {
     pub(crate) fn open_file_externally(&mut self, path: &str, cx: &mut Context<Self>) {
         let path = Path::new(path);
         if path.as_os_str().is_empty() || !path.is_file() {
-            self.store.toast_error =
-                Some(i18n::t("That file is no longer available").into());
+            self.store.toast_error = Some(i18n::t("That file is no longer available").into());
             self.image_context_menu = None;
             return;
         }
@@ -4165,8 +4318,7 @@ impl Whatfast {
         };
         let source = PathBuf::from(&viewer.path);
         if !source.is_file() {
-            self.store.toast_error =
-                Some(i18n::t("That file is no longer available").into());
+            self.store.toast_error = Some(i18n::t("That file is no longer available").into());
             self.image_context_menu = None;
             cx.notify();
             return;
@@ -4812,9 +4964,7 @@ impl Whatfast {
         match self.settings.bubble_width() {
             // Never narrower than an attachment card: a bubble that is
             // narrower than its content pushes the layout of the thread.
-            Some(part) => {
-                px((f32::from(self.message_wrap_width) * part).max(320. * self.ui_scale))
-            }
+            Some(part) => px((f32::from(self.message_wrap_width) * part).max(320. * self.ui_scale)),
             None => px(560.),
         }
     }
@@ -4995,6 +5145,239 @@ impl Whatfast {
         }
         self.save_settings();
         cx.notify();
+    }
+
+    /// Sets whether the app asks for a newer release when it starts.
+    pub(crate) fn set_check_updates(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.check_updates == enabled {
+            return;
+        }
+        self.check_updates = enabled;
+        self.settings.check_updates = enabled;
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Asks the release for a newer version.
+    ///
+    /// The request lives in its own thread: the check waits on the network,
+    /// and the window keeps painting while it does. `automatic` is the check
+    /// of the start: it only tells the user when it finds something.
+    pub(crate) fn start_update_check(&mut self, automatic: bool, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_phase,
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading
+                | UpdatePhase::Installing
+                | UpdatePhase::Ready
+        ) {
+            return;
+        }
+        if !crate::update::enabled() {
+            self.update_phase = UpdatePhase::Failed;
+            self.update_error = i18n::t("The automatic update is off in this copy.").to_string();
+            cx.notify();
+            return;
+        }
+        let Some(manifest_name) = crate::update::platform_manifest() else {
+            self.update_phase = UpdatePhase::Unsupported;
+            cx.notify();
+            return;
+        };
+        self.update_phase = UpdatePhase::Checking;
+        self.update_error.clear();
+        self.update_received = 0;
+        self.update_total = 0;
+        cx.notify();
+        let (sender, receiver) = async_channel::unbounded();
+        let base = crate::update::base_url();
+        let name = manifest_name.to_string();
+        let started = std::thread::Builder::new()
+            .name("whatfast-update-check".to_string())
+            .spawn(move || {
+                let event = match crate::update::check(&base, &name) {
+                    Ok(Some(manifest)) => crate::update::Event::Found(manifest),
+                    Ok(None) => crate::update::Event::Current,
+                    Err(error) => crate::update::Event::Failed(error),
+                };
+                let _ = sender.send_blocking(event);
+            });
+        if started.is_err() {
+            self.update_phase = UpdatePhase::Failed;
+            self.update_error = i18n::t("The update could not be checked.").to_string();
+            cx.notify();
+            return;
+        }
+        self.watch_update(receiver, automatic, cx);
+    }
+
+    /// Follows the events of the thread of the update until it ends.
+    fn watch_update(
+        &mut self,
+        receiver: async_channel::Receiver<crate::update::Event>,
+        automatic: bool,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = receiver.recv().await {
+                let Ok(keep) =
+                    this.update(cx, |this, cx| this.on_update_event(event, automatic, cx))
+                else {
+                    break;
+                };
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Paints one note of the update thread in the state of the panel.
+    fn on_update_event(
+        &mut self,
+        event: crate::update::Event,
+        automatic: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match event {
+            crate::update::Event::Found(manifest) => {
+                self.update_version = manifest.version.clone();
+                self.update_manifest = Some(manifest);
+                self.update_phase = UpdatePhase::Available;
+                self.update_error.clear();
+                if automatic {
+                    self.store.toast_info = Some(i18n::t_args(
+                        "Whatfast {version} is available. Open Settings, Updates.",
+                        &[("version", &self.update_version)],
+                    ));
+                    self.clear_toast_info_later(cx);
+                }
+            }
+            crate::update::Event::Current => {
+                self.update_phase = UpdatePhase::UpToDate;
+                self.update_error.clear();
+            }
+            crate::update::Event::Failed(error) => {
+                self.update_phase = UpdatePhase::Failed;
+                self.update_error = error;
+            }
+            crate::update::Event::Progress { received, total } => {
+                self.update_phase = UpdatePhase::Downloading;
+                self.update_received = received;
+                self.update_total = total;
+            }
+            crate::update::Event::Downloaded(folder) => {
+                self.update_phase = UpdatePhase::Ready;
+                self.update_staging = Some(folder);
+                self.update_ready_at = Some(Instant::now());
+                self.update_received = 0;
+                self.update_total = 0;
+                self.store.toast_info = Some(i18n::t_args(
+                    "Whatfast {version} is ready. Restart from Settings, Updates.",
+                    &[("version", &self.update_version)],
+                ));
+                self.clear_toast_info_later(cx);
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Downloads the two files of the release that the check found.
+    pub(crate) fn start_update_download(&mut self, cx: &mut Context<Self>) {
+        if self.update_phase != UpdatePhase::Available {
+            return;
+        }
+        let Some(manifest) = self.update_manifest.clone() else {
+            return;
+        };
+        self.update_phase = UpdatePhase::Downloading;
+        self.update_error.clear();
+        self.update_received = 0;
+        self.update_total = 0;
+        cx.notify();
+        let (sender, receiver) = async_channel::unbounded();
+        let base = crate::update::base_url();
+        let staging = crate::update::staging_root();
+        let started = std::thread::Builder::new()
+            .name("whatfast-update-download".to_string())
+            .spawn(move || {
+                let mut last = 0u64;
+                let progress_sender = sender.clone();
+                let mut progress = move |received: u64, total: u64| {
+                    // One note per half a megabyte keeps the interface from
+                    // repainting for every chunk of 64 KiB.
+                    if received.saturating_sub(last) >= 512 * 1024
+                        || (total > 0 && received == total)
+                    {
+                        last = received;
+                        let _ = progress_sender
+                            .send_blocking(crate::update::Event::Progress { received, total });
+                    }
+                };
+                let event = match crate::update::download(&manifest, &base, &staging, &mut progress)
+                {
+                    Ok(folder) => crate::update::Event::Downloaded(folder),
+                    Err(error) => crate::update::Event::Failed(error),
+                };
+                let _ = sender.send_blocking(event);
+            });
+        if started.is_err() {
+            self.update_phase = UpdatePhase::Failed;
+            self.update_error = i18n::t("The update could not be downloaded.").to_string();
+            cx.notify();
+            return;
+        }
+        self.watch_update(receiver, false, cx);
+    }
+
+    /// Replaces the two executables with the downloaded ones and starts the
+    /// new copy.
+    pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
+        if self.update_phase != UpdatePhase::Ready {
+            return;
+        }
+        // A click that began on the Download button can end on the button
+        // that replaces it when the download is fast. The install asks for a
+        // deliberate second click.
+        if self
+            .update_ready_at
+            .is_some_and(|ready| ready.elapsed() < Duration::from_millis(1500))
+        {
+            return;
+        }
+        let (Some(manifest), Some(staging)) =
+            (self.update_manifest.clone(), self.update_staging.clone())
+        else {
+            return;
+        };
+        self.update_phase = UpdatePhase::Installing;
+        self.update_error.clear();
+        cx.notify();
+        // The sidecar runs the executable of the backend: it has to end
+        // before the files move. The interface is about to exit, so a
+        // backend that does not answer is not a reason to stay.
+        self.rpc.stop_backend();
+        let exe = std::env::current_exe().unwrap_or_default();
+        match crate::update::install(&manifest, &staging, &exe) {
+            Ok(installed) => {
+                // The download is spent: a restart must never offer the same
+                // files again, even if the new build reports the old version.
+                let _ = std::fs::remove_dir_all(&staging);
+                // The new copy takes the lock that this one releases, and the
+                // exit is immediate: this process must never write the lock
+                // file again.
+                crate::instance::release();
+                let _ = std::process::Command::new(&installed).spawn();
+                std::process::exit(0);
+            }
+            Err(error) => {
+                self.update_phase = UpdatePhase::Failed;
+                self.update_error = error;
+                cx.notify();
+            }
+        }
     }
 
     /// Sets the directory of "Save to folder"; `None` asks every time.
@@ -5577,7 +5960,11 @@ impl Whatfast {
     /// Checks the PIN of the lock screen and opens the window.
     pub(crate) fn try_unlock(&mut self, cx: &mut Context<Self>) {
         let pin = self.pin_buffer.clone();
-        if crate::app_lock::verify(&pin, &self.settings.app_lock_salt, &self.settings.app_lock_hash) {
+        if crate::app_lock::verify(
+            &pin,
+            &self.settings.app_lock_salt,
+            &self.settings.app_lock_hash,
+        ) {
             self.locked = false;
             self.lock_error = None;
         } else {
@@ -5732,7 +6119,8 @@ impl Whatfast {
     }
 
     /// Sends the creation of the group with the name and the marked contacts.
-    pub(crate) fn submit_create_group(&mut self, cx: &mut Context<Self>) {        let Some(state) = self.create_group.as_ref() else {
+    pub(crate) fn submit_create_group(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.create_group.as_ref() else {
             return;
         };
         if state.pending {
@@ -6089,7 +6477,11 @@ impl Whatfast {
         if record_recent {
             record_recent_chat(&mut self.recent_chat_ids, &chat_id);
         }
-        let previous_unread = self.store.chat(&chat_id).map(|c| c.unread_count).unwrap_or(0);
+        let previous_unread = self
+            .store
+            .chat(&chat_id)
+            .map(|c| c.unread_count)
+            .unwrap_or(0);
         self.load_selected_chat(chat_id.clone());
         self.store.mark_selected_chat_read_locally();
         self.request(
@@ -6312,6 +6704,11 @@ impl Whatfast {
     }
 
     pub(crate) fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.video_fullscreen {
+            self.video_fullscreen = false;
+            cx.notify();
+            return;
+        }
         if self.media_editor.is_some() {
             self.media_editor = None;
             self.sync_shell(cx);
@@ -7075,6 +7472,27 @@ impl Whatfast {
         report_failed_request(&mut self.store, self.rpc.request_repair_local_cache());
     }
 
+    /// Reads the space the media cache takes on this device.
+    ///
+    /// The answer paints the breakdown of the settings panel: nothing here
+    /// talks to WhatsApp, only to the folder of this computer.
+    pub(crate) fn load_storage_usage(&mut self) {
+        report_failed_request(&mut self.store, self.rpc.request_storage_usage());
+    }
+
+    /// Deletes the files of the media cache of this device.
+    ///
+    /// Only the copies this computer downloaded: the account, the phone and
+    /// the conversation stay as they are, and the app fetches a file again
+    /// when the user opens the message.
+    pub(crate) fn clear_media_cache(&mut self) {
+        if self.storage_clearing {
+            return;
+        }
+        self.storage_clearing = true;
+        report_failed_request(&mut self.store, self.rpc.request_clear_media_cache());
+    }
+
     /// Asks the sidecar to reconnect to WhatsApp.
     ///
     /// port: the origin refuses to reconnect when the account is already
@@ -7496,7 +7914,10 @@ impl Whatfast {
     }
 
     /// The attachment of a message, if it is a video.
-    fn video_attachment(&self, message_id: &str) -> Option<whatfast_protocol::AttachmentContent> {
+    pub(crate) fn video_attachment(
+        &self,
+        message_id: &str,
+    ) -> Option<whatfast_protocol::AttachmentContent> {
         self.message_attachment(message_id)
             .filter(crate::video::is_video)
     }
@@ -7538,6 +7959,38 @@ impl Whatfast {
 
     /// Abre la sesion del video de un mensaje: con el archivo en el disco
     /// arranca ya, y sin el pide la descarga.
+    /// Apaga o prende el sonido del video sin perder el volumen elegido.
+    pub(crate) fn toggle_video_mute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.video_muted = !self.video_muted;
+        // Prender el sonido con el volumen en cero no se oye: el boton
+        // devuelve la mitad, que es lo que hace cualquier reproductor.
+        if !self.video_muted && self.video_volume <= 0.0 {
+            self.video_volume = 0.5;
+            self.volume_slider.update(cx, |slider, cx| {
+                slider.set_value(0.5, window, cx);
+            });
+        }
+        self.apply_video_volume(cx);
+    }
+
+    /// El volumen que el usuario solto en la barra del reproductor.
+    fn set_video_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
+        self.video_volume = volume.clamp(0.0, 1.0);
+        // Mover la barra es pedir sonido: si estaba en silencio, vuelve.
+        if self.video_volume > 0.0 {
+            self.video_muted = false;
+        }
+        self.apply_video_volume(cx);
+    }
+
+    /// Lleva el volumen y el silencio al reproductor y a la burbuja.
+    fn apply_video_volume(&mut self, cx: &mut Context<Self>) {
+        self.video.volume = self.video_volume;
+        self.video.muted = self.video_muted;
+        self.video_engine.set_volume(self.video.effective_volume());
+        cx.notify();
+    }
+
     fn start_video_session(&mut self, key: &VideoKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(attachment) = self.video_attachment(&key.1) else {
             return;
@@ -7548,6 +8001,10 @@ impl Whatfast {
             duration: attachment.duration_seconds as f32,
             ..Default::default()
         };
+        // El video arranca con el sonido que el usuario dejo.
+        self.video.volume = self.video_volume;
+        self.video.muted = self.video_muted;
+        self.video_engine.set_volume(self.video.effective_volume());
         if !path.is_empty() && Path::new(&path).is_file() {
             self.video.path = path.clone();
             self.video.active = true;
@@ -7565,12 +8022,39 @@ impl Whatfast {
         self.load_message_attachment(key.0.clone(), key.1.clone());
     }
 
+    /// Abre el video en el visor que ocupa la ventana entera.
+    ///
+    /// Un video que todavia no esta en el disco arranca su descarga y el
+    /// visor muestra la caja negra hasta que llega el primer cuadro.
+    pub(crate) fn open_video_fullscreen(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key: VideoKey = (chat_id, message_id);
+        if !self.video.is_for(&key) {
+            self.stop_video();
+            self.start_video_session(&key, window, cx);
+        }
+        self.video_fullscreen = true;
+        cx.notify();
+    }
+
+    /// Cierra el visor del video y deja el reproductor en la burbuja.
+    pub(crate) fn close_video_fullscreen(&mut self, cx: &mut Context<Self>) {
+        self.video_fullscreen = false;
+        cx.notify();
+    }
+
     /// Corta el video que se esta mirando.
     pub(crate) fn stop_video(&mut self) {
         if self.video.active {
             self.video_engine.stop();
         }
         self.attachment_play_requested = None;
+        self.video_fullscreen = false;
         self.video = VideoPlayback::default();
     }
 
@@ -8419,6 +8903,10 @@ impl Whatfast {
             }
             NavAction::Privacy | NavAction::Settings => {
                 self.settings_open = true;
+                // The panel shows the space of the media cache: it reads the
+                // folder of this computer when it opens, not on the boot,
+                // because a profile may never open it.
+                self.load_storage_usage();
             }
         }
         self.sync_shell(cx);
@@ -8910,8 +9398,9 @@ impl Whatfast {
 fn report_failed_request(store: &mut Store, request: anyhow::Result<u64>) {
     if request.is_err() {
         store.screen = Screen::Fatal;
-        store.fatal_error =
-            Some(i18n::t("Whatfast lost the connection with its backend. Restart Whatfast.").into());
+        store.fatal_error = Some(
+            i18n::t("Whatfast lost the connection with its backend. Restart Whatfast.").into(),
+        );
     }
 }
 
@@ -8969,10 +9458,7 @@ const NOTIFICATION_MAX_AGE_MS: i64 = 60_000;
 ///
 /// port: `notificationTitle` of `tauri/src/lib/notification-policy.ts`.
 fn notification_title(chat: &Chat, message: &Message) -> String {
-    for candidate in [
-        chat.title.as_str(),
-        message.sender_name.as_str(),
-    ] {
+    for candidate in [chat.title.as_str(), message.sender_name.as_str()] {
         if !candidate.is_empty() {
             return candidate.to_string();
         }

@@ -2712,3 +2712,279 @@ ni la seleccion multiple.
 
 Probar en la app nueva: una foto de visualizacion unica, una nota de voz
 pausada, crear un grupo y activar el PIN.
+
+
+## 2026-10-28 - Tarjeta de enlace, filas vacias y boton del agente
+
+**Que**
+
+- `render_link_preview` toma el fondo y el texto de la burbuja que lo
+  contiene, oscurece el fondo un 18 %, lleva la imagen a todo el ancho y
+  el titulo a dos lineas.
+- El hilo esconde las filas sin contenido visible: `Unsupported` vacio o
+  con `type_name` "revoked" y sin reacciones, ademas de las revocadas.
+- La cabecera de la conversacion ya no tiene el boton "Preguntar a un
+  agente"; el modo rapido sigue en `ctrl-shift-q`.
+- El backend falso trae una miniatura JPEG para el link preview de la
+  demo (`link-preview-demo.jpg`).
+
+**Por que**
+
+- La tarjeta pintaba con `cx.theme()` (el tema del componente, claro)
+  mientras la burbuja usa el tema de Whatfast (oscuro): fondo blanco y
+  titulo blanco encima, invisible.
+- Un sidecar viejo guardo sobres de protocolo como filas `unsupported`
+  vacias, y se pintaban como burbujas sin texto.
+
+**Evidencia**
+
+- `cargo test -p whatfast-model -p whatfast-ui`: 71 y 294 pasan (1
+  ignorado).
+- Captura del chat falso: tarjeta verde derivada de la burbuja, titulo
+  blanco visible, imagen a todo el ancho y el boton del agente ausente.
+
+**Trampa**
+
+- El test de `settings.rs` no compilaba desde el PIN: le faltaban
+  `app_lock_salt` y `app_lock_hash`.
+- `whatfast.exe` en uso se puede renombrar y reemplazar sin cerrar la
+  app; el proceso vivo sigue con el binario viejo hasta reiniciar.
+
+**Pendiente**
+
+- Probar la tarjeta con un mensaje real y confirmar que las filas vacias
+  de la base del usuario desaparecen del hilo.
+
+
+## 2026-10-28 - El buscador del sidebar, como la referencia
+
+**Que**
+
+- El panel del buscador pinta tres secciones con avatar, fecha y nombre:
+  Contactos, Chats y Mensajes. La consulta se resalta en verde, y cuando el
+  store la encontro por errata se marca el trozo que el texto y la consulta
+  comparten.
+- El backend busca conversaciones directas ademas de grupos
+  (`search_chats`, sobre `ChatRow::display_title`) y contactos de la agenda
+  (`search_contacts`, una fila por persona entre `@lid` y
+  `@s.whatsapp.net`). Antes `SearchLocal` devolvia `contacts` vacio.
+- El buscador tiene la X para borrar y el borde verde al enfocar; el pie
+  con el contador de chats se esconde mientras busca.
+
+**Por que**
+
+- La captura del usuario mostraba una lista plana de mensajes de una sola
+  conversacion, sin avatares ni fechas, el encabezado "Messages20" pegado y
+  el pie "787 chats" sobre los resultados.
+
+**Evidencia**
+
+- `cargo test -p whatfast-ui`: 295 pasan (1 ignorado).
+- `cargo test -p whatfast-wa --test store`: 38 pasan, con los tests nuevos
+  de chats directos y de contactos duplicados.
+- Captura con el backend falso (`21-resultados.png`): las tres secciones,
+  avatares, fechas y "bruno" en verde. `dist` y
+  `Programs\Whatfast` quedaron con los binarios nuevos.
+
+**Trampa**
+
+- Las filas del `v_virtual_list` se miden con ancho de 1 px: sin `w_full`
+  cada fila se encoge al texto (era el "Messages20" pegado).
+- El `border_color` del `Input` se aplica en `refine_style` y pisaba el
+  borde de foco verde: hay que dejar que el componente pinte el ring.
+
+**Pendiente**
+
+- Reiniciar la app para ver el cambio: los procesos viejos siguen con el
+  binario anterior.
+- Probar con la base real ("EL MERCADO DEL CERDO" en Chats y Contactos).
+- El recorrido del sitio (`VIEWS`/`RAIL`) sigue sin la vista de agentes.
+
+## 2026-10-28 - La cache de medios: cuanto ocupa y como vaciarla
+
+**Que**
+
+- `whatfast-wa/src/storage.rs`: `scan` mide `<data-dir>/media` y agrupa por
+  tipo (foto, video, audio, documento, avatar, otro) y `clear` borra solo esos
+  archivos. Nada del lado del telefono ni de la cuenta.
+- `proto/bridge.proto`: `StorageUsage` (80) y `ClearMediaCache` (81), con los
+  bytes, los archivos y la carpeta de la cache.
+- `db.rs::clear_media_paths`: despues de vaciar, las filas vuelven a "sin
+  descargar" (`image_local_path` y `media_local_path` en vacio) y conservan
+  `image_direct_path`/`media_direct_path`, que es lo que la proxima descarga
+  necesita.
+- Ajustes > "Cache de medios": total, una fila por tipo, la carpeta,
+  "Actualizar" y "Vaciar la cache de medios". El panel lee la carpeta al
+  abrirse, no en el arranque.
+- `Store::forget_avatars`: al vaciar, los avatares de la sesion quedan sin
+  ruta y la proxima pintada los pide de nuevo.
+
+**Por que**: el usuario pidio ver cuanto ocupan las fotos, los videos y demas
+en el sistema local, y poder limpiarlo.
+
+**Evidencia**
+
+- `cargo test -p whatfast-wa --lib storage`: 3 pasan. `--test store`: 39
+  pasan (el nuevo comprueba que se olvidan las rutas y quedan los
+  descriptores). `-p whatfast-protocol --test fake`: 15 pasan (con
+  `the_storage_panel_measures_and_clears_only_the_media_tree`, que ademas
+  verifica que `chats.db` no se toca). `-p whatfast-ui`: 299 pasan.
+- Linux (WSL archlinux): `cargo test -p whatfast-wa --lib storage` (3),
+  `--test store` (39) y `-p whatfast-model` (72) en verde, y
+  `cargo check -p whatfast-ui` compila.
+- Capturas con el backend falso: `31-ajustes-cache.png` (4.0 MB en 52
+  archivos), `32-ajustes-vaciado.png` ("No hay archivos descargados", boton
+  apagado, aviso "Se vacio la cache de medios. 2.2 MB liberados.").
+
+**Trampa**
+
+- Los avatares que escribe el sidecar actual viven en `<data-dir>/media`
+  (`avatar-<hash>-<variante>.jpg`); `<data-dir>/avatars` es cache muerta del
+  sidecar Go y ningun codigo la lee.
+- La extension sale de `media.rs::cache_extension`: `.oga` es audio y `.3gpp`
+  es video; sin esos dos el panel los contaba como "otros".
+- Al vaciar, la interfaz vuelve a pedir los avatares visibles en el acto: la
+  carpeta se repuebla sola con unos pocos archivos.
+
+**Pendiente**
+
+- Instalar el binario nuevo (`scripts\instalar.ps1`) y reiniciar la app.
+- El aviso de `StorageUsage` no se refresca solo mientras el panel esta
+  abierto: se actualiza con "Actualizar" o al reabrirlo.
+
+## 2026-10-28 - La nota de voz acelerada ya no suena a ratita
+
+**Que**
+
+- `whatfast-ui/src/audio.rs`: la nota se reproduce a velocidad 1x y el
+  estiramiento del tiempo lo hace `stretch` (WSOLA: ventanas de 40 ms con
+  Hann al 50 %, cada una alineada por correlacion cruzada dentro de +/-6 ms).
+  El tono no cambia.
+- `Library` guarda el archivo decodificado y una copia estirada de la ultima
+  velocidad. `Command::Speed` lleva la posicion del reloj y reconstruye el
+  reproductor; al reanudar despues de una pausa tambien se reconstruye, porque
+  la velocidad pudo cambiar mientras estaba en pausa.
+
+**Por que**: el usuario reporto que al acelerar el audio la voz se escuchaba
+como una ratita: `rodio` cambia la velocidad remuestreando, y eso sube el
+tono (a 1.5x un 50 %).
+
+**Evidencia**
+
+- 4 tests nuevos: un tono de 440 Hz sigue en 440 Hz a 1.5x y a 2x (antes
+  subia a 660 y 880), la duracion queda en 1/velocidad, 1x devuelve las
+  muestras intactas y el estiramiento conserva los dos canales.
+  `cargo test -p whatfast-ui audio::` 9 en verde.
+
+**Trampa**
+
+- El navegador estiraba solo con `playbackRate`; el reproductor nativo no
+  tiene ese modo, asi que el estiramiento es codigo propio.
+- `Player::set_speed` ya no se usa en `audio.rs`: si vuelve, la voz vuelve a
+  sonar como ratita.
+
+## 2026-10-28 - Instalado el binario de la cache y de la voz
+
+**Que**: `scripts\instalar.ps1` dejo en `%LOCALAPPDATA%\Programs\Whatfast` el
+`whatfast.exe` y el `whatfast-backend.exe` de `dist\`. El SHA-256 de los dos
+coincide con `dist`. La app se cerro con permiso del usuario y se volvio a
+abrir con el binario nuevo.
+
+**Evidencia**: captura del panel con el perfil real: "99 MB en 669 archivos"
+(Fotos 65 MB, Videos 31 MB, Audio 2.2 MB, Documentos 90 KB, Avatares 262 KB) y
+la carpeta `C:\Users\perca\AppData\Local\whatfast\media`.
+
+**Pendiente**: probar una nota de voz a 1.5x y a 2x en la app real.
+
+## 2026-10-28 - Faltaban mensajes: los sobres y el avatar que trababa el bucle
+
+**Que**: los mensajes que no se veian (fotos y videos de albumes, fotos de
+estado, stickers Lottie) llegaban envueltos y `classify` los guardaba como
+`unsupported`. Ahora `classify` pela los sobres (`envelope_message`, hasta 4
+niveles) antes de clasificar; al arrancar el sidecar,
+`ingest::recover_legacy_messages` vuelve a clasificar las filas viejas y les
+escribe la burbuja y el descriptor de descarga; las filas que solo son senal
+(revoke, voto, placeholder) pasan a `kind='signal'` y `message_is_hidden` las
+oculta. Aparte, `Server::resolve_avatar` ya no espera la foto de perfil dentro
+del bucle de pedidos: la busca en una tarea aparte y contesta en 2 s como
+maximo.
+
+**Por que**: el reporte del usuario fue "faltan mensajes". La base real tenia
+568 filas opacas: 398 hijos de album (261 fotos y 137 videos), 119 cabeceras
+de album, 45 stickers Lottie y 6 fotos de estados. El otro sintoma, el chat
+abierto y vacio, era el bucle de pedidos esperando un `GetChatAvatar` que
+tardo 75 s (`backend.log`: "GetChatAvatar held the loop for 75004 ms").
+
+**Evidencia**:
+
+- Copia con la recuperacion ya aplicada: `image` 2693 -> 3008, `video` 543 ->
+  681, `sticker` 1353 -> 1398, `album` 1 -> 120, `signal` 216.
+- Tests de `whatfast-wa`: 91 en la libreria y los 6 binarios de integracion en
+  verde (18, 19, 8, 12, 24 y 39), con 4 tests nuevos en `ingest.rs`. El de la
+  bitacora (`bridge_smoke`) vuelve a pasar con el `Tee` restaurado.
+- En la app instalada, "Alumnos INVECO" abre con el flyer, el PDF y las fotos
+  recuperadas del 28/09 y del 30/09 (`136-inveco-arriba2.png`).
+- `backend.log` con el binario nuevo: "GetChatAvatar held the loop for 2009 ms"
+  cuatro veces, y el MCP `chat_info` contesta en 236 ms mientras tanto.
+- Nota de voz de "Guzman Valentin": el boton pasa a 1.5x y a 2x y reproduce sin
+  error (`140-voz-15.png`, `141-voz-2.png`).
+
+**Trampa**:
+
+- El `stderr` del sidecar no era la causa del cuelgue: el transporte de la
+  interfaz ya lo drena (`whatfast-protocol::transport::from_child`,
+  `capture_stderr`). El `Tee` se queda; lo de los 64 KiB era una hipotesis
+  falsa.
+- Una foto de perfil que no contesta tarda 75 s en el cliente de WhatsApp: la
+  gracia de 2 s evita que trabe el resto, y el reintento de la interfaz lee la
+  cache cuando la tarea de fondo termina.
+- Los 12 `unsupported` que quedan tienen `payload` vacio: no hay nada que
+  recuperar y siguen ocultos.
+- Una foto recuperada que nunca se bajo antes del vencimiento del enlace del
+  CDN (`oe=` en `image_direct_path`) muestra la burbuja pero no el archivo: en
+  la base hay 1010 fotos y 220 videos asi. Las recuperadas recientes (27/10)
+  si se ven completas.
+
+## 2026-10-29 - Bandeja, volumen del video y duplicados de WhatsApp
+
+**Que**: la ventana ya no se congela al arrancar (`Tray::install` esperaba al
+hilo de la bandeja, que contestaba recien al cerrarse; ahora el handle llega
+apenas entra el icono, con 2 s de tope, y el de la ventana principal sale de
+GPUI por `raw-window-handle`). El video suena (Media Foundation + `rodio`) y
+tiene boton de silencio y barra de volumen en la burbuja y en el visor de
+pantalla completa. Los videos HD/HEVC que WhatsApp manda como dos halves se
+pliegan en el padre (esquema 2 a 3). La app se actualiza desde GitHub
+Releases (`update.rs`, `release.yml`, `docs/actualizaciones.md`).
+
+**Por que**: los reportes fueron "la app esta congelada", "los videos no
+tienen audio", "los videos llegan duplicados" y "falta el volumen".
+
+**Evidencia**: 309 tests de `whatfast-ui` en verde; en vivo, cerrar esconde
+la ventana, relanzar la muestra y Salir termina el proceso; la base real
+quedo en version 3 con 39356 filas y 418 pliegues (156 videos, 262 fotos).
+
+**Trampa**: `PrintWindow` sobre una ventana de GPUI devuelve negro a veces:
+para las capturas de prueba sirve GDI sobre el rectangulo de la ventana.
+
+## 2026-10-29 - La busqueda y la apertura de un chat
+
+**Que**: `SearchLocal` barria `messages` con hasta 66 `LIKE` por tecla: 1189 ms
+para "instrucciones" y 502 ms para "pedido" sobre la base real. Ahora hay un
+indice FTS5 trigram (`messages_fts`, esquema 4, columnas externas y
+disparadores): la misma busqueda tarda 1,2 a 11,7 ms. Ademas el bucle del
+sidecar atiende un pedido por vez y esperaba a la red: `GetChatAvatar` hasta
+2 s y `MarkRead` 10,5 s (los dos en `backend.log`). La foto de perfil y el
+acuse de leido van en su propia tarea; una foto vieja se devuelve del disco
+mientras se refresca.
+
+**Evidencia**: migracion 3 a 4 de la base real en 169 ms y 39553 filas; la
+base viva quedo en version 4. `cargo test -p whatfast-wa` en verde, con un test
+nuevo que edita y borra y comprueba el indice. Sin avisos de "held the loop"
+desde el arranque nuevo.
+
+**Trampa**: FTS5 trigram exige 3 caracteres (`search_trigrams` ya devuelve
+vacio con menos), y el indice se mantiene con disparadores: una escritura
+directa a `messages` tambien lo actualiza.
+
+
+

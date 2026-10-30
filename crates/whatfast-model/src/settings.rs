@@ -161,6 +161,8 @@ pub struct Settings {
     /// disk.
     pub app_lock_salt: String,
     pub app_lock_hash: String,
+    /// Whether the app asks the releases for a newer version when it starts.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -187,6 +189,7 @@ impl Default for Settings {
             chat_wallpaper_opacity: 1.0,
             app_lock_salt: String::new(),
             app_lock_hash: String::new(),
+            check_updates: true,
         }
     }
 }
@@ -363,6 +366,9 @@ mod tests {
             chat_background_color: "#101010".into(),
             chat_wallpaper: "wallpapers/uno.png".into(),
             chat_wallpaper_opacity: 0.6,
+            app_lock_salt: "una-sal".into(),
+            app_lock_hash: "un-hash".into(),
+            check_updates: false,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path, &legacy), settings);

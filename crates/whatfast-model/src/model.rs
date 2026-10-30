@@ -383,7 +383,7 @@ impl Store {
         }
         // Un mensaje eliminado no se dibuja: el hilo lo salta. El backend
         // conserva la fila para la historia; la ventana no la pinta.
-        if message.revoked {
+        if message_is_hidden(&message) {
             let chat_id = message.chat_id.clone();
             let id = message.id.clone();
             self.remove_message(&chat_id, &id);
@@ -422,7 +422,7 @@ impl Store {
         for mut message in incoming {
             // Un mensaje eliminado no entra al hilo, ni siquiera en la
             // historia que se pide al abrir la conversacion.
-            if message.revoked {
+            if message_is_hidden(&message) {
                 by_id.remove(&message.id);
                 continue;
             }
@@ -458,7 +458,7 @@ impl Store {
         for mut message in incoming {
             // Un mensaje eliminado no entra al hilo, ni siquiera en la
             // historia que se pide al abrir la conversacion.
-            if message.revoked {
+            if message_is_hidden(&message) {
                 by_id.remove(&message.id);
                 continue;
             }
@@ -490,7 +490,7 @@ impl Store {
         has_newer: bool,
     ) {
         // Lo que ya venia eliminado no se dibuja.
-        messages.retain(|message| !message.revoked);
+        messages.retain(|message| !message_is_hidden(message));
         messages.sort_by(compare_messages);
         if messages.len() > MAX_ACTIVE_MESSAGES {
             messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
@@ -612,6 +612,21 @@ impl Store {
             .get(participant_id)
             .map(String::as_str)
             .filter(|path| !path.is_empty())
+    }
+
+    /// Forgets every avatar path this session knows.
+    ///
+    /// The media cache was cleared and the files are gone: a path that
+    /// survives would paint a hole. The next paint finds the empty path and
+    /// asks the backend for the picture again.
+    pub fn forget_avatars(&mut self) {
+        for chat in &mut self.chats {
+            chat.avatar_path.clear();
+        }
+        self.participant_avatar_paths.clear();
+        for message in &mut self.messages {
+            message.sender_avatar_path.clear();
+        }
     }
 
     pub fn apply_reaction(&mut self, reaction: whatfast_protocol::Reaction, removed: bool) {
@@ -1429,6 +1444,26 @@ fn compare_messages(
     (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
 }
 
+/// Whether the thread skips the message: the deleted ones and the rows that
+/// carry no visible content at all.
+///
+/// WhatsApp sends envelopes of protocol (a revoke whose target is gone, an
+/// edit, a poll update) and some versions of the sidecar stored them as
+/// empty rows. A row without text and without content is not a message: it
+/// is the envelope of one, and the thread never paints it.
+fn message_is_hidden(message: &whatfast_protocol::Message) -> bool {
+    if message.revoked {
+        return true;
+    }
+    let Some(whatfast_protocol::message::Content::Unsupported(content)) = message.content.as_ref()
+    else {
+        return false;
+    };
+    content.type_name == "revoked"
+        || content.type_name == "signal"
+        || (content.fallback_text.trim().is_empty() && message.reactions.is_empty())
+}
+
 fn estimate_message_height(message: &whatfast_protocol::Message) -> Pixels {
     let text = message_text(message);
     let lines = text
@@ -1471,6 +1506,30 @@ mod tests {
             timestamp_ms: id as i64,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn forgetting_the_avatars_clears_every_path_of_the_session() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.chats.push(whatfast_protocol::Chat {
+            id: "chat".into(),
+            avatar_path: "/cache/avatar-1.jpg".into(),
+            ..Default::default()
+        });
+        store.set_participant_avatar("p@x".into(), "/cache/avatar-2.jpg".into());
+        store.upsert_message(whatfast_protocol::Message {
+            sender_avatar_path: "/cache/avatar-3.jpg".into(),
+            ..message(1)
+        });
+
+        store.forget_avatars();
+
+        assert!(store.chats[0].avatar_path.is_empty());
+        assert_eq!(store.participant_avatar_path("p@x"), None);
+        assert!(store.messages[0].sender_avatar_path.is_empty());
     }
 
     #[test]
@@ -2618,6 +2677,37 @@ mod tests {
         borrado.revoked = true;
         store.upsert_message(borrado);
         assert!(store.messages.is_empty());
+    }
+
+    #[test]
+    fn an_empty_protocol_row_never_reaches_the_thread() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        // Un sobre de protocolo que un sidecar viejo guardo como fila vacia:
+        // no es un mensaje y no se pinta.
+        let mut envelope = message(4);
+        envelope.content = Some(whatfast_protocol::message::Content::Unsupported(
+            whatfast_protocol::UnsupportedContent {
+                type_name: "unsupported".into(),
+                fallback_text: String::new(),
+            },
+        ));
+        store.upsert_message(envelope.clone());
+        assert!(store.messages.is_empty());
+
+        // Un aviso sin texto propio si se ve: la fila dice lo que paso.
+        let mut notice = envelope;
+        notice.id = "5".into();
+        notice.content = Some(whatfast_protocol::message::Content::Unsupported(
+            whatfast_protocol::UnsupportedContent {
+                type_name: "call".into(),
+                fallback_text: "Missed voice call".into(),
+            },
+        ));
+        store.upsert_message(notice);
+        assert_eq!(store.messages.len(), 1);
     }
 
     #[test]

@@ -44,6 +44,50 @@ pub struct ChatRow {
     pub named: bool,
 }
 
+impl ChatRow {
+    /// The name the interface shows for the conversation: the name the user
+    /// gave the contact, the business name, the subject of the group, or the
+    /// number.
+    ///
+    /// The order is the one of `wire_chat`: the title of a direct chat comes
+    /// from the address book, not from the subject the server sent, because
+    /// WhatsApp does not rename the conversation when the contact is saved.
+    pub fn display_title(&self) -> String {
+        if self.address_jid.ends_with("@g.us") {
+            return self.name.clone();
+        }
+        [self.contact_name.as_str(), self.business_name.as_str(), self.name.as_str()]
+            .into_iter()
+            .find(|candidate| !candidate.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.phone_label())
+    }
+
+    /// The number of the conversation, with the plus and the groups of its
+    /// country.
+    fn phone_label(&self) -> String {
+        if self.phone_number.is_empty() {
+            whatfast_core::phone::format(&crate::wire::phone_digits(&self.address_jid))
+        } else {
+            whatfast_core::phone::format(&self.phone_number)
+        }
+    }
+}
+
+/// One contact of the local address book, with the conversation it already
+/// has, if any. The search of the sidebar groups the results by kind and this
+/// is the row of the "Contacts" section.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContactRow {
+    /// The WhatsApp address the row opens when the user chooses it.
+    pub jid: String,
+    /// The conversation of the contact, empty when there is none yet.
+    pub chat_id: String,
+    pub display_name: String,
+    pub secondary_name: String,
+    pub phone_number: String,
+}
+
 /// A row of `messages` plus the reactions attached to it.
 #[derive(Debug, Clone, Default)]
 pub struct MessageRow {
@@ -127,6 +171,51 @@ pub struct ReactionRow {
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
+
+/// The trigram index of the searchable fields of the messages.
+///
+/// The client of the reference filtered the candidates with an FTS5 trigram
+/// index. This port filtered them with OR'd LIKE probes, which read the whole
+/// table on every keystroke: a second for a long word. The index holds the
+/// trigrams of the six fields and follows the rows with triggers, so a search
+/// is an index lookup and not a scan.
+const SEARCH_INDEX: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    text,
+    image_caption,
+    media_file_name,
+    contacts_json,
+    location_name,
+    location_address,
+    content='messages',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, text, image_caption, media_file_name,
+                             contacts_json, location_name, location_address)
+    VALUES (new.rowid, new.text, new.image_caption, new.media_file_name,
+            new.contacts_json, new.location_name, new.location_address);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, text, image_caption, media_file_name,
+                             contacts_json, location_name, location_address)
+    VALUES ('delete', old.rowid, old.text, old.image_caption, old.media_file_name,
+            old.contacts_json, old.location_name, old.location_address);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_au
+AFTER UPDATE OF text, image_caption, media_file_name, contacts_json,
+                location_name, location_address ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, text, image_caption, media_file_name,
+                             contacts_json, location_name, location_address)
+    VALUES ('delete', old.rowid, old.text, old.image_caption, old.media_file_name,
+            old.contacts_json, old.location_name, old.location_address);
+    INSERT INTO messages_fts(rowid, text, image_caption, media_file_name,
+                             contacts_json, location_name, location_address)
+    VALUES (new.rowid, new.text, new.image_caption, new.media_file_name,
+            new.contacts_json, new.location_name, new.location_address);
+END;
+"#;
 
 /// The schema, ported verbatim from the Go sidecar's migration. A fresh
 /// database is created at the final shape; the Go's incremental ALTERs only
@@ -377,6 +466,9 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
+        // The search index follows the table with triggers; it is created
+        // before the migrations so a delete of an old row keeps it in sync.
+        conn.execute_batch(SEARCH_INDEX)?;
         // The poll key material arrived after the table: profiles created by
         // older builds lack the columns, and SQLite has no ADD COLUMN IF NOT
         // EXISTS, so a duplicate-column error just means the column is there.
@@ -389,6 +481,26 @@ impl Store {
             {
                 return Err(error);
             }
+        }
+        // Version 3 folds the two halves of an HD upload into one message.
+        // The rows of older builds painted the same photo or video twice.
+        let version: i64 =
+            conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        if version < 3 {
+            let tx = conn.unchecked_transaction()?;
+            dedupe_hd_uploads(&tx)?;
+            tx.execute("UPDATE schema_version SET version=3", [])?;
+            tx.commit()?;
+        }
+        // Version 4 adds the trigram index of the search. The rows that are
+        // already there are indexed once; from then on the triggers keep it.
+        if version < 4 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')", [])?;
+            tx.execute("UPDATE schema_version SET version=4", [])?;
+            tx.commit()?;
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -813,6 +925,19 @@ impl Store {
         Ok(Some(message))
     }
 
+    /// Folds the child half of an HD upload into the message it belongs to.
+    ///
+    /// The child is not a message: its file replaces the one of the parent
+    /// when the parent has not been downloaded yet, and it is thrown away
+    /// when the parent already plays a file from the disk. An orphan child,
+    /// the one whose parent never arrived, becomes a message of its own.
+    pub fn adopt_hd_child(&self, child: &MessageRow) -> rusqlite::Result<HdChild> {
+        let Some(dual) = stored_dual_upload(child) else {
+            return Ok(HdChild::Orphan);
+        };
+        self.write(|conn| adopt_hd_child_in(conn, &child.chat_jid, &dual, child))
+    }
+
     /// Records an edit the way the Go reducer did: the stored timestamp stays
     /// put, a revoked row never accepts new text, and the chat preview follows
     /// when the edited row is the one the pointer names.
@@ -892,6 +1017,20 @@ impl Store {
             "image_local_path",
             "('image','sticker')",
         )
+    }
+
+    /// Forgets where the downloaded files were: the cache was cleaned, and a
+    /// row that still points at a file that is gone would never fetch it
+    /// again. The keys and the direct paths stay, because they are what the
+    /// next download needs.
+    pub fn clear_media_paths(&self) -> rusqlite::Result<usize> {
+        self.write(|conn| {
+            conn.execute(
+                "UPDATE messages SET image_local_path='', media_local_path=''
+                 WHERE image_local_path<>'' OR media_local_path<>''",
+                [],
+            )
+        })
     }
 
     fn set_kind_local_path(
@@ -1025,17 +1164,17 @@ impl Store {
     // Search
     // ------------------------------------------------------------------
 
-    /// The group conversations whose name matches, ranked the Go `SearchLocal`
-    /// way: fuzzy score plus the group bonus, then recency, then jid.
+    /// The conversations whose name matches, ranked the Go `SearchLocal` way:
+    /// fuzzy score plus the conversation bonus, then recency, then jid.
     ///
-    /// Every group is considered, not one page of chats: a group with an old
-    /// last message is still searchable in the oracle.
-    pub fn search_groups(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<ChatRow>> {
+    /// Every conversation is considered, direct or group, not one page of
+    /// chats: a conversation with an old last message is still searchable in
+    /// the oracle, and the sidebar shows the "Chats" section of the reference.
+    pub fn search_chats(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<ChatRow>> {
         let matcher = SearchMatcher::new(query);
         let chats = self.read(|conn| {
             let mut statement = conn.prepare(&format!(
-                "{CHAT_SELECT} WHERE c.preferred_jid LIKE '%@g.us'
-                 ORDER BY c.last_message_at DESC, c.jid DESC"
+                "{CHAT_SELECT} ORDER BY c.last_message_at DESC, c.jid DESC"
             ))?;
             let rows = statement
                 .query_map([], chat_from_row)?
@@ -1044,7 +1183,10 @@ impl Store {
         })?;
         let mut ranked: Vec<(i64, ChatRow)> = chats
             .into_iter()
-            .filter_map(|chat| matcher.score(&chat.name).map(|score| (score + 250, chat)))
+            .filter_map(|chat| {
+                let title = chat.display_title();
+                matcher.score(&title).map(|score| (score + 250, chat))
+            })
             .collect();
         ranked.sort_by(|a, b| {
             b.0.cmp(&a.0)
@@ -1053,6 +1195,81 @@ impl Store {
         });
         ranked.truncate(limit as usize);
         Ok(ranked.into_iter().map(|(_, chat)| chat).collect())
+    }
+
+    /// The contacts of the local address book whose name matches, best score
+    /// first. A contact that is both in the book and in a conversation is one
+    /// row, and the one with the conversation wins.
+    pub fn search_contacts(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<ContactRow>> {
+        let matcher = SearchMatcher::new(query);
+        let contacts = self.read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT k.jid, COALESCE(c.jid,''), k.contact_name, k.push_name,
+                        k.business_name, k.phone_number
+                 FROM contacts k
+                 LEFT JOIN chats c ON c.preferred_jid = k.jid",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    let jid: String = row.get(0)?;
+                    let chat_id: String = row.get(1)?;
+                    let contact_name: String = row.get(2)?;
+                    let push_name: String = row.get(3)?;
+                    let business_name: String = row.get(4)?;
+                    let mut phone_number: String = row.get(5)?;
+                    if phone_number.is_empty() && jid.ends_with("@s.whatsapp.net") {
+                        phone_number = crate::wire::phone_digits(&jid);
+                    }
+                    let display_name =
+                        [contact_name.as_str(), business_name.as_str(), push_name.as_str()]
+                            .into_iter()
+                            .find(|name| !name.is_empty())
+                            .unwrap_or("")
+                            .to_owned();
+                    Ok(ContactRow {
+                        jid,
+                        chat_id,
+                        display_name,
+                        secondary_name: push_name,
+                        phone_number,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+        let mut ranked: Vec<(i64, ContactRow)> = contacts
+            .into_iter()
+            .filter(|contact| !contact.display_name.is_empty())
+            .filter_map(|contact| {
+                let score = matcher
+                    .score(&contact.display_name)
+                    .or_else(|| matcher.score(&contact.phone_number))?;
+                Some((score + 300, contact))
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(a.1.chat_id.is_empty().cmp(&b.1.chat_id.is_empty()))
+                .then(a.1.jid.cmp(&b.1.jid))
+        });
+        // The same person can be stored twice, once per address (`@lid` and
+        // `@s.whatsapp.net`). The reference lists the contact once; the entry
+        // with the conversation and the number wins, and two people with the
+        // same name and different numbers are still two rows.
+        let mut unique: Vec<ContactRow> = Vec::new();
+        for (_, contact) in ranked {
+            let repeated = unique.iter().any(|existing| {
+                existing.display_name.eq_ignore_ascii_case(&contact.display_name)
+                    && (existing.phone_number == contact.phone_number
+                        || existing.phone_number.is_empty()
+                        || contact.phone_number.is_empty())
+            });
+            if !repeated {
+                unique.push(contact);
+            }
+        }
+        unique.truncate(limit as usize);
+        Ok(unique)
     }
 
     /// The messages whose indexed fields match, best score first.
@@ -1072,36 +1289,27 @@ impl Store {
             return Ok(Vec::new());
         }
         let limit = if limit == 0 || limit > 20 { 20 } else { limit };
-        const FIELDS: [&str; 6] = [
-            "LOWER(text)",
-            "LOWER(image_caption)",
-            "LOWER(media_file_name)",
-            "LOWER(contacts_json)",
-            "LOWER(location_name)",
-            "LOWER(location_address)",
-        ];
-        let mut probes = Vec::with_capacity(trigrams.len() * FIELDS.len());
-        let mut conditions = Vec::with_capacity(trigrams.len());
-        for trigram in &trigrams {
-            let mut column_probes = Vec::with_capacity(FIELDS.len());
-            for field in FIELDS {
-                column_probes.push(format!("{field} LIKE ? ESCAPE '\\'"));
-                probes.push(format!("%{}%", escape_like(trigram)));
-            }
-            conditions.push(format!("({})", column_probes.join(" OR ")));
-        }
-        let sql = format!(
-            "SELECT chat_jid,id,timestamp,text,image_caption,media_file_name,
-                    contacts_json,location_name,location_address
-             FROM messages
-             WHERE kind<>'reaction' AND revoked=0 AND ({})
-             ORDER BY timestamp DESC, id DESC LIMIT 256",
-            conditions.join(" OR ")
-        );
+        // A hit only needs one shared trigram, the same OR the Go built: the
+        // terms go to the index quoted, so a trigram with a quote or a space
+        // is one literal term and not syntax.
+        let terms = trigrams
+            .iter()
+            .map(|trigram| format!("\"{}\"", trigram.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = "SELECT m.chat_jid, m.id, m.timestamp, m.text, m.image_caption,
+                          m.media_file_name, m.contacts_json, m.location_name,
+                          m.location_address
+                   FROM messages m
+                   WHERE m.rowid IN (
+                       SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1
+                   )
+                     AND m.kind<>'reaction' AND m.revoked=0
+                   ORDER BY m.timestamp DESC, m.id DESC LIMIT 256";
         let candidates = self.read(|conn| {
             let mut statement = conn.prepare(&sql)?;
             let rows = statement
-                .query_map(rusqlite::params_from_iter(probes.iter()), |row| {
+                .query_map([&terms], |row| {
                     Ok(SearchCandidate {
                         chat_jid: row.get(0)?,
                         message_id: row.get(1)?,
@@ -1731,6 +1939,28 @@ impl Store {
             }
             rows.reverse();
             Ok((rows, has_more))
+        })
+    }
+
+    /// The rows an older build stored as an opaque payload: the label of an
+    /// envelope with the bytes of the message it wrapped. The startup
+    /// recovery reads them once to rebuild the bubble and the media
+    /// descriptor the row never had.
+    pub fn opaque_messages(&self) -> rusqlite::Result<Vec<MessageRow>> {
+        self.read(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "{MESSAGE_SELECT}
+                 WHERE m.kind IN (
+                     'unsupported','group_status','associated_child',
+                     'lottie_sticker','ephemeral','device_sent'
+                 )
+                   AND length(m.payload)>0
+                 ORDER BY m.timestamp"
+            ))?;
+            let rows = statement
+                .query_map([], message_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 
@@ -3113,6 +3343,181 @@ fn update_message_row(conn: &Connection, message: &MessageRow) -> rusqlite::Resu
     Ok(())
 }
 
+/// What happened to the child half of an HD upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HdChild {
+    /// The parent is not stored: the child stays as a message of its own.
+    Orphan,
+    /// The HD file replaced the media of the parent with this id.
+    Adopted(String),
+    /// The parent already had a file on disk: the child is thrown away.
+    Dropped,
+}
+
+impl HdChild {
+    /// Whether the child must become a message of its own.
+    fn is_orphan(&self) -> bool {
+        matches!(self, Self::Orphan)
+    }
+}
+
+/// The parent named by the association of a dual upload's second half, read
+/// from the stored payload, and whether its file is the better copy.
+fn stored_dual_upload(child: &MessageRow) -> Option<crate::ingest::DualUpload> {
+    if child.payload.is_empty() {
+        return None;
+    }
+    let message = whatsapp_rust::waproto::codec::message_decode(&child.payload).ok()?;
+    crate::ingest::dual_upload(&message)
+}
+
+/// Folds one dual upload's second half into its parent, inside the write of
+/// the caller.
+fn adopt_hd_child_in(
+    conn: &Connection,
+    chat_jid: &str,
+    dual: &crate::ingest::DualUpload,
+    child: &MessageRow,
+) -> rusqlite::Result<HdChild> {
+    let parent_id = match dual {
+        crate::ingest::DualUpload::Better(parent) | crate::ingest::DualUpload::Same(parent) => {
+            parent.as_str()
+        }
+    };
+    let parent = conn
+        .query_row(
+            &format!("{MESSAGE_SELECT} WHERE m.chat_jid=?1 AND m.id=?2"),
+            params![chat_jid, parent_id],
+            message_from_row,
+        )
+        .optional()?;
+    let Some(mut parent) = parent else {
+        return Ok(HdChild::Orphan);
+    };
+    // The parent's file stays when it is the compatible copy of the same
+    // video, and when it is already on the disk: that is the one the reader
+    // has seen and the descriptor would no longer match it.
+    if matches!(dual, crate::ingest::DualUpload::Same(_))
+        || !parent.media_local_path.is_empty()
+        || !parent.image_local_path.is_empty()
+    {
+        return Ok(HdChild::Dropped);
+    }
+    match child.kind.as_str() {
+        "video" => {
+            parent.media_mime.clone_from(&child.media_mime);
+            parent.media_file_name.clone_from(&child.media_file_name);
+            parent.media_direct_path.clone_from(&child.media_direct_path);
+            parent.media_media_key.clone_from(&child.media_media_key);
+            parent
+                .media_file_sha256
+                .clone_from(&child.media_file_sha256);
+            parent
+                .media_file_enc_sha256
+                .clone_from(&child.media_file_enc_sha256);
+            parent.media_width = child.media_width;
+            parent.media_height = child.media_height;
+            parent.media_size = child.media_size;
+            parent.media_duration = child.media_duration;
+            parent.media_voice = child.media_voice;
+            parent.media_animated = child.media_animated;
+        }
+        "image" => {
+            parent.image_mime.clone_from(&child.image_mime);
+            parent.image_thumbnail.clone_from(&child.image_thumbnail);
+            parent.image_direct_path.clone_from(&child.image_direct_path);
+            parent.image_media_key.clone_from(&child.image_media_key);
+            parent
+                .image_file_sha256
+                .clone_from(&child.image_file_sha256);
+            parent
+                .image_file_enc_sha256
+                .clone_from(&child.image_file_enc_sha256);
+            parent.image_width = child.image_width;
+            parent.image_height = child.image_height;
+            parent.image_size = child.image_size;
+            parent.image_animated = child.image_animated;
+        }
+        _ => return Ok(HdChild::Dropped),
+    }
+    update_message_row(conn, &parent)?;
+    Ok(HdChild::Adopted(parent_id.to_string()))
+}
+
+/// Folds the HD children already in the profile into their parents.
+///
+/// The rows were stored by builds that painted each half of an HD upload as
+/// its own bubble. The children go away; the ones whose parent never arrived
+/// stay, because they are the only copy of the file.
+fn dedupe_hd_uploads(conn: &Connection) -> rusqlite::Result<usize> {
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT chat_jid, id, payload FROM messages
+             WHERE length(payload)>0 AND kind IN ('image','video')",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut folded = 0;
+    let mut chats: Vec<String> = Vec::new();
+    for (chat_jid, id, payload) in rows {
+        let Ok(message) = whatsapp_rust::waproto::codec::message_decode(&payload) else {
+            continue;
+        };
+        let Some(dual) = crate::ingest::dual_upload(&message) else {
+            continue;
+        };
+        let child = conn
+            .query_row(
+                &format!("{MESSAGE_SELECT} WHERE m.chat_jid=?1 AND m.id=?2"),
+                params![chat_jid, id],
+                message_from_row,
+            )
+            .optional()?;
+        let Some(child) = child else {
+            continue;
+        };
+        if adopt_hd_child_in(conn, &chat_jid, &dual, &child)?.is_orphan() {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM messages WHERE chat_jid=?1 AND id=?2",
+            params![chat_jid, id],
+        )?;
+        if !chats.contains(&chat_jid) {
+            chats.push(chat_jid);
+        }
+        folded += 1;
+    }
+    // The child could be the newest row of its chat: the pointer and the
+    // unread counter are recomputed from what is left.
+    for chat in &chats {
+        conn.execute(
+            "UPDATE chats SET
+               last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+               last_message_text=COALESCE((SELECT CASE
+                    WHEN text<>'' THEN text
+                    WHEN image_caption<>'' THEN image_caption
+                    WHEN media_caption<>'' THEN media_caption
+                    ELSE '' END
+                  FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+               last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),0),
+               unread_count=(SELECT count(*) FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 AND unread=1)
+             WHERE jid=?1",
+            params![chat],
+        )?;
+    }
+    Ok(folded)
+}
+
 /// Folds a re-delivered row into the stored one with the Go reducer's rules:
 /// a mutation wins, stale history only fills blanks, and nothing already
 /// known (a timestamp, a download path, a sender) is erased.
@@ -3368,9 +3773,9 @@ fn score_search_candidate(matcher: &SearchMatcher, candidate: &SearchCandidate) 
         .max()
 }
 
-/// The unique trigrams of a normalized query. The cap keeps the LIKE fallback
-/// bounded; a hit only needs one shared trigram, which is also true of the
-/// FTS5 OR query the Go built.
+/// The unique trigrams of a normalized query. The cap keeps the OR bounded;
+/// a hit only needs one shared trigram, which is also true of the FTS5 OR
+/// query the Go built.
 fn search_trigrams(query: &str) -> Vec<String> {
     let runes: Vec<char> = query.chars().collect();
     if runes.len() < 3 {
@@ -3385,22 +3790,6 @@ fn search_trigrams(query: &str) -> Vec<String> {
         }
     }
     terms
-}
-
-/// Escapes the LIKE wildcards so a literal `%` or `_` in the query stays a
-/// literal, the guard the Go got from the FTS5 tokenizer.
-fn escape_like(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '%' | '_' | '\\' => {
-                out.push('\\');
-                out.push(character);
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Lowercase, trim, collapse internal whitespace, and fold the Latin accents

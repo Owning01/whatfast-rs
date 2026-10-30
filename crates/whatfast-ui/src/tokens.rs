@@ -804,6 +804,15 @@ pub(crate) fn bubble_colors(theme: &Theme) -> (Rgba, Rgba) {
     (colors.bubble_in_bg, colors.bubble_out_bg)
 }
 
+/// The colors of the text over the bubbles: the received and the sent ones.
+///
+/// A card inside a bubble does not use the palette of the window: its text
+/// has to be readable over the color of its own bubble.
+pub(crate) fn bubble_text_colors(theme: &Theme) -> (Rgba, Rgba) {
+    let colors = ThemeColors::resolve(theme);
+    (colors.bubble_in_fg, colors.bubble_out_fg)
+}
+
 /// The ratio of contrast between two colors of a theme, from 1 to 21.
 ///
 /// It is the ratio of WCAG 2.1: the relative luminance of each color over the

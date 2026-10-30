@@ -28,7 +28,10 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px, relative, rgb,
     rgba,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, slider::Slider, tooltip::Tooltip,
+    v_flex,
+};
 use whatfast_i18n as i18n;
 
 use whatfast_model::model::message_text;
@@ -483,6 +486,60 @@ impl Whatfast {
         self.render_video_player(index, message, attachment, width, height, true, cx)
     }
 
+    /// La fila del volumen del reproductor de video: el boton que apaga el
+    /// sonido y la barra que lo sube o lo baja.
+    fn render_video_volume(
+        &self,
+        index: usize,
+        scale: f32,
+        muted: gpui::Hsla,
+        hovered: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let silent = self.video.muted || self.video.volume <= 0.0;
+        h_flex()
+            .mt(px(VIDEO_META_GAP * scale))
+            .gap(px(CARD_GAP * scale))
+            .h(px(VIDEO_META_HEIGHT * scale))
+            .items_center()
+            .child(
+                div()
+                    .id(("video-mute", index))
+                    .p(px(4. * scale))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hovered))
+                    .tooltip({
+                        let label: gpui::SharedString = if silent {
+                            i18n::t("Unmute")
+                        } else {
+                            i18n::t("Mute")
+                        }
+                        .into();
+                        move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                    })
+                    .child(
+                        Icon::new(if silent {
+                            WhatfastIcon::VolumeMute
+                        } else {
+                            WhatfastIcon::Volume
+                        })
+                        .with_size(px(DOWNLOAD_SIZE * scale))
+                        .text_color(muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_video_mute(window, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Slider::new(&self.volume_slider).horizontal()),
+            )
+    }
+
     fn render_video_player(
         &self,
         index: usize,
@@ -515,6 +572,8 @@ impl Whatfast {
         let play_message_id = message.id.clone();
         let save_chat_id = message.chat_id.clone();
         let save_message_id = message.id.clone();
+        let expand_chat_id = message.chat_id.clone();
+        let expand_message_id = message.id.clone();
         // The viewer of the statuses is always dark, whatever the theme of the
         // window: the colors of the card come with the background.
         let (muted, accent, hovered, danger, title_color) = if on_dark {
@@ -620,6 +679,10 @@ impl Whatfast {
                             .child(div().h_full().w(relative(progress)).bg(accent)),
                     ),
             )
+            // La fila del volumen, mientras el video es el que suena.
+            .when(playback.is_some(), |player| {
+                player.child(self.render_video_volume(index, scale, muted, hovered, cx))
+            })
             // La fila de los datos del archivo, con la flecha de la descarga.
             .child(
                 h_flex()
@@ -677,6 +740,29 @@ impl Whatfast {
                                     })),
                             )
                         },
+                    )
+                    // El boton que abre el video en el visor de la ventana.
+                    .child(
+                        div()
+                            .id(("video-expand", index))
+                            .p(px(4. * scale))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hovered))
+                            .child(
+                                Icon::new(WhatfastIcon::Maximize)
+                                    .with_size(px(DOWNLOAD_SIZE * scale))
+                                    .text_color(muted),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_video_fullscreen(
+                                    expand_chat_id.clone(),
+                                    expand_message_id.clone(),
+                                    window,
+                                    cx,
+                                );
+                            })),
                     ),
             )
             .when_some(error, |player, error| {

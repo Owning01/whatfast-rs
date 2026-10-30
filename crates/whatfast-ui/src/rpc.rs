@@ -152,6 +152,10 @@ pub(crate) enum PendingRequest {
     IntegrityStatus,
     /// Repairs the local database of the sidecar.
     RepairLocalCache,
+    /// The space the media cache takes on this device.
+    StorageUsage,
+    /// Deletes the files of the media cache of this device.
+    ClearMediaCache,
     /// Asks the sidecar to reconnect to WhatsApp.
     Reconnect,
     /// Sends a file that is not an image.
@@ -299,6 +303,7 @@ impl PendingRequest {
             | Self::HistoryCoverage { .. }
             | Self::HistoryOverview
             | Self::IntegrityStatus
+            | Self::StorageUsage
             | Self::Stickers
             | Self::PinnedMessages { .. }
             | Self::Statuses
@@ -315,6 +320,7 @@ impl PendingRequest {
             | Self::MarkRead { .. }
             | Self::Logout
             | Self::RepairLocalCache
+            | Self::ClearMediaCache
             | Self::SendStickerFromLibrary { .. }
             | Self::ForwardMessage { .. }
             | Self::EditMessage { .. }
@@ -581,6 +587,22 @@ impl RpcClient {
         self.send(
             rpc_request::Request::RepairLocalCache(whatfast_protocol::RepairLocalCacheRequest {}),
             PendingRequest::RepairLocalCache,
+        )
+    }
+
+    /// The space the media cache takes on this device, grouped by kind.
+    pub(crate) fn request_storage_usage(&mut self) -> Result<u64> {
+        self.send(
+            rpc_request::Request::StorageUsage(whatfast_protocol::StorageUsageRequest {}),
+            PendingRequest::StorageUsage,
+        )
+    }
+
+    /// Deletes the files of the media cache of this device.
+    pub(crate) fn request_clear_media_cache(&mut self) -> Result<u64> {
+        self.send(
+            rpc_request::Request::ClearMediaCache(whatfast_protocol::ClearMediaCacheRequest {}),
+            PendingRequest::ClearMediaCache,
         )
     }
 
@@ -939,6 +961,17 @@ impl RpcClient {
             rpc_request::Request::Shutdown(whatfast_protocol::ShutdownRequest {}),
             PendingRequest::Shutdown,
         )
+    }
+
+    /// Stops the sidecar and waits for it to end, before the update replaces
+    /// its executable.
+    ///
+    /// The wait is bounded by the same grace of the transport: after that the
+    /// sidecar is killed, and the files can move anyway.
+    pub(crate) fn stop_backend(&mut self) {
+        if let Backend::Real(client) = &self.backend {
+            let _ = client.shutdown_and_wait(std::time::Duration::from_secs(8));
+        }
     }
 
     /// Classify an inbound message of the backend.

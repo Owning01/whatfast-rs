@@ -454,6 +454,27 @@ const VIDEO: Glyph = Glyph {
     overlay: &[],
 };
 
+const VOLUME: Glyph = Glyph {
+    path: "M4 9h3.5L12 5v14l-4.5-4H4z M15 8.5a4.5 4.5 0 0 1 0 7v-1.6a2.9 2.9 0 0 0 0-3.8z M17.6 6a7.4 7.4 0 0 1 0 12v-1.7a5.7 5.7 0 0 0 0-8.6z",
+    main: &[
+        "M4 9h3.5L12 5v14l-4.5-4H4z",
+        "M15 8.5a4.5 4.5 0 0 1 0 7v-1.6a2.9 2.9 0 0 0 0-3.8z",
+        "M17.6 6a7.4 7.4 0 0 1 0 12v-1.7a5.7 5.7 0 0 0 0-8.6z",
+    ],
+    cutout: &[],
+    overlay: &[],
+};
+
+const VOLUME_MUTE: Glyph = Glyph {
+    path: "M4 9h3.5L12 5v14l-4.5-4H4z M14.9 8.6l1.1-1.1 2.1 2.1 2.1-2.1 1.1 1.1-2.1 2.1 2.1 2.1-1.1 1.1-2.1-2.1-2.1 2.1-1.1-1.1 2.1-2.1z",
+    main: &[
+        "M4 9h3.5L12 5v14l-4.5-4H4z",
+        "M14.9 8.6l1.1-1.1 2.1 2.1 2.1-2.1 1.1 1.1-2.1 2.1 2.1 2.1-1.1 1.1-2.1-2.1-2.1 2.1-1.1-1.1 2.1-2.1z",
+    ],
+    cutout: &[],
+    overlay: &[],
+};
+
 const WARNING: Glyph = Glyph {
     path: "M10 2.8a2.3 2.3 0 0 1 4 0l9.1 16A2.1 2.1 0 0 1 21.2 22H2.8a2.1 2.1 0 0 1-1.9-3.2z M10.6 7h2.8l-.4 8h-2zm0 10h2.8v2.5h-2.8z",
     main: &["M10 2.8a2.3 2.3 0 0 1 4 0l9.1 16A2.1 2.1 0 0 1 21.2 22H2.8a2.1 2.1 0 0 1-1.9-3.2z"],
@@ -509,12 +530,14 @@ pub enum WhatfastIcon {
     Trash,
     TrashOutline,
     Video,
+    Volume,
+    VolumeMute,
     Warning,
 }
 
 impl WhatfastIcon {
     /// Every icon of the set.
-    pub const ALL: [WhatfastIcon; 42] = [
+    pub const ALL: [WhatfastIcon; 44] = [
         WhatfastIcon::Archive,
         WhatfastIcon::Attach,
         WhatfastIcon::Bell,
@@ -556,6 +579,8 @@ impl WhatfastIcon {
         WhatfastIcon::Trash,
         WhatfastIcon::TrashOutline,
         WhatfastIcon::Video,
+        WhatfastIcon::Volume,
+        WhatfastIcon::VolumeMute,
         WhatfastIcon::Warning,
     ];
 
@@ -603,6 +628,8 @@ impl WhatfastIcon {
             WhatfastIcon::Trash => "trash",
             WhatfastIcon::TrashOutline => "trash-outline",
             WhatfastIcon::Video => "video",
+            WhatfastIcon::Volume => "volume",
+            WhatfastIcon::VolumeMute => "volume-mute",
             WhatfastIcon::Warning => "warning",
         }
     }
@@ -697,6 +724,8 @@ impl WhatfastIcon {
             WhatfastIcon::Trash => &TRASH,
             WhatfastIcon::TrashOutline => &TRASH_OUTLINE,
             WhatfastIcon::Video => &VIDEO,
+            WhatfastIcon::Volume => &VOLUME,
+            WhatfastIcon::VolumeMute => &VOLUME_MUTE,
             WhatfastIcon::Warning => &WARNING,
         }
     }
@@ -786,7 +815,10 @@ mod tests {
         assert!(text.contains("currentColor"), "the logo has a fixed color");
         // Un harness sin marca no inventa una: la tarjeta dibuja el robot.
         assert!(
-            assets.load("harness/hermes").expect("the source answers").is_none(),
+            assets
+                .load("harness/hermes")
+                .expect("the source answers")
+                .is_none(),
             "hermes must fall back to the robot"
         );
         // Y un icono propio sigue saliendo por su camino de siempre.
@@ -1026,6 +1058,8 @@ mod tests {
                 "trash",
                 "trash-outline",
                 "video",
+                "volume",
+                "volume-mute",
                 "warning",
             ]
         );

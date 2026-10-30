@@ -73,6 +73,57 @@ impl Drop for InstanceLock {
     }
 }
 
+/// Brings the window of the instance that holds the lock to the front.
+///
+/// A second launch of the program is how the user asks for a window that is
+/// hidden in the tray: the new process cannot open one, so it shows the one
+/// that already exists and goes away.
+#[cfg(windows)]
+pub(crate) fn show_running_instance() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetWindowThreadProcessId, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+        ShowWindow,
+    };
+    let path = whatfast_model::paths::data_dir().join(LOCK_FILE);
+    let Some(owner) = read_owner(&path) else {
+        return;
+    };
+    let title: Vec<u16> = "Whatfast".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: the title ends in a zero, and the handle is only used while
+    // the window exists.
+    unsafe {
+        let window = FindWindowW(std::ptr::null(), title.as_ptr());
+        if window.is_null() {
+            return;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(window, &mut pid);
+        if pid != owner.pid {
+            return;
+        }
+        let _ = ShowWindow(window, SW_SHOW);
+        let _ = ShowWindow(window, SW_RESTORE);
+        let _ = SetForegroundWindow(window);
+    }
+}
+
+/// There is no second instance to show outside Windows.
+#[cfg(not(windows))]
+pub(crate) fn show_running_instance() {}
+
+/// Releases the lock of this process before the app restarts itself with an
+/// update.
+///
+/// The new process starts before this one leaves, so the lock has to be free
+/// when it asks. The file is only removed when it names this process: a lock
+/// of another instance is never touched.
+pub(crate) fn release() {
+    let path = whatfast_model::paths::data_dir().join(LOCK_FILE);
+    if read_owner(&path).is_some_and(|owner| owner.pid == std::process::id()) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// The process that wrote the lock, if it is written.
 struct Owner {
     /// The number of the process.

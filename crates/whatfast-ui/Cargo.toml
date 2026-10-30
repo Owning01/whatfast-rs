@@ -64,6 +64,9 @@ smol = "2"
 uuid = { version = "1.18", features = ["v4"] }
 # The custom themes of the profile are JSON inside the settings file.
 serde_json = "1.0"
+# The self-update reads the manifest of the release and downloads the two
+# executables over TLS: the same client the sidecar uses.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 # The toasts of the system when a message arrives in the background: the
 # same call paints on the notification center of each platform.
 notify-rust = "4.18"
@@ -72,10 +75,16 @@ notify-rust = "4.18"
 # window, and the check of the process that holds the lock of the instance:
 # the app is a `windows_subsystem`, so it has no console.
 [target.'cfg(windows)'.dependencies]
+# The handle of the window of GPUI, so the tray knows which window to hide
+# and which one to show. The version is the one that gpui already links.
+raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Time",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # El video de los mensajes se decodifica con Media Foundation, que viene con

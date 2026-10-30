@@ -69,6 +69,10 @@ const MESSAGE_TOTAL: usize = 1_000;
 /// How many messages a chat has in the performance fixture.
 const PERF_MESSAGE_TOTAL: usize = 2_000;
 
+/// The picture of the link preview of the demo: the image the card shows on
+/// top of the title, as a real preview does.
+const LINK_PREVIEW_THUMBNAIL: &[u8] = include_bytes!("link-preview-demo.jpg");
+
 /// Every how many messages the dataset has a document.
 ///
 /// The photo has its own stride (every 37 messages) and these four strides
@@ -763,6 +767,102 @@ pub fn fake_integrity_status() -> IntegrityStatus {
     }
 }
 
+/// What the media tree of the fake takes, grouped by the extension of each
+/// file. The fake writes the same files the sidecar writes, so the panel of
+/// the settings shows a real breakdown over a demo profile.
+fn fake_storage_usage(media_dir: &Path) -> crate::StorageUsageResponse {
+    let mut buckets: Vec<(String, u64, u32)> = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut total_files = 0u32;
+    let mut visit = |path: &Path, size: u64| {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let kind = if name.starts_with("avatar-") {
+            "avatar"
+        } else {
+            match path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "jpg" | "jpeg" | "png" | "webp" | "gif" => "photo",
+                "mp4" | "mov" | "webm" => "video",
+                "ogg" | "opus" | "mp3" | "m4a" => "audio",
+                "pdf" | "doc" | "docx" | "txt" | "csv" | "zip" => "document",
+                _ => "other",
+            }
+        };
+        total_bytes += size;
+        total_files += 1;
+        match buckets.iter_mut().find(|bucket| bucket.0 == kind) {
+            Some(bucket) => {
+                bucket.1 += size;
+                bucket.2 += 1;
+            }
+            None => buckets.push((kind.to_owned(), size, 1)),
+        }
+    };
+    collect_files(media_dir, &mut visit);
+    // The panel paints the kinds in the order of the sidecar, not in the
+    // order the folder gave them.
+    const ORDER: [&str; 6] = ["photo", "video", "audio", "document", "avatar", "other"];
+    let mut ordered: Vec<(String, u64, u32)> = ORDER
+        .into_iter()
+        .filter_map(|kind| {
+            let (_, bytes, files) = buckets.iter().find(|bucket| bucket.0 == kind)?;
+            Some((kind.to_owned(), *bytes, *files))
+        })
+        .collect();
+    // A file with an extension that no kind claims still counts as "other".
+    for bucket in &buckets {
+        if !ORDER.contains(&bucket.0.as_str()) {
+            ordered.push(bucket.clone());
+        }
+    }
+    crate::StorageUsageResponse {
+        total_bytes,
+        total_files,
+        buckets: ordered
+            .into_iter()
+            .map(|(kind, bytes, files)| crate::StorageBucket { kind, bytes, files })
+            .collect(),
+        folder: media_dir.to_string_lossy().into_owned(),
+    }
+}
+
+/// Visits every file of the tree, the nested ones included.
+fn collect_files(root: &Path, visit: &mut impl FnMut(&Path, u64)) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let path = entry.path();
+        if metadata.is_dir() {
+            collect_files(&path, visit);
+        } else if metadata.is_file() {
+            visit(&path, metadata.len());
+        }
+    }
+}
+
+/// Deletes every file of the tree and answers how many it could remove.
+fn remove_files(root: &Path) -> u32 {
+    let mut deleted = 0u32;
+    collect_files(root, &mut |path, _| {
+        if std::fs::remove_file(path).is_ok() {
+            deleted += 1;
+        }
+    });
+    deleted
+}
+
 /// Answer the requests of the client until the queue is closed.
 ///
 /// The origin's fake was the simulator of the GPUI client: it took the
@@ -892,6 +992,22 @@ pub fn fake_loop(
                     status: Some(fake_integrity_status()),
                 })
             }
+            Some(rpc_request::Request::StorageUsage(_)) => {
+                rpc_response::Result::StorageUsage(fake_storage_usage(&profile_dir.join("media")))
+            }
+            Some(rpc_request::Request::ClearMediaCache(_)) => {
+                // The demo cache is regenerated on demand, so the cleanup is
+                // the same as the one of the sidecar, on this folder.
+                let media_dir = profile_dir.join("media");
+                let before = fake_storage_usage(&media_dir);
+                let deleted = remove_files(&media_dir);
+                let usage = fake_storage_usage(&media_dir);
+                rpc_response::Result::ClearMediaCache(crate::ClearMediaCacheResponse {
+                    freed_bytes: before.total_bytes.saturating_sub(usage.total_bytes),
+                    deleted_files: deleted,
+                    usage: Some(usage),
+                })
+            }
             Some(rpc_request::Request::ListChats(request)) => {
                 let start = request.cursor.parse::<usize>().unwrap_or_default();
                 let limit = request.limit.min(100) as usize;
@@ -921,11 +1037,15 @@ pub fn fake_loop(
                 })
             }
             Some(rpc_request::Request::ListMessages(request)) => {
-                let end = if request.before_timestamp_ms == 0 {
-                    message_total
-                } else {
-                    request.before_timestamp_ms as usize
-                };
+                // The cursor is a timestamp with the id of the message, as
+                // the real sidecar takes it: the page ends right before the
+                // oldest message the caller already has, not at the number of
+                // messages of the dataset.
+                let end = before_index(
+                    message_total,
+                    &request.before_message_id,
+                    request.before_timestamp_ms,
+                );
                 let start = end.saturating_sub(request.limit as usize);
                 let messages = (start..end)
                     .map(|id| fake_message(&request.chat_id, id, &profile_dir))
@@ -3300,6 +3420,28 @@ fn fake_timestamp_ms(id: usize) -> i64 {
     fake_now_ms() - (total - id as i64) * FAKE_STEP_MS
 }
 
+/// The index of the first message that is older than the cursor of a page.
+///
+/// The cursor of the protocol is the timestamp of the oldest message the
+/// caller has, with its id. The id decides; the timestamp is the fallback for
+/// a caller that only sends it.
+fn before_index(total: usize, before_id: &str, before_ts: i64) -> usize {
+    if let Some(index) = before_id
+        .strip_prefix("message-")
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return index.min(total);
+    }
+    if before_ts == 0 {
+        return total;
+    }
+    // The timestamps of the dataset grow with the index, so a timestamp
+    // names the first message that is not older than it.
+    (0..total)
+        .find(|index| fake_timestamp_ms(*index) >= before_ts)
+        .unwrap_or(total)
+}
+
 /// A message of the dataset.
 ///
 /// Every field is decided by the index of the message: the sender, the
@@ -3359,6 +3501,7 @@ pub fn fake_message(chat_id: &str, id: usize, profile_dir: &Path) -> Message {
                     url: "https://www.lagaceta.com.ar/".into(),
                     title: "La Gaceta — Las noticias de Tucumán".into(),
                     description: "El diario de Tucumán, actualizado durante todo el día.".into(),
+                    jpeg_thumbnail: LINK_PREVIEW_THUMBNAIL.to_vec(),
                     ..Default::default()
                 }),
             })

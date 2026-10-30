@@ -346,6 +346,33 @@ impl BackendClient {
             spawn_reaper(child.clone());
         }
     }
+
+    /// Stops the sidecar and waits for its process to end.
+    ///
+    /// The update of the app replaces the executable of the backend, and
+    /// Windows refuses to move a file that another process runs: the wait is
+    /// what makes the swap possible. The reaper of `shutdown` kills the child
+    /// when the grace period runs out, so this wait is bounded.
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> bool {
+        self.shutdown();
+        let Some(child) = &self.child else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let exited = match child.lock() {
+                Ok(mut child) => matches!(child.try_wait(), Ok(Some(_))),
+                Err(_) => false,
+            };
+            if exited {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 impl Drop for BackendClient {

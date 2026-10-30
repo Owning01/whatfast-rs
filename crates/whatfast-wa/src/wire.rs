@@ -41,38 +41,6 @@ fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// The title of a chat.
-///
-/// For a group the title is the subject. For a direct chat the saved name of
-/// the contact wins, then the business name, then the name the store knows;
-/// when the contact is not in the address book the title is its phone number,
-/// formatted as WhatsApp writes it. The name the contact chose for itself is
-/// not a title: two people can call themselves the same, and the user asked
-/// for the number of the ones that are not saved.
-fn chat_title(chat: &ChatRow) -> String {
-    if chat.address_jid.ends_with("@g.us") {
-        return chat.name.clone();
-    }
-    [
-        chat.contact_name.as_str(),
-        chat.business_name.as_str(),
-        chat.name.as_str(),
-    ]
-    .into_iter()
-    .find(|candidate| !candidate.is_empty())
-    .map(str::to_owned)
-    .unwrap_or_else(|| phone_number(chat))
-}
-
-/// The number of the chat, with the plus and the groups of its country.
-fn phone_number(chat: &ChatRow) -> String {
-    if chat.phone_number.is_empty() {
-        whatfast_core::phone::format(&phone_digits(&chat.address_jid))
-    } else {
-        whatfast_core::phone::format(&chat.phone_number)
-    }
-}
-
 /// The wire chat of one store row. `muted` is true while the mute deadline
 /// is in the future, matching the Go's rule.
 pub fn wire_chat(chat: &ChatRow) -> WireChat {
@@ -80,7 +48,7 @@ pub fn wire_chat(chat: &ChatRow) -> WireChat {
     WireChat {
         id: chat.jid.clone(),
         kind: chat_kind(&chat.address_jid) as i32,
-        title: chat_title(chat),
+        title: chat.display_title(),
         avatar_path: String::new(),
         last_message_preview: normalize_newlines(&chat.last_message_text),
         last_message_timestamp_ms: chat.last_message_at,

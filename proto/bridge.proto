@@ -102,6 +102,11 @@ message RpcRequest {
     // v24: create a group with a subject and the participants the user
     // picked in the desktop. The group is created on the phone's account.
     CreateGroupRequest create_group = 79;
+    // The space the media cache takes on this device, and its cleanup.
+    // Neither request touches the account or the phone: only the files
+    // this computer downloaded.
+    StorageUsageRequest storage_usage = 80;
+    ClearMediaCacheRequest clear_media_cache = 81;
   }
 }
 
@@ -179,6 +184,8 @@ message RpcResponse {
     SchedulePauseResponse schedule_pause = 72;
     ScheduleRemoveResponse schedule_remove = 73;
     CreateGroupResponse create_group = 79;
+    StorageUsageResponse storage_usage = 80;
+    ClearMediaCacheResponse clear_media_cache = 81;
   }
 }
 
@@ -1169,6 +1176,32 @@ message GetIntegrityStatusRequest {}
 message GetIntegrityStatusResponse { IntegrityStatus status = 1; }
 message RepairLocalCacheRequest {}
 message RepairLocalCacheResponse { IntegrityStatus status = 1; }
+
+// The space the cache of media takes on this device, grouped by kind. The
+// cache is `<data-dir>/media`: the pictures, videos, voice notes, documents
+// and avatars this computer downloaded. Nothing here is the account, and
+// clearing it never asks the phone for anything.
+message StorageUsageRequest {}
+message StorageBucket {
+  // photo, video, audio, document, avatar or other.
+  string kind = 1;
+  uint64 bytes = 2;
+  uint32 files = 3;
+}
+message StorageUsageResponse {
+  uint64 total_bytes = 1;
+  uint32 total_files = 2;
+  repeated StorageBucket buckets = 3;
+  // The folder of the cache, for the panel of the settings.
+  string folder = 4;
+}
+message ClearMediaCacheRequest {}
+message ClearMediaCacheResponse {
+  uint64 freed_bytes = 1;
+  uint32 deleted_files = 2;
+  // The cache after the cleanup, which is usually empty.
+  StorageUsageResponse usage = 3;
+}
 
 message SyncProgress {
   uint64 chats_processed = 1;

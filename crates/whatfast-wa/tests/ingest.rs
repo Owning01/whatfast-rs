@@ -93,6 +93,67 @@ fn a_live_inbound_message_grows_the_unread_counter_and_points_the_chat() {
 }
 
 #[test]
+fn the_hd_half_of_a_video_does_not_open_a_second_bubble() {
+    let (dir, store) = temp_store("hd-video");
+    let identity = Identity::open(&dir);
+    let chat = "120363000000000001@g.us";
+    whatfast_wa::ingest::apply_event(
+        &store,
+        &identity,
+        &event_of(vec![InboundMessage::builder()
+            .message(Arc::new(video_content("/v/standard", 480)))
+            .info(Arc::new(info("parent", false, 1_700_000_000_000)))
+            .build()]),
+    );
+    let (events, _ingested) = whatfast_wa::ingest::apply_event(
+        &store,
+        &identity,
+        &event_of(vec![InboundMessage::builder()
+            .message(Arc::new(video_content_with_hd_parent("/v/hd", 720, "parent")))
+            .info(Arc::new(info("child", false, 1_700_000_014_000)))
+            .build()]),
+    );
+
+    assert!(
+        store.message(chat, "child").unwrap().is_none(),
+        "the second half of the upload is not a message"
+    );
+    let parent = store.message(chat, "parent").unwrap().unwrap();
+    assert_eq!(parent.media_direct_path, "/v/hd");
+    assert_eq!(parent.media_width, 720);
+    // The desktop hears about the parent again, with the HD file.
+    assert_eq!(events.len(), 1);
+    assert_eq!(store.chat(chat).unwrap().unwrap().unread_count, 1);
+}
+
+fn video_content(direct_path: &str, width: u32) -> wa::Message {
+    let mut video = wa::message::VideoMessage::default();
+    video.mimetype = Some("video/mp4".into());
+    video.direct_path = Some(direct_path.into());
+    video.file_length = Some(1_000);
+    video.seconds = Some(28);
+    video.width = Some(width);
+    video.height = Some(width * 2);
+    let mut message = wa::Message::default();
+    message.video_message = MessageField::some(video);
+    message
+}
+
+fn video_content_with_hd_parent(direct_path: &str, width: u32, parent: &str) -> wa::Message {
+    let mut message = video_content(direct_path, width);
+    let mut key = wa::MessageKey::default();
+    key.id = Some(parent.to_string());
+    let mut association = wa::MessageAssociation::default();
+    association.association_type =
+        Some(wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD);
+    association.parent_message_key = MessageField::some(key);
+    let mut context = wa::MessageContextInfo::default();
+    context.message_association = MessageField::some(association);
+    message.message_context_info = MessageField::some(context);
+    message
+}
+
+#[test]
 fn an_out_of_order_message_does_not_drag_the_preview_or_the_pointer_back() {
     let (dir, store) = temp_store("order");
     let identity = Identity::open(&dir);

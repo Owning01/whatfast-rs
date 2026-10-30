@@ -59,6 +59,27 @@ jobs:
             "$hash  $archivo" | Set-Content -Encoding ascii "$archivo.sha256"
             Get-Content "$archivo.sha256"
           }
+      - name: los archivos del autoactualizador
+        shell: pwsh
+        run: |
+          # El autoactualizador no baja el zip: pide estos dos ejecutables y
+          # el manifiesto que dice la version y la suma de cada uno. La
+          # etiqueta y Cargo.toml tienen que decir lo mismo: si no, la app
+          # se actualizaria a una version que no es la que se publico.
+          $version = "${{ github.event.inputs.tag || github.ref_name }}".TrimStart("v")
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($version -ne $cargo) { throw "la etiqueta v$version no coincide con Cargo.toml ($cargo)" }
+          Copy-Item dist\whatfast.exe whatfast-windows-x86_64.exe
+          Copy-Item dist\whatfast-backend.exe whatfast-windows-x86_64-backend.exe
+          $app = (Get-FileHash whatfast-windows-x86_64.exe -Algorithm SHA256).Hash.ToLower()
+          $backend = (Get-FileHash whatfast-windows-x86_64-backend.exe -Algorithm SHA256).Hash.ToLower()
+          $manifest = [ordered]@{
+            version = $version
+            app = [ordered]@{ asset = "whatfast-windows-x86_64.exe"; sha256 = $app }
+            backend = [ordered]@{ asset = "whatfast-windows-x86_64-backend.exe"; sha256 = $backend }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding ascii whatfast-windows-x86_64.json
+          Get-Content whatfast-windows-x86_64.json
       - name: publicar
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -68,6 +89,9 @@ jobs:
             whatfast-windows.zip.sha256
             whatfast-setup.exe
             whatfast-setup.exe.sha256
+            whatfast-windows-x86_64.exe
+            whatfast-windows-x86_64-backend.exe
+            whatfast-windows-x86_64.json
           body: |
             Whatfast, cliente de escritorio de WhatsApp.
 
@@ -159,6 +183,23 @@ jobs:
           sha256sum whatfast-linux.tar.gz > whatfast-linux.tar.gz.sha256
           tar -tzf whatfast-linux.tar.gz
           du -h whatfast-linux.tar.gz
+      - name: los archivos del autoactualizador
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${version#v}"
+          cargo_version="$(awk '/^\[workspace.package\]/{encontrado=1;next} /^\[/{encontrado=0} encontrado && /^version *=/{gsub(/[",]/,"");print $3}' Cargo.toml)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "FALLO: la etiqueta v$version no coincide con Cargo.toml ($cargo_version)" >&2
+            exit 1
+          fi
+          cp dist/whatfast whatfast-linux-x86_64
+          cp dist/whatfast-backend whatfast-linux-x86_64-backend
+          app="$(sha256sum whatfast-linux-x86_64 | cut -d' ' -f1)"
+          backend="$(sha256sum whatfast-linux-x86_64-backend | cut -d' ' -f1)"
+          printf '{\n  "version": "%s",\n  "app": { "asset": "whatfast-linux-x86_64", "sha256": "%s" },\n  "backend": { "asset": "whatfast-linux-x86_64-backend", "sha256": "%s" }\n}\n' \
+            "$version" "$app" "$backend" > whatfast-linux-x86_64.json
+          cat whatfast-linux-x86_64.json
       - name: publicar
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -166,6 +207,9 @@ jobs:
           files: |
             whatfast-linux.tar.gz
             whatfast-linux.tar.gz.sha256
+            whatfast-linux-x86_64
+            whatfast-linux-x86_64-backend
+            whatfast-linux-x86_64.json
           body: |
             Whatfast, cliente de escritorio de WhatsApp.
 

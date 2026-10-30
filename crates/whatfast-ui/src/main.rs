@@ -79,7 +79,9 @@ mod stickers;
 mod tabs;
 mod text;
 mod tokens;
+mod tray;
 mod ubicaciones;
+mod update;
 mod video;
 
 use app::Whatfast;
@@ -92,10 +94,16 @@ fn main() {
     if arguments.next().as_deref() == Some("mcp") {
         std::process::exit(whatfast_mcp::run(arguments.collect::<Vec<_>>()));
     }
+    // An update of a previous run left the old executables beside the new
+    // ones, and the copy that was waiting for the restart is not needed: the
+    // profile of this run shows `ready.json` when it still is.
+    update::cleanup();
     // One instance only: two sidecars with the same device session would
     // confuse the server and could invalidate the session of the phone.
     let Some(_lock) = instance::InstanceLock::acquire(&whatfast_model::paths::data_dir()) else {
-        warn("Whatfast is already running.");
+        // The window of the other instance may be hidden in the tray: this
+        // launch is the request to show it.
+        instance::show_running_instance();
         std::process::exit(1);
     };
     // The source of the assets is the one of `gpui_component` plus the icons

@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
@@ -70,10 +71,16 @@ pub(crate) enum VideoEvent {
 }
 
 enum Command {
-    Play { key: VideoKey, path: PathBuf },
+    Play {
+        key: VideoKey,
+        path: PathBuf,
+    },
     Pause,
     Resume,
     Stop,
+    /// El volumen que tiene que sonar, de 0 a 1. Llega con el video en
+    /// marcha: el reproductor lo aplica sin cortar el sonido.
+    Volume(f32),
 }
 
 /// Si el adjunto es un video que se puede reproducir en la burbuja.
@@ -96,13 +103,32 @@ pub(crate) fn status_box_size(width: u32, height: u32, scale: f32) -> (f32, f32)
     fit_box(width, height, scale, STATUS_MAX_WIDTH, STATUS_MAX_HEIGHT)
 }
 
-fn fit_box(
+/// The box of the video in the viewer that fills the window.
+///
+/// The limits arrive in pixels because the window already carries its own
+/// scale: the box is as big as the window lets it, keeping the shape of the
+/// file.
+pub(crate) fn viewer_box_size(
     width: u32,
     height: u32,
-    scale: f32,
     max_width: f32,
     max_height: f32,
 ) -> (f32, f32) {
+    let max_width = max_width.max(1.);
+    let max_height = max_height.max(1.);
+    let (source_width, source_height) = if width == 0 || height == 0 {
+        (DEFAULT_ASPECT, 1.)
+    } else {
+        (width as f32, height as f32)
+    };
+    let scale_to_fit = (max_width / source_width).min(max_height / source_height);
+    (
+        (source_width * scale_to_fit).max(1.),
+        (source_height * scale_to_fit).max(1.),
+    )
+}
+
+fn fit_box(width: u32, height: u32, scale: f32, max_width: f32, max_height: f32) -> (f32, f32) {
     let max_width = (max_width * scale).max(1.);
     let max_height = (max_height * scale).max(1.);
     let (source_width, source_height) = if width == 0 || height == 0 {
@@ -136,7 +162,6 @@ pub(crate) fn render_image(frame: VideoFrame) -> Option<Arc<RenderImage>> {
 }
 
 /// El estado visible del reproductor de la burbuja.
-#[derive(Default)]
 pub(crate) struct VideoPlayback {
     pub(crate) key: Option<VideoKey>,
     /// El archivo que se esta reproduciendo.
@@ -151,6 +176,30 @@ pub(crate) struct VideoPlayback {
     pub(crate) position: f32,
     pub(crate) frame: Option<Arc<RenderImage>>,
     pub(crate) error: Option<SharedString>,
+    /// El volumen elegido, de 0 a 1.
+    pub(crate) volume: f32,
+    /// El sonido esta apagado sin perder el volumen elegido.
+    pub(crate) muted: bool,
+}
+
+impl Default for VideoPlayback {
+    fn default() -> Self {
+        Self {
+            key: None,
+            path: String::new(),
+            active: false,
+            playing: false,
+            waiting: false,
+            duration: 0.0,
+            position: 0.0,
+            frame: None,
+            error: None,
+            // El video arranca con todo el sonido: el que lo quiera bajo lo
+            // baja, y el volumen elegido se mantiene para el proximo.
+            volume: 1.0,
+            muted: false,
+        }
+    }
 }
 
 impl VideoPlayback {
@@ -163,12 +212,21 @@ impl VideoPlayback {
     pub(crate) fn is_running(&self) -> bool {
         self.active && self.playing
     }
+
+    /// El volumen que oye el reproductor: en cero cuando esta en silencio.
+    pub(crate) fn effective_volume(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
 }
 
 /// El handle del hilo del video.
 pub(crate) struct VideoEngine {
     commands: Sender<Command>,
     events: Receiver<VideoEvent>,
+    /// El volumen de la sesion que se abra despues, en los bits de un `f32`:
+    /// el hilo lo lee al empezar y la sesion nueva arranca con el sonido que
+    /// el usuario dejo, sin esperar a que llegue un comando.
+    volume: Arc<AtomicU32>,
 }
 
 impl VideoEngine {
@@ -179,10 +237,16 @@ impl VideoEngine {
         // Una cola corta: si la interfaz no llega a pintar, los cuadros
         // viejos se descartan en vez de acumularse.
         let (event_sender, events) = async_channel::bounded(4);
+        let volume = Arc::new(AtomicU32::new(1f32.to_bits()));
+        let level = volume.clone();
         let _ = std::thread::Builder::new()
             .name("whatfast-video".into())
-            .spawn(move || run_video(command_receiver, event_sender));
-        Self { commands, events }
+            .spawn(move || run_video(command_receiver, event_sender, level));
+        Self {
+            commands,
+            events,
+            volume,
+        }
     }
 
     /// Arranca el archivo desde el principio.
@@ -205,13 +269,20 @@ impl VideoEngine {
         let _ = self.commands.send_blocking(Command::Stop);
     }
 
+    /// Fija el volumen de lo que este sonando y el de la proxima sesion.
+    pub(crate) fn set_volume(&self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
+        let _ = self.commands.send_blocking(Command::Volume(volume));
+    }
+
     pub(crate) fn try_recv(&self) -> Option<VideoEvent> {
         self.events.try_recv().ok()
     }
 }
 
 /// El cuerpo del hilo: una sesion por vez.
-fn run_video(commands: Receiver<Command>, events: Sender<VideoEvent>) {
+fn run_video(commands: Receiver<Command>, events: Sender<VideoEvent>, volume: Arc<AtomicU32>) {
     loop {
         // Espera una sesion nueva; la pausa y el alto de una sesion que ya
         // termino no tienen a quien avisar.
@@ -222,10 +293,10 @@ fn run_video(commands: Receiver<Command>, events: Sender<VideoEvent>) {
                 Err(_) => return,
             }
         };
-        match play_session(&key, &path, &commands, &events) {
+        match play_session(&key, &path, &commands, &events, &volume) {
             Ok(SessionEnd::Stop) => {}
             Ok(SessionEnd::Restart { key, path }) => {
-                if let Err(message) = play_session(&key, &path, &commands, &events) {
+                if let Err(message) = play_session(&key, &path, &commands, &events, &volume) {
                     let _ = events.send_blocking(VideoEvent::Failed {
                         key,
                         message: message.into(),
@@ -253,17 +324,22 @@ fn play_session(
     path: &Path,
     commands: &Receiver<Command>,
     events: &Sender<VideoEvent>,
+    volume: &AtomicU32,
 ) -> Result<SessionEnd, String> {
     let mut source = decoder::open(path)?;
     // El sonido es opcional: un video sin pista de audio, o una maquina sin
     // placa de sonido, se mira igual.
-    let audio = AudioTrack::start(path);
+    let mut level = f32::from_bits(volume.load(Ordering::Relaxed));
+    let mut audio = AudioTrack::start(path, level);
     let mut paused = false;
     let mut clock: Option<(i64, Instant)> = None;
     let mut paused_total = Duration::ZERO;
     let mut paused_at: Option<Instant> = None;
 
     loop {
+        // El sonido que ya bajo del archivo espera en la cola mientras la
+        // interfaz mira el cuadro.
+        audio.pump();
         // Los comandos que llegaron mientras se decodificaba el cuadro.
         while let Ok(command) = commands.try_recv() {
             match command {
@@ -287,9 +363,17 @@ fn play_session(
                         audio.resume();
                     }
                 }
+                Command::Volume(value) => {
+                    // El volumen cambia tambien en pausa: al volver a
+                    // reproducir ya suena como el usuario lo dejo.
+                    level = value.clamp(0.0, 1.0);
+                    audio.set_volume(level);
+                }
             }
         }
         if paused {
+            // En pausa el sonido tampoco corre; la cola se llena y espera.
+            audio.pump();
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
@@ -307,6 +391,7 @@ fn play_session(
             while left > Duration::ZERO {
                 let step = left.min(Duration::from_millis(10));
                 std::thread::sleep(step);
+                audio.pump();
                 left = left.saturating_sub(step);
             }
         }
@@ -319,34 +404,193 @@ fn play_session(
     }
 }
 
-/// La pista de sonido del archivo, si la hay.
+/// Cuantos bloques de sonido esperan al reproductor. Cada bloque trae unos
+/// 85 ms, asi que la cola cubre varios segundos de video sin crecer.
+const AUDIO_QUEUE: usize = 64;
+
+/// El sonido del video que `rodio` va sacando de la cola.
 ///
-/// `rodio` decodifica el AAC de un MP4 con la misma pila de las notas de voz.
+/// El decodificador es el de Media Foundation, el mismo del cuadro: `rodio`
+/// solo no puede con estos archivos. Su `Decoder::new` toma la primera pista
+/// con codec del MP4, que es el H264 del video, y al no tener decodificador
+/// de video devuelve `UnrecognizedFormat`; el AAC de la segunda pista nunca
+/// suena. Symphonia tampoco abre estos MP4: rechaza el descriptor `esds` que
+/// escribe WhatsApp. Por eso el sonido se decodifica en el hilo del video y
+/// aca solo se entrega a la salida del sistema.
+#[cfg(windows)]
+struct VideoAudio {
+    chunks: async_channel::Receiver<Vec<f32>>,
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
+    current: Vec<f32>,
+    index: usize,
+}
+
+#[cfg(windows)]
+impl Iterator for VideoAudio {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if self.index < self.current.len() {
+                let sample = self.current[self.index];
+                self.index += 1;
+                return Some(sample);
+            }
+            // La cola se llena mientras el video decodifica el cuadro: aca
+            // casi siempre hay un bloque listo.
+            let chunk = self.chunks.recv_blocking().ok()?;
+            self.current = chunk;
+            self.index = 0;
+        }
+    }
+}
+
+#[cfg(windows)]
+impl rodio::Source for VideoAudio {
+    fn current_span_len(&self) -> Option<usize> {
+        // El sonido termina cuando la cola se cierra: entre bloque y bloque
+        // no hay un corte que valga.
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+/// La pista de sonido del archivo, si la hay.
 struct AudioTrack {
     device: Option<rodio::MixerDeviceSink>,
     player: Option<rodio::Player>,
+    #[cfg(windows)]
+    reader: Option<windows_mf::AudioReader>,
+    #[cfg(windows)]
+    sender: Option<async_channel::Sender<Vec<f32>>>,
+    #[cfg(windows)]
+    pending: Option<Vec<f32>>,
+    /// El archivo no tiene mas sonido, o no tenia pista de audio.
+    #[cfg(windows)]
+    finished: bool,
 }
 
 impl AudioTrack {
-    fn start(path: &Path) -> Self {
-        let mut track = Self {
-            device: None,
-            player: None,
-        };
-        let Ok(file) = std::fs::File::open(path) else {
-            return track;
-        };
-        let Ok(decoder) = rodio::Decoder::new(std::io::BufReader::new(file)) else {
-            return track;
-        };
-        let Ok(device) = rodio::DeviceSinkBuilder::open_default_sink() else {
-            return track;
-        };
-        let player = rodio::Player::connect_new(device.mixer());
-        player.append(decoder);
-        track.device = Some(device);
-        track.player = Some(player);
-        track
+    fn start(path: &Path, volume: f32) -> Self {
+        #[cfg(windows)]
+        {
+            let mut track = Self {
+                device: None,
+                player: None,
+                reader: None,
+                sender: None,
+                pending: None,
+                finished: true,
+            };
+            // Sin pista de audio, o sin placa de sonido, el video se mira
+            // igual: el sonido es opcional.
+            let Ok(reader) = windows_mf::AudioReader::open(path) else {
+                return track;
+            };
+            let (sender, receiver) = async_channel::bounded(AUDIO_QUEUE);
+            let (Some(channels), Some(sample_rate)) = (
+                rodio::ChannelCount::new(reader.channels()),
+                rodio::SampleRate::new(reader.sample_rate()),
+            ) else {
+                return track;
+            };
+            let Ok(device) = rodio::DeviceSinkBuilder::open_default_sink() else {
+                return track;
+            };
+            let player = rodio::Player::connect_new(device.mixer());
+            // El volumen de la sesion se fija antes de que suene el primer
+            // bloque: el video arranca con el sonido que el usuario dejo.
+            player.set_volume(volume.clamp(0.0, 1.0));
+            player.append(VideoAudio {
+                chunks: receiver,
+                channels,
+                sample_rate,
+                current: Vec::new(),
+                index: 0,
+            });
+            track.device = Some(device);
+            track.player = Some(player);
+            track.reader = Some(reader);
+            track.sender = Some(sender);
+            track.finished = false;
+            // El primer cuadro tarda lo suyo: el sonido arranca con la cola
+            // ya llena.
+            track.pump();
+            track
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            Self {
+                device: None,
+                player: None,
+            }
+        }
+    }
+
+    /// Mueve el sonido del archivo a la cola del reproductor.
+    ///
+    /// Se llama desde el bucle del video, que ya espera entre cuadro y
+    /// cuadro: el lector de Media Foundation no toca el hilo del audio.
+    fn pump(&mut self) {
+        #[cfg(windows)]
+        {
+            // Un tope por vuelta: el bucle del video no se queda leyendo el
+            // archivo entero si la cola tiene lugar.
+            for _ in 0..4 {
+                if self.finished {
+                    break;
+                }
+                if self.pending.is_none() {
+                    let Some(reader) = self.reader.as_mut() else {
+                        self.finished = true;
+                        break;
+                    };
+                    match reader.next_chunk() {
+                        Ok(Some(chunk)) => self.pending = Some(chunk),
+                        Ok(None) | Err(_) => {
+                            self.finished = true;
+                            break;
+                        }
+                    }
+                }
+                let Some(chunk) = self.pending.take() else {
+                    break;
+                };
+                let Some(sender) = self.sender.as_ref() else {
+                    self.finished = true;
+                    break;
+                };
+                match sender.try_send(chunk) {
+                    Ok(()) => {}
+                    Err(async_channel::TrySendError::Full(chunk)) => {
+                        self.pending = Some(chunk);
+                        break;
+                    }
+                    Err(async_channel::TrySendError::Closed(_)) => {
+                        self.finished = true;
+                        break;
+                    }
+                }
+            }
+            // Sin sonido que mandar, la cola se cierra y el reproductor
+            // termina: el video sigue su reloj.
+            if self.finished {
+                self.sender = None;
+            }
+        }
     }
 
     fn pause(&self) {
@@ -358,6 +602,13 @@ impl AudioTrack {
     fn resume(&self) {
         if let Some(player) = self.player.as_ref() {
             player.play();
+        }
+    }
+
+    /// Cambia el volumen de lo que ya esta sonando.
+    fn set_volume(&self, volume: f32) {
+        if let Some(player) = self.player.as_ref() {
+            player.set_volume(volume.clamp(0.0, 1.0));
         }
     }
 }
@@ -416,20 +667,170 @@ mod windows_mf {
     use std::ptr;
 
     use windows::Win32::Media::MediaFoundation::{
-        IMFAttributes, IMFMediaType, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
-        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-        MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-        MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
-        MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
-        MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
+        IMFAttributes, IMFMediaType, IMFSourceReader, MF_MT_AUDIO_BITS_PER_SAMPLE,
+        MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE,
+        MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
+        MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+        MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
+        MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFAudioFormat_Float, MFAudioFormat_PCM,
+        MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
+        MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
     };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-    use windows::core::HSTRING;
+    use windows::core::{GUID, HSTRING};
 
     use super::{MAX_WIDTH, VideoFrame};
 
     /// El stream de video del archivo: el indice negativo que pide la API.
     const VIDEO_STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+
+    /// El stream de audio, con el mismo truco del indice negativo.
+    const AUDIO_STREAM: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+
+    /// Los frames de sonido que viajan en cada bloque: unos 85 ms a 48 kHz.
+    const AUDIO_CHUNK_FRAMES: usize = 4096;
+
+    /// El lector de la pista de sonido.
+    pub(super) struct AudioReader {
+        reader: IMFSourceReader,
+        sample_rate: u32,
+        channels: u16,
+        bits: u32,
+        float: bool,
+    }
+
+    impl AudioReader {
+        pub(super) fn open(path: &Path) -> Result<Self, String> {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                MFStartup(MF_VERSION, MFSTARTUP_FULL)
+                    .map_err(|error| format!("Media Foundation did not start: {error}"))?;
+            }
+            let reader = unsafe { open_audio_source(path)? };
+            unsafe {
+                let _ = reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false);
+                let _ = reader.SetStreamSelection(AUDIO_STREAM, true);
+            }
+            // El decodificador entrega PCM: se pide ese tipo y se lee el
+            // formato que quedo puesto.
+            let integer = unsafe { audio_output_type(MFAudioFormat_PCM) }?;
+            if unsafe { reader.SetCurrentMediaType(AUDIO_STREAM, None, &integer) }.is_err() {
+                let float = unsafe { audio_output_type(MFAudioFormat_Float) }?;
+                unsafe {
+                    reader
+                        .SetCurrentMediaType(AUDIO_STREAM, None, &float)
+                        .map_err(|error| {
+                            format!("The sound of the video could not be decoded: {error}")
+                        })?;
+                }
+            }
+            let current = unsafe { reader.GetCurrentMediaType(AUDIO_STREAM) }
+                .map_err(|error| format!("The sound of the video has no format: {error}"))?;
+            let channels =
+                unsafe { current.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS) }.unwrap_or(2) as u16;
+            let sample_rate =
+                unsafe { current.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND) }.unwrap_or(48_000);
+            let bits = unsafe { current.GetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE) }.unwrap_or(16);
+            let float = unsafe { current.GetGUID(&MF_MT_SUBTYPE) }
+                .is_ok_and(|subtype| subtype == MFAudioFormat_Float);
+            Ok(Self {
+                reader,
+                sample_rate,
+                channels: channels.max(1),
+                bits,
+                float,
+            })
+        }
+
+        pub(super) fn sample_rate(&self) -> u32 {
+            self.sample_rate
+        }
+
+        pub(super) fn channels(&self) -> u16 {
+            self.channels
+        }
+
+        /// Entrega el bloque de sonido que sigue, ya en f32 intercalado.
+        pub(super) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, String> {
+            let target = AUDIO_CHUNK_FRAMES * self.channels as usize;
+            let mut samples = Vec::with_capacity(target);
+            // Un decodificador que devuelve muestras vacias no puede dejar
+            // este bucle girando para siempre.
+            for _ in 0..64 {
+                if samples.len() >= target {
+                    break;
+                }
+                let mut flags = 0u32;
+                let mut timestamp = 0i64;
+                let mut sample: Option<windows::Win32::Media::MediaFoundation::IMFSample> = None;
+                unsafe {
+                    self.reader
+                        .ReadSample(
+                            AUDIO_STREAM,
+                            0,
+                            None,
+                            Some(&mut flags),
+                            Some(&mut timestamp),
+                            Some(&mut sample),
+                        )
+                        .map_err(|error| {
+                            format!("The sound of the video could not be read: {error}")
+                        })?;
+                }
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    break;
+                }
+                let Some(sample) = sample else {
+                    continue;
+                };
+                let bytes = unsafe { sample_bytes(&sample)? };
+                self.push_samples(&bytes, &mut samples);
+            }
+            Ok((!samples.is_empty()).then_some(samples))
+        }
+
+        fn push_samples(&self, bytes: &[u8], out: &mut Vec<f32>) {
+            match (self.float, self.bits) {
+                (true, 32) => out.extend(
+                    bytes
+                        .chunks_exact(4)
+                        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
+                ),
+                (false, 16) => out.extend(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32_768.0),
+                ),
+                (false, 32) => out.extend(bytes.chunks_exact(4).map(|chunk| {
+                    i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32
+                        / 2_147_483_648.0
+                })),
+                (false, 8) => out.extend(bytes.iter().map(|byte| (*byte as f32 - 128.0) / 128.0)),
+                _ => {}
+            }
+        }
+    }
+
+    /// El tipo de salida PCM que se le pide al decodificador.
+    unsafe fn audio_output_type(subtype: GUID) -> Result<IMFMediaType, String> {
+        let media_type = unsafe {
+            MFCreateMediaType().map_err(|error| format!("The sound type failed: {error}"))?
+        };
+        unsafe {
+            media_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .and_then(|()| media_type.SetGUID(&MF_MT_SUBTYPE, &subtype))
+                .map_err(|error| format!("The sound type failed: {error}"))?;
+        }
+        Ok(media_type)
+    }
+
+    /// Abre el lector del archivo sin los atributos de video.
+    unsafe fn open_audio_source(path: &Path) -> Result<IMFSourceReader, String> {
+        let url = file_url(path);
+        unsafe { MFCreateSourceReaderFromURL(&url, None) }
+            .map_err(|error| format!("The video could not be opened: {error}"))
+    }
 
     pub(super) struct Source {
         reader: IMFSourceReader,
@@ -548,13 +949,17 @@ mod windows_mf {
         }
     }
 
-    unsafe fn open_reader(path: &Path) -> Result<IMFSourceReader, String> {
-        // La ruta de Windows, con espacios y acentos, entra como url de
-        // archivo: es la forma que el resolvedor de medios entiende.
-        let url = HSTRING::from(format!(
+    /// La ruta de Windows como url de archivo: es la forma que el resolvedor
+    /// de medios entiende, con espacios y acentos.
+    fn file_url(path: &Path) -> HSTRING {
+        HSTRING::from(format!(
             "file:///{}",
             path.to_string_lossy().replace('\\', "/")
-        ));
+        ))
+    }
+
+    unsafe fn open_reader(path: &Path) -> Result<IMFSourceReader, String> {
+        let url = file_url(path);
         let mut last_error = String::new();
         // Con los procesadores de video el cuadro sale ya escalado; si el
         // archivo o el decodificador no los aceptan, se abre igual sin
@@ -820,6 +1225,32 @@ mod tests {
     }
 
     #[test]
+    fn the_sound_of_the_video_follows_the_mute_button() {
+        // El volumen elegido se mantiene: el silencio no lo borra.
+        let mut player = VideoPlayback::default();
+        assert!((player.effective_volume() - 1.0).abs() < f32::EPSILON);
+        player.volume = 0.4;
+        assert!((player.effective_volume() - 0.4).abs() < f32::EPSILON);
+        player.muted = true;
+        assert!(player.effective_volume().abs() < f32::EPSILON);
+        player.muted = false;
+        assert!((player.effective_volume() - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_viewer_uses_the_room_of_the_window() {
+        // Un video horizontal ocupa el ancho que la ventana le da, sin
+        // pasarse del alto.
+        let (width, height) = super::viewer_box_size(1920, 1080, 1200., 700.);
+        assert!((width - 1200.).abs() < 0.5, "ancho {width}");
+        assert!((height - 675.).abs() < 0.5, "alto {height}");
+        // Uno vertical se topa con el alto y conserva la forma.
+        let (width, height) = super::viewer_box_size(576, 1024, 1200., 700.);
+        assert!(height <= 700. && width <= 1200., "{width}x{height}");
+        assert!((height / width - 1024. / 576.).abs() < 0.01);
+    }
+
+    #[test]
     fn a_video_without_a_size_falls_back_to_the_sixteen_by_nine() {
         let (width, height) = video_box_size(0, 0, 1.0);
         assert!((width - 420.).abs() < 0.5, "ancho {width}");
@@ -849,6 +1280,34 @@ mod tests {
         let playback = VideoPlayback::default();
         assert!(!playback.is_running());
         assert!(!playback.is_for(&("chat".into(), "message".into())));
+    }
+
+    /// El audio de un video de verdad sale por el mismo decodificador que usa
+    /// el reproductor.
+    ///
+    /// El AAC dentro del MP4 va por Media Foundation, igual que la pista que
+    /// arranca `AudioTrack`. Un archivo sin sonido, o un decodificador que no
+    /// entiende el contenedor, deja el video mudo sin ningun error visible.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs WHATFAST_VIDEO_SAMPLE with a real video file"]
+    fn a_real_video_gives_samples_of_its_sound() {
+        let Ok(path) = std::env::var("WHATFAST_VIDEO_SAMPLE") else {
+            return;
+        };
+        let mut reader = super::windows_mf::AudioReader::open(std::path::Path::new(&path))
+            .expect("the sound of the video opens");
+        let sample_rate = reader.sample_rate();
+        let channels = reader.channels();
+        let mut samples = 0usize;
+        let mut audible = 0usize;
+        while let Some(chunk) = reader.next_chunk().expect("the sound of the video decodes") {
+            samples += chunk.len();
+            audible += chunk.iter().filter(|sample| sample.abs() > 0.001).count();
+        }
+        assert!(samples > 0, "the video gave no samples of sound");
+        assert!(audible > 0, "the sound of the video is silent");
+        eprintln!("audio: {sample_rate} Hz, {channels} canales, {audible} muestras con sonido");
     }
 
     /// Decodifica un video de verdad, cuando la maquina tiene uno a mano.

@@ -9583,7 +9583,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-agents"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "getrandom 0.2.17",
  "serde_json",
@@ -9591,7 +9591,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-auto"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "libc",
@@ -9606,7 +9606,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-core"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "serde",
  "serde_json",
@@ -9614,14 +9614,14 @@ dependencies = [
 
 [[package]]
 name = "whatfast-i18n"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "whatfast-mcp"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "async-channel",
  "getrandom 0.2.17",
@@ -9635,7 +9635,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-model"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "emojis",
  "image",
@@ -9648,7 +9648,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-protocol"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "async-channel",
  "prost",
@@ -9659,7 +9659,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-ui"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9678,11 +9678,13 @@ dependencies = [
  "opus-pure",
  "pbkdf2",
  "qrcode",
+ "raw-window-handle",
  "rodio",
  "serde_json",
  "sha2 0.10.9",
  "smol",
  "tempfile",
+ "ureq",
  "uuid",
  "whatfast-agents",
  "whatfast-auto",
@@ -9697,7 +9699,7 @@ dependencies = [
 
 [[package]]
 name = "whatfast-wa"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "async-channel",
