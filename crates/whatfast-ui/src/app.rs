@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
@@ -55,6 +55,13 @@ use crate::audio::{VoiceAudio, VoiceState};
 use crate::automations_panel::AutomationsPanel;
 use crate::composer_attachments::PendingImages;
 use crate::media_editor::{MediaEditor, MediaEditorEvent};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MediaEditorTarget {
+    #[default]
+    Chat,
+    Status,
+}
 use crate::members::MemberPanel;
 use crate::message_actions::{
     AttachmentAction, AttachmentBar, ForwardAction, ForwardPicker, MessageAction, MessageMenu,
@@ -963,6 +970,7 @@ pub(crate) struct Whatfast {
     pub(crate) avatar_retries: HashMap<String, u8>,
     pub(crate) participant_avatar_attempted: HashSet<String>,
     pub(crate) image_download_attempted: HashSet<(String, String)>,
+    pub(crate) image_download_queue: VecDeque<(String, String)>,
     pub(crate) image_failures: HashMap<(String, String), String>,
     pub(crate) sticker_preparing: bool,
     pub(crate) reaction_repair_attempted: HashSet<String>,
@@ -1081,6 +1089,10 @@ pub(crate) struct Whatfast {
     pub(crate) tab_strip: Entity<TabStrip>,
     /// The editor of a picture, when it is open.
     pub(crate) media_editor: Option<Entity<MediaEditor>>,
+    /// Target of media editor (Chat or Status).
+    pub(crate) media_editor_target: MediaEditorTarget,
+    /// Confirm delete status message id modal.
+    pub(crate) confirm_delete_status: Option<String>,
     /// The panel of the newsletters.
     pub(crate) newsletter_panel: NewsletterPanel,
     /// The strip of the states of the contacts.
@@ -1498,6 +1510,7 @@ impl Whatfast {
             avatar_retries: HashMap::new(),
             participant_avatar_attempted: HashSet::new(),
             image_download_attempted: HashSet::new(),
+            image_download_queue: VecDeque::new(),
             image_failures: HashMap::new(),
             sticker_preparing: false,
             reaction_repair_attempted: HashSet::new(),
@@ -1552,6 +1565,8 @@ impl Whatfast {
             nav_rail,
             tab_strip,
             media_editor: None,
+            media_editor_target: MediaEditorTarget::Chat,
+            confirm_delete_status: None,
             newsletter_panel: NewsletterPanel::new(window, cx),
             status_strip: StatusStrip::new(window, cx),
             agents_panel: AgentsPanel::new(window, cx),
@@ -1800,6 +1815,7 @@ impl Whatfast {
                             i18n::t("Photo download timed out · Click to retry").into()
                         },
                     );
+                    self.pump_image_download_queue();
                 }
                 PendingRequest::Search { generation, .. }
                     if generation == self.search_generation =>
@@ -2505,6 +2521,7 @@ impl Whatfast {
                         i18n::t("Photo is no longer available").into()
                     },
                 );
+                self.pump_image_download_queue();
                 return;
             }
             if let PendingRequest::MarkRead {
@@ -2987,6 +3004,7 @@ impl Whatfast {
                         image.image_path,
                         image.thumbnail_path,
                     );
+                    self.pump_image_download_queue();
                 }
             }
             (
@@ -4278,9 +4296,38 @@ impl Whatfast {
         );
     }
 
+    pub(crate) fn pump_image_download_queue(&mut self) {
+        while self.rpc.pending_media_count() < 4 {
+            if let Some((chat_id, message_id)) = self.image_download_queue.pop_front() {
+                let key = (chat_id.clone(), message_id.clone());
+                if !self.image_download_attempted.contains(&key) {
+                    self.image_download_attempted.insert(key);
+                    self.request(
+                        rpc_request::Request::GetMessageImage(whatfast_protocol::GetMessageImageRequest {
+                            chat_id: chat_id.clone(),
+                            message_id: message_id.clone(),
+                        }),
+                        PendingRequest::MessageImage {
+                            chat_id,
+                            message_id,
+                        },
+                    );
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn load_message_image(&mut self, chat_id: String, message_id: String) {
         let key = (chat_id.clone(), message_id.clone());
-        if self.image_download_attempted.contains(&key) || self.rpc.pending_media_count() >= 4 {
+        if self.image_download_attempted.contains(&key) {
+            return;
+        }
+        if self.rpc.pending_media_count() >= 4 {
+            if !self.image_download_queue.iter().any(|k| k == &key) {
+                self.image_download_queue.push_back(key);
+            }
             return;
         }
         self.image_download_attempted.insert(key);
@@ -6836,6 +6883,11 @@ impl Whatfast {
     }
 
     pub(crate) fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_delete_status.is_some() {
+            self.confirm_delete_status = None;
+            cx.notify();
+            return;
+        }
         if self.confirm_delete_message.is_some() {
             self.confirm_delete_message = None;
             cx.notify();
@@ -7448,7 +7500,7 @@ impl Whatfast {
         else {
             return;
         };
-        self.open_media_editor(path, window, cx);
+        self.open_media_editor(path, MediaEditorTarget::Chat, window, cx);
     }
 
     /// The field of the message says what the next message is: the text or
@@ -9210,18 +9262,27 @@ impl Whatfast {
     pub(crate) fn open_media_editor(
         &mut self,
         path: PathBuf,
+        target: MediaEditorTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.media_editor.is_some() {
             return;
         }
-        let editor = cx.new(|cx| MediaEditor::new(&path, cx));
+        self.media_editor_target = target;
+        let editor = cx.new(|cx| MediaEditor::new(&path, window, cx));
         let subscription = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
             match event {
                 MediaEditorEvent::Applied(edit) => {
                     this.media_editor = None;
-                    this.stage_edited_picture(edit.clone(), window, cx);
+                    match this.media_editor_target {
+                        MediaEditorTarget::Chat => {
+                            this.stage_edited_picture(edit.clone(), window, cx);
+                        }
+                        MediaEditorTarget::Status => {
+                            this.publish_edited_status(edit.clone(), window, cx);
+                        }
+                    }
                 }
                 MediaEditorEvent::Cancelled => {
                     this.media_editor = None;
@@ -9232,6 +9293,102 @@ impl Whatfast {
         self._subscriptions.push(subscription);
         self.media_editor = Some(editor);
         self.sync_shell(cx);
+    }
+
+    /// Publishes a status picture that was cropped, rotated and/or given caption/emojis.
+    pub(crate) fn publish_edited_status(
+        &mut self,
+        edit: crate::media_editor::MediaEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source = edit.path.clone();
+        let plan = edit.plan;
+        let caption = edit.caption.clone();
+        let extension = source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("png")
+            .to_owned();
+        let destination = whatfast_model::paths::data_dir()
+            .join("edited")
+            .join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+        let parent = destination
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let task_source = source.clone();
+        let edited = cx.background_spawn(async move {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    crate::media_editor::apply_edit(&task_source, &plan, &destination)
+                })?;
+            Ok::<std::path::PathBuf, String>(destination)
+        });
+        let state = self.status_strip.state();
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let prepared = edited.await;
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Ok(destination) = prepared {
+                            let path_str = destination.to_string_lossy().into_owned();
+                            crate::statuses::publish_photo_status_with_caption(
+                                this,
+                                &state,
+                                &path_str,
+                                &caption,
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Deletes a status message (both from local store and from backend).
+    pub(crate) fn delete_status(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        let chat_id = crate::statuses::statuses_chat_id(self);
+        let mut groups = self.store.statuses().to_vec();
+        let mut removed = false;
+        for group in &mut groups {
+            if let Some(pos) = group.messages.iter().position(|m| m.id == message_id) {
+                group.messages.remove(pos);
+                removed = true;
+                break;
+            }
+        }
+        if removed {
+            groups.retain(|g| !g.messages.is_empty());
+            self.store.set_statuses(chat_id, groups);
+            if !message_id.starts_with("local-status-") {
+                let _ = self.rpc.request_delete_message("status@broadcast".to_string(), message_id.to_string(), true);
+            }
+            let state = self.status_strip.state();
+            let mut inner = state.borrow_mut();
+            if let Some(viewer) = inner.viewer.as_mut() {
+                let groups_ref = self.store.statuses();
+                if let Some(group) = groups_ref.get(viewer.group_index) {
+                    if viewer.message_index >= group.messages.len() {
+                        viewer.message_index = group.messages.len().saturating_sub(1);
+                    }
+                } else if !groups_ref.is_empty() {
+                    viewer.group_index = viewer.group_index.min(groups_ref.len() - 1);
+                    viewer.message_index = 0;
+                } else {
+                    inner.viewer = None;
+                }
+            }
+            drop(inner);
+            self.stop_video();
+            self.store.toast_info = Some(i18n::t("Estado eliminado").into());
+            cx.notify();
+        }
     }
 
     /// Writes the picture the user edited and puts it back in the tray, in

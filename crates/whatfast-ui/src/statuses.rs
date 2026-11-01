@@ -22,7 +22,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use whatfast_i18n as i18n;
 
-use gpui::{
+use gpui::prelude::FluentBuilder as _;
+use gpui::AnimationExt as _;
+use gpui::{Animation, 
     AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
     ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Subscription, Window, canvas, div, img, point, px, quad, rgba,
@@ -200,6 +202,10 @@ pub(crate) struct StatusStripState {
     /// The reference draws two buttons, one for the text and one for the
     /// photo: the composer of the text only shows when the first is pressed.
     pub(crate) text_composer_open: bool,
+    /// Incremented when switching between different contacts for smooth slide transition.
+    pub(crate) transition_id: usize,
+    /// Direction of the transition: true = forward, false = backward.
+    pub(crate) transition_forward: bool,
 }
 
 impl StatusStripState {
@@ -207,6 +213,7 @@ impl StatusStripState {
     pub(crate) fn new() -> Self {
         Self {
             text_color: DEFAULT_STATUS_COLOR.to_string(),
+            transition_forward: true,
             ..Self::default()
         }
     }
@@ -274,6 +281,42 @@ pub(crate) fn has_unseen(state: &StatusStripState, group: &StatusGroup) -> bool 
         .get(&group.sender_id)
         .map(|mark| *mark < newest)
         .unwrap_or(true)
+}
+
+/// The state of one segment of the circular status ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusSegment {
+    Seen,
+    Unseen,
+}
+
+/// Computes the segments of the status ring for a group.
+///
+/// Each segment corresponds to one status message in chronological upload order.
+/// If `last_seen_ms` is present, messages with `timestamp_ms <= last_seen_ms`
+/// are marked `Seen`, and newer messages are marked `Unseen`.
+pub(crate) fn status_segments(
+    group: &StatusGroup,
+    last_seen_ms: Option<i64>,
+) -> Vec<StatusSegment> {
+    if group.messages.is_empty() {
+        return vec![StatusSegment::Unseen];
+    }
+    group
+        .messages
+        .iter()
+        .map(|message| {
+            if let Some(last_seen) = last_seen_ms {
+                if message.timestamp_ms <= last_seen {
+                    StatusSegment::Seen
+                } else {
+                    StatusSegment::Unseen
+                }
+            } else {
+                StatusSegment::Unseen
+            }
+        })
+        .collect()
 }
 
 /// The letter that stands for a contact in the ring of its status.
@@ -404,6 +447,9 @@ pub(crate) fn add_status_message(groups: &mut Vec<StatusGroup>, message: Message
         .find(|group| group.sender_id == message.sender_id)
     {
         group.messages.push(message);
+        group
+            .messages
+            .sort_by(|a, b| a.timestamp_ms.cmp(&b.timestamp_ms).then_with(|| a.id.cmp(&b.id)));
         return;
     }
     groups.insert(
@@ -534,7 +580,7 @@ impl StatusStrip {
 
     /// Asks the user for a photo and publishes it as a status.
     pub(crate) fn publish_photo_status(&self, window: &mut Window, cx: &mut Context<Whatfast>) {
-        choose_photo_status(&self.state, window, cx);
+        choose_photo_status(window, cx);
     }
 
     /// Opens or closes the composer of a text status.
@@ -731,49 +777,103 @@ impl StatusStrip {
             .min_h_0()
             .overflow_y_scroll()
             .child(
-                v_flex()
-                    .id("status-my-status")
-                    .w_full()
-                    .gap(px(4.))
-                    .px(px(16. * scale))
-                    .py(px(12. * scale))
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        let groups = app.store.statuses();
-                        if let Some(own_index) = groups.iter().position(|g| {
-                            g.sender_id == "me@s.whatsapp.net"
-                                || g.messages.iter().any(|m| m.from_me)
-                        }) {
-                            open_viewer(app, &state, own_index, "me@s.whatsapp.net", cx);
-                        } else {
-                            choose_photo_status(&state, window, cx);
-                        }
-                    }))
-                    .child(
-                        h_flex()
-                            .gap(px(12. * scale))
-                            .items_center()
-                            .child(self.render_own_ring(scale, cx))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(i18n::t("My status")),
+                {
+                    let own_index = groups.iter().position(|g| {
+                        g.sender_id == "me@s.whatsapp.net"
+                            || g.messages.iter().any(|m| m.from_me)
+                    });
+                    let has_own_status = own_index.is_some();
+                    let own_status_id = own_index.and_then(|idx| {
+                        groups.get(idx).and_then(|g| g.messages.last().map(|m| m.id.clone()))
+                    });
+                    let state_for_view = state.clone();
+
+                    v_flex()
+                        .id("status-my-status")
+                        .w_full()
+                        .gap(px(4.))
+                        .px(px(16. * scale))
+                        .py(px(12. * scale))
+                        .hover(move |style| style.bg(hover))
+                        .child(
+                            h_flex()
+                                .gap(px(12. * scale))
+                                .items_center()
+                                .child(self.render_own_ring(scale, cx))
+                                .child(
+                                    v_flex()
+                                        .id("status-own-text")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(2.))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |_app, _, window, cx| {
+                                            choose_photo_status(window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(i18n::t("My status")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(if has_own_status {
+                                                    i18n::t("Haz clic para añadir un nuevo estado")
+                                                } else {
+                                                    i18n::t("Click to add a status update")
+                                                }),
+                                        ),
+                                )
+                                .when(has_own_status, |row| {
+                                    let own_idx = own_index.unwrap();
+                                    let state_v = state_for_view.clone();
+                                    let msg_id_opt = own_status_id.clone();
+                                    row.child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .id("status-my-view-btn")
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(cx.theme().secondary)
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.opacity(0.85))
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        open_viewer(app, &state_v, own_idx, "me@s.whatsapp.net", cx);
+                                                    }))
+                                                    .child(i18n::t("Ver estado")),
+                                            )
+                                            .when_some(msg_id_opt, |row, msg_id| {
+                                                row.child(
+                                                    div()
+                                                        .id("status-my-delete-btn")
+                                                        .p_1()
+                                                        .rounded_md()
+                                                        .cursor_pointer()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .hover(|s| s.text_color(cx.theme().danger))
+                                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                                            app.confirm_delete_status = Some(msg_id.clone());
+                                                            cx.notify();
+                                                        }))
+                                                        .child(
+                                                            Icon::new(WhatfastIcon::Trash)
+                                                                .with_size(px(16.))
+                                                        ),
+                                                )
+                                            })
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(i18n::t("Click to add a status update")),
-                                    ),
-                            ),
-                    ),
+                                }),
+                        )
+                },
             );
 
         if !groups.is_empty() {
@@ -813,7 +913,7 @@ impl StatusStrip {
         let sender = group.sender_id.clone();
         let time = group
             .messages
-            .first()
+            .last()
             .map(|message| status_time(message.timestamp_ms, now_ms()))
             .unwrap_or_default();
         let hover = cx.theme().muted;
@@ -869,13 +969,25 @@ impl StatusStrip {
             .flex()
             .items_center()
             .justify_center()
+            .cursor_pointer()
+            .on_click(cx.listener(move |app, _, window, cx| {
+                let groups = app.store.statuses();
+                if let Some(own_index) = groups.iter().position(|g| {
+                    g.sender_id == "me@s.whatsapp.net"
+                        || g.messages.iter().any(|m| m.from_me)
+                }) {
+                    open_viewer(app, &state, own_index, "me@s.whatsapp.net", cx);
+                } else {
+                    choose_photo_status(window, cx);
+                }
+            }))
             .child(
                 Icon::new(IconName::User)
                     .with_size(px(RING_SIZE * 0.48 * scale))
                     .text_color(muted),
             )
             .child(
-                // El circulito verde del "+": esta en la esquina de la foto.
+                // El circulito verde del "+": abre para anadir nuevo estado
                 div()
                     .id("status-own-add")
                     .absolute()
@@ -888,7 +1000,8 @@ impl StatusStrip {
                     .items_center()
                     .justify_center()
                     .on_click(cx.listener(move |_app, _, window, cx| {
-                        choose_photo_status(&state, window, cx);
+                        cx.stop_propagation();
+                        choose_photo_status(window, cx);
                     }))
                     .child(
                         Icon::new(IconName::Plus)
@@ -917,7 +1030,9 @@ impl StatusStrip {
         let label = sender_label(group);
         let state = self.state.clone();
         let sender = group.sender_id.clone();
-        let seen = !has_unseen(&self.state.borrow(), group);
+        let muted = cx.theme().muted_foreground.opacity(0.4);
+        let last_seen = self.state.borrow().seen.get(&group.sender_id).copied();
+        let segments = status_segments(group, last_seen);
         let size = RING_SIZE * scale;
         let thickness = RING_BORDER * scale;
         // The photo sits inside the ring: the border and the gap take their
@@ -937,7 +1052,7 @@ impl StatusStrip {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        paint_status_ring(bounds, size, thickness, seen, accent, scale, window);
+                        paint_status_ring(bounds, size, thickness, &segments, accent, muted, scale, window);
                     },
                 )
                 .absolute()
@@ -1107,7 +1222,42 @@ impl StatusStrip {
                             ),
                     ),
             )
-            .child(self.render_close(cx));
+            .child({
+                let is_own = group.sender_id == "me@s.whatsapp.net"
+                    || message.map_or(false, |m| m.from_me);
+                let mut actions = h_flex().gap_2().items_center();
+                if is_own {
+                    if let Some(msg) = message {
+                        let msg_id = msg.id.clone();
+                        actions = actions.child(
+                            div()
+                                .id("status-viewer-delete")
+                                .size(px(32.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgba(0xffffff22)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.confirm_delete_status = Some(msg_id.clone());
+                                    cx.notify();
+                                }))
+                                .child(
+                                    Icon::new(WhatfastIcon::Trash)
+                                        .with_size(px(18.))
+                                        .text_color(rgba(0xffffffdd)),
+                                ),
+                        );
+                    }
+                }
+                actions.child(self.render_close(cx))
+            });
+
+        let transition_id = self.state.borrow().transition_id;
+        let transition_forward = self.state.borrow().transition_forward;
+        let anim_id = ElementId::named_usize("status-group-slide", transition_id);
+        let anim = Animation::new(Duration::from_millis(320));
 
         let content = v_flex()
             .id("status-viewer-content")
@@ -1116,6 +1266,17 @@ impl StatusStrip {
             .items_center()
             .justify_center()
             .p(px(16. * scale))
+            .relative()
+            .with_animation(anim_id, anim, move |div, progress| {
+                let t = 1.0 - (1.0 - progress) * (1.0 - progress);
+                let offset = if transition_forward {
+                    (1.0 - t) * 75.0
+                } else {
+                    (1.0 - t) * -75.0
+                };
+                let opacity = 0.35 + 0.65 * t;
+                div.left(px(offset)).opacity(opacity)
+            })
             .child(match message {
                 Some(message) => render_message(app, message, scale, cx),
                 None => div(),
@@ -1134,7 +1295,19 @@ impl StatusStrip {
                     .px(px(16. * scale))
                     .py(px(12. * scale))
                     .child(progress)
-                    .child(meta),
+                    .child({
+                        let meta_anim_id = ElementId::named_usize("status-meta-slide", transition_id);
+                        let meta_anim = Animation::new(Duration::from_millis(280));
+                        meta.relative().with_animation(meta_anim_id, meta_anim, move |div, progress| {
+                            let t = 1.0 - (1.0 - progress) * (1.0 - progress);
+                            let offset = if transition_forward {
+                                (1.0 - t) * 35.0
+                            } else {
+                                (1.0 - t) * -35.0
+                            };
+                            div.left(px(offset)).opacity(0.4 + 0.6 * t)
+                        })
+                    }),
             )
             .child(content)
             .child(self.render_reply(app, cx));
@@ -1438,36 +1611,79 @@ fn paint_status_ring(
     bounds: Bounds<gpui::Pixels>,
     size: f32,
     thickness: f32,
-    seen: bool,
-    color: Hsla,
-    scale: f32,
+    segments: &[StatusSegment],
+    accent: Hsla,
+    muted: Hsla,
+    _scale: f32,
     window: &mut Window,
 ) {
+    if segments.is_empty() {
+        return;
+    }
     let center = bounds.center();
     let radius = (size - thickness) * 0.5;
-    let mut builder = PathBuilder::stroke(px(thickness));
-    if !seen {
-        builder = builder.dash_array(&[px(RING_DASH * scale), px(RING_DASH_GAP * scale)]);
+
+    // Cuando hay un solo estado, el anillo es continuo (sin cortes).
+    if segments.len() == 1 {
+        let color = if segments[0] == StatusSegment::Seen { muted } else { accent };
+        let mut builder = PathBuilder::stroke(px(thickness));
+        builder.move_to(point_on_circle(&center, radius, 0.));
+        builder.arc_to(
+            point(px(radius), px(radius)),
+            px(0.),
+            false,
+            true,
+            point_on_circle(&center, radius, 180.),
+        );
+        builder.arc_to(
+            point(px(radius), px(radius)),
+            px(0.),
+            false,
+            true,
+            point_on_circle(&center, radius, 360.),
+        );
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+        return;
     }
-    // El circulo completo: dos semicirculos, para que el trazo no tenga una
-    // costura en el punto de arranque.
-    builder.move_to(point_on_circle(&center, radius, 0.));
-    builder.arc_to(
-        point(px(radius), px(radius)),
-        px(0.),
-        false,
-        true,
-        point_on_circle(&center, radius, 180.),
-    );
-    builder.arc_to(
-        point(px(radius), px(radius)),
-        px(0.),
-        false,
-        true,
-        point_on_circle(&center, radius, 360.),
-    );
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
+
+    // Exactamente tantas rayitas como estados tenga el contacto.
+    let count = segments.len();
+    let gap_deg = if count <= 2 {
+        8.0
+    } else if count <= 4 {
+        6.0
+    } else if count <= 8 {
+        5.0
+    } else if count <= 15 {
+        4.0
+    } else if count <= 25 {
+        3.0
+    } else {
+        (60.0 / count as f32).max(1.5)
+    };
+    let arc_deg = (360.0 - (count as f32) * gap_deg) / (count as f32);
+    let mut current_angle = gap_deg * 0.5;
+
+    for segment in segments {
+        let color = if *segment == StatusSegment::Seen { muted } else { accent };
+        let from = point_on_circle(&center, radius, current_angle);
+        let to = point_on_circle(&center, radius, current_angle + arc_deg);
+        let mut builder = PathBuilder::stroke(px(thickness));
+        builder.move_to(from);
+        let large_arc = arc_deg > 180.0;
+        builder.arc_to(
+            point(px(radius), px(radius)),
+            px(0.),
+            large_arc,
+            true,
+            to,
+        );
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+        current_angle += arc_deg + gap_deg;
     }
 }
 
@@ -1498,8 +1714,7 @@ fn publish_text_status(
 ///
 /// port: `publishPhotoStatus` of the origin. The photo stays in the memory
 /// of the client: the linked device has no RPC for a status of the user.
-fn choose_photo_status(
-    state: &Rc<RefCell<StatusStripState>>,
+pub(crate) fn choose_photo_status(
     window: &mut Window,
     cx: &mut Context<Whatfast>,
 ) {
@@ -1507,10 +1722,9 @@ fn choose_photo_status(
         files: true,
         directories: false,
         multiple: false,
-        prompt: Some("Choose a photo for your status".into()),
+        prompt: Some(i18n::t("Elige una foto para tu estado").into()),
     });
     let view = cx.entity();
-    let state = state.clone();
     cx.spawn_in(window, async move |_, window| {
         let Some(path) = selected
             .await
@@ -1521,16 +1735,58 @@ fn choose_photo_status(
         else {
             return;
         };
-        let path = path.to_string_lossy().into_owned();
         window
-            .update(|_, cx| {
+            .update(|window, cx| {
                 view.update(cx, |app, cx| {
-                    publish_photo_status(app, &state, &path, cx);
+                    app.open_media_editor(path, crate::app::MediaEditorTarget::Status, window, cx);
                 });
             })
             .ok();
     })
     .detach();
+}
+
+/// Publishes a photo status with an optional caption / emojis in the memory of the client.
+pub(crate) fn publish_photo_status_with_caption(
+    app: &mut Whatfast,
+    state: &Rc<RefCell<StatusStripState>>,
+    path: &str,
+    caption: &str,
+    cx: &mut Context<Whatfast>,
+) {
+    let chat_id = statuses_chat_id(app);
+    let message = photo_status_message_with_caption(&chat_id, path, caption, now_ms());
+    let color = state.borrow().text_color.clone();
+    state.borrow_mut().colors.insert(message.id.clone(), color);
+    let mut groups = app.store.statuses().to_vec();
+    add_status_message(&mut groups, message);
+    app.store.set_statuses(chat_id, groups);
+    cx.notify();
+}
+
+pub(crate) fn photo_status_message_with_caption(
+    chat_id: &str,
+    path: &str,
+    caption: &str,
+    timestamp_ms: i64,
+) -> Message {
+    Message {
+        id: format!("local-status-{timestamp_ms}"),
+        chat_id: chat_id.to_string(),
+        sender_id: "me@s.whatsapp.net".to_string(),
+        sender_name: "You".to_string(),
+        from_me: true,
+        timestamp_ms,
+        status: MessageStatus::Sent as i32,
+        content: Some(Content::Image(ImageContent {
+            caption: caption.to_string(),
+            mime_type: "image/jpeg".to_string(),
+            local_path: path.to_string(),
+            thumbnail_path: path.to_string(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
 }
 
 /// Publishes a photo status in the memory of the client.
@@ -1540,14 +1796,7 @@ fn publish_photo_status(
     path: &str,
     cx: &mut Context<Whatfast>,
 ) {
-    let chat_id = statuses_chat_id(app);
-    let message = photo_status_message(&chat_id, path, now_ms());
-    let color = state.borrow().text_color.clone();
-    state.borrow_mut().colors.insert(message.id.clone(), color);
-    let mut groups = app.store.statuses().to_vec();
-    add_status_message(&mut groups, message);
-    app.store.set_statuses(chat_id, groups);
-    cx.notify();
+    publish_photo_status_with_caption(app, state, path, "", cx);
 }
 
 /// The conversation that carries the statuses.
@@ -1556,7 +1805,7 @@ fn publish_photo_status(
 /// The sender of a status is a person, and the chat of that person carries the
 /// same jid. A jid that the sidecar stored as a LID does not match the phone
 /// one, so the number is the second chance.
-fn group_of_chat<'a>(groups: &'a [StatusGroup], chat: &Chat) -> Option<&'a StatusGroup> {
+pub(crate) fn group_of_chat<'a>(groups: &'a [StatusGroup], chat: &Chat) -> Option<&'a StatusGroup> {
     let phone = chat.phone_number.trim_start_matches('+');
     groups.iter().find(|group| {
         group.sender_id == chat.transport_jid
@@ -1625,10 +1874,12 @@ pub(crate) fn status_avatar(
     avatar_path: &str,
     size: f32,
     is_group: bool,
+    segments: Vec<StatusSegment>,
     cx: &mut Context<Whatfast>,
 ) -> gpui::Div {
     let accent = cx.theme().accent;
     let secondary = cx.theme().secondary;
+    let muted = cx.theme().muted_foreground.opacity(0.4);
     // Las medidas del anillo del strip, llevadas al tamano de esta foto.
     let ratio = size / RING_SIZE;
     let thickness = RING_BORDER * ratio;
@@ -1646,7 +1897,7 @@ pub(crate) fn status_avatar(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    paint_status_ring(bounds, size, thickness, false, accent, ratio, window);
+                    paint_status_ring(bounds, size, thickness, &segments, accent, muted, ratio, window);
                 },
             )
             .absolute()
@@ -1724,7 +1975,7 @@ pub(crate) fn reply_to_the_open_status(
     true
 }
 
-fn statuses_chat_id(app: &Whatfast) -> String {
+pub(crate) fn statuses_chat_id(app: &Whatfast) -> String {
     let chat_id = app.store.statuses_chat_id();
     if chat_id.is_empty() {
         "status@broadcast".to_string()
@@ -1771,18 +2022,33 @@ fn open_viewer(
     sender_id: &str,
     cx: &mut Context<Whatfast>,
 ) {
-    let newest = app
-        .store
-        .statuses()
-        .get(group_index)
-        .map(newest_status_ms)
-        .unwrap_or_default();
+    let group = app.store.statuses().get(group_index);
+    let newest = group.map(newest_status_ms).unwrap_or_default();
+    let initial_message_index = {
+        let inner = state.borrow();
+        if let Some(group) = group {
+            if let Some(last_seen) = inner.seen.get(sender_id) {
+                // Abre en el primer estado no visto, o en 0 si ya vio todos
+                group
+                    .messages
+                    .iter()
+                    .position(|m| m.timestamp_ms > *last_seen)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
     let generation = {
         let mut inner = state.borrow_mut();
         inner.generation += 1;
+        inner.transition_id += 1;
+        inner.transition_forward = true;
         inner.viewer = Some(StatusViewer {
             group_index,
-            message_index: 0,
+            message_index: initial_message_index,
         });
         mark_seen(&mut inner, sender_id, newest);
         crate::status_seen::save(&inner.seen);
@@ -1807,6 +2073,7 @@ pub(crate) fn move_viewer(
     let Some(mut viewer) = inner.viewer else {
         return;
     };
+    let old_group = viewer.group_index;
     let moved = if forward {
         if advance_viewer(&mut viewer, groups) {
             inner.viewer = Some(viewer);
@@ -1823,6 +2090,12 @@ pub(crate) fn move_viewer(
     };
     if moved {
         app.stop_video();
+        if let Some(v) = inner.viewer {
+            if v.group_index != old_group {
+                inner.transition_id += 1;
+                inner.transition_forward = forward;
+            }
+        }
     }
     if moved && inner.viewer.is_some() {
         inner.generation += 1;
@@ -2356,5 +2629,55 @@ mod tests {
             status_time(yesterday, noon),
             format!("Yesterday at {}", status_hour(yesterday))
         );
+    }
+
+    #[test]
+    fn segment_count_matches_status_count_and_tracks_seen() {
+        let mut sender = group("mariano@s.whatsapp.net", 3);
+        sender.messages[0].timestamp_ms = 1_000;
+        sender.messages[1].timestamp_ms = 2_000;
+        sender.messages[2].timestamp_ms = 3_000;
+
+        // None seen yet
+        let segs = status_segments(&sender, None);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs, vec![StatusSegment::Unseen, StatusSegment::Unseen, StatusSegment::Unseen]);
+
+        // First 2 seen
+        let segs = status_segments(&sender, Some(2_000));
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs, vec![StatusSegment::Seen, StatusSegment::Seen, StatusSegment::Unseen]);
+
+        // All seen
+        let segs = status_segments(&sender, Some(3_000));
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs, vec![StatusSegment::Seen, StatusSegment::Seen, StatusSegment::Seen]);
+    }
+
+    #[test]
+    fn status_messages_are_sorted_by_upload_time() {
+        let mut groups = vec![StatusGroup {
+            sender_id: "mariano@s.whatsapp.net".to_string(),
+            sender_name: "Mariano".to_string(),
+            sender_phone_number: String::new(),
+            messages: vec![
+                Message { id: "m2".into(), timestamp_ms: 2_000, ..Default::default() },
+                Message { id: "m1".into(), timestamp_ms: 1_000, ..Default::default() },
+            ],
+        }];
+
+        // Add a newer message with timestamp 3000
+        let m3 = Message { id: "m3".into(), sender_id: "mariano@s.whatsapp.net".into(), timestamp_ms: 3_000, ..Default::default() };
+        add_status_message(&mut groups, m3);
+
+        // Add an earlier message with timestamp 500
+        let m0 = Message { id: "m0".into(), sender_id: "mariano@s.whatsapp.net".into(), timestamp_ms: 500, ..Default::default() };
+        add_status_message(&mut groups, m0);
+
+        assert_eq!(groups[0].messages.len(), 4);
+        assert_eq!(groups[0].messages[0].id, "m0");
+        assert_eq!(groups[0].messages[1].id, "m1");
+        assert_eq!(groups[0].messages[2].id, "m2");
+        assert_eq!(groups[0].messages[3].id, "m3");
     }
 }

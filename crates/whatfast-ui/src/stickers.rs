@@ -340,7 +340,7 @@ impl StickerTray {
             .collect::<Vec<_>>();
         let missing: Vec<(String, String)> = stickers
             .iter()
-            .take(30)
+            .take(100)
             .filter(|s| {
                 s.local_path.is_empty()
                     && !s.source_chat_id.is_empty()

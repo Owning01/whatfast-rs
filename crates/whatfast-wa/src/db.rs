@@ -1799,7 +1799,7 @@ impl Store {
     }
 
     /// The most recent live sticker row matching a sticker id (the plaintext
-    /// file hash, hex): the (chat, message) pair that can resend it.
+    /// or ciphertext file hash, hex): the (chat, message) pair that can resend it.
     pub fn message_by_sticker_id(
         &self,
         sticker_id: &str,
@@ -1807,10 +1807,29 @@ impl Store {
         self.read(|conn| {
             conn.query_row(
                 "SELECT chat_jid,id FROM messages
-                 WHERE kind='sticker' AND revoked=0 AND LOWER(HEX(image_file_sha256))=LOWER(?1)
-                 ORDER BY timestamp DESC, id DESC LIMIT 1",
+                 WHERE kind='sticker' AND revoked=0
+                   AND (LOWER(HEX(image_file_sha256))=LOWER(?1) OR LOWER(HEX(image_file_enc_sha256))=LOWER(?1))
+                 ORDER BY (image_local_path <> '') DESC, timestamp DESC, id DESC LIMIT 1",
                 params![sticker_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Looks up a sticker's source chat, message, and local cache path.
+    pub fn sticker_source_and_path(
+        &self,
+        sticker_id: &str,
+    ) -> rusqlite::Result<Option<(String, String, String)>> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT chat_jid, id, image_local_path FROM messages
+                 WHERE kind='sticker' AND revoked=0
+                   AND (LOWER(HEX(image_file_enc_sha256))=LOWER(?1) OR LOWER(HEX(image_file_sha256))=LOWER(?1))
+                 ORDER BY (image_local_path <> '') DESC, timestamp DESC, id DESC LIMIT 1",
+                params![sticker_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
             )
             .optional()
         })

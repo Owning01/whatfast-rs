@@ -876,7 +876,12 @@ impl Store {
 
     /// Keeps the statuses of the profile and the conversation that carries
     /// them.
-    pub fn set_statuses(&mut self, chat_id: String, groups: Vec<whatfast_protocol::StatusGroup>) {
+    pub fn set_statuses(&mut self, chat_id: String, mut groups: Vec<whatfast_protocol::StatusGroup>) {
+        for group in &mut groups {
+            group
+                .messages
+                .sort_by(|a, b| a.timestamp_ms.cmp(&b.timestamp_ms).then_with(|| a.id.cmp(&b.id)));
+        }
         self.statuses_chat_id = chat_id;
         self.statuses = groups;
     }

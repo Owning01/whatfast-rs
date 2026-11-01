@@ -944,13 +944,21 @@ impl Whatfast {
                 // La foto lleva el circulo verde cuando la persona subio un
                 // estado que todavia no se abrio, y ese circulo se clickea
                 // para verlo: el clic no abre la conversacion.
-                let unseen_status = crate::statuses::has_unseen_status(self, &chat);
+                let (unseen_status, segments) = if let Some(group) = crate::statuses::group_of_chat(self.store.statuses(), &chat) {
+                    let state = self.status_strip.state();
+                    let has_unseen = crate::statuses::has_unseen(&state.borrow(), group);
+                    let last_seen = state.borrow().seen.get(&group.sender_id).copied();
+                    (has_unseen, crate::statuses::status_segments(group, last_seen))
+                } else {
+                    (false, Vec::new())
+                };
                 let avatar = if unseen_status {
                     crate::statuses::status_avatar(
                         &chat.title,
                         &chat.avatar_path,
                         49. * ui_scale,
                         chat.kind() == proto::ChatKind::Group,
+                        segments,
                         cx,
                     )
                 } else {
@@ -2137,6 +2145,80 @@ impl Whatfast {
                                         this.delete_message(message_id, for_everyone);
                                         this.image_viewer = None;
                                         cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_confirm_delete_status(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(message_id) = self.confirm_delete_status.clone() else {
+            return div().into_any_element();
+        };
+        let scale = self.ui_scale;
+        let panel = cx.theme().background;
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        div()
+            .id("confirm-delete-status-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000088))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm_delete_status = None;
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("confirm-delete-status-card")
+                    .w(px(380. * scale))
+                    .gap_3()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(panel)
+                    .border_1()
+                    .border_color(border)
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .child(i18n::t("¿Eliminar estado?")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(i18n::t("Esta actualización de estado se eliminará para ti y tus contactos.")),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("delete-status-cancel")
+                                    .label(i18n::t("Cancelar"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.confirm_delete_status = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("delete-status-confirm")
+                                    .danger()
+                                    .label(i18n::t("Eliminar"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let id = message_id.clone();
+                                        this.confirm_delete_status = None;
+                                        this.delete_status(&id, cx);
                                     })),
                             ),
                     ),
@@ -8975,6 +9057,9 @@ impl Render for Whatfast {
                 } else {
                     root
                 }
+            })
+            .when(self.confirm_delete_status.is_some(), |root| {
+                root.child(self.render_confirm_delete_status(cx))
             })
             .when(self.settings_open, |root| {
                 root.child(self.render_settings(cx))

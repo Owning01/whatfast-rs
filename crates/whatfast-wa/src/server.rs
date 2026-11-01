@@ -2471,7 +2471,7 @@ impl Server {
             .iter()
             .map(|favorite| {
                 let target = self.media_dir.join(format!("fav-{}.webp", favorite.id));
-                let local_path = if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                let mut local_path = if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
                     target.to_string_lossy().into_owned()
                 } else if !favorite.local_path.is_empty()
                     && std::path::Path::new(&favorite.local_path).exists()
@@ -2480,6 +2480,17 @@ impl Server {
                 } else {
                     String::new()
                 };
+                let mut source_chat_id = String::new();
+                let mut source_message_id = String::new();
+                if local_path.is_empty() {
+                    if let Ok(Some((chat, msg, path))) = self.store.sticker_source_and_path(&favorite.id) {
+                        source_chat_id = chat;
+                        source_message_id = msg;
+                        if !path.is_empty() && std::path::Path::new(&path).exists() {
+                            local_path = path;
+                        }
+                    }
+                }
                 whatfast_protocol::Sticker {
                     id: favorite.id.clone(),
                     local_path,
@@ -2489,8 +2500,8 @@ impl Server {
                     height: favorite.height as i32,
                     favorite: true,
                     last_used_ms: favorite.updated_at,
-                    source_chat_id: String::new(),
-                    source_message_id: String::new(),
+                    source_chat_id,
+                    source_message_id,
                 }
             })
             .collect();

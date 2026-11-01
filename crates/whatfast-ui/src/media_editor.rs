@@ -21,10 +21,13 @@ use whatfast_i18n as i18n;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, Context, EventEmitter, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _,
-    Pixels, Point, Render, Styled as _, StyledImage as _, Window, canvas, div, img, px, rgba,
+    AppContext as _, Bounds, Context, EventEmitter, FontWeight, ImageSource, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement as _, Pixels, Point, Render, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Window, canvas, div, img, px, rgba,
 };
+use gpui::ElementId;
+use gpui_component::input::{Input, InputState};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -91,6 +94,8 @@ pub(crate) struct MediaEdit {
     /// The rotation and the crop. The crop is in the pixels of the rotated
     /// picture: that is the space the core crops in.
     pub(crate) plan: EditPlan,
+    /// The caption or text and emojis attached to the picture.
+    pub(crate) caption: String,
 }
 
 /// Applies a plan of edit to a picture and writes the result.
@@ -190,17 +195,22 @@ pub(crate) struct MediaEditor {
     /// window. The canvas of the surface fills them on every frame, so the
     /// mouse can be turned into a point of the picture.
     surface: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The caption / text / emojis field.
+    caption: Option<gpui::Entity<InputState>>,
 }
 
 impl EventEmitter<MediaEditorEvent> for MediaEditor {}
 
 impl MediaEditor {
     /// Builds the editor of the picture and starts to load it.
-    pub(crate) fn new(path: &Path, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(path: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "photo".to_string());
+        let caption = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(i18n::t("Añadir comentario, texto o emojis..."))
+        });
         let mut editor = Self {
             path: path.to_path_buf(),
             file_name,
@@ -217,6 +227,7 @@ impl MediaEditor {
             rendered: None,
             rendered_rotation: None,
             surface: Rc::new(Cell::new(None)),
+            caption: Some(caption),
         };
         editor.load(cx);
         editor
@@ -288,9 +299,15 @@ impl MediaEditor {
         }
         match self.plan() {
             Ok(plan) => {
+                let caption = self
+                    .caption
+                    .as_ref()
+                    .map(|c| c.read(cx).value().trim().to_string())
+                    .unwrap_or_default();
                 let edit = MediaEdit {
                     path: self.path().to_path_buf(),
                     plan,
+                    caption,
                 };
                 cx.emit(MediaEditorEvent::Applied(edit));
             }
@@ -732,6 +749,44 @@ impl MediaEditor {
                                     })),
                             ),
                     )
+                    .when_some(self.caption.as_ref(), |parent, caption_entity| {
+                        let caption_input = caption_entity.clone();
+                        parent.child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(Input::new(caption_entity).flex_1()),
+                                )
+                                .child({
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .children(["😀", "❤️", "🔥", "😂", "✨", "🎉", "👍", "👏"].iter().enumerate().map(|(idx, &emoji)| {
+                                            let input = caption_input.clone();
+                                            div()
+                                                .id(ElementId::named_usize("editor-emoji", idx))
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .text_sm()
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgba(0xffffff22)))
+                                                .child(emoji)
+                                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                                    input.update(cx, |input, cx| {
+                                                        let mut val = input.value().to_string();
+                                                        val.push_str(emoji);
+                                                        input.set_value(val, window, cx);
+                                                    });
+                                                    cx.notify();
+                                                }))
+                                        }))
+                                }),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()
@@ -864,6 +919,28 @@ impl MediaEditor {
             );
         for handle in handles {
             surface = surface.child(handle);
+        }
+        let caption_preview = self
+            .caption
+            .as_ref()
+            .map(|c| c.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        if !caption_preview.is_empty() {
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .bottom_2()
+                    .left_2()
+                    .right_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgba(0x000000aa))
+                    .text_color(rgba(0xffffffff))
+                    .text_sm()
+                    .text_center()
+                    .child(caption_preview),
+            );
         }
         surface
     }
@@ -1009,6 +1086,7 @@ mod tests {
             rendered: None,
             rendered_rotation: None,
             surface: Rc::new(Cell::new(None)),
+            caption: None,
         }
     }
 

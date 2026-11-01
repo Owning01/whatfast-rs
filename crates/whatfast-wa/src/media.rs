@@ -998,6 +998,7 @@ struct FavoriteDownloadable<'a> {
     media_key: &'a [u8],
     file_enc_sha256: &'a [u8],
     file_length: u64,
+    media_type: MediaType,
 }
 
 impl<'a> Downloadable for FavoriteDownloadable<'a> {
@@ -1014,10 +1015,14 @@ impl<'a> Downloadable for FavoriteDownloadable<'a> {
         None
     }
     fn file_length(&self) -> Option<u64> {
-        Some(self.file_length)
+        if self.file_length > 0 {
+            Some(self.file_length)
+        } else {
+            None
+        }
     }
     fn app_info(&self) -> MediaType {
-        MediaType::Image
+        self.media_type
     }
 }
 
@@ -1061,40 +1066,38 @@ pub(crate) async fn fetch_favorite_sticker(
     })?;
 
     let temporary = media_dir.join(format!(".fav-{}.tmp", fav.id));
-    let downloadable = FavoriteDownloadable {
-        direct_path: &fav.direct_path,
-        media_key: &fav.media_key,
-        file_enc_sha256: &fav.file_enc_sha256,
-        file_length: fav.file_size.max(0) as u64,
-    };
+    let file_length = fav.file_size.max(0) as u64;
 
     let download = async {
-        let file = std::fs::File::create(&temporary).map_err(|error| {
-            (
-                "internal".into(),
-                format!("creating the temp file: {error}"),
-                false,
-            )
-        })?;
-        let file = session
-            .client
-            .download_to_writer(&downloadable, file, DownloadLimits::default())
-            .await
-            .map_err(|error| {
+        for media_type in [MediaType::Sticker, MediaType::Image] {
+            let file = std::fs::File::create(&temporary).map_err(|error| {
                 (
-                    "unavailable".into(),
-                    format!("favourite sticker download: {error}"),
-                    true,
+                    "internal".into(),
+                    format!("creating the temp file: {error}"),
+                    false,
                 )
             })?;
-        file.sync_all().map_err(|error| {
-            (
-                "internal".into(),
-                format!("flushing the download: {error}"),
-                false,
-            )
-        })?;
-        Ok(())
+            let downloadable = FavoriteDownloadable {
+                direct_path: &fav.direct_path,
+                media_key: &fav.media_key,
+                file_enc_sha256: &fav.file_enc_sha256,
+                file_length,
+                media_type,
+            };
+            if let Ok(file) = session
+                .client
+                .download_to_writer(&downloadable, file, DownloadLimits::default())
+                .await
+            {
+                let _ = file.sync_all();
+                return Ok(());
+            }
+        }
+        Err((
+            "unavailable".into(),
+            "favourite sticker download failed".into(),
+            true,
+        ))
     };
 
     if let Err(error) = download.await {
