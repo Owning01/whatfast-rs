@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use wacore::download::MediaType;
+use wacore::download::{Downloadable, MediaType};
 use whatsapp_rust::Jid;
 use whatsapp_rust::download::{DownloadLimits, DownloadParams};
 use whatsapp_rust::upload::UploadOptions;
@@ -991,6 +991,129 @@ fn set_media_path(
         store.set_media_local_path(&row.chat_jid, &row.id, path)
     };
     changed.map(|_| ()).map_err(internal)
+}
+
+struct FavoriteDownloadable<'a> {
+    direct_path: &'a str,
+    media_key: &'a [u8],
+    file_enc_sha256: &'a [u8],
+    file_length: u64,
+}
+
+impl<'a> Downloadable for FavoriteDownloadable<'a> {
+    fn direct_path(&self) -> Option<&str> {
+        Some(self.direct_path)
+    }
+    fn media_key(&self) -> Option<&[u8]> {
+        Some(self.media_key)
+    }
+    fn file_enc_sha256(&self) -> Option<&[u8]> {
+        Some(self.file_enc_sha256)
+    }
+    fn file_sha256(&self) -> Option<&[u8]> {
+        None
+    }
+    fn file_length(&self) -> Option<u64> {
+        Some(self.file_length)
+    }
+    fn app_info(&self) -> MediaType {
+        MediaType::Image
+    }
+}
+
+/// Downloads one favourite sticker into the cache and returns its file path.
+pub(crate) async fn fetch_favorite_sticker(
+    session: &Session,
+    store: &Store,
+    media_dir: &Path,
+    id: &str,
+) -> Result<String, (String, String, bool)> {
+    let fav = store
+        .favorite_sticker(id)
+        .map_err(internal)?
+        .ok_or_else(|| ("not_found".into(), "favourite sticker is not stored".into(), false))?;
+
+    let target = media_dir.join(format!("fav-{}.webp", fav.id));
+    if let Ok(size) = std::fs::metadata(&target).map(|m| m.len())
+        && size > 0
+    {
+        let path = target.to_string_lossy().into_owned();
+        if fav.local_path != path {
+            let _ = store.set_favorite_sticker_local_path(id, &path);
+        }
+        return Ok(path);
+    }
+
+    if fav.direct_path.is_empty() || fav.media_key.len() != 32 || fav.file_enc_sha256.len() != 32 {
+        return Err((
+            "not_found".into(),
+            "favourite sticker descriptor is incomplete".into(),
+            false,
+        ));
+    }
+
+    std::fs::create_dir_all(media_dir).map_err(|error| {
+        (
+            "internal".into(),
+            format!("creating the media cache: {error}"),
+            false,
+        )
+    })?;
+
+    let temporary = media_dir.join(format!(".fav-{}.tmp", fav.id));
+    let downloadable = FavoriteDownloadable {
+        direct_path: &fav.direct_path,
+        media_key: &fav.media_key,
+        file_enc_sha256: &fav.file_enc_sha256,
+        file_length: fav.file_size.max(0) as u64,
+    };
+
+    let download = async {
+        let file = std::fs::File::create(&temporary).map_err(|error| {
+            (
+                "internal".into(),
+                format!("creating the temp file: {error}"),
+                false,
+            )
+        })?;
+        let file = session
+            .client
+            .download_to_writer(&downloadable, file, DownloadLimits::default())
+            .await
+            .map_err(|error| {
+                (
+                    "unavailable".into(),
+                    format!("favourite sticker download: {error}"),
+                    true,
+                )
+            })?;
+        file.sync_all().map_err(|error| {
+            (
+                "internal".into(),
+                format!("flushing the download: {error}"),
+                false,
+            )
+        })?;
+        Ok(())
+    };
+
+    if let Err(error) = download.await {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    let _ = std::fs::remove_file(&target);
+    std::fs::rename(&temporary, &target).map_err(|error| {
+        (
+            "internal".into(),
+            format!("moving the favourite sticker into cache: {error}"),
+            false,
+        )
+    })?;
+
+    let path = target.to_string_lossy().into_owned();
+    let _ = store.set_favorite_sticker_local_path(id, &path);
+    Ok(path)
 }
 
 #[cfg(test)]

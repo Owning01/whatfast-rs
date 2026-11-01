@@ -1777,6 +1777,7 @@ impl Server {
             }
             Some(rpc_request::Request::ListStickers(_)) => {
                 let packs = self.sticker_library()?;
+                self.spawn_sticker_prefetch();
                 Ok(Handled {
                     result: rpc_response::Result::ListStickers(
                         whatfast_protocol::ListStickersResponse { packs },
@@ -2468,20 +2469,29 @@ impl Server {
             .collect();
         let favorite_pack = favorites
             .iter()
-            .map(|favorite| whatfast_protocol::Sticker {
-                id: favorite.id.clone(),
-                // Nothing downloads a favourite yet: the Go cached the bytes
-                // through `DownloadFavoriteSticker`, a path this port's media
-                // module does not have.
-                local_path: favorite.local_path.clone(),
-                mime_type: favorite.mime.clone(),
-                animated: favorite.animated,
-                width: favorite.width as i32,
-                height: favorite.height as i32,
-                favorite: true,
-                last_used_ms: favorite.updated_at,
-                source_chat_id: String::new(),
-                source_message_id: String::new(),
+            .map(|favorite| {
+                let target = self.media_dir.join(format!("fav-{}.webp", favorite.id));
+                let local_path = if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                    target.to_string_lossy().into_owned()
+                } else if !favorite.local_path.is_empty()
+                    && std::path::Path::new(&favorite.local_path).exists()
+                {
+                    favorite.local_path.clone()
+                } else {
+                    String::new()
+                };
+                whatfast_protocol::Sticker {
+                    id: favorite.id.clone(),
+                    local_path,
+                    mime_type: favorite.mime.clone(),
+                    animated: favorite.animated,
+                    width: favorite.width as i32,
+                    height: favorite.height as i32,
+                    favorite: true,
+                    last_used_ms: favorite.updated_at,
+                    source_chat_id: String::new(),
+                    source_message_id: String::new(),
+                }
             })
             .collect();
         let candidates = self.store.recent_sticker_messages(0)?;
@@ -2541,8 +2551,12 @@ impl Server {
             &candidate.mime,
             "",
         );
-        let local_path = if cached.exists() {
+        let local_path = if cached.exists() && cached.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             cached.to_string_lossy().into_owned()
+        } else if !candidate.local_path.is_empty()
+            && std::path::Path::new(&candidate.local_path).exists()
+        {
+            candidate.local_path.clone()
         } else {
             String::new()
         };
@@ -2558,6 +2572,108 @@ impl Server {
             source_chat_id: candidate.chat_jid.clone(),
             source_message_id: candidate.message_id.clone(),
         }
+    }
+
+    /// Prefetches missing favourite and recent stickers from WhatsApp CDN in background.
+    fn spawn_sticker_prefetch(&self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let store = self.store.clone();
+        let media_dir = self.media_dir.clone();
+        let events = self.events.clone();
+
+        tokio::spawn(async move {
+            let favorites = match store.favorite_stickers(0) {
+                Ok(favs) => favs,
+                Err(_) => return,
+            };
+
+            let missing_favs: Vec<String> = favorites
+                .into_iter()
+                .filter(|fav| {
+                    if fav.direct_path.is_empty() {
+                        return false;
+                    }
+                    let target = media_dir.join(format!("fav-{}.webp", fav.id));
+                    !target.exists() || target.metadata().map(|m| m.len() == 0).unwrap_or(true)
+                })
+                .map(|fav| fav.id)
+                .collect();
+
+            let mut count = 0;
+            for id in missing_favs {
+                if crate::media::fetch_favorite_sticker(&session, &store, &media_dir, &id)
+                    .await
+                    .is_ok()
+                {
+                    count += 1;
+                    if count % 6 == 0 {
+                        let _ = events
+                            .send(whatfast_protocol::BackendEvent {
+                                sequence: 0,
+                                event: Some(
+                                    whatfast_protocol::backend_event::Event::StickersChanged(
+                                        whatfast_protocol::StickersChanged {},
+                                    ),
+                                ),
+                            })
+                            .await;
+                    }
+                }
+            }
+
+            if let Ok(candidates) = store.recent_sticker_messages(60) {
+                for candidate in candidates {
+                    let cached = crate::media::cached_media_path(
+                        &media_dir,
+                        &candidate.chat_jid,
+                        &candidate.message_id,
+                        &candidate.mime,
+                        "",
+                    );
+                    if !cached.exists() {
+                        if crate::media::fetch_message_media(
+                            &session,
+                            &store,
+                            &media_dir,
+                            &candidate.chat_jid,
+                            &candidate.message_id,
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            count += 1;
+                            if count % 6 == 0 {
+                                let _ = events
+                                    .send(whatfast_protocol::BackendEvent {
+                                        sequence: 0,
+                                        event: Some(
+                                            whatfast_protocol::backend_event::Event::StickersChanged(
+                                                whatfast_protocol::StickersChanged {},
+                                            ),
+                                        ),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if count > 0 && count % 6 != 0 {
+                let _ = events
+                    .send(whatfast_protocol::BackendEvent {
+                        sequence: 0,
+                        event: Some(
+                            whatfast_protocol::backend_event::Event::StickersChanged(
+                                whatfast_protocol::StickersChanged {},
+                            ),
+                        ),
+                    })
+                    .await;
+            }
+        });
     }
 
     /// Pins or unpins one stored message for everyone, the Go

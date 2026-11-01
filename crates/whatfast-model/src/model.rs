@@ -587,6 +587,14 @@ impl Store {
                 }
             }
         }
+        for pack in &mut self.sticker_packs {
+            for sticker in &mut pack.stickers {
+                if sticker.source_chat_id == chat_id && sticker.source_message_id == message_id {
+                    sticker.local_path = image_path.clone();
+                    updated = true;
+                }
+            }
+        }
         let Some(message) = self
             .message_index
             .get(message_id)

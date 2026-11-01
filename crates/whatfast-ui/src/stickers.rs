@@ -338,6 +338,28 @@ impl StickerTray {
             .iter()
             .filter(|sticker| sticker_matches(sticker, query))
             .collect::<Vec<_>>();
+        let missing: Vec<(String, String)> = stickers
+            .iter()
+            .take(30)
+            .filter(|s| {
+                s.local_path.is_empty()
+                    && !s.source_chat_id.is_empty()
+                    && !s.source_message_id.is_empty()
+            })
+            .map(|s| (s.source_chat_id.clone(), s.source_message_id.clone()))
+            .collect();
+        if !missing.is_empty() {
+            cx.spawn(async move |weak, cx| {
+                weak.update(cx, |app, cx| {
+                    for (chat_id, message_id) in missing {
+                        app.load_message_image(chat_id, message_id);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         h_flex()
             .id("sticker-grid")
             .flex_1()

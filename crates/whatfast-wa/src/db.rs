@@ -2134,7 +2134,7 @@ impl Store {
         self.read(|conn| {
             let mut statement = conn.prepare(
                 "SELECT chat_jid,id,from_me,timestamp,image_mime,image_file_sha256,
-                        image_width,image_height,image_animated
+                        image_width,image_height,image_animated,image_local_path
                  FROM messages
                  WHERE kind='sticker' AND revoked=0 AND image_file_sha256<>X''
                  ORDER BY timestamp DESC,id DESC LIMIT ?1",
@@ -2152,6 +2152,7 @@ impl Store {
                         width: row.get(6)?,
                         height: row.get(7)?,
                         animated: row.get::<_, i64>(8)? != 0,
+                        local_path: row.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2932,6 +2933,7 @@ pub struct StickerCandidateRow {
     pub animated: bool,
     pub from_me: bool,
     pub timestamp: i64,
+    pub local_path: String,
 }
 
 /// One sticker WhatsApp synced as favourited on another device.
