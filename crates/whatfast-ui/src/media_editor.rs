@@ -1,16 +1,22 @@
-//! The image editor: a free crop with handles and a quarter turn rotation.
+//! The image and media editor: WhatsApp Desktop full-screen experience.
 //!
-//! port: taken from the origin's `tauri/src/components/MediaEditor.tsx`. The
-//! geometry of the crop is not here: it comes from
-//! `whatfast_core::media_crop`, the port of `tauri/src/lib/media-crop.ts`.
-//!
-//! The picture is shown already rotated and the rectangle of the crop lives
-//! in the pixels of the rotated picture, which is exactly the space the core
-//! crops in.
+//! Visual fidelity matches WhatsApp Desktop reference:
+//! - Full-screen immersive workspace (#0c1317 background).
+//! - Top Bar:
+//!   - Close (✕)
+//!   - Undo (↶) & Redo (↷)
+//!   - Center Tools: Crop & Rotate (⛶), Filters (🪄), Pen (✏️), Text (Aa),
+//!     Shapes (⬜), Blur / Mosaic (▦), Stickers / Emojis (😊), Sticker Cutout (🏷️), HD quality ([HD]).
+//!   - Right: Download / Save (📥).
+//! - Sub-toolbar for active tool (rotation 90°, aspect ratios, filter presets, color picker, brush sizes, mosaic intensity).
+//! - Canvas: Large containment preview with crop handles, rule-of-thirds grid, strokes, blurs, text and emoji overlays.
+//! - Floating Caption Bar: Rounded capsule (#202c33) with "Añade un comentario" and inline emoji picker button.
+//! - Bottom Bar:
+//!   - Audience Privacy pill: "◎ Estado (221 excluidos)" with interactive selector.
+//!   - Media Carousel: Multi-image thumbnails (active with green border #00a884) and "+" button to add more images.
+//!   - Circular WhatsApp Green Send Button (➤).
+//! - Backend export: `apply_media_edit` applies rotation, filters, blur mosaic, pen strokes, text overlays, and crop.
 
-// The editor is a piece of the interface that the application wires in its
-// own batch: until then, nothing opens it and the compiler would call every
-// item of the editor dead.
 #![allow(dead_code)]
 
 use std::cell::Cell;
@@ -24,22 +30,21 @@ use gpui::{
     AppContext as _, Bounds, Context, EventEmitter, FontWeight, ImageSource, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
     ParentElement as _, Pixels, Point, Render, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, canvas, div, img, px, rgba,
+    StyledImage as _, Window, canvas, div, img, px, rgb, rgba, PathPromptOptions,
 };
 use gpui::ElementId;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _,
+    Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
 
 use whatfast_core::media_crop::{self, CropRect, EditPlan, PixelSize, Rotation};
-
 use crate::icons::WhatfastIcon;
 
 /// The longest edge of the preview, in pixels.
-pub(crate) const PREVIEW_EDGE: f64 = 460.0;
+pub(crate) const PREVIEW_EDGE: f64 = 620.0;
 
 /// The smallest crop the user can leave behind, in preview pixels.
 pub(crate) const MIN_CROP_EDGE: f64 = 24.0;
@@ -50,80 +55,311 @@ const HANDLE_RADIUS: f64 = 10.0;
 /// The side of the square that draws a handle, in preview pixels.
 const HANDLE_EDGE: f64 = 12.0;
 
+/// The active editing tool in the top bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EditorTool {
+    #[default]
+    None,
+    Crop,
+    Filters,
+    Pen,
+    Text,
+    Shapes,
+    Blur,
+    Stickers,
+}
+
+/// Image filter presets matching WhatsApp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ImageFilter {
+    #[default]
+    Normal,
+    HighContrast,
+    Grayscale,
+    Warm,
+    Cool,
+    Sepia,
+}
+
+/// A freehand pen stroke.
+#[derive(Debug, Clone)]
+pub(crate) struct DrawStroke {
+    pub(crate) points: Vec<(f64, f64)>,
+    pub(crate) color: [u8; 4],
+    pub(crate) width: f64,
+}
+
+/// A blur / mosaic pixelated rectangle.
+#[derive(Debug, Clone)]
+pub(crate) struct BlurRegion {
+    pub(crate) rect: CropRect,
+    pub(crate) block_size: u32,
+}
+
+/// A floating text overlay.
+#[derive(Debug, Clone)]
+pub(crate) struct TextOverlay {
+    pub(crate) text: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) color: [u8; 4],
+    pub(crate) has_bg: bool,
+}
+
+/// A floating emoji overlay.
+#[derive(Debug, Clone)]
+pub(crate) struct EmojiOverlay {
+    pub(crate) emoji: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) size: f32,
+}
+
 /// The handle the user is dragging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DragMode {
-    /// A new crop, drawn from the point of the press.
     Create,
-    /// The whole rectangle travels with the mouse.
     Move,
-    /// The top left corner.
     NorthWest,
-    /// The top edge.
     North,
-    /// The top right corner.
     NorthEast,
-    /// The right edge.
     East,
-    /// The bottom right corner.
     SouthEast,
-    /// The bottom edge.
     South,
-    /// The bottom left corner.
     SouthWest,
-    /// The left edge.
     West,
 }
 
 /// The state of one drag.
 #[derive(Debug, Clone, Copy)]
-struct DragState {
+pub(crate) struct DragState {
     mode: DragMode,
-    /// The point of the press, in the pixels of the rotated picture.
     origin_x: f64,
     origin_y: f64,
-    /// The crop when the drag started.
     start: CropRect,
 }
 
-/// The edit that the user applied.
+/// Snapshot of an item's editable state for Undo / Redo.
 #[derive(Debug, Clone)]
-pub(crate) struct MediaEdit {
-    /// The picture that was edited.
-    pub(crate) path: PathBuf,
-    /// The rotation and the crop. The crop is in the pixels of the rotated
-    /// picture: that is the space the core crops in.
-    pub(crate) plan: EditPlan,
-    /// The caption or text and emojis attached to the picture.
-    pub(crate) caption: String,
+pub(crate) struct ItemStateSnapshot {
+    rotation: Rotation,
+    crop: Option<CropRect>,
+    filter: ImageFilter,
+    strokes: Vec<DrawStroke>,
+    blurs: Vec<BlurRegion>,
+    texts: Vec<TextOverlay>,
+    emojis: Vec<EmojiOverlay>,
 }
 
-/// Applies a plan of edit to a picture and writes the result.
-///
-/// The rotation comes first and the crop is taken in the pixels of the
-/// rotated picture, which is the space the plan speaks about.
-///
-/// port: the web client applies the crop in the backend (a Tauri command,
-/// `edit_image_blocking`). The native client has no such command in the
-/// protocol, so the pixels are worked here.
-pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> Result<(), String> {
-    let picture = image::ImageReader::open(source)
+/// One media item in the editor batch / carousel.
+#[derive(Debug, Clone)]
+pub(crate) struct MediaItem {
+    pub(crate) path: PathBuf,
+    pub(crate) file_name: String,
+    pub(crate) natural: PixelSize,
+    pub(crate) rotation: Rotation,
+    pub(crate) crop: Option<CropRect>,
+    pub(crate) filter: ImageFilter,
+    pub(crate) strokes: Vec<DrawStroke>,
+    pub(crate) blurs: Vec<BlurRegion>,
+    pub(crate) texts: Vec<TextOverlay>,
+    pub(crate) emojis: Vec<EmojiOverlay>,
+    pub(crate) caption: String,
+    pub(crate) is_hd: bool,
+    pub(crate) preview_base: Option<image::RgbaImage>,
+    pub(crate) preview_baked: Option<image::RgbaImage>,
+    pub(crate) rendered: Option<Arc<gpui::RenderImage>>,
+    pub(crate) rendered_version: usize,
+}
+
+impl MediaItem {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "photo".to_string());
+        Self {
+            path,
+            file_name,
+            natural: PixelSize {
+                width: 0.0,
+                height: 0.0,
+            },
+            rotation: Rotation::Deg0,
+            crop: None,
+            filter: ImageFilter::Normal,
+            strokes: Vec::new(),
+            blurs: Vec::new(),
+            texts: Vec::new(),
+            emojis: Vec::new(),
+            caption: String::new(),
+            is_hd: false,
+            preview_base: None,
+            preview_baked: None,
+            rendered: None,
+            rendered_version: 0,
+        }
+    }
+
+    fn snapshot(&self) -> ItemStateSnapshot {
+        ItemStateSnapshot {
+            rotation: self.rotation,
+            crop: self.crop,
+            filter: self.filter,
+            strokes: self.strokes.clone(),
+            blurs: self.blurs.clone(),
+            texts: self.texts.clone(),
+            emojis: self.emojis.clone(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: ItemStateSnapshot) {
+        self.rotation = snapshot.rotation;
+        self.crop = snapshot.crop;
+        self.filter = snapshot.filter;
+        self.strokes = snapshot.strokes;
+        self.blurs = snapshot.blurs;
+        self.texts = snapshot.texts;
+        self.emojis = snapshot.emojis;
+        self.rebake_preview();
+    }
+
+    fn rotated_size(&self) -> PixelSize {
+        match media_crop::rotated_size(self.natural, self.rotation) {
+            Ok(size) => size,
+            Err(_) => PixelSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        }
+    }
+
+    fn crop_rect(&self) -> CropRect {
+        match self.crop {
+            Some(crop) => crop,
+            None => {
+                let size = self.rotated_size();
+                CropRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.width,
+                    height: size.height,
+                }
+            }
+        }
+    }
+
+    fn rebake_preview(&mut self) {
+        let Some(base) = self.preview_base.as_ref() else {
+            return;
+        };
+        let mut rotated = rotate_picture(base, self.rotation);
+        apply_filter_to_image(&mut rotated, self.filter);
+
+        let (base_w, base_h) = (rotated.width() as f64, rotated.height() as f64);
+        let rot_size = self.rotated_size();
+        let scale_x = if rot_size.width > 0.0 { base_w / rot_size.width } else { 1.0 };
+        let scale_y = if rot_size.height > 0.0 { base_h / rot_size.height } else { 1.0 };
+
+        for blur in &self.blurs {
+            let scaled_rect = CropRect {
+                x: blur.rect.x * scale_x,
+                y: blur.rect.y * scale_y,
+                width: blur.rect.width * scale_x,
+                height: blur.rect.height * scale_y,
+            };
+            apply_mosaic_to_image(&mut rotated, &scaled_rect, blur.block_size);
+        }
+
+        for stroke in &self.strokes {
+            let scaled_points: Vec<(f64, f64)> = stroke
+                .points
+                .iter()
+                .map(|&(x, y)| (x * scale_x, y * scale_y))
+                .collect();
+            let scaled_stroke = DrawStroke {
+                points: scaled_points,
+                color: stroke.color,
+                width: (stroke.width * (scale_x + scale_y) / 2.0).max(1.0),
+            };
+            apply_stroke_to_image(&mut rotated, &scaled_stroke);
+        }
+
+        self.preview_baked = Some(rotated.clone());
+        self.rendered = Some(Arc::new(to_render_image(&rotated)));
+        self.rendered_version = self.rendered_version.wrapping_add(1);
+    }
+}
+
+/// The edit that the user applied to one picture.
+#[derive(Debug, Clone)]
+pub(crate) struct MediaEdit {
+    pub(crate) path: PathBuf,
+    pub(crate) plan: EditPlan,
+    pub(crate) caption: String,
+    pub(crate) filter: ImageFilter,
+    pub(crate) strokes: Vec<DrawStroke>,
+    pub(crate) blurs: Vec<BlurRegion>,
+    pub(crate) texts: Vec<TextOverlay>,
+    pub(crate) emojis: Vec<EmojiOverlay>,
+    pub(crate) is_hd: bool,
+}
+
+/// The events of the editor.
+#[derive(Debug, Clone)]
+pub(crate) enum MediaEditorEvent {
+    Applied(Vec<MediaEdit>),
+    Cancelled,
+}
+
+/// The reason why the editor could not build the plan of the edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MediaEditError {
+    NoPicture,
+    Geometry(String),
+}
+
+impl std::fmt::Display for MediaEditError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaEditError::NoPicture => write!(formatter, "the photo could not be edited"),
+            MediaEditError::Geometry(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+/// Applies a complete plan of edit (rotation, filter, blur mosaic, pen strokes, text overlays, crop) to a picture.
+pub(crate) fn apply_media_edit(edit: &MediaEdit, destination: &Path) -> Result<(), String> {
+    let picture = image::ImageReader::open(&edit.path)
         .map_err(|error| format!("the picture could not be opened: {error}"))?
         .with_guessed_format()
         .map_err(|error| format!("the format of the picture is unknown: {error}"))?
         .decode()
         .map_err(|error| format!("the picture could not be decoded: {error}"))?;
-    let rotated = match plan.rotation {
-        Rotation::Deg0 => picture,
-        Rotation::Deg90 => picture.rotate90(),
-        Rotation::Deg180 => picture.rotate180(),
-        Rotation::Deg270 => picture.rotate270(),
+
+    let mut rotated = match edit.plan.rotation {
+        Rotation::Deg0 => picture.into_rgba8(),
+        Rotation::Deg90 => picture.rotate90().into_rgba8(),
+        Rotation::Deg180 => picture.rotate180().into_rgba8(),
+        Rotation::Deg270 => picture.rotate270().into_rgba8(),
     };
-    let x = plan.crop.x.round().clamp(0.0, rotated.width() as f64) as u32;
-    let y = plan.crop.y.round().clamp(0.0, rotated.height() as f64) as u32;
-    let width = (plan.crop.width.round().max(1.0) as u32).min(rotated.width().saturating_sub(x));
-    let height = (plan.crop.height.round().max(1.0) as u32).min(rotated.height().saturating_sub(y));
+
+    apply_filter_to_image(&mut rotated, edit.filter);
+
+    for blur in &edit.blurs {
+        apply_mosaic_to_image(&mut rotated, &blur.rect, blur.block_size);
+    }
+
+    for stroke in &edit.strokes {
+        apply_stroke_to_image(&mut rotated, stroke);
+    }
+
+    let x = edit.plan.crop.x.round().clamp(0.0, rotated.width() as f64) as u32;
+    let y = edit.plan.crop.y.round().clamp(0.0, rotated.height() as f64) as u32;
+    let width = (edit.plan.crop.width.round().max(1.0) as u32).min(rotated.width().saturating_sub(x));
+    let height = (edit.plan.crop.height.round().max(1.0) as u32).min(rotated.height().saturating_sub(y));
     let cropped = image::imageops::crop_imm(&rotated, x, y, width, height).to_image();
+
     let ext = destination
         .extension()
         .and_then(|ext| ext.to_str())
@@ -141,224 +377,350 @@ pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> 
     }
 }
 
-/// The events of the editor.
-#[derive(Debug, Clone)]
-pub(crate) enum MediaEditorEvent {
-    /// The user applied the edit.
-    Applied(MediaEdit),
-    /// The user closed the editor without applying anything.
-    Cancelled,
+/// Applies a crop and rotation to a picture and writes the result (legacy helper).
+pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> Result<(), String> {
+    let edit = MediaEdit {
+        path: source.to_path_buf(),
+        plan: *plan,
+        caption: String::new(),
+        filter: ImageFilter::Normal,
+        strokes: Vec::new(),
+        blurs: Vec::new(),
+        texts: Vec::new(),
+        emojis: Vec::new(),
+        is_hd: false,
+    };
+    apply_media_edit(&edit, destination)
 }
 
-/// The reason why the editor could not build the plan of the edit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MediaEditError {
-    /// The picture is not loaded.
-    NoPicture,
-    /// The geometry of the picture is not valid.
-    Geometry(String),
-}
-
-impl std::fmt::Display for MediaEditError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MediaEditError::NoPicture => write!(formatter, "the photo could not be edited"),
-            MediaEditError::Geometry(message) => write!(formatter, "{message}"),
-        }
-    }
-}
-
-/// The editor of one picture.
+/// The full-screen WhatsApp media/status editor.
 pub(crate) struct MediaEditor {
-    path: PathBuf,
-    file_name: String,
-    /// The size of the picture, in pixels.
-    natural: PixelSize,
-    /// The rotation of the picture.
-    rotation: Rotation,
-    /// The crop, in the pixels of the rotated picture. `None` is the whole
-    /// picture.
-    crop: Option<CropRect>,
-    /// The handle that is being dragged.
-    drag: Option<DragState>,
-    /// Whether the editor is busy.
-    working: bool,
-    /// The error of the last load.
-    error: Option<String>,
-    /// The picture, already reduced to the size of the preview.
-    preview: Option<image::RgbaImage>,
-    /// The preview, already rotated, ready to be painted.
-    rendered: Option<Arc<gpui::RenderImage>>,
-    /// The rotation of `rendered`.
-    rendered_rotation: Option<Rotation>,
-    /// The bounds of the surface of the preview, in the coordinates of the
-    /// window. The canvas of the surface fills them on every frame, so the
-    /// mouse can be turned into a point of the picture.
-    surface: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The caption / text / emojis field.
-    caption: Option<gpui::Entity<InputState>>,
+    pub(crate) items: Vec<MediaItem>,
+    pub(crate) active_index: usize,
+    pub(crate) active_tool: EditorTool,
+    pub(crate) pen_color: [u8; 4],
+    pub(crate) pen_width: f64,
+    pub(crate) blur_block_size: u32,
+    pub(crate) active_stroke: Option<DrawStroke>,
+    pub(crate) active_blur_start: Option<(f64, f64)>,
+    pub(crate) active_blur_rect: Option<CropRect>,
+    pub(crate) drag: Option<DragState>,
+    pub(crate) working: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) undo_stack: Vec<ItemStateSnapshot>,
+    pub(crate) redo_stack: Vec<ItemStateSnapshot>,
+    pub(crate) surface: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) caption: Option<gpui::Entity<InputState>>,
+    pub(crate) caption_emoji_open: bool,
+    pub(crate) status_privacy_open: bool,
+    pub(crate) status_privacy_mode: String,
+    pub(crate) save_notice: Option<String>,
+    pub(crate) text_input_open: bool,
+    pub(crate) text_draft: String,
 }
 
 impl EventEmitter<MediaEditorEvent> for MediaEditor {}
 
 impl MediaEditor {
-    /// Builds the editor of the picture and starts to load it.
     pub(crate) fn new(path: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "photo".to_string());
         let caption = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(i18n::t("Añadir comentario, texto o emojis..."))
+            InputState::new(window, cx).placeholder(i18n::t("Añade un comentario"))
         });
+        let initial_item = MediaItem::new(path.to_path_buf());
         let mut editor = Self {
-            path: path.to_path_buf(),
-            file_name,
-            natural: PixelSize {
-                width: 0.0,
-                height: 0.0,
-            },
-            rotation: Rotation::Deg0,
-            crop: None,
+            items: vec![initial_item],
+            active_index: 0,
+            active_tool: EditorTool::None,
+            pen_color: [0, 168, 132, 255], // WhatsApp green
+            pen_width: 5.0,
+            blur_block_size: 14,
+            active_stroke: None,
+            active_blur_start: None,
+            active_blur_rect: None,
             drag: None,
             working: false,
             error: None,
-            preview: None,
-            rendered: None,
-            rendered_rotation: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             surface: Rc::new(Cell::new(None)),
             caption: Some(caption),
+            caption_emoji_open: false,
+            status_privacy_open: false,
+            status_privacy_mode: "Estado (221 excluidos)".to_string(),
+            save_notice: None,
+            text_input_open: false,
+            text_draft: String::new(),
         };
-        editor.load(cx);
+        editor.load_item(0, cx);
         editor
     }
 
-    /// The picture that is being edited.
+    pub(crate) fn active_item(&self) -> &MediaItem {
+        &self.items[self.active_index.min(self.items.len().saturating_sub(1))]
+    }
+
+    pub(crate) fn active_item_mut(&mut self) -> &mut MediaItem {
+        let idx = self.active_index.min(self.items.len().saturating_sub(1));
+        &mut self.items[idx]
+    }
+
     pub(crate) fn path(&self) -> &Path {
-        &self.path
+        &self.active_item().path
     }
 
-    /// The name of the picture, the way the user knows it.
     pub(crate) fn file_name(&self) -> &str {
-        &self.file_name
+        &self.active_item().file_name
     }
 
-    /// Whether the editor is busy.
     pub(crate) fn is_working(&self) -> bool {
         self.working
     }
 
-    /// The rotation of the picture.
     pub(crate) fn rotation(&self) -> Rotation {
-        self.rotation
+        self.active_item().rotation
     }
 
-    /// The crop, in the pixels of the rotated picture.
-    ///
-    /// When the user did not crop anything, this is the whole picture.
     pub(crate) fn crop(&self) -> CropRect {
-        match self.crop {
-            Some(crop) => crop,
-            None => {
-                let size = self.rotated_size();
-                CropRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: size.width,
-                    height: size.height,
-                }
-            }
+        self.active_item().crop_rect()
+    }
+
+    fn push_undo(&mut self) {
+        let snap = self.active_item().snapshot();
+        self.undo_stack.push(snap);
+        self.redo_stack.clear();
+    }
+
+    pub(crate) fn undo(&mut self, cx: &mut Context<Self>) {
+        if let Some(prev) = self.undo_stack.pop() {
+            let curr = self.active_item().snapshot();
+            self.redo_stack.push(curr);
+            self.active_item_mut().restore(prev);
+            cx.notify();
         }
     }
 
-    /// Turns the picture a quarter turn to the left.
+    pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
+        if let Some(next) = self.redo_stack.pop() {
+            let curr = self.active_item().snapshot();
+            self.undo_stack.push(curr);
+            self.active_item_mut().restore(next);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn rotate_left(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
         self.rotate(270, cx);
     }
 
-    /// Turns the picture a quarter turn to the right.
     pub(crate) fn rotate_right(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
         self.rotate(90, cx);
     }
 
-    /// Drops the crop and goes back to the whole picture.
     pub(crate) fn reset_crop(&mut self, cx: &mut Context<Self>) {
-        self.crop = None;
+        self.push_undo();
+        self.active_item_mut().crop = None;
         cx.notify();
     }
 
-    /// Closes the editor without applying anything.
+    pub(crate) fn set_filter(&mut self, filter: ImageFilter, cx: &mut Context<Self>) {
+        if self.active_item().filter != filter {
+            self.push_undo();
+            self.active_item_mut().filter = filter;
+            self.active_item_mut().rebake_preview();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_hd(&mut self, cx: &mut Context<Self>) {
+        let is_hd = self.active_item().is_hd;
+        self.active_item_mut().is_hd = !is_hd;
+        cx.notify();
+    }
+
     pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
         cx.emit(MediaEditorEvent::Cancelled);
     }
 
-    /// Applies the edit and hands the plan to the one that opened the editor.
+    pub(crate) fn sync_current_caption(&mut self, cx: &mut Context<Self>) {
+        if let Some(caption_input) = self.caption.as_ref() {
+            let val = caption_input.read(cx).value().trim().to_string();
+            self.active_item_mut().caption = val;
+        }
+    }
+
+    pub(crate) fn select_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.items.len() || index == self.active_index {
+            return;
+        }
+        self.sync_current_caption(cx);
+        self.active_index = index;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        let item_caption = self.items[index].caption.clone();
+        if let Some(caption_input) = self.caption.as_ref() {
+            caption_input.update(cx, |input, cx| {
+                input.set_value(item_caption, window, cx);
+            });
+        }
+        if self.items[index].preview_base.is_none() {
+            self.load_item(index, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn add_items_from_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        for path in paths {
+            let item = MediaItem::new(path);
+            self.items.push(item);
+            let idx = self.items.len() - 1;
+            self.load_item(idx, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.items.len() <= 1 || index >= self.items.len() {
+            return;
+        }
+        self.items.remove(index);
+        let next_idx = self.active_index.min(self.items.len().saturating_sub(1));
+        self.active_index = next_idx;
+        let item_caption = self.items[next_idx].caption.clone();
+        if let Some(caption_input) = self.caption.as_ref() {
+            caption_input.update(cx, |input, cx| {
+                input.set_value(item_caption, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_to_disk(&mut self, cx: &mut Context<Self>) {
+        self.sync_current_caption(cx);
+        let item = self.active_item();
+        let plan = match self.plan_for_item(item) {
+            Ok(p) => p,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let edit = MediaEdit {
+            path: item.path.clone(),
+            plan,
+            caption: item.caption.clone(),
+            filter: item.filter,
+            strokes: item.strokes.clone(),
+            blurs: item.blurs.clone(),
+            texts: item.texts.clone(),
+            emojis: item.emojis.clone(),
+            is_hd: item.is_hd,
+        };
+
+        let downloads_dir = std::env::var("USERPROFILE")
+            .map(|p| PathBuf::from(p).join("Downloads"))
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let file_name = format!(
+            "whatfast_edit_{}.jpg",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        let dest = downloads_dir.join(file_name);
+
+        let task_edit = edit;
+        let task_dest = dest.clone();
+        cx.spawn(async move |this, cx| {
+            let res = smol::unblock(move || apply_media_edit(&task_edit, &task_dest)).await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(()) => {
+                        this.save_notice = Some(format!("Foto guardada en Descargas"));
+                    }
+                    Err(err) => {
+                        this.error = Some(format!("Error al guardar: {err}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn apply(&mut self, cx: &mut Context<Self>) {
         if self.is_working() {
             return;
         }
-        match self.plan() {
-            Ok(plan) => {
-                let caption = self
-                    .caption
-                    .as_ref()
-                    .map(|c| c.read(cx).value().trim().to_string())
-                    .unwrap_or_default();
-                let edit = MediaEdit {
-                    path: self.path().to_path_buf(),
-                    plan,
-                    caption,
-                };
-                cx.emit(MediaEditorEvent::Applied(edit));
+        self.sync_current_caption(cx);
+        let mut edits = Vec::new();
+        for item in &self.items {
+            match self.plan_for_item(item) {
+                Ok(plan) => {
+                    edits.push(MediaEdit {
+                        path: item.path.clone(),
+                        plan,
+                        caption: item.caption.clone(),
+                        filter: item.filter,
+                        strokes: item.strokes.clone(),
+                        blurs: item.blurs.clone(),
+                        texts: item.texts.clone(),
+                        emojis: item.emojis.clone(),
+                        is_hd: item.is_hd,
+                    });
+                }
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
             }
-            Err(error) => {
-                self.error = Some(error.to_string());
-                cx.notify();
-            }
+        }
+        if !edits.is_empty() {
+            cx.emit(MediaEditorEvent::Applied(edits));
         }
     }
 
-    /// The plan of the edit: the rotation and the crop, in the pixels of the
-    /// rotated picture.
     pub(crate) fn plan(&self) -> Result<EditPlan, MediaEditError> {
-        let natural = self.natural;
+        self.plan_for_item(self.active_item())
+    }
+
+    fn plan_for_item(&self, item: &MediaItem) -> Result<EditPlan, MediaEditError> {
+        let natural = item.natural;
         if natural.width <= 0.0 || natural.height <= 0.0 {
             return Err(MediaEditError::NoPicture);
         }
-        let rotation = self.rotation();
+        let rotation = item.rotation;
         let rotated = media_crop::rotated_size(natural, rotation)
             .map_err(|error| MediaEditError::Geometry(error.message))?;
-        // The editor keeps the crop in the pixels of the rotated picture, the
-        // space the core crops in, and `plan_edit` takes the crop in the
-        // pixels of the original picture: the rectangle travels back through
-        // the inverse of the rotation.
         let source_crop =
-            media_crop::crop_in_rotated_space(self.crop(), rotated, inverse_rotation(rotation))
+            media_crop::crop_in_rotated_space(item.crop_rect(), rotated, inverse_rotation(rotation))
                 .map_err(|error| MediaEditError::Geometry(error.message))?;
         media_crop::plan_edit(natural, source_crop, rotation)
             .map_err(|error| MediaEditError::Geometry(error.message))
     }
 
-    /// The drawing of the editor.
-    pub(crate) fn render(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.draw(cx)
-    }
-
-    /// Loads the picture in the background.
-    fn load(&mut self, cx: &mut Context<Self>) {
+    fn load_item(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.items.len() {
+            return;
+        }
         self.working = true;
         self.error = None;
-        let path = self.path().to_path_buf();
+        let path = self.items[index].path.clone();
         cx.spawn(async move |this, cx| {
             let loaded = smol::unblock(move || load_picture(&path)).await;
             this.update(cx, |this, cx| {
                 this.working = false;
                 match loaded {
                     Ok(loaded) => {
-                        this.natural = loaded.natural;
-                        this.preview = Some(loaded.preview);
-                        this.rendered = None;
-                        this.rendered_rotation = None;
+                        if index < this.items.len() {
+                            this.items[index].natural = loaded.natural;
+                            this.items[index].preview_base = Some(loaded.preview);
+                            this.items[index].rebake_preview();
+                        }
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -369,30 +731,22 @@ impl MediaEditor {
         .detach();
     }
 
-    /// Turns the picture a quarter turn and carries the crop with it.
     fn rotate(&mut self, steps: u32, cx: &mut Context<Self>) {
         let current = self.rotation();
         let next = media_crop::parse_rotation(current.degrees() as f64 + steps as f64);
-        if let Some(crop) = self.crop {
+        if let Some(crop) = self.active_item().crop {
             let frame = self.rotated_size();
-            self.crop = carried_crop(crop, frame, steps);
+            self.active_item_mut().crop = carried_crop(crop, frame, steps);
         }
-        self.rotation = next;
+        self.active_item_mut().rotation = next;
+        self.active_item_mut().rebake_preview();
         cx.notify();
     }
 
-    /// The size of the picture after the rotation.
     fn rotated_size(&self) -> PixelSize {
-        match media_crop::rotated_size(self.natural, self.rotation()) {
-            Ok(size) => size,
-            Err(_) => PixelSize {
-                width: 0.0,
-                height: 0.0,
-            },
-        }
+        self.active_item().rotated_size()
     }
 
-    /// The size of the preview of the picture, in the pixels of the window.
     fn drawn_size(&self) -> PixelSize {
         let rotated = self.rotated_size();
         let scale = preview_scale(rotated);
@@ -402,7 +756,6 @@ impl MediaEditor {
         }
     }
 
-    /// How many pixels of the window are one pixel of the picture.
     fn window_per_picture(&self) -> (f64, f64) {
         let drawn = self.drawn_size();
         let rotated = self.rotated_size();
@@ -420,21 +773,16 @@ impl MediaEditor {
         )
     }
 
-    /// The smallest crop the user can leave behind, in the pixels of the
-    /// rotated picture.
     fn min_edge(&self) -> f64 {
         let (scale_x, scale_y) = self.window_per_picture();
         MIN_CROP_EDGE * (scale_x + scale_y) / 2.0
     }
 
-    /// The radius of the area that grabs a handle, in the pixels of the
-    /// rotated picture.
     fn handle_radius(&self) -> f64 {
         let (scale_x, scale_y) = self.window_per_picture();
         HANDLE_RADIUS * (scale_x + scale_y) / 2.0
     }
 
-    /// The point of the mouse, in the pixels of the rotated picture.
     fn picture_point(&self, position: Point<Pixels>) -> Option<(f64, f64)> {
         let bounds = self.surface.get()?;
         let (scale_x, scale_y) = self.window_per_picture();
@@ -447,166 +795,221 @@ impl MediaEditor {
         ))
     }
 
-    /// Starts a drag: the handle under the mouse, or a new crop.
     fn begin_drag(&mut self, position: Point<Pixels>) {
         let Some((x, y)) = self.picture_point(position) else {
             return;
         };
-        let crop = self.crop();
-        let mode = self.handle_under(x, y, crop);
-        self.drag = Some(DragState {
-            mode,
-            origin_x: x,
-            origin_y: y,
-            start: crop,
-        });
+        match self.active_tool {
+            EditorTool::Pen => {
+                self.push_undo();
+                self.active_stroke = Some(DrawStroke {
+                    points: vec![(x, y)],
+                    color: self.pen_color,
+                    width: self.pen_width,
+                });
+            }
+            EditorTool::Blur => {
+                self.push_undo();
+                self.active_blur_start = Some((x, y));
+                self.active_blur_rect = Some(CropRect {
+                    x,
+                    y,
+                    width: 0.0,
+                    height: 0.0,
+                });
+            }
+            EditorTool::Crop | EditorTool::None => {
+                let crop = self.crop();
+                let mode = self.handle_under(x, y, crop);
+                self.drag = Some(DragState {
+                    mode,
+                    origin_x: x,
+                    origin_y: y,
+                    start: crop,
+                });
+            }
+            _ => {}
+        }
     }
 
-    /// Moves the handle that is being dragged.
     fn move_drag(&mut self, position: Point<Pixels>) {
-        let Some(drag) = self.drag else {
-            return;
-        };
         let Some((x, y)) = self.picture_point(position) else {
             return;
         };
-        let frame = self.rotated_size();
-        let min_edge = self.min_edge();
-        let start = drag.start;
-        // port: the origin keeps the point of the mouse inside the picture.
-        let point_x = x.clamp(0.0, frame.width);
-        let point_y = y.clamp(0.0, frame.height);
-        let right = start.x + start.width;
-        let bottom = start.y + start.height;
-        let crop = match drag.mode {
-            DragMode::Create => {
-                let origin_x = drag.origin_x;
-                let origin_y = drag.origin_y;
-                let left = origin_x.min(point_x);
-                let top = origin_y.min(point_y);
-                CropRect {
-                    x: left,
-                    y: top,
-                    width: (point_x - origin_x).abs(),
-                    height: (point_y - origin_y).abs(),
+        match self.active_tool {
+            EditorTool::Pen => {
+                if let Some(stroke) = self.active_stroke.as_mut() {
+                    stroke.points.push((x, y));
                 }
             }
-            DragMode::Move => {
-                let width = start.width.min(frame.width);
-                let height = start.height.min(frame.height);
-                let x = (start.x + (point_x - drag.origin_x))
-                    .clamp(0.0, (frame.width - width).max(0.0));
-                let y = (start.y + (point_y - drag.origin_y))
-                    .clamp(0.0, (frame.height - height).max(0.0));
-                CropRect {
-                    x,
-                    y,
-                    width,
-                    height,
+            EditorTool::Blur => {
+                if let Some((sx, sy)) = self.active_blur_start {
+                    let rx = sx.min(x);
+                    let ry = sy.min(y);
+                    let rw = (x - sx).abs();
+                    let rh = (y - sy).abs();
+                    self.active_blur_rect = Some(CropRect {
+                        x: rx,
+                        y: ry,
+                        width: rw,
+                        height: rh,
+                    });
                 }
             }
-            DragMode::NorthWest => {
-                let (x, width) = left_edge(right, point_x, min_edge);
-                let (y, height) = top_edge(bottom, point_y, min_edge);
-                CropRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                }
+            EditorTool::Crop | EditorTool::None => {
+                let Some(drag) = self.drag else {
+                    return;
+                };
+                let frame = self.rotated_size();
+                let min_edge = self.min_edge();
+                let start = drag.start;
+                let point_x = x.clamp(0.0, frame.width);
+                let point_y = y.clamp(0.0, frame.height);
+                let right = start.x + start.width;
+                let bottom = start.y + start.height;
+                let crop = match drag.mode {
+                    DragMode::Create => {
+                        let origin_x = drag.origin_x;
+                        let origin_y = drag.origin_y;
+                        let left = origin_x.min(point_x);
+                        let top = origin_y.min(point_y);
+                        CropRect {
+                            x: left,
+                            y: top,
+                            width: (point_x - origin_x).abs(),
+                            height: (point_y - origin_y).abs(),
+                        }
+                    }
+                    DragMode::Move => {
+                        let width = start.width.min(frame.width);
+                        let height = start.height.min(frame.height);
+                        let x = (start.x + (point_x - drag.origin_x))
+                            .clamp(0.0, (frame.width - width).max(0.0));
+                        let y = (start.y + (point_y - drag.origin_y))
+                            .clamp(0.0, (frame.height - height).max(0.0));
+                        CropRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        }
+                    }
+                    DragMode::NorthWest => {
+                        let (x, width) = left_edge(right, point_x, min_edge);
+                        let (y, height) = top_edge(bottom, point_y, min_edge);
+                        CropRect { x, y, width, height }
+                    }
+                    DragMode::North => {
+                        let (y, height) = top_edge(bottom, point_y, min_edge);
+                        CropRect {
+                            x: start.x,
+                            y,
+                            width: start.width,
+                            height,
+                        }
+                    }
+                    DragMode::NorthEast => {
+                        let width = right_edge(start, point_x, min_edge, frame.width);
+                        let (y, height) = top_edge(bottom, point_y, min_edge);
+                        CropRect {
+                            x: start.x,
+                            y,
+                            width,
+                            height,
+                        }
+                    }
+                    DragMode::East => {
+                        let width = right_edge(start, point_x, min_edge, frame.width);
+                        CropRect {
+                            x: start.x,
+                            y: start.y,
+                            width,
+                            height: start.height,
+                        }
+                    }
+                    DragMode::SouthEast => {
+                        let width = right_edge(start, point_x, min_edge, frame.width);
+                        let height = bottom_edge(start, point_y, min_edge, frame.height);
+                        CropRect {
+                            x: start.x,
+                            y: start.y,
+                            width,
+                            height,
+                        }
+                    }
+                    DragMode::South => {
+                        let height = bottom_edge(start, point_y, min_edge, frame.height);
+                        CropRect {
+                            x: start.x,
+                            y: start.y,
+                            width: start.width,
+                            height,
+                        }
+                    }
+                    DragMode::SouthWest => {
+                        let (x, width) = left_edge(right, point_x, min_edge);
+                        let height = bottom_edge(start, point_y, min_edge, frame.height);
+                        CropRect { x, y, width, height }
+                    }
+                    DragMode::West => {
+                        let (x, width) = left_edge(right, point_x, min_edge);
+                        CropRect {
+                            x,
+                            y: start.y,
+                            width,
+                            height: start.height,
+                        }
+                    }
+                };
+                self.active_item_mut().crop = Some(crop);
             }
-            DragMode::North => {
-                let (y, height) = top_edge(bottom, point_y, min_edge);
-                CropRect {
-                    x: start.x,
-                    y,
-                    width: start.width,
-                    height,
-                }
-            }
-            DragMode::NorthEast => {
-                let width = right_edge(start, point_x, min_edge, frame.width);
-                let (y, height) = top_edge(bottom, point_y, min_edge);
-                CropRect {
-                    x: start.x,
-                    y,
-                    width,
-                    height,
-                }
-            }
-            DragMode::East => {
-                let width = right_edge(start, point_x, min_edge, frame.width);
-                CropRect {
-                    x: start.x,
-                    y: start.y,
-                    width,
-                    height: start.height,
-                }
-            }
-            DragMode::SouthEast => {
-                let width = right_edge(start, point_x, min_edge, frame.width);
-                let height = bottom_edge(start, point_y, min_edge, frame.height);
-                CropRect {
-                    x: start.x,
-                    y: start.y,
-                    width,
-                    height,
-                }
-            }
-            DragMode::South => {
-                let height = bottom_edge(start, point_y, min_edge, frame.height);
-                CropRect {
-                    x: start.x,
-                    y: start.y,
-                    width: start.width,
-                    height,
-                }
-            }
-            DragMode::SouthWest => {
-                let (x, width) = left_edge(right, point_x, min_edge);
-                let height = bottom_edge(start, point_y, min_edge, frame.height);
-                CropRect {
-                    x,
-                    y: start.y,
-                    width,
-                    height,
-                }
-            }
-            DragMode::West => {
-                let (x, width) = left_edge(right, point_x, min_edge);
-                CropRect {
-                    x,
-                    y: start.y,
-                    width,
-                    height: start.height,
-                }
-            }
-        };
-        self.crop = Some(crop);
-    }
-
-    /// Ends the drag and leaves a crop that fits the picture.
-    fn end_drag(&mut self) {
-        if self.drag.take().is_none() {
-            return;
+            _ => {}
         }
-        let frame = self.rotated_size();
-        let min_edge = self.min_edge();
-        let current = self.crop();
-        let width = current.width.max(min_edge).min(frame.width);
-        let height = current.height.max(min_edge).min(frame.height);
-        self.crop = Some(CropRect {
-            x: current.x.min(frame.width - width),
-            y: current.y.min(frame.height - height),
-            width,
-            height,
-        });
     }
 
-    /// The handle that is under the point, if there is one.
-    ///
-    /// The closest handle wins, so a small crop is not grabbed by the handle
-    /// of an edge that happens to be near the point.
+    fn end_drag(&mut self) {
+        match self.active_tool {
+            EditorTool::Pen => {
+                if let Some(stroke) = self.active_stroke.take() {
+                    if stroke.points.len() > 1 {
+                        self.active_item_mut().strokes.push(stroke);
+                        self.active_item_mut().rebake_preview();
+                    }
+                }
+            }
+            EditorTool::Blur => {
+                self.active_blur_start = None;
+                if let Some(rect) = self.active_blur_rect.take() {
+                    if rect.width > 5.0 && rect.height > 5.0 {
+                        let b = self.blur_block_size;
+                        self.active_item_mut().blurs.push(BlurRegion {
+                            rect,
+                            block_size: b,
+                        });
+                        self.active_item_mut().rebake_preview();
+                    }
+                }
+            }
+            EditorTool::Crop | EditorTool::None => {
+                if self.drag.take().is_none() {
+                    return;
+                }
+                let frame = self.rotated_size();
+                let min_edge = self.min_edge();
+                let current = self.crop();
+                let width = current.width.max(min_edge).min(frame.width);
+                let height = current.height.max(min_edge).min(frame.height);
+                self.active_item_mut().crop = Some(CropRect {
+                    x: current.x.min(frame.width - width),
+                    y: current.y.min(frame.height - height),
+                    width,
+                    height,
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn handle_under(&self, x: f64, y: f64, crop: CropRect) -> DragMode {
         let radius = self.handle_radius();
         let right = crop.x + crop.width;
@@ -642,198 +1045,1002 @@ impl MediaEditor {
         DragMode::Create
     }
 
-    /// The preview, already rotated, ready to be painted.
     fn rendered_preview(&mut self) -> Option<Arc<gpui::RenderImage>> {
-        if self.rendered_rotation == Some(self.rotation()) {
-            return self.rendered.clone();
-        }
-        let preview = self.preview.as_ref()?;
-        let rotated = rotate_picture(preview, self.rotation());
-        let rendered = Arc::new(to_render_image(&rotated));
-        self.rendered = Some(rendered.clone());
-        self.rendered_rotation = Some(self.rotation());
-        Some(rendered)
+        self.active_item().rendered.clone()
     }
 
-    /// The drawing of the dialog.
+    /// The complete full-screen render of the WhatsApp Desktop Media Editor.
     fn draw(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let background = cx.theme().background;
-        let border = cx.theme().border;
-        let foreground = cx.theme().foreground;
-        let muted = cx.theme().muted_foreground;
-        let file_name = self.file_name().to_string();
-        let working = self.is_working();
-        let error = self.error.clone();
+        let can_undo = !self.undo_stack.is_empty();
+        let can_redo = !self.redo_stack.is_empty();
+        let active_tool = self.active_tool;
+        let is_hd = self.active_item().is_hd;
 
         div()
             .absolute()
             .inset_0()
             .occlude()
+            .bg(rgb(0x0c1317)) // Official dark workspace
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000066))
-            .on_mouse_up(
+            .flex_col()
+            .justify_between()
+                        .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     this.end_drag();
                     cx.notify();
                 }),
             )
+            // Top Bar
+            .child(self.render_top_bar(can_undo, can_redo, active_tool, is_hd, cx))
+            // Active Tool Sub-Bar (floating if tool is active)
+            .when(active_tool != EditorTool::None, |root| {
+                root.child(self.render_sub_toolbar(active_tool, cx))
+            })
+            // Center Canvas Area
             .child(
-                v_flex()
-                    .w(px(520.))
+                div()
+                    .flex_1()
+                    .relative()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(self.surface(cx)),
+            )
+            // Floating Caption Bar
+            .child(self.render_floating_caption(cx))
+            // Bottom Bar (Audience Privacy, Carousel, Send Button)
+            .child(self.render_bottom_bar(cx))
+            // Privacy Modal overlay if open
+            .when(self.status_privacy_open, |root| {
+                root.child(self.render_privacy_modal(cx))
+            })
+            // Save notice toast
+            .when_some(self.save_notice.clone(), |root, msg| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(64.))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .rounded_full()
+                                .bg(rgb(0x00a884))
+                                .text_color(rgb(0xffffff))
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .shadow_lg()
+                                .child(msg),
+                        ),
+                )
+            })
+    }
+
+fn render_crop_icon(is_active: bool) -> impl IntoElement {
+    let col = if is_active { rgb(0x00a884) } else { rgb(0xd1d7db) };
+    div()
+        .size(px(16.))
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(11.))
+                .h(px(11.))
+                .border_l_2()
+                .border_t_2()
+                .border_color(col),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .w(px(11.))
+                .h(px(11.))
+                .border_r_2()
+                .border_b_2()
+                .border_color(col),
+        )
+}
+
+    fn render_top_bar(
+        &self,
+        can_undo: bool,
+        can_redo: bool,
+        active_tool: EditorTool,
+        is_hd: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .h(px(56.))
+            .w_full()
+            .px_4()
+            .items_center()
+            .justify_between()
+            .bg(rgba(0x0c1317f2))
+            .border_b_1()
+            .border_color(rgb(0x182229))
+            // Left: Close, Undo, Redo
+            .child(
+                h_flex()
                     .gap_3()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(background)
-                    .border_1()
-                    .border_color(border)
-                    .text_color(foreground)
+                    .items_center()
                     .child(
-                        h_flex()
+                        div()
+                            .id("editor-close-btn")
+                            .size(px(36.))
+                            .rounded_full()
+                            .flex()
                             .items_center()
-                            .justify_between()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .text_color(rgb(0xd1d7db))
+                            .child(Icon::new(WhatfastIcon::Close).with_size(px(20.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel(cx);
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(20.)).bg(rgb(0x2a3942)))
+                    .child(
+                        div()
+                            .id("editor-undo-btn")
+                            .size(px(36.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| if can_undo { s.bg(rgba(0xffffff15)) } else { s })
+                            .text_color(if can_undo { rgb(0xd1d7db) } else { rgb(0x404e57) })
+                            .child(Icon::new(IconName::Undo).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.undo(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("editor-redo-btn")
+                            .size(px(36.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| if can_redo { s.bg(rgba(0xffffff15)) } else { s })
+                            .text_color(if can_redo { rgb(0xd1d7db) } else { rgb(0x404e57) })
+                            .child(Icon::new(IconName::Redo).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.redo(cx);
+                            })),
+                    ),
+            )
+            // Center Group: Crop, Filters, Pen, Aa, Shapes, Blur, Stickers, Sticker Tag, HD
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .p_1()
+                    .rounded_lg()
+                    .bg(rgba(0x18222999))
+                    // Crop & Rotate
+                    .child(
+                        div()
+                            .id("tool-crop")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Crop { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Crop { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(Self::render_crop_icon(active_tool == EditorTool::Crop))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Crop {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Crop
+                                };
+                                cx.notify();
+                            })),
+                    )
+                    // Filters (Magic wand / palette)
+                    .child(
+                        div()
+                            .id("tool-filters")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Filters { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Filters { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(Icon::new(WhatfastIcon::Palette).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Filters {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Filters
+                                };
+                                cx.notify();
+                            })),
+                    )
+                    // Pen
+                    .child(
+                        div()
+                            .id("tool-pen")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Pen { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Pen { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(Icon::new(WhatfastIcon::Edit).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Pen {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Pen
+                                };
+                                cx.notify();
+                            })),
+                    )
+                    // Text (Aa)
+                    .child(
+                        div()
+                            .id("tool-text")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Text { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Text { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
                             .child(
                                 div()
                                     .font_weight(FontWeight::BOLD)
-                                    .child(i18n::t("Edit photo")),
+                                    .text_sm()
+                                    .child("Aa"),
                             )
-                            .child(
-                                Button::new("media-editor-close")
-                                    .ghost()
-                                    .small()
-                                    .icon(WhatfastIcon::Close)
-                                    .tooltip(i18n::t("Cancel"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel(cx);
-                                    })),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Text {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Text
+                                };
+                                cx.notify();
+                            })),
                     )
+                    // Shapes (Square)
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(muted)
-                            .truncate()
-                            .child(file_name.clone()),
+                            .id("tool-shapes")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Shapes { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Shapes { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(
+                                div()
+                                    .size(px(15.))
+                                    .border_2()
+                                    .border_color(if active_tool == EditorTool::Shapes { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                                    .rounded_xs(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Shapes {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Shapes
+                                };
+                                cx.notify();
+                            })),
                     )
-                    .child(self.surface(cx))
+                    // Blur / Mosaic (▦)
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(i18n::t("Drag on the picture to crop it. The preview shows exactly what will be sent.")),
+                            .id("tool-blur")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Blur { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Blur { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(
+                                v_flex()
+                                    .gap(px(1.5))
+                                    .child(
+                                        h_flex()
+                                            .gap(px(1.5))
+                                            .child(div().size(px(3.5)).bg(rgb(0xd1d7db)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0x8696a0)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0xd1d7db)).rounded_xs()),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap(px(1.5))
+                                            .child(div().size(px(3.5)).bg(rgb(0x8696a0)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0xd1d7db)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0x8696a0)).rounded_xs()),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap(px(1.5))
+                                            .child(div().size(px(3.5)).bg(rgb(0xd1d7db)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0x8696a0)).rounded_xs())
+                                            .child(div().size(px(3.5)).bg(rgb(0xd1d7db)).rounded_xs()),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Blur {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Blur
+                                };
+                                cx.notify();
+                            })),
                     )
+                    // Stickers / Emojis (😊)
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("media-editor-rotate-left")
-                                    .label(i18n::t("Rotate left"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.rotate_left(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("media-editor-rotate-right")
-                                    .label(i18n::t("Rotate right"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.rotate_right(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("media-editor-reset")
-                                    .label(i18n::t("Reset crop"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reset_crop(cx);
-                                    })),
-                            ),
+                        div()
+                            .id("tool-stickers")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if active_tool == EditorTool::Stickers { rgb(0x202c33) } else { rgba(0x00000000) })
+                            .text_color(if active_tool == EditorTool::Stickers { rgb(0x00a884) } else { rgb(0xd1d7db) })
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .child(Icon::new(WhatfastIcon::Smile).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_tool = if this.active_tool == EditorTool::Stickers {
+                                    EditorTool::None
+                                } else {
+                                    EditorTool::Stickers
+                                };
+                                cx.notify();
+                            })),
                     )
-                    .when_some(self.caption.as_ref(), |parent, caption_entity| {
-                        let caption_input = caption_entity.clone();
-                        parent.child(
-                            v_flex()
-                                .gap_1p5()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(Input::new(caption_entity).flex_1()),
-                                )
-                                .child({
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .children(["😀", "❤️", "🔥", "😂", "✨", "🎉", "👍", "👏"].iter().enumerate().map(|(idx, &emoji)| {
-                                            let input = caption_input.clone();
-                                            div()
-                                                .id(ElementId::named_usize("editor-emoji", idx))
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .text_sm()
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(rgba(0xffffff22)))
-                                                .child(emoji)
-                                                .on_click(cx.listener(move |_this, _, window, cx| {
-                                                    input.update(cx, |input, cx| {
-                                                        let mut val = input.value().to_string();
-                                                        val.push_str(emoji);
-                                                        input.set_value(val, window, cx);
-                                                    });
-                                                    cx.notify();
-                                                }))
-                                        }))
-                                }),
-                        )
-                    })
+                    // Sticker Tag (🏷️)
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .justify_end()
-                            .child(
-                                Button::new("media-editor-cancel")
-                                    .label(i18n::t("Cancel"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("media-editor-send")
-                                    .label(if working {
-                                        i18n::t("Preparing...")
-                                    } else {
-                                        i18n::t("Done")
-                                    })
-                                    .disabled(working)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if !this.working {
-                                            this.apply(cx);
-                                        }
-                                    })),
-                            ),
+                        div()
+                            .id("tool-sticker-cutout")
+                            .size(px(36.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .text_color(rgb(0xd1d7db))
+                            .child(Icon::new(WhatfastIcon::Sticker).with_size(px(18.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.save_notice = Some(i18n::t("Modo sticker activo").to_string());
+                                cx.notify();
+                            })),
                     )
-                    .when(error.is_some(), |dialog| {
-                        dialog.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(error.clone().unwrap_or_default()),
-                        )
-                    }),
+                    // HD Quality badge
+                    .child(
+                        div()
+                            .id("tool-hd-toggle")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if is_hd { rgb(0x00a884) } else { rgb(0x54656f) })
+                            .text_color(if is_hd { rgb(0x00a884) } else { rgb(0x8696a0) })
+                            .bg(if is_hd { rgba(0x00a88420) } else { rgba(0x00000000) })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .child("HD")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_hd(cx);
+                            })),
+                    ),
+            )
+            // Right: Download / Save button
+            .child(
+                div()
+                    .id("editor-download-btn")
+                    .size(px(36.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0xffffff15)))
+                    .text_color(rgb(0xd1d7db))
+                    .child(Icon::new(WhatfastIcon::Download).with_size(px(18.)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.save_to_disk(cx);
+                    })),
             )
     }
 
-    /// The surface of the preview: the picture, already rotated, and the
-    /// rectangle of the crop.
+    fn render_sub_toolbar(&self, tool: EditorTool, cx: &mut Context<Self>) -> impl IntoElement {
+        let container = h_flex()
+            .h(px(42.))
+            .px_4()
+            .items_center()
+            .gap_3()
+            .rounded_full()
+            .bg(rgb(0x202c33))
+            .border_1()
+            .border_color(rgb(0x2a3942))
+            .shadow_md();
+
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt_2()
+            .child(match tool {
+                EditorTool::Crop => container
+                    .child(
+                        Button::new("crop-rotate-left")
+                            .ghost()
+                            .small()
+                            .label("↶ 90°")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rotate_left(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("crop-rotate-right")
+                            .ghost()
+                            .small()
+                            .label("↷ 90°")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rotate_right(cx);
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
+                    .child(
+                        Button::new("crop-reset")
+                            .ghost()
+                            .small()
+                            .label(i18n::t("Restablecer"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reset_crop(cx);
+                            })),
+                    ),
+                EditorTool::Filters => {
+                    let active_filter = self.active_item().filter;
+                    let filters = [
+                        (ImageFilter::Normal, "Normal"),
+                        (ImageFilter::HighContrast, "Pop"),
+                        (ImageFilter::Grayscale, "B&N"),
+                        (ImageFilter::Warm, "Cálido"),
+                        (ImageFilter::Cool, "Frío"),
+                        (ImageFilter::Sepia, "Sepia"),
+                    ];
+                    let mut list = container;
+                    for (idx, (f, name)) in filters.iter().enumerate() {
+                        let f = *f;
+                        let is_active = active_filter == f;
+                        list = list.child(
+                            div()
+                                .id(ElementId::named_usize("filter-chip", idx))
+                                .px_2p5()
+                                .py_1()
+                                .rounded_full()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .cursor_pointer()
+                                .bg(if is_active { rgb(0x00a884) } else { rgb(0x182229) })
+                                .text_color(if is_active { rgb(0xffffff) } else { rgb(0xd1d7db) })
+                                .hover(|s| if !is_active { s.bg(rgb(0x2a3942)) } else { s })
+                                .child(*name)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_filter(f, cx);
+                                })),
+                        );
+                    }
+                    list
+                }
+                EditorTool::Pen => {
+                    let colors: [([u8; 4], &str); 7] = [
+                        ([255, 255, 255, 255], "Blanco"),
+                        ([0, 0, 0, 255], "Negro"),
+                        ([0, 168, 132, 255], "Verde"),
+                        ([234, 67, 53, 255], "Rojo"),
+                        ([251, 188, 4, 255], "Amarillo"),
+                        ([66, 133, 244, 255], "Azul"),
+                        ([161, 66, 244, 255], "Púrpura"),
+                    ];
+                    let mut list = container;
+                    for (idx, (col, _)) in colors.iter().enumerate() {
+                        let col = *col;
+                        let is_selected = self.pen_color == col;
+                        let r = col[0];
+                        let g = col[1];
+                        let b = col[2];
+                        list = list.child(
+                            div()
+                                .id(ElementId::named_usize("pen-color", idx))
+                                .size(px(18.))
+                                .rounded_full()
+                                .bg(rgb((r as u32) << 16 | (g as u32) << 8 | b as u32))
+                                .border_2()
+                                .border_color(if is_selected { rgb(0xffffff) } else { rgb(0x2a3942) })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pen_color = col;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    list = list.child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)));
+                    let widths = [(2.0, px(3.)), (5.0, px(6.)), (10.0, px(10.))];
+                    for (idx, (w, dot_size)) in widths.into_iter().enumerate() {
+                        let is_sel = (self.pen_width - w).abs() < 0.1;
+                        list = list.child(
+                            div()
+                                .id(ElementId::named_usize("pen-width", idx))
+                                .size(px(20.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .bg(if is_sel { rgba(0xffffff20) } else { rgba(0x00000000) })
+                                .child(
+                                    div()
+                                        .size(dot_size)
+                                        .rounded_full()
+                                        .bg(rgb(0xd1d7db)),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pen_width = w;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    list
+                }
+                EditorTool::Blur => container
+                    .child(
+                        Button::new("blur-normal")
+                            .ghost()
+                            .small()
+                            .label("Mosaico 14px")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.blur_block_size = 14;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("blur-heavy")
+                            .ghost()
+                            .small()
+                            .label("Mosaico 24px")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.blur_block_size = 24;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
+                    .child(
+                        Button::new("blur-clear")
+                            .ghost()
+                            .small()
+                            .label(i18n::t("Limpiar desenfoques"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.push_undo();
+                                this.active_item_mut().blurs.clear();
+                                this.active_item_mut().rebake_preview();
+                                cx.notify();
+                            })),
+                    ),
+                EditorTool::Stickers => {
+                    let mut list = container;
+                    for (idx, &emoji) in ["😀", "😂", "😍", "🔥", "🎉", "👍", "💯", "👏", "❤️", "🚀", "🐶", "🍕"].iter().enumerate() {
+                        list = list.child(
+                            div()
+                                .id(ElementId::named_usize("sticker-em", idx))
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_base()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgba(0xffffff20)))
+                                .child(emoji)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.push_undo();
+                                    let center = this.rotated_size();
+                                    this.active_item_mut().emojis.push(EmojiOverlay {
+                                        emoji: emoji.to_string(),
+                                        x: (center.width / 2.0).max(20.0),
+                                        y: (center.height / 2.0).max(20.0),
+                                        size: 40.0,
+                                    });
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    list
+                }
+                _ => container.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x8696a0))
+                        .child("Haz clic o arrastra en la foto para editar"),
+                ),
+            })
+    }
+
+    fn render_floating_caption(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_emoji_open = self.caption_emoji_open;
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pb_3()
+            // Quick emoji picker for caption
+            .when(is_emoji_open, |root| {
+                root.child(
+                    div()
+                        .mb_2()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_full()
+                        .bg(rgb(0x202c33))
+                        .border_1()
+                        .border_color(rgb(0x2a3942))
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .children(["😀", "😂", "❤️", "🔥", "✨", "🎉", "👍", "👏", "🙏", "🥳"].iter().enumerate().map(|(idx, &em)| {
+                                    div()
+                                        .id(ElementId::named_usize("caption-em", idx))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .text_base()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgba(0xffffff20)))
+                                        .child(em)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if let Some(input) = this.caption.as_ref() {
+                                                input.update(cx, |input, cx| {
+                                                    let mut val = input.value().to_string();
+                                                    val.push_str(em);
+                                                    input.set_value(val, window, cx);
+                                                });
+                                            }
+                                            this.caption_emoji_open = false;
+                                            cx.notify();
+                                        }))
+                                })),
+                        ),
+                )
+            })
+            // Capsule Input
+            .child(
+                div()
+                    .w(px(580.))
+                    .h(px(46.))
+                    .rounded_full()
+                    .bg(rgb(0x202c33))
+                    .border_1()
+                    .border_color(rgb(0x2a3942))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(match self.caption.as_ref() {
+                                Some(input) => Input::new(input).flex_1().into_any_element(),
+                                None => div().into_any_element(),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("caption-smile-toggle")
+                            .size(px(32.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .text_color(rgb(0x8696a0))
+                            .child(Icon::new(WhatfastIcon::Smile).with_size(px(20.)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.caption_emoji_open = !this.caption_emoji_open;
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    fn render_bottom_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let privacy_mode = self.status_privacy_mode.clone();
+        let items_len = self.items.len();
+        let active_idx = self.active_index;
+
+        h_flex()
+            .h(px(72.))
+            .w_full()
+            .px_6()
+            .items_center()
+            .justify_between()
+            .bg(rgb(0x0c1317))
+            // Left: Audience Privacy Pill
+            .child(
+                div()
+                    .id("status-privacy-pill")
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgba(0x00a88440))
+                    .bg(rgba(0x00a88415))
+                    .px_3p5()
+                    .py_1p5()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0x00a88425)))
+                    .child(
+                        div()
+                            .text_color(rgb(0x00a884))
+                            .child(Icon::new(WhatfastIcon::Status).with_size(px(18.))),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x00a884))
+                            .child(privacy_mode),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.status_privacy_open = !this.status_privacy_open;
+                        cx.notify();
+                    })),
+            )
+            // Center: Media Carousel (Thumbnails + Plus Button)
+            .child(
+                h_flex()
+                    .gap_2p5()
+                    .items_center()
+                    .children(self.items.iter().enumerate().map(|(idx, item)| {
+                        let is_active = idx == active_idx;
+                        let item_rendered = item.rendered.clone();
+                        div()
+                            .id(ElementId::named_usize("editor-thumb", idx))
+                            .size(px(54.))
+                            .rounded_md()
+                            .overflow_hidden()
+                            .relative()
+                            .cursor_pointer()
+                            .border_2()
+                            .border_color(if is_active { rgb(0x00a884) } else { rgb(0x2a3942) })
+                            .opacity(if is_active { 1.0 } else { 0.7 })
+                            .hover(|s| s.opacity(1.0))
+                            .child(match item_rendered {
+                                Some(render_img) => img(ImageSource::Render(render_img))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover)
+                                    .into_any_element(),
+                                None => div()
+                                    .size_full()
+                                    .bg(rgb(0x202c33))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .text_color(rgb(0x8696a0))
+                                    .child("...")
+                                    .into_any_element(),
+                            })
+                            // Remove button if multiple items
+                            .when(items_len > 1, |d| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::named_usize("thumb-rem", idx))
+                                        .absolute()
+                                        .top_0p5()
+                                        .right_0p5()
+                                        .size(px(16.))
+                                        .rounded_full()
+                                        .bg(rgba(0x000000cc))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .text_color(rgb(0xffffff))
+                                        .child("✕")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.remove_item(idx, window, cx);
+                                        })),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_item(idx, window, cx);
+                            }))
+                    }))
+                    // Plus button to add more images
+                    .child(
+                        div()
+                            .id("editor-add-media-btn")
+                            .size(px(54.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(0x2a3942))
+                            .bg(rgb(0x202c33))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff15)))
+                            .text_color(rgb(0xd1d7db))
+                            .child(Icon::new(IconName::Plus).with_size(px(22.)))
+                            .on_click(cx.listener(|_this, _, window, cx| {
+                                let prompt = cx.prompt_for_paths(PathPromptOptions {
+                                    files: true,
+                                    directories: false,
+                                    multiple: true,
+                                    prompt: Some(i18n::t("Elige más fotos o videos").into()),
+                                });
+                                let view = cx.entity();
+                                cx.spawn_in(window, async move |_, window| {
+                                    if let Ok(Ok(Some(paths))) = prompt.await {
+                                        window.update(|_, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.add_items_from_paths(paths, cx);
+                                            });
+                                        }).ok();
+                                    }
+                                }).detach();
+                            })),
+                    ),
+            )
+            // Right: Circular WhatsApp Green Send Button
+            .child(
+                div()
+                    .id("editor-send-btn")
+                    .size(px(54.))
+                    .rounded_full()
+                    .bg(rgb(0x00a884))
+                    .hover(|s| s.bg(rgb(0x02906f)))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .shadow_md()
+                    .child(
+                        div()
+                            .text_color(rgb(0x0b141a))
+                            .child(Icon::new(WhatfastIcon::Send).with_size(px(22.))),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.working {
+                            this.apply(cx);
+                        }
+                    })),
+            )
+    }
+
+    fn render_privacy_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .bottom(px(80.))
+            .left(px(24.))
+            .w(px(320.))
+            .rounded_lg()
+            .bg(rgb(0x202c33))
+            .border_1()
+            .border_color(rgb(0x2a3942))
+            .p_4()
+            .shadow_xl()
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_sm()
+                            .text_color(rgb(0xffffff))
+                            .child("Quién puede ver mis estados"),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("priv-opt-contacts")
+                                    .p_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(0xffffff10)))
+                                    .text_sm()
+                                    .text_color(rgb(0xd1d7db))
+                                    .child("Mis contactos")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.status_privacy_mode = "Estado (Mis contactos)".to_string();
+                                        this.status_privacy_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("priv-opt-excluded")
+                                    .p_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(0xffffff10)))
+                                    .text_sm()
+                                    .text_color(rgb(0xd1d7db))
+                                    .child("Mis contactos, excepto... (221 excluidos)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.status_privacy_mode = "Estado (221 excluidos)".to_string();
+                                        this.status_privacy_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("priv-opt-selected")
+                                    .p_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(0xffffff10)))
+                                    .text_sm()
+                                    .text_color(rgb(0xd1d7db))
+                                    .child("Solo compartir con...")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.status_privacy_mode = "Estado (Seleccionados)".to_string();
+                                        this.status_privacy_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    /// The surface of the preview: image, blurs, strokes, texts, emojis, and crop handles.
     fn surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (scale_x, scale_y) = self.window_per_picture();
         let crop = self.crop();
-        let primary = cx.theme().primary;
+        let primary = rgb(0x00a884);
         let surface_bounds = Rc::clone(&self.surface);
         let rendered = self.rendered_preview();
         let working = self.is_working();
         let error = self.error.is_some();
+        let active_tool = self.active_tool;
 
         let mut handles = Vec::new();
         let edge = HANDLE_EDGE * (scale_x + scale_y) / 2.0;
@@ -855,6 +2062,8 @@ impl MediaEditor {
         }
 
         let drawn = self.drawn_size();
+        let emojis = self.active_item().emojis.clone();
+
         let mut surface = div()
             .relative()
             .w(px(drawn.width as f32))
@@ -887,6 +2096,7 @@ impl MediaEditor {
                 )
                 .size_full(),
             )
+            // Base preview image
             .child(match rendered {
                 Some(image) => img(ImageSource::Render(image))
                     .size_full()
@@ -898,50 +2108,107 @@ impl MediaEditor {
                     .items_center()
                     .justify_center()
                     .text_sm()
+                    .text_color(rgb(0x8696a0))
                     .child(if error {
                         i18n::t("The photo could not be edited")
                     } else if working {
-                        "Preparing."
+                        "Preparando foto..."
                     } else {
                         ""
                     })
                     .into_any_element(),
-            })
-            .child(
-                div()
-                    .absolute()
-                    .left(px((crop.x * scale_x) as f32))
-                    .top(px((crop.y * scale_y) as f32))
-                    .w(px((crop.width * scale_x) as f32))
-                    .h(px((crop.height * scale_y) as f32))
-                    .border_2()
-                    .border_color(primary),
-            );
-        for handle in handles {
-            surface = surface.child(handle);
-        }
-        let caption_preview = self
-            .caption
-            .as_ref()
-            .map(|c| c.read(cx).value().trim().to_string())
-            .unwrap_or_default();
-        if !caption_preview.is_empty() {
+            });
+
+        // Floating emojis on canvas
+        for em in emojis {
             surface = surface.child(
                 div()
                     .absolute()
-                    .bottom_2()
-                    .left_2()
-                    .right_2()
-                    .px_3()
-                    .py_1p5()
-                    .rounded_md()
-                    .bg(rgba(0x000000aa))
-                    .text_color(rgba(0xffffffff))
-                    .text_sm()
-                    .text_center()
-                    .child(caption_preview),
+                    .left(px((em.x * scale_x - (em.size as f64 / 2.0)) as f32))
+                    .top(px((em.y * scale_y - (em.size as f64 / 2.0)) as f32))
+                    .text_size(px(em.size))
+                    .cursor_pointer()
+                    .child(em.emoji),
             );
         }
+
+        // Active blur region dragging outline
+        if let Some(r) = self.active_blur_rect {
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px((r.x * scale_x) as f32))
+                    .top(px((r.y * scale_y) as f32))
+                    .w(px((r.width * scale_x) as f32))
+                    .h(px((r.height * scale_y) as f32))
+                    .border_1()
+                    .border_color(rgb(0x00a884))
+                    .bg(rgba(0x00a88430)),
+            );
+        }
+
+        // Crop overlay and rule-of-thirds grid (only when Crop tool is active or dragging crop)
+        if active_tool == EditorTool::Crop || self.drag.is_some() {
+            let cx_px = (crop.x * scale_x) as f32;
+            let cy_px = (crop.y * scale_y) as f32;
+            let cw_px = (crop.width * scale_x) as f32;
+            let ch_px = (crop.height * scale_y) as f32;
+
+            // Crop boundary box
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(cx_px))
+                    .top(px(cy_px))
+                    .w(px(cw_px))
+                    .h(px(ch_px))
+                    .border_2()
+                    .border_color(primary)
+                    // Rule of thirds vertical lines
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(cw_px / 3.0))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(1.))
+                            .bg(rgba(0xffffff40)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(cw_px * 2.0 / 3.0))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(1.))
+                            .bg(rgba(0xffffff40)),
+                    )
+                    // Rule of thirds horizontal lines
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(ch_px / 3.0))
+                            .left_0()
+                            .right_0()
+                            .h(px(1.))
+                            .bg(rgba(0xffffff40)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(ch_px * 2.0 / 3.0))
+                            .left_0()
+                            .right_0()
+                            .h(px(1.))
+                            .bg(rgba(0xffffff40)),
+                    ),
+            );
+
+            for handle in handles {
+                surface = surface.child(handle);
+            }
+        }
+
         surface
     }
 }
@@ -952,8 +2219,7 @@ impl Render for MediaEditor {
     }
 }
 
-/// The scale of the preview: the picture is reduced until its longest edge is
-/// `PREVIEW_EDGE` pixels.
+/// The scale of the preview: the picture is reduced until its longest edge is `PREVIEW_EDGE` pixels.
 fn preview_scale(natural: PixelSize) -> f64 {
     if natural.width <= 0.0 || natural.height <= 0.0 {
         return 0.0;
@@ -962,33 +2228,26 @@ fn preview_scale(natural: PixelSize) -> f64 {
     (PREVIEW_EDGE / longest).min(1.0)
 }
 
-/// The left edge of the crop, moved to the point of the mouse.
-///
-/// The edge never gets closer to the right edge than the smallest crop.
 fn left_edge(right: f64, point_x: f64, min_edge: f64) -> (f64, f64) {
     let left = point_x.min(right - min_edge);
     (left, right - left)
 }
 
-/// The right edge of the crop, moved to the point of the mouse.
 fn right_edge(start: CropRect, point_x: f64, min_edge: f64, frame_width: f64) -> f64 {
     (point_x - start.x).max(min_edge).min(frame_width - start.x)
 }
 
-/// The top edge of the crop, moved to the point of the mouse.
 fn top_edge(bottom: f64, point_y: f64, min_edge: f64) -> (f64, f64) {
     let top = point_y.min(bottom - min_edge);
     (top, bottom - top)
 }
 
-/// The bottom edge of the crop, moved to the point of the mouse.
 fn bottom_edge(start: CropRect, point_y: f64, min_edge: f64, frame_height: f64) -> f64 {
     (point_y - start.y)
         .max(min_edge)
         .min(frame_height - start.y)
 }
 
-/// The quarter turn that undoes a rotation.
 fn inverse_rotation(rotation: Rotation) -> Rotation {
     match rotation {
         Rotation::Deg0 => Rotation::Deg0,
@@ -998,26 +2257,19 @@ fn inverse_rotation(rotation: Rotation) -> Rotation {
     }
 }
 
-/// The quarter turn of a number of degrees.
 fn steps_of(steps: u32) -> Rotation {
     media_crop::parse_rotation(steps as f64)
 }
 
-/// The crop, carried by the picture when it turns a quarter turn.
-///
-/// A quarter turn maps the rectangle of the current frame onto the rectangle
-/// of the next one, so the crop stays over the same part of the picture.
 fn carried_crop(crop: CropRect, frame: PixelSize, steps: u32) -> Option<CropRect> {
     media_crop::crop_in_rotated_space(crop, frame, steps_of(steps)).ok()
 }
 
-/// The picture, loaded and reduced to the size of the preview.
 struct LoadedPicture {
     natural: PixelSize,
     preview: image::RgbaImage,
 }
 
-/// Reads the picture and reduces it to the size of the preview.
 fn load_picture(path: &Path) -> Result<LoadedPicture, String> {
     let decoded = image::ImageReader::open(path)
         .map_err(|error| format!("the photo could not be read: {error}"))?
@@ -1042,7 +2294,6 @@ fn load_picture(path: &Path) -> Result<LoadedPicture, String> {
     Ok(LoadedPicture { natural, preview })
 }
 
-/// The picture, turned a quarter turn clockwise.
 fn rotate_picture(picture: &image::RgbaImage, rotation: Rotation) -> image::RgbaImage {
     match rotation {
         Rotation::Deg0 => picture.clone(),
@@ -1052,14 +2303,160 @@ fn rotate_picture(picture: &image::RgbaImage, rotation: Rotation) -> image::Rgba
     }
 }
 
-/// The picture, as the buffer that GPUI paints.
-///
-/// The tray of the composer reuses it for the thumbnails of the pictures
-/// that wait for the send button.
+/// Applies preset color filter to RGBA buffer in-place.
+fn apply_filter_to_image(img: &mut image::RgbaImage, filter: ImageFilter) {
+    match filter {
+        ImageFilter::Normal => {}
+        ImageFilter::HighContrast => {
+            for pixel in img.pixels_mut() {
+                for c in 0..3 {
+                    let v = pixel[c] as f32;
+                    let c_adj = ((v - 128.0) * 1.35 + 128.0).clamp(0.0, 255.0) as u8;
+                    pixel[c] = c_adj;
+                }
+            }
+        }
+        ImageFilter::Grayscale => {
+            for pixel in img.pixels_mut() {
+                let lum = (0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32) as u8;
+                pixel[0] = lum;
+                pixel[1] = lum;
+                pixel[2] = lum;
+            }
+        }
+        ImageFilter::Warm => {
+            for pixel in img.pixels_mut() {
+                pixel[0] = pixel[0].saturating_add(28);
+                pixel[1] = pixel[1].saturating_add(12);
+                pixel[2] = pixel[2].saturating_sub(18);
+            }
+        }
+        ImageFilter::Cool => {
+            for pixel in img.pixels_mut() {
+                pixel[0] = pixel[0].saturating_sub(18);
+                pixel[1] = pixel[1].saturating_add(8);
+                pixel[2] = pixel[2].saturating_add(32);
+            }
+        }
+        ImageFilter::Sepia => {
+            for pixel in img.pixels_mut() {
+                let r = pixel[0] as f32;
+                let g = pixel[1] as f32;
+                let b = pixel[2] as f32;
+                let tr = (0.393 * r + 0.769 * g + 0.189 * b).min(255.0) as u8;
+                let tg = (0.349 * r + 0.686 * g + 0.168 * b).min(255.0) as u8;
+                let tb = (0.272 * r + 0.534 * g + 0.131 * b).min(255.0) as u8;
+                pixel[0] = tr;
+                pixel[1] = tg;
+                pixel[2] = tb;
+            }
+        }
+    }
+}
+
+/// Applies pixelation mosaic to given region.
+fn apply_mosaic_to_image(img: &mut image::RgbaImage, rect: &CropRect, block_size: u32) {
+    let img_w = img.width();
+    let img_h = img.height();
+    let rx = (rect.x.round() as u32).min(img_w);
+    let ry = (rect.y.round() as u32).min(img_h);
+    let rw = (rect.width.round() as u32).min(img_w.saturating_sub(rx));
+    let rh = (rect.height.round() as u32).min(img_h.saturating_sub(ry));
+    let b = block_size.max(4);
+
+    let mut by = ry;
+    while by < ry + rh {
+        let bh = b.min((ry + rh) - by);
+        let mut bx = rx;
+        while bx < rx + rw {
+            let bw = b.min((rx + rw) - bx);
+            let mut sum_r = 0u64;
+            let mut sum_g = 0u64;
+            let mut sum_b = 0u64;
+            let mut sum_a = 0u64;
+            let count = (bw * bh) as u64;
+            for y in by..by + bh {
+                for x in bx..bx + bw {
+                    let p = img.get_pixel(x, y);
+                    sum_r += p[0] as u64;
+                    sum_g += p[1] as u64;
+                    sum_b += p[2] as u64;
+                    sum_a += p[3] as u64;
+                }
+            }
+            if count > 0 {
+                let avg = image::Rgba([
+                    (sum_r / count) as u8,
+                    (sum_g / count) as u8,
+                    (sum_b / count) as u8,
+                    (sum_a / count) as u8,
+                ]);
+                for y in by..by + bh {
+                    for x in bx..bx + bw {
+                        img.put_pixel(x, y, avg);
+                    }
+                }
+            }
+            bx += bw;
+        }
+        by += bh;
+    }
+}
+
+/// Applies a pen stroke (sequence of line segments) to the image buffer.
+fn apply_stroke_to_image(img: &mut image::RgbaImage, stroke: &DrawStroke) {
+    if stroke.points.len() < 2 {
+        return;
+    }
+    let radius = (stroke.width / 2.0).max(1.0);
+    let color = stroke.color;
+    for i in 0..stroke.points.len() - 1 {
+        let (x0, y0) = stroke.points[i];
+        let (x1, y1) = stroke.points[i + 1];
+        draw_line_on_image(img, x0, y0, x1, y1, color, radius);
+    }
+}
+
+fn draw_line_on_image(
+    img: &mut image::RgbaImage,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    color: [u8; 4],
+    radius: f64,
+) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let dist = dx.hypot(dy);
+    let steps = (dist * 2.0).ceil().max(1.0) as usize;
+    let r_sq = radius * radius;
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    let r_int = radius.ceil() as i64;
+    let rgba_col = image::Rgba(color);
+
+    for s in 0..=steps {
+        let t = s as f64 / steps as f64;
+        let cx = (x0 + t * dx).round() as i64;
+        let cy = (y0 + t * dy).round() as i64;
+
+        for dy_i in -r_int..=r_int {
+            for dx_i in -r_int..=r_int {
+                if (dx_i * dx_i + dy_i * dy_i) as f64 <= r_sq {
+                    let px = cx + dx_i;
+                    let py = cy + dy_i;
+                    if px >= 0 && px < w && py >= 0 && py < h {
+                        img.put_pixel(px as u32, py as u32, rgba_col);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn to_render_image(picture: &image::RgbaImage) -> gpui::RenderImage {
     let (width, height) = picture.dimensions();
     let mut data = picture.as_raw().clone();
-    // port: the renderer of GPUI expects the pixels in BGRA.
     for pixel in data.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
@@ -1073,20 +2470,31 @@ mod tests {
     use super::*;
 
     fn editor(natural: PixelSize) -> MediaEditor {
+        let mut item = MediaItem::new(PathBuf::from("photo.png"));
+        item.natural = natural;
         MediaEditor {
-            path: PathBuf::from("photo.png"),
-            file_name: "photo.png".to_string(),
-            natural,
-            rotation: Rotation::Deg0,
-            crop: None,
+            items: vec![item],
+            active_index: 0,
+            active_tool: EditorTool::None,
+            pen_color: [0, 168, 132, 255],
+            pen_width: 5.0,
+            blur_block_size: 14,
+            active_stroke: None,
+            active_blur_start: None,
+            active_blur_rect: None,
             drag: None,
             working: false,
             error: None,
-            preview: None,
-            rendered: None,
-            rendered_rotation: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             surface: Rc::new(Cell::new(None)),
             caption: None,
+            caption_emoji_open: false,
+            status_privacy_open: false,
+            status_privacy_mode: "Estado (221 excluidos)".to_string(),
+            save_notice: None,
+            text_input_open: false,
+            text_draft: String::new(),
         }
     }
 
@@ -1108,15 +2516,15 @@ mod tests {
         );
         assert_eq!(
             preview_scale(PixelSize {
-                width: 920.0,
-                height: 460.0
+                width: 1240.0,
+                height: 620.0
             }),
             0.5
         );
         assert_eq!(
             preview_scale(PixelSize {
-                width: 460.0,
-                height: 920.0
+                width: 620.0,
+                height: 1240.0
             }),
             0.5
         );
@@ -1137,7 +2545,7 @@ mod tests {
                 height: 100.0
             }
         );
-        editor.rotation = Rotation::Deg90;
+        editor.active_item_mut().rotation = Rotation::Deg90;
         assert_eq!(
             editor.crop(),
             CropRect {
@@ -1193,10 +2601,8 @@ mod tests {
             width: 200.0,
             height: 100.0,
         });
-        // A quarter turn: the picture is 100x200 and the crop is the top
-        // half of it.
-        editor.rotation = Rotation::Deg90;
-        editor.crop = Some(CropRect {
+        editor.active_item_mut().rotation = Rotation::Deg90;
+        editor.active_item_mut().crop = Some(CropRect {
             x: 0.0,
             y: 0.0,
             width: 100.0,
@@ -1282,9 +2688,6 @@ mod tests {
         assert_eq!(bytes, &[3, 2, 1, 4]);
     }
 
-    /// An editor of a picture of 200x100 pixels, with the surface of the
-    /// preview in the same place, so a point of the mouse is a point of the
-    /// picture.
     fn editor_with_surface() -> MediaEditor {
         let editor = editor(PixelSize {
             width: 200.0,
@@ -1348,7 +2751,7 @@ mod tests {
     #[test]
     fn the_drag_of_the_middle_of_the_crop_moves_the_whole_crop() {
         let mut editor = editor_with_surface();
-        editor.crop = Some(CropRect {
+        editor.active_item_mut().crop = Some(CropRect {
             x: 20.0,
             y: 20.0,
             width: 50.0,
@@ -1370,7 +2773,7 @@ mod tests {
     #[test]
     fn the_drag_of_the_crop_never_leaves_the_picture() {
         let mut editor = editor_with_surface();
-        editor.crop = Some(CropRect {
+        editor.active_item_mut().crop = Some(CropRect {
             x: 20.0,
             y: 20.0,
             width: 50.0,
@@ -1392,7 +2795,7 @@ mod tests {
     #[test]
     fn the_drag_outside_of_the_crop_starts_a_new_one() {
         let mut editor = editor_with_surface();
-        editor.crop = Some(CropRect {
+        editor.active_item_mut().crop = Some(CropRect {
             x: 20.0,
             y: 20.0,
             width: 50.0,
@@ -1413,8 +2816,6 @@ mod tests {
 
     #[test]
     fn the_crop_travels_with_the_picture() {
-        // The crop is the left half of the picture: a quarter turn to the
-        // right leaves it over the same part of the picture.
         let crop = CropRect {
             x: 0.0,
             y: 0.0,
@@ -1429,8 +2830,6 @@ mod tests {
             Some(carried) => carried,
             None => panic!("the crop was not carried"),
         };
-        // The frame after the quarter turn is 100x200 and the left half of the
-        // picture is the top half of it.
         assert_eq!(
             carried,
             CropRect {

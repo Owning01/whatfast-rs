@@ -9273,14 +9273,18 @@ impl Whatfast {
         let editor = cx.new(|cx| MediaEditor::new(&path, window, cx));
         let subscription = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
             match event {
-                MediaEditorEvent::Applied(edit) => {
+                MediaEditorEvent::Applied(edits) => {
                     this.media_editor = None;
                     match this.media_editor_target {
                         MediaEditorTarget::Chat => {
-                            this.stage_edited_picture(edit.clone(), window, cx);
+                            for edit in edits {
+                                this.stage_edited_picture(edit.clone(), window, cx);
+                            }
                         }
                         MediaEditorTarget::Status => {
-                            this.publish_edited_status(edit.clone(), window, cx);
+                            for edit in edits {
+                                this.publish_edited_status(edit.clone(), window, cx);
+                            }
                         }
                     }
                 }
@@ -9303,7 +9307,6 @@ impl Whatfast {
         cx: &mut Context<Self>,
     ) {
         let source = edit.path.clone();
-        let plan = edit.plan;
         let caption = edit.caption.clone();
         let extension = source
             .extension()
@@ -9317,12 +9320,12 @@ impl Whatfast {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let task_source = source.clone();
+        let task_edit = edit.clone();
         let edited = cx.background_spawn(async move {
             std::fs::create_dir_all(parent)
                 .map_err(|error| error.to_string())
                 .and_then(|()| {
-                    crate::media_editor::apply_edit(&task_source, &plan, &destination)
+                    crate::media_editor::apply_media_edit(&task_edit, &destination)
                 })?;
             Ok::<std::path::PathBuf, String>(destination)
         });
@@ -9406,7 +9409,6 @@ impl Whatfast {
             return;
         }
         let source = edit.path.clone();
-        let plan = edit.plan;
         let extension = source
             .extension()
             .and_then(|extension| extension.to_str())
@@ -9422,12 +9424,12 @@ impl Whatfast {
         // Decoding, rotating, cropping and encoding a twelve-megapixel photo
         // takes hundreds of milliseconds: the pixels travel in the background
         // so the window keeps painting while the edit is written.
-        let task_source = source.clone();
+        let task_edit = edit.clone();
         let edited = cx.background_spawn(async move {
             std::fs::create_dir_all(parent)
                 .map_err(|error| error.to_string())
                 .and_then(|()| {
-                    crate::media_editor::apply_edit(&task_source, &plan, &destination)
+                    crate::media_editor::apply_media_edit(&task_edit, &destination)
                 })?;
             Ok::<std::path::PathBuf, String>(destination)
         });
