@@ -21,6 +21,12 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Owning01/whatfast-rs"
 
+# The Windows backend of GPUI only asks DirectWrite for COLR glyphs, so the
+# emoji sets that ship as PNG bitmaps (CBDT/CBLC, sbix) draw nothing. The copy
+# in `vendor/gpui_windows` adds that path. Drop the patch when Zed supports it.
+[patch."https://github.com/zed-industries/zed"]
+gpui_windows = { path = "vendor/gpui_windows" }
+
 [workspace.dependencies]
 anyhow = "1.0"
 async-channel = "2.5"

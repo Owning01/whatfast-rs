@@ -187,6 +187,9 @@ impl StickerTray {
             .shadow_lg()
             .bg(cx.theme().popover)
             .overflow_hidden()
+            // La rueda dentro de la bandeja mueve sus rejillas, no la
+            // conversacion que queda detras.
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(self.render_tabs(app, packs, cx))
             // El buscador, con la lupa dentro, como en la referencia.
             .child(self.render_search(app, cx))

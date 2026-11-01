@@ -58,6 +58,7 @@ mod call_video;
 mod chat_drafts;
 mod composer_attachments;
 mod document;
+mod emoji_font;
 mod emoji_recent;
 mod harness_logos;
 mod helpers;
@@ -75,6 +76,7 @@ mod recording;
 mod render;
 mod rpc;
 mod statuses;
+mod status_seen;
 mod stickers;
 mod tabs;
 mod text;
@@ -111,6 +113,10 @@ fn main() {
     gpui_platform::application()
         .with_assets(crate::icons::WhatfastAssets::new())
         .run(|cx| {
+            // Los emojis de WhatsApp son los de Google: la fuente viaja con
+            // la aplicacion y entra en el sistema de texto antes de la
+            // primera ventana.
+            emoji_font::install(cx);
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),

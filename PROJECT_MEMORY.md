@@ -2986,5 +2986,98 @@ desde el arranque nuevo.
 vacio con menos), y el indice se mantiene con disparadores: una escritura
 directa a `messages` tambien lo actualiza.
 
+## 2026-10-30 - Los emojis de Apple
+
+**Que**: La ventana pintaba los emojis con Segoe UI Emoji, no con el dibujo de
+WhatsApp Web. Ahora usa una fuente propia: `<data>/fonts/emoji.ttf` (o
+`WHATFAST_EMOJI_FONT`) y, sin archivo, el Noto Color Emoji embebido en
+`crates/whatfast-ui/assets/fonts/`. La familia se lee de la tabla `name` en
+runtime. En Windows el archivo se copia a las fuentes del usuario y se registra
+(HKCU + `WM_FONTCHANGE`); en Linux `add_fonts` alcanza.
+
+**Por que**: GPUI Windows solo pintaba COLRv0. Se vendorizo el crate
+(`vendor/gpui_windows` con `[patch]` en `Cargo.toml`) y se agrego el camino PNG
+de `direct_write.rs`: `bitmap_glyph` pide la imagen a DirectWrite y
+`rasterize_bitmap` la escala al atlas.
+
+**Evidencia**: `scripts/build_apple_emoji_font.py` genera 3.779 emojis (19,7 MB).
+Una sonda sin ventana (DirectWrite, `IDWriteFontFace4`) devuelve 3.779 imagenes
+y 0 fallos, por archivo y tambien por familia instalada. El ejecutable pasa de
+14,7 a 27,8 MB.
+
+**Trampa**: DirectWrite exige el largo del PNG en 4 bytes entre las metricas y
+la imagen (formato 17). Sin el, `GetGlyphImageData` devuelve
+`DWRITE_E_FILEFORMAT` (0x88985000) aunque `GetGlyphImageFormats` diga PNG. Noto
+y nanoemoji escriben ese largo; el generador no lo hacia. El formato 19 no
+sirve: DirectWrite lo rechaza.
+
+**Trampa**: el `FontFallbacks` del ejemplo no resuelve familias cargadas con
+`add_fonts`, solo instaladas en el sistema. Varias conclusiones previas de la
+depuracion eran el fallback del sistema contestando, no la fuente propia.
+
+**Pendiente**: ver la app con la fuente nueva y confirmar el dibujo en Linux.
+
+## 2026-10-30 - Los estados: anillo, respuesta y carga
+
+**Que**: La foto de cada fila de la lista de chats lleva un circulo verde
+punteado cuando esa persona subio un estado que no se abrio, y el clic en esa
+foto abre el visor de ese estado (corta la propagacion del clic de la fila).
+El visor tiene abajo el mismo campo del chat: el texto sale como respuesta al
+estado, al chat del autor y con el estado citado. La vista de estados muestra
+la foto de perfil del contacto (la del chat, ya descargada) en vez de las
+iniciales. El reintento mientras la lista esta vacia paso de 10 s a 1,2 s.
+
+**Por que**: El "visto" vivia solo en memoria de la sesion y no habia forma de
+responder un estado desde la ventana. La respuesta ya existia en el contrato
+(`SendTextRequest.reply_to_message_id` + `reply_to_chat_id`), el sidecar la
+acepta entre chats y no hizo falta tocar el protocolo.
+
+**Evidencia**: 316 tests en verde. Capturas con el backend de demostracion
+(`--fake-backend`, perfil aparte en `%TEMP%`): las dos filas de estados salen
+con foto y anillo punteado, y el visor sale con la barra "Type a message" +
+Send. Un test encontro que el numero del chat y el del estado se comparaban con
+el `+` puesto en uno solo y nunca coincidian.
+
+**Trampa**: el lock de instancia unica vive en el perfil. Para una segunda
+ventana de prueba hay que darle `WHATFAST_DATA_DIR` y `WHATFAST_CONFIG_DIR`
+aparte, o no abre. El guion `captura-frontal.ps1` hace los clics **antes** de
+pulsar los destinos del riel: para abrir un estado hay que clickear el icono
+del riel dentro de la misma secuencia de clics.
+
+**Pendiente**: probar el envio real de una respuesta a un estado (el visor y la
+barra estan, falta un estado real con la sesion conectada) y ver el anillo en
+la lista con datos reales.
 
 
+
+
+
+
+## 2026-10-30 - El emoji: color, el campo y la rueda del panel
+
+**Que**: Tres arreglos del emoji en Windows. (1) `rasterize_bitmap` cambia el
+rojo y el azul del PNG: el atlas del panel es B8G8R8A8 y el PNG llega RGBA, y
+por eso todos los emojis salian azules. (2) `font_metrics` arma una caja de un
+em cuando la fuente no trae caja de glifos (`bbox 0 0 0 0`): GPUI mide el glifo
+con esa caja para decidir si entra en el recorte y, con cero, saltea el emoji
+que cae en el borde. Ese era el emoji invisible al principio del campo de
+escribir. (3) El panel de los emojis y la bandeja de los stickers cortan la
+rueda con `stop_propagation`: la rejilla se mueve y la conversacion de atras
+queda quieta.
+
+**Por que**: El usuario reporto los emojis azules, el emoji que no aparecia en
+el campo y la rueda que movia el chat. El azul era el orden de los canales; el
+emoji invisible era la caja vacia de la fuente de mapa de bits, no el PNG.
+
+**Evidencia**: Capturas con `--fake-backend` y perfil aparte en `%TEMP%`: el
+panel sale amarillo, rojo y verde; el campo muestra el emoji despues de
+elegirlo; la rueda sobre la rejilla la mueve y deja el mensaje "Gracias por
+ayer" en la misma altura. 316 tests en verde.
+
+**Trampa**: La sonda de `layout_line` mostro que el emoji del campo si se
+forma con la fuente del telefono y `is_emoji=1`, pero no se rasterizaba: el
+problema estaba despues, en el recorte. La fuente de Apple tiene
+`head.bbox = 0 0 0 0`, asi que `DWRITE_FONT_METRICS.glyphBox*` viene en cero.
+El `eprintln!` de `is_color_glyph` que quedaba del trabajo anterior se borro.
+
+**Pendiente**: Nada de codigo. El commit y el push siguen sin permiso.

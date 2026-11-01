@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -35,17 +35,21 @@ use gpui_component::{
     v_flex,
 };
 use smol::Timer;
+use uuid::Uuid;
 
 use whatfast_core::message_format::{DateLocale, LocalTimestamp, format_day, format_time};
 use whatfast_model::model::message_text;
 use whatfast_protocol::{
-    ImageContent, Message, MessageStatus, StatusGroup, TextContent, message::Content,
+    Chat, ConnectionState, ImageContent, Message, MessageStatus, SendTextRequest, StatusGroup,
+    TextContent, message::Content, rpc_request,
 };
 
 use crate::app::Whatfast;
-use crate::helpers::avatar_element;
+use crate::helpers::{avatar_element, avatar_element_of};
 use crate::icons::WhatfastIcon;
 use crate::local_time::local_offset_minutes;
+use crate::rpc::PendingRequest;
+use crate::text::validate_text_message;
 use crate::tokens::parse_color;
 
 /// How long a status stays open before the viewer moves to the next one.
@@ -57,6 +61,14 @@ pub(crate) const STATUS_STEP_MS: u64 = 3_000;
 /// The view asks again only while the list is empty: a request that failed
 /// during the connection must not leave the view empty for the whole session.
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(10);
+/// How long the first tries wait before asking again.
+///
+/// The sidecar takes a moment to connect when the window opens. Ten seconds
+/// of empty view for a request that arrived early is what made the view feel
+/// slow, so the first tries go fast.
+pub(crate) const FIRST_RETRY_AFTER: Duration = Duration::from_millis(1_200);
+/// How many fast tries before the wait grows to [`RETRY_AFTER`].
+pub(crate) const FAST_TRIES: u32 = 10;
 /// The side of the ring of a status, in pixels, before the scale.
 pub(crate) const RING_SIZE: f32 = 46.0;
 /// The side of the avatar of the viewer, in pixels, before the scale.
@@ -159,13 +171,13 @@ pub(crate) struct StatusStripState {
     pub(crate) viewer: Option<StatusViewer>,
     /// The background of every status that was published locally.
     pub(crate) colors: HashMap<String, String>,
-    /// The senders of the statuses the user already opened.
+    /// The time of the newest status that the user already opened, by sender.
     ///
     /// The reference draws the ring of a status in green when the user saw
-    /// it, and dashed when the status is new. The client of the origin asks
-    /// the sidecar to mark them, but the model of this client has no such
-    /// field, so the ring follows the viewer of this session.
-    pub(crate) seen: HashSet<String>,
+    /// it, and dashed when the status is new. The sidecar has no mark for a
+    /// status, so the client keeps it in `status_seen`: a status that is newer
+    /// than the mark is new again, and the mark survives a restart.
+    pub(crate) seen: crate::status_seen::Seen,
     /// The color the next text status will have.
     pub(crate) text_color: String,
     /// How many times the viewer was opened. The task that moves the viewer
@@ -178,6 +190,11 @@ pub(crate) struct StatusStripState {
     /// because the sidecar was still connecting must not leave the view empty
     /// for the rest of the session. `None` means never asked.
     pub(crate) requested_at: Option<Instant>,
+    /// How many times the strip asked for the statuses without an answer.
+    ///
+    /// The first tries are fast, because the sidecar is still connecting when
+    /// the window opens; the later ones wait [`RETRY_AFTER`].
+    pub(crate) attempts: u32,
     /// Whether the composer of a text status is open in the panel.
     ///
     /// The reference draws two buttons, one for the text and one for the
@@ -193,6 +210,14 @@ impl StatusStripState {
             ..Self::default()
         }
     }
+
+    /// The state of a strip that remembers the statuses of the last session.
+    pub(crate) fn with_marks(seen: crate::status_seen::Seen) -> Self {
+        Self {
+            seen,
+            ..Self::new()
+        }
+    }
 }
 
 /// Whether the strip has to ask the sidecar for the statuses again.
@@ -201,23 +226,54 @@ impl StatusStripState {
 /// or the account had no status in the window— leaves the view asking again
 /// after [`RETRY_AFTER`], instead of staying empty for the whole session.
 pub(crate) fn should_request(state: &StatusStripState, now: Instant) -> bool {
+    let wait = if state.attempts < FAST_TRIES {
+        FIRST_RETRY_AFTER
+    } else {
+        RETRY_AFTER
+    };
     match state.requested_at {
         None => true,
-        Some(at) => now.saturating_duration_since(at) >= RETRY_AFTER,
+        Some(at) => now.saturating_duration_since(at) >= wait,
     }
 }
 
-/// Marks the status of one sender as seen.
+/// The time of the newest status of one group.
+pub(crate) fn newest_status_ms(group: &StatusGroup) -> i64 {
+    group
+        .messages
+        .iter()
+        .map(|message| message.timestamp_ms)
+        .max()
+        .unwrap_or_default()
+}
+
+/// Marks the statuses of one sender as seen, up to `newest_ms`.
 ///
 /// The ring of a sender that was seen is solid; the ring of a sender that was
 /// never opened is dashed.
-pub(crate) fn mark_seen(state: &mut StatusStripState, sender_id: &str) {
-    state.seen.insert(sender_id.to_string());
+pub(crate) fn mark_seen(state: &mut StatusStripState, sender_id: &str, newest_ms: i64) {
+    let mark = state.seen.entry(sender_id.to_string()).or_insert(newest_ms);
+    if *mark < newest_ms {
+        *mark = newest_ms;
+    }
 }
 
 /// Whether the status of one sender was already seen.
 pub(crate) fn has_seen(state: &StatusStripState, sender_id: &str) -> bool {
-    state.seen.contains(sender_id)
+    state.seen.contains_key(sender_id)
+}
+
+/// Whether the group has a status that the user did not open yet.
+///
+/// A group without a mark is new, and so is a group with a status newer than
+/// the mark: a contact that posts again after being seen is new again.
+pub(crate) fn has_unseen(state: &StatusStripState, group: &StatusGroup) -> bool {
+    let newest = newest_status_ms(group);
+    state
+        .seen
+        .get(&group.sender_id)
+        .map(|mark| *mark < newest)
+        .unwrap_or(true)
 }
 
 /// The letter that stands for a contact in the ring of its status.
@@ -443,7 +499,9 @@ pub(crate) struct StatusStrip {
 impl StatusStrip {
     /// Creates the strip with the input of the text status.
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Whatfast>) -> Self {
-        let state = Rc::new(RefCell::new(StatusStripState::new()));
+        let state = Rc::new(RefCell::new(StatusStripState::with_marks(
+            crate::status_seen::load(),
+        )));
         let text_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(i18n::t("Write a text status…"))
@@ -730,13 +788,10 @@ impl StatusStrip {
                     .child(i18n::t("RECENT")),
             );
             for (index, group) in groups.iter().enumerate() {
-                // La foto del que subio el estado: la misma que muestra el
-                // chat, si el contacto la tiene.
-                let avatar_path = app
-                    .store
-                    .participant_avatar_path(&group.sender_id)
-                    .unwrap_or("");
-                list = list.child(self.render_status_row(group, index, avatar_path, scale, cx));
+                // La foto de perfil del que subio el estado: la del chat, que
+                // ya esta descargada, o la del participante.
+                let avatar_path = sender_avatar(app, group);
+                list = list.child(self.render_status_row(group, index, &avatar_path, scale, cx));
             }
         }
 
@@ -862,7 +917,7 @@ impl StatusStrip {
         let label = sender_label(group);
         let state = self.state.clone();
         let sender = group.sender_id.clone();
-        let seen = has_seen(&self.state.borrow(), &sender);
+        let seen = !has_unseen(&self.state.borrow(), group);
         let size = RING_SIZE * scale;
         let thickness = RING_BORDER * scale;
         // The photo sits inside the ring: the border and the gap take their
@@ -1002,10 +1057,7 @@ impl StatusStrip {
                 }));
 
         let sender = sender_label(group);
-        let avatar_path = app
-            .store
-            .participant_avatar_path(&group.sender_id)
-            .unwrap_or("");
+        let avatar_path = sender_avatar(app, group);
         let meta = h_flex()
             .gap(px(10. * scale))
             .items_center()
@@ -1023,7 +1075,7 @@ impl StatusStrip {
                     .justify_center()
                     .child(avatar_element(
                         &sender,
-                        avatar_path,
+                        &avatar_path,
                         px((VIEWER_AVATAR_SIZE - 2. * RING_BORDER) * scale),
                         cx,
                     )),
@@ -1084,12 +1136,44 @@ impl StatusStrip {
                     .child(progress)
                     .child(meta),
             )
-            .child(content);
+            .child(content)
+            .child(self.render_reply(app, cx));
 
         if groups.len() > 1 || group.messages.len() > 1 {
             viewer_root = viewer_root.child(self.render_navs(cx));
         }
         Some(viewer_root)
+    }
+
+    /// The bar that answers the status with the composer of the chat.
+    ///
+    /// The field is the same one of the conversation: the text goes to the
+    /// chat of the author with the status quoted, the way WhatsApp does it.
+    fn render_reply(&self, app: &Whatfast, cx: &mut Context<Whatfast>) -> gpui::Div {
+        let scale = app.ui_scale;
+        let empty = app.composer.read(cx).value().trim().is_empty();
+        h_flex()
+            .flex_none()
+            .gap(px(8. * scale))
+            .px(px(16. * scale))
+            .py(px(12. * scale))
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&app.composer)),
+            )
+            .child(
+                Button::new("status-reply-send")
+                    .secondary()
+                    .small()
+                    .label(i18n::t("Send"))
+                    .disabled(empty)
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        reply_to_the_open_status(app, window, cx);
+                    })),
+            )
     }
 
     /// The button that closes the viewer.
@@ -1181,6 +1265,7 @@ impl StatusStrip {
                 return;
             }
             state.requested_at = Some(now);
+            state.attempts += 1;
         }
         cx.spawn(async move |weak, cx| {
             weak.update(cx, |app, cx| {
@@ -1189,8 +1274,7 @@ impl StatusStrip {
             })
             .ok();
         })
-        .detach();
-    }
+        .detach();    }
 }
 
 /// The drawing inside one of the round buttons of the panel.
@@ -1467,6 +1551,179 @@ fn publish_photo_status(
 }
 
 /// The conversation that carries the statuses.
+/// The group of the statuses of one chat, when the chat has one.
+///
+/// The sender of a status is a person, and the chat of that person carries the
+/// same jid. A jid that the sidecar stored as a LID does not match the phone
+/// one, so the number is the second chance.
+fn group_of_chat<'a>(groups: &'a [StatusGroup], chat: &Chat) -> Option<&'a StatusGroup> {
+    let phone = chat.phone_number.trim_start_matches('+');
+    groups.iter().find(|group| {
+        group.sender_id == chat.transport_jid
+            || (!phone.is_empty() && group.sender_phone_number.trim_start_matches('+') == phone)
+    })
+}
+
+/// Whether the chat has a status that the user did not open yet.
+///
+/// The list of chats draws the green circle of the photo with this.
+pub(crate) fn has_unseen_status(app: &Whatfast, chat: &Chat) -> bool {
+    let groups = app.store.statuses();
+    let Some(group) = group_of_chat(groups, chat) else {
+        return false;
+    };
+    has_unseen(&app.status_strip.state.borrow(), group)
+}
+
+/// Opens the viewer of the statuses of one chat, when the chat has one.
+///
+/// Returns whether a viewer was opened: a chat without a status keeps its own
+/// click, which opens the conversation.
+pub(crate) fn open_status_of(app: &mut Whatfast, chat: &Chat, cx: &mut Context<Whatfast>) -> bool {
+    let (index, sender) = {
+        let groups = app.store.statuses();
+        let Some(group) = group_of_chat(groups, chat) else {
+            return false;
+        };
+        let sender = group.sender_id.clone();
+        let Some(index) = groups.iter().position(|other| other.sender_id == sender) else {
+            return false;
+        };
+        (index, sender)
+    };
+    let state = app.status_strip.state.clone();
+    open_viewer(app, &state, index, &sender, cx);
+    true
+}
+
+/// The profile photo of the sender of a group of statuses.
+///
+/// The chat of that person already carries the photo that the list of chats
+/// downloaded, so the strip shows it without asking the sidecar again.
+pub(crate) fn sender_avatar(app: &Whatfast, group: &StatusGroup) -> String {
+    if let Some(path) = app.store.participant_avatar_path(&group.sender_id) {
+        return path.to_string();
+    }
+    let phone = group.sender_phone_number.trim_start_matches('+');
+    app.store
+        .chats
+        .iter()
+        .find(|chat| {
+            chat.transport_jid == group.sender_id
+                || (!phone.is_empty() && chat.phone_number.trim_start_matches('+') == phone)
+        })
+        .map(|chat| chat.avatar_path.clone())
+        .unwrap_or_default()
+}
+
+/// The photo of a chat with the green circle of a status that was not seen.
+///
+/// The circle is dashed, like the one of the strip: the reference draws a new
+/// status with dashes, and a chat without a status has no circle at all.
+pub(crate) fn status_avatar(
+    title: &str,
+    avatar_path: &str,
+    size: f32,
+    is_group: bool,
+    cx: &mut Context<Whatfast>,
+) -> gpui::Div {
+    let accent = cx.theme().accent;
+    let secondary = cx.theme().secondary;
+    // Las medidas del anillo del strip, llevadas al tamano de esta foto.
+    let ratio = size / RING_SIZE;
+    let thickness = RING_BORDER * ratio;
+    let inner = size - 2. * thickness - 2. * PHOTO_GAP * ratio;
+    div()
+        .flex_shrink_0()
+        .relative()
+        .size(px(size))
+        .rounded_full()
+        .bg(secondary)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    paint_status_ring(bounds, size, thickness, false, accent, ratio, window);
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(avatar_element_of(
+            title,
+            avatar_path,
+            px(inner),
+            is_group,
+            cx,
+        ))
+}
+
+/// Sends the text of the composer as a reply to the status of the viewer.
+///
+/// WhatsApp sends the answer to the chat of the author, quoting the status:
+/// the sidecar accepts a quote from another chat (`reply_to_chat_id`), so the
+/// message arrives as a private message with the status above it.
+///
+/// Returns whether the text went out.
+pub(crate) fn reply_to_the_open_status(
+    app: &mut Whatfast,
+    window: &mut Window,
+    cx: &mut Context<Whatfast>,
+) -> bool {
+    let Some(viewer) = app.status_strip.viewer() else {
+        return false;
+    };
+    let text = app.composer.read(cx).value().trim().to_string();
+    if text.is_empty() {
+        return false;
+    }
+    let (author, status_id, status_chat) = {
+        let groups = app.store.statuses();
+        let Some(group) = groups.get(viewer.group_index) else {
+            return false;
+        };
+        let Some(message) = group.messages.get(viewer.message_index) else {
+            return false;
+        };
+        (
+            group.sender_id.clone(),
+            message.id.clone(),
+            statuses_chat_id(app),
+        )
+    };
+    if app.store.connection != ConnectionState::Connected {
+        app.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
+        return false;
+    }
+    if let Err(error) = validate_text_message(&text) {
+        app.store.toast_error = Some(error);
+        return false;
+    }
+    app.store.toast_error = None;
+    app.composer
+        .update(cx, |input, cx| input.set_value("", window, cx));
+    app.request(
+        rpc_request::Request::SendText(SendTextRequest {
+            client_message_id: Uuid::new_v4().to_string(),
+            chat_id: author.clone(),
+            text,
+            reply_to_message_id: status_id.clone(),
+            mentioned_jids: Vec::new(),
+            reply_to_chat_id: status_chat,
+        }),
+        PendingRequest::SendText {
+            chat_id: author,
+            draft_text: String::new(),
+            reply_to_message_id: Some(status_id),
+            mentions: Vec::new(),
+        },
+    );
+    true
+}
+
 fn statuses_chat_id(app: &Whatfast) -> String {
     let chat_id = app.store.statuses_chat_id();
     if chat_id.is_empty() {
@@ -1514,6 +1771,12 @@ fn open_viewer(
     sender_id: &str,
     cx: &mut Context<Whatfast>,
 ) {
+    let newest = app
+        .store
+        .statuses()
+        .get(group_index)
+        .map(newest_status_ms)
+        .unwrap_or_default();
     let generation = {
         let mut inner = state.borrow_mut();
         inner.generation += 1;
@@ -1521,7 +1784,8 @@ fn open_viewer(
             group_index,
             message_index: 0,
         });
-        mark_seen(&mut inner, sender_id);
+        mark_seen(&mut inner, sender_id, newest);
+        crate::status_seen::save(&inner.seen);
         inner.generation
     };
     // A video of another viewer must not keep playing under this one.
@@ -1972,15 +2236,71 @@ mod tests {
     #[test]
     fn a_status_is_new_until_the_user_opens_it() {
         let state = StatusStripState::new();
+        let mut sender = group("maya@s.whatsapp.net", 1);
+        sender.messages[0].timestamp_ms = 1_000;
+        assert!(has_unseen(&state, &sender));
         assert!(!has_seen(&state, "maya@s.whatsapp.net"));
     }
 
     #[test]
     fn opening_a_status_marks_it_as_seen_and_leaves_the_others_new() {
         let mut state = StatusStripState::new();
-        mark_seen(&mut state, "maya@s.whatsapp.net");
+        let mut maya = group("maya@s.whatsapp.net", 1);
+        maya.messages[0].timestamp_ms = 1_000;
+        mark_seen(&mut state, "maya@s.whatsapp.net", 1_000);
+        assert!(!has_unseen(&state, &maya));
         assert!(has_seen(&state, "maya@s.whatsapp.net"));
+        let mut priya = group("priya@s.whatsapp.net", 1);
+        priya.messages[0].timestamp_ms = 1_000;
+        assert!(has_unseen(&state, &priya));
         assert!(!has_seen(&state, "priya@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn the_chat_of_the_sender_is_the_group_of_its_statuses() {
+        let mut sender = group("5491100000000@s.whatsapp.net", 1);
+        sender.sender_phone_number = "+54 9 11 0000-0000".to_string();
+        let groups = vec![sender];
+        // The jid of the chat is the one of the sender.
+        let chat = Chat {
+            transport_jid: "5491100000000@s.whatsapp.net".to_string(),
+            ..Default::default()
+        };
+        assert!(group_of_chat(&groups, &chat).is_some());
+        // A chat stored with another jid (a LID) is found by the number.
+        let chat = Chat {
+            transport_jid: "999@lid".to_string(),
+            phone_number: "+54 9 11 0000-0000".to_string(),
+            ..Default::default()
+        };
+        assert!(group_of_chat(&groups, &chat).is_some());
+        // A chat of someone else has no status.
+        let chat = Chat {
+            transport_jid: "5491100000001@s.whatsapp.net".to_string(),
+            phone_number: "+54 9 11 0000-0001".to_string(),
+            ..Default::default()
+        };
+        assert!(group_of_chat(&groups, &chat).is_none());
+    }
+
+    #[test]
+    fn a_newer_status_of_a_seen_contact_is_new_again() {
+        let mut state = StatusStripState::new();
+        let mut sender = group("maya@s.whatsapp.net", 2);
+        sender.messages[0].timestamp_ms = 1_000;
+        sender.messages[1].timestamp_ms = 2_000;
+        mark_seen(&mut state, "maya@s.whatsapp.net", 2_000);
+        assert!(!has_unseen(&state, &sender));
+        // The contact posts again: the ring is dashed once more.
+        sender.messages.insert(
+            0,
+            Message {
+                id: "new".to_string(),
+                timestamp_ms: 3_000,
+                ..Default::default()
+            },
+        );
+        assert!(has_unseen(&state, &sender));
     }
 
     #[test]
@@ -1990,10 +2310,15 @@ mod tests {
         // The first look always asks.
         assert!(should_request(&state, now));
         state.requested_at = Some(now);
-        // Right after asking, it waits.
+        state.attempts = 1;
+        // The first tries go fast: the sidecar is still connecting.
         assert!(!should_request(&state, now));
+        assert!(!should_request(&state, now + FIRST_RETRY_AFTER / 2));
+        assert!(should_request(&state, now + FIRST_RETRY_AFTER));
+        // After a few tries the wait grows, so an account without statuses
+        // does not ask the sidecar every second.
+        state.attempts = FAST_TRIES;
         assert!(!should_request(&state, now + RETRY_AFTER / 2));
-        // A request that left the list empty is retried, not remembered.
         assert!(should_request(&state, now + RETRY_AFTER));
     }
 

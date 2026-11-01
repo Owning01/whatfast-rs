@@ -1235,21 +1235,28 @@ impl Whatfast {
                 let composer = composer.clone();
                 move |this, _, event, window, cx| {
                     if matches!(event, InputEvent::Change) {
-                        let text = composer.read(cx).value().to_string();
-                        let composing = !text.trim().is_empty();
-                        this.update_active_draft_text(text);
-                        let picker_was_open = this.mention_picker.is_some();
-                        this.refresh_mention_picker(cx);
-                        this.signal_typing(composing);
-                        // Abrir o cerrar el panel de las menciones cambia el
-                        // pie del chat, y el campo se queda con el texto del
-                        // cuadro anterior: el caracter que abrio el panel no
-                        // se veia hasta el proximo clic. Se avisa al campo
-                        // para que se pinte de nuevo.
-                        if picker_was_open != this.mention_picker.is_some() {
-                            this.composer.update(cx, |_, cx| cx.notify());
+                        // El campo tambien escribe la respuesta de un estado:
+                        // ese texto no es un borrador del chat ni un aviso de
+                        // que el usuario esta escribiendo en el.
+                        if this.status_strip.viewer_open() {
+                            cx.notify();
+                        } else {
+                            let text = composer.read(cx).value().to_string();
+                            let composing = !text.trim().is_empty();
+                            this.update_active_draft_text(text);
+                            let picker_was_open = this.mention_picker.is_some();
+                            this.refresh_mention_picker(cx);
+                            this.signal_typing(composing);
+                            // Abrir o cerrar el panel de las menciones cambia el
+                            // pie del chat, y el campo se queda con el texto del
+                            // cuadro anterior: el caracter que abrio el panel no
+                            // se veia hasta el proximo clic. Se avisa al campo
+                            // para que se pinte de nuevo.
+                            if picker_was_open != this.mention_picker.is_some() {
+                                this.composer.update(cx, |_, cx| cx.notify());
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
                     }
                     if let InputEvent::PressEnter {
                         secondary, shift, ..
@@ -3192,7 +3199,18 @@ impl Whatfast {
                 }
             }
             (PendingRequest::Statuses, rpc_response::Result::ListStatuses(response)) => {
+                // La foto de los que subieron un estado se pide apenas llega
+                // la lista: el tope de descargas del cliente deja salir unas
+                // pocas y el resto se queda con la foto del chat.
+                let senders: Vec<String> = response
+                    .groups
+                    .iter()
+                    .map(|group| group.sender_id.clone())
+                    .collect();
                 self.store.set_statuses(response.chat_id, response.groups);
+                for sender in senders {
+                    self.load_participant_avatar(sender);
+                }
                 cx.notify();
             }
             (
@@ -7195,6 +7213,13 @@ impl Whatfast {
     /// Puts the message of the composer out: the pictures of the tray when
     /// there are any, the text otherwise.
     pub(crate) fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // El campo es el mismo del chat: con el visor de estados abierto, el
+        // texto es la respuesta a ese estado y no un mensaje de la
+        // conversacion que esta detras.
+        if self.status_strip.viewer_open() {
+            crate::statuses::reply_to_the_open_status(self, window, cx);
+            return;
+        }
         if self.pending_images.is_empty() {
             self.send_text(window, cx);
         } else {
@@ -9024,7 +9049,7 @@ impl Whatfast {
             self.store
                 .statuses()
                 .iter()
-                .any(|group| !crate::statuses::has_seen(&state, &group.sender_id))
+                .any(|group| crate::statuses::has_unseen(&state, group))
         };
         self.nav_rail.update(cx, |rail, _| {
             rail.set_link(link);

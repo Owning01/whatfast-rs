@@ -939,13 +939,41 @@ impl Whatfast {
                     .as_ref()
                     .is_some_and(|selection| selection.ids.contains(&chat.id));
                 let highlighted = checked || (selected && !selecting);
-                let avatar = avatar_element_of(
-                    &chat.title,
-                    &chat.avatar_path,
-                    px(49. * ui_scale),
-                    chat.kind() == proto::ChatKind::Group,
-                    cx,
-                );
+                // La foto lleva el circulo verde cuando la persona subio un
+                // estado que todavia no se abrio, y ese circulo se clickea
+                // para verlo: el clic no abre la conversacion.
+                let unseen_status = crate::statuses::has_unseen_status(self, &chat);
+                let avatar = if unseen_status {
+                    crate::statuses::status_avatar(
+                        &chat.title,
+                        &chat.avatar_path,
+                        49. * ui_scale,
+                        chat.kind() == proto::ChatKind::Group,
+                        cx,
+                    )
+                } else {
+                    avatar_element_of(
+                        &chat.title,
+                        &chat.avatar_path,
+                        px(49. * ui_scale),
+                        chat.kind() == proto::ChatKind::Group,
+                        cx,
+                    )
+                };
+                let avatar = avatar.id(ElementId::named_usize("chat-avatar", index));
+                let avatar = if unseen_status && !selecting {
+                    let chat_of_the_status = chat.clone();
+                    avatar
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if crate::statuses::open_status_of(this, &chat_of_the_status, cx) {
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }))
+                } else {
+                    avatar
+                };
                 let typing_preview =
                     self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
                 let row_typing = typing_preview.is_some();
@@ -4062,6 +4090,10 @@ impl Whatfast {
             .bg(cx.theme().popover)
             .shadow_lg()
             .overflow_hidden()
+            // La rueda dentro del panel mueve su rejilla, no la conversacion
+            // que queda detras: la lista de abajo ya se movio cuando el evento
+            // llega aca, asi que se corta la propagacion.
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             // La fila de las categorias, con el dibujo de cada una, como la
             // referencia.
             .child(self.render_emoji_categories(cx))
@@ -8246,6 +8278,15 @@ impl Render for Whatfast {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
+            // El emoji que la fuente de la interfaz no tiene se pinta con la
+            // del telefono: el corazon, la carita y la bandera son los de
+            // WhatsApp, no los de Windows.
+            .font(gpui::Font {
+                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                    crate::emoji_font::family().to_string(),
+                ])),
+                ..Default::default()
+            })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CycleRecentChat, window, cx| {
                 this.cycle_recent_chat(false, window, cx);
