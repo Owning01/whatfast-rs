@@ -54,7 +54,7 @@ use whatfast_model::model::{
 };
 
 use crate::app::{
-    ACCENT_SWATCHES, ChatContextAction, ChatMenuAction, CycleRecentChat, CycleRecentChatReverse,
+    ConfirmDeleteMessage, ACCENT_SWATCHES, ChatContextAction, ChatMenuAction, CycleRecentChat, CycleRecentChatReverse,
     DARK_GREEN, EMOJI_COLUMNS, EmojiTarget, EscapeAction, FocusComposerAction, FocusSearch,
     MAX_UI_SCALE, MIN_UI_SCALE, OpenQuickAsk, OpenSettingsAction, PANEL, PageDownMessages,
     PageUpMessages, PanelTab, PinDialogMode, ScrollSurface, ScrollToBottomAction,
@@ -2048,6 +2048,102 @@ impl Whatfast {
     /// La confirmacion de "Cerrar sesion", cuando sale del menu de la columna
     /// de los chats: la sesion del dispositivo se desvincula y los mensajes
     /// que ya estan en disco no se tocan.
+    /// El cuadro que pide confirmacion antes de eliminar un mensaje.
+    fn render_confirm_delete_message(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(target) = self.confirm_delete_message.clone() else {
+            return div().into_any_element();
+        };
+        let scale = self.ui_scale;
+        let panel = cx.theme().popover;
+        let muted = cx.theme().muted_foreground;
+        let delete_for_everyone = target.delete_for_everyone;
+
+        let title = if delete_for_everyone {
+            i18n::t("Delete message for everyone?")
+        } else {
+            i18n::t("Delete message?")
+        };
+
+        let description = if delete_for_everyone {
+            i18n::t("Are you sure you want to delete this message for everyone in this chat?")
+        } else {
+            i18n::t("Are you sure you want to delete this message? It will only be removed from this device.")
+        };
+
+        let confirm_label = if delete_for_everyone {
+            i18n::t("Delete for everyone")
+        } else {
+            i18n::t("Delete for me")
+        };
+
+        div()
+            .id("delete-message-confirm-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000a6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm_delete_message = None;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("delete-message-confirm-card")
+                    .w(px(380. * scale))
+                    .rounded_lg()
+                    .bg(panel)
+                    .p(px(22. * scale))
+                    .gap_3()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(description),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("delete-message-cancel")
+                                    .label(i18n::t("Cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.confirm_delete_message = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("delete-message-confirm-button")
+                                    .danger()
+                                    .label(confirm_label)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let message_id = target.message_id.clone();
+                                        let for_everyone = target.delete_for_everyone;
+                                        this.confirm_delete_message = None;
+                                        this.delete_message(message_id, for_everyone);
+                                        this.image_viewer = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_logout_confirm(
         &self,
         _window: &mut Window,
@@ -6283,8 +6379,10 @@ impl Whatfast {
                         .on_click(cx.listener({
                             let message_id = message_id.clone();
                             move |this, _, _, cx| {
-                                this.delete_message(message_id.clone(), false);
-                                this.image_viewer = None;
+                                this.confirm_delete_message = Some(ConfirmDeleteMessage {
+                                    message_id: message_id.clone(),
+                                    delete_for_everyone: false,
+                                });
                                 cx.notify();
                             }
                         })),
@@ -8861,6 +8959,9 @@ impl Render for Whatfast {
             })
             .when(self.confirm_logout_open, |root| {
                 root.child(self.render_logout_confirm(window, cx))
+            })
+            .when(self.confirm_delete_message.is_some(), |root| {
+                root.child(self.render_confirm_delete_message(window, cx))
             })
             .when(self.view_once_info_open, |root| {
                 root.child(self.render_view_once_info(cx))

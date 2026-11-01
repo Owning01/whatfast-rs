@@ -343,6 +343,13 @@ pub(crate) struct ChatSelection {
     pub(crate) ids: HashSet<String>,
 }
 
+/// The confirmation dialog to delete a message.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConfirmDeleteMessage {
+    pub(crate) message_id: String,
+    pub(crate) delete_for_everyone: bool,
+}
+
 /// What the PIN dialog does: turn the lock on for the first time, or off.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum PinDialogMode {
@@ -1009,6 +1016,8 @@ pub(crate) struct Whatfast {
     pub(crate) chat_list_menu: bool,
     /// Whether the dialog that confirms the logout is open.
     pub(crate) confirm_logout_open: bool,
+    /// Confirmation dialog before deleting a message.
+    pub(crate) confirm_delete_message: Option<ConfirmDeleteMessage>,
     /// Whether the card that explains the view-once messages is open.
     pub(crate) view_once_info_open: bool,
     /// The dialog that creates a group, when it is open.
@@ -1514,6 +1523,7 @@ impl Whatfast {
             sidebar_hidden: false,
             chat_list_menu: false,
             confirm_logout_open: false,
+            confirm_delete_message: None,
             view_once_info_open: false,
             create_group: None,
             selection: None,
@@ -6826,6 +6836,11 @@ impl Whatfast {
     }
 
     pub(crate) fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_delete_message.is_some() {
+            self.confirm_delete_message = None;
+            cx.notify();
+            return;
+        }
         if self.video_fullscreen {
             self.video_fullscreen = false;
             cx.notify();
@@ -9342,8 +9357,18 @@ impl Whatfast {
             MessageAction::Reply => self.start_reply(message_id),
             MessageAction::Forward => self.open_forward_picker(chat_id, message_id, window, cx),
             MessageAction::Edit => self.start_edit(message_id, window, cx),
-            MessageAction::Delete => self.delete_message(message_id, false),
-            MessageAction::DeleteForEveryone => self.delete_message(message_id, true),
+            MessageAction::Delete => {
+                self.confirm_delete_message = Some(ConfirmDeleteMessage {
+                    message_id,
+                    delete_for_everyone: false,
+                });
+            }
+            MessageAction::DeleteForEveryone => {
+                self.confirm_delete_message = Some(ConfirmDeleteMessage {
+                    message_id,
+                    delete_for_everyone: true,
+                });
+            }
             MessageAction::Copy => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
