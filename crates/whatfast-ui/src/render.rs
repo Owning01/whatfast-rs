@@ -200,15 +200,17 @@ impl Whatfast {
         // sale del asa y el borde no recibiria mas movimientos.
         if self.sidebar_dragging {
             let moved = cx.entity().downgrade();
-            window.on_mouse_event(move |event: &MouseMoveEvent, _phase, _window, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
+                let viewport_w = window.viewport_size().width;
                 let _ = moved.update(cx, |this, cx| {
                     if !this.sidebar_dragging {
                         return;
                     }
                     let rail = crate::navrail::column_width(this.ui_scale);
                     let width = (f32::from(event.position.x) - f32::from(rail)) / this.ui_scale;
-                    this.sidebar_width =
-                        width.clamp(crate::app::MIN_SIDEBAR_WIDTH, crate::app::MAX_SIDEBAR_WIDTH);
+                    let max_ratio = ((f32::from(viewport_w) - f32::from(rail)) * 0.45) / this.ui_scale;
+                    let max_allowed = crate::app::MAX_SIDEBAR_WIDTH.min(max_ratio.max(crate::app::MIN_SIDEBAR_WIDTH));
+                    this.sidebar_width = width.clamp(crate::app::MIN_SIDEBAR_WIDTH, max_allowed);
                     cx.notify();
                 });
             });
@@ -3497,6 +3499,75 @@ impl Whatfast {
                     // area, so it stays behind the bubbles, and it is
                     // absolute, so it does not move when the list scrolls.
                     .when_some(wallpaper, |area, layer| area.child(layer))
+                    .when(self.chat_search_open, |area| {
+                        let scale = self.ui_scale;
+                        let muted = cx.theme().muted_foreground;
+                        area.child(
+                            h_flex()
+                                .w_full()
+                                .px_4()
+                                .py_2()
+                                .gap_3()
+                                .items_center()
+                                .bg(cx.theme().background)
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .with_size(px(16. * scale))
+                                        .text_color(muted),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(240. * scale))
+                                        .child(self.chat_search_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(if self.chat_search_matches.is_empty() {
+                                            if self.chat_search_query.trim().is_empty() {
+                                                String::new()
+                                            } else {
+                                                i18n::t("No matches").to_string()
+                                            }
+                                        } else {
+                                            format!("{} / {}", self.chat_search_current, self.chat_search_matches.len())
+                                        }),
+                                )
+                                .child(
+                                    Button::new("chat-search-prev")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ArrowUp)
+                                        .tooltip(i18n::t("Previous match"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.chat_search_prev(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("chat-search-next")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ArrowDown)
+                                        .tooltip(i18n::t("Next match"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.chat_search_next(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("chat-search-close")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Close)
+                                        .tooltip(i18n::t("Close search"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.close_chat_search(window, cx);
+                                        })),
+                                ),
+                        )
+                    })
                     // port: the button that loads the older messages is a
                     // small pill above the list of the messages, the same way
                     // the reference draws it. It is not over the list: the
@@ -5526,6 +5597,59 @@ impl Whatfast {
             );
         }
         if let Some(info) = info {
+            // Media, links and docs section
+            let media_count = self.store.messages.iter().filter(|m| {
+                matches!(m.content.as_ref(), Some(proto::message::Content::Image(_)))
+            }).count();
+            let doc_count = self.store.messages.iter().filter(|m| {
+                matches!(m.content.as_ref(), Some(proto::message::Content::Attachment(a)) if a.kind != "audio" && !a.voice_note)
+            }).count();
+            let link_count = self.store.messages.iter().filter(|m| {
+                crate::attachments::bubble_text(m).contains("http://") || crate::attachments::bubble_text(m).contains("https://")
+            }).count();
+
+            body = body.child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .bg(cx.theme().secondary)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(muted)
+                            .child(i18n::t("Media, links and docs")),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .child(div().text_sm().child(format!("📷 {} {}", media_count, i18n::t("Photos"))))
+                            .child(div().text_sm().child(format!("📄 {} {}", doc_count, i18n::t("Docs"))))
+                            .child(div().text_sm().child(format!("🔗 {} {}", link_count, i18n::t("Links")))),
+                    ),
+            );
+
+            let timer_label = match info.disappearing_timer_seconds {
+                86400 => i18n::t("24 hours"),
+                604800 => i18n::t("7 days"),
+                7776000 => i18n::t("90 days"),
+                _ => i18n::t("Off"),
+            };
+            body = body.child(
+                v_flex()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .bg(cx.theme().secondary)
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(i18n::t("Disappearing messages")))
+                    .child(div().text_sm().text_color(muted).child(format!("{}: {}", i18n::t("Timer"), timer_label))),
+            );
+
             if !is_group {
                 if !info.about.is_empty() {
                     body = body.child(section(i18n::t("About"), info.about.clone()));
@@ -7095,11 +7219,15 @@ impl Whatfast {
             .as_ref()
             .filter(|content| ubicaciones::is_card_content(content))
             .cloned();
+        let poll_content = match message.content.as_ref() {
+            Some(proto::message::Content::Poll(poll)) => Some(poll.clone()),
+            _ => None,
+        };
         // El mensaje de visualizacion unica no trae el contenido: la burbuja
         // es el aviso de WhatsApp.
         let view_once = is_view_once_message(message);
         let sticker = image_content.as_ref().is_some_and(|image| image.sticker);
-        let text = if sticker || view_once {
+        let text = if sticker || view_once || poll_content.is_some() {
             String::new()
         } else {
             // port: el texto de la burbuja no repite el nombre del archivo ni
@@ -7189,9 +7317,11 @@ impl Whatfast {
         };
         let starts_cluster = self.starts_cluster(index);
         let vertical_padding = px(if self.density == Density::Compact {
-            4.
+            if starts_cluster { 3. } else { 2. }
+        } else if starts_cluster {
+            5.
         } else {
-            6.
+            3.5
         } * self.ui_scale);
         let bubble_element = v_flex()
             .id(("message-bubble", index))
@@ -7537,48 +7667,71 @@ impl Whatfast {
                 }),
                 |bubble, card| bubble.child(card),
             )
+            .when_some(poll_content.clone(), |bubble, poll| {
+                bubble.child(self.render_poll_card(index, message, &poll, cx))
+            })
             .when(!text.is_empty(), |bubble| {
-                // The hour goes at the end of the text,
-                // inside the bubble, the way the
-                // reference writes it, with the ticks
-                // of the delivery state right after.
                 let scale = self.ui_scale;
-                bubble.child(
-                    h_flex()
-                        .items_end()
-                        .gap_1()
-                        .child(self.render_linkified_text(&body_message_id, &text))
-                        .when(starred, |row| {
-                            row.child(
-                                Icon::new(IconName::StarFill)
-                                    .with_size(px(11. * scale))
-                                    .text_color(cx.theme().accent),
-                            )
-                        })
-                        .child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(3. * scale))
-                                .when(!meta_text.is_empty(), |row| {
-                                    row.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(meta_text.clone()),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(time_label.clone()),
+                let is_multiline = text.contains('\n') || text.chars().count() > 38;
+                let time_and_status = h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(3. * scale))
+                    .when(!meta_text.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(meta_text.clone()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(time_label.clone()),
+                    )
+                    .when_some(status_glyph, |row, glyph| {
+                        row.child(status_tick(glyph, status_color, scale))
+                    });
+
+                if is_multiline {
+                    bubble.child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(self.render_linkified_text(&body_message_id, &text))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_end()
+                                    .items_center()
+                                    .gap_1()
+                                    .when(starred, |row| {
+                                        row.child(
+                                            Icon::new(IconName::StarFill)
+                                                .with_size(px(11. * scale))
+                                                .text_color(cx.theme().accent),
+                                        )
+                                    })
+                                    .child(time_and_status),
+                            ),
+                    )
+                } else {
+                    bubble.child(
+                        h_flex()
+                            .items_end()
+                            .gap_2()
+                            .child(self.render_linkified_text(&body_message_id, &text))
+                            .when(starred, |row| {
+                                row.child(
+                                    Icon::new(IconName::StarFill)
+                                        .with_size(px(11. * scale))
+                                        .text_color(cx.theme().accent),
                                 )
-                                .when_some(status_glyph, |row, glyph| {
-                                    row.child(status_tick(glyph, status_color, scale))
-                                }),
-                        ),
-                )
+                            })
+                            .child(time_and_status),
+                    )
+                }
             })
             // Una foto o un sticker sin epigrafe no
             // tienen la linea del texto: la hora y la
@@ -7769,26 +7922,157 @@ impl Whatfast {
                 )
             })
             .child({
-                let mut row = h_flex()
+                let bubble_wrapper = h_flex()
+                    .relative()
+                    .items_center()
+                    .child(bubble_element)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_1()
+                            .when(message.from_me, |a| a.right_full().mr_2())
+                            .when(!message.from_me, |a| a.left_full().ml_2())
+                            .child(hover_actions),
+                    );
+                h_flex()
                     .w_full()
                     .items_center()
-                    .gap_2()
-                    .group(actions_group);
-                if message.from_me {
-                    row = row.justify_end().child(hover_actions).child(bubble_element);
-                } else {
-                    row = row
-                        .justify_start()
-                        .child(bubble_element)
-                        .child(hover_actions);
-                }
-                row
+                    .group(actions_group)
+                    .when(message.from_me, |r| r.justify_end())
+                    .when(!message.from_me, |r| r.justify_start())
+                    .child(bubble_wrapper)
             })
     }
 
     /// El aviso de WhatsApp para un mensaje de visualizacion unica: el
     /// telefono retiene el contenido y el dispositivo vinculado solo puede
     /// avisar que llego.
+
+    fn render_poll_card(
+        &self,
+        index: usize,
+        message: &proto::Message,
+        poll: &proto::PollContent,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let scale = self.ui_scale;
+        let single_choice = poll.selectable_options_count <= 1;
+        let poll_message_id = message.id.clone();
+        let total_voters = poll.total_voters.max(1);
+        let accent = cx.theme().accent;
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+
+        v_flex()
+            .id(("poll-card", index))
+            .w(px(320. * scale))
+            .max_w_full()
+            .gap_2()
+            .px_1()
+            .py_1()
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .child(poll.question.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(if single_choice {
+                                i18n::t("Select one option").to_string()
+                            } else {
+                                i18n::t("Select one or more options").to_string()
+                            }),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .children(poll.options.iter().enumerate().map(|(opt_idx, opt)| {
+                        let is_selected = opt.selected_by_me;
+                        let opt_name = opt.name.clone();
+                        let vote_count = opt.vote_count;
+                        let ratio = (vote_count as f32 / total_voters as f32).clamp(0.0, 1.0);
+                        let poll_id = poll_message_id.clone();
+                        let all_options = poll.options.clone();
+
+                        h_flex()
+                            .id(format!("poll-option-{index}-{opt_idx}"))
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if is_selected { accent } else { border })
+                            .bg(if is_selected { cx.theme().selection } else { cx.theme().secondary })
+                            .relative()
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(gpui::relative(ratio))
+                                    .bg(accent.opacity(0.18)),
+                            )
+                            .child(
+                                div()
+                                    .size(px(18. * scale))
+                                    .rounded(if single_choice { px(9. * scale) } else { px(4. * scale) })
+                                    .border_1()
+                                    .border_color(if is_selected { accent } else { muted })
+                                    .bg(if is_selected { accent } else { gpui::transparent_black() })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(is_selected, |box_| {
+                                        box_.child(
+                                            Icon::new(IconName::Check)
+                                                .with_size(px(12. * scale))
+                                                .text_color(cx.theme().accent_foreground),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(if is_selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                                    .child(opt_name.clone()),
+                            )
+                            .when(vote_count > 0, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(vote_count.to_string()),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let mut desired: Vec<String> = all_options
+                                    .iter()
+                                    .filter(|o| o.selected_by_me && (!single_choice || o.name != opt_name))
+                                    .map(|o| o.name.clone())
+                                    .collect();
+                                if !is_selected {
+                                    desired.push(opt_name.clone());
+                                }
+                                this.vote_poll(poll_id.clone(), desired);
+                                cx.notify();
+                            }))
+                    })),
+            )
+    }
+
     fn render_view_once(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
         let scale = self.ui_scale;
         let muted = cx.theme().muted_foreground;

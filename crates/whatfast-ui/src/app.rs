@@ -841,6 +841,11 @@ pub(crate) struct Whatfast {
     /// button of the send, the same way the reference shows them over the
     /// field of the message.
     pub(crate) pending_images: PendingImages,
+    pub(crate) chat_search_open: bool,
+    pub(crate) chat_search_input: Entity<InputState>,
+    pub(crate) chat_search_query: String,
+    pub(crate) chat_search_matches: Vec<String>,
+    pub(crate) chat_search_current: usize,
     pub(crate) search_input: Entity<InputState>,
     pub(crate) search_query: String,
     pub(crate) search_results: SearchResults,
@@ -1160,6 +1165,11 @@ impl Whatfast {
         });
         let emoji_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search emoji")));
+        let chat_search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(i18n::t("Find in chat"))
+                .clean_on_escape()
+        });
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 // port: the placeholder of the origin
@@ -1296,6 +1306,15 @@ impl Whatfast {
                     }
                 }
             }),
+            cx.subscribe_in(&chat_search_input, window, {
+                let chat_search_input = chat_search_input.clone();
+                move |this, _, event, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let query = chat_search_input.read(cx).value().to_string();
+                        this.set_chat_search_query(query, cx);
+                    }
+                }
+            }),
             cx.subscribe_in(&search_input, window, {
                 let search_input = search_input.clone();
                 move |this, _, event, _, cx| {
@@ -1385,6 +1404,11 @@ impl Whatfast {
             call_video: crate::call_video::CallVideo::default(),
             composer,
             pending_images: PendingImages::default(),
+            chat_search_open: false,
+            chat_search_input: chat_search_input.clone(),
+            chat_search_query: String::new(),
+            chat_search_matches: Vec::new(),
+            chat_search_current: 0,
             search_input,
             search_query: String::new(),
             search_results: SearchResults::default(),
@@ -1832,10 +1856,10 @@ impl Whatfast {
                     chat_id,
                     previous_unread,
                 } => {
-                    self.store.restore_unread(&chat_id, previous_unread);
-                    self.store.last_mark_read_id = None;
-                    self.store.toast_error =
-                        Some(i18n::t("Mark as read timed out. Try again.").into());
+                    if self.store.selected_chat_id.as_deref() != Some(chat_id.as_str()) {
+                        self.store.restore_unread(&chat_id, previous_unread);
+                        self.store.last_mark_read_id = None;
+                    }
                 }
                 PendingRequest::Messages { prepend: true, .. } => {
                     self.pending_prepend_anchor = None;
@@ -1996,6 +2020,78 @@ impl Whatfast {
         }
     }
 
+    pub(crate) fn set_chat_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.chat_search_query = query.clone();
+        let query_lower = query.trim().to_lowercase();
+        if query_lower.is_empty() {
+            self.chat_search_matches.clear();
+            self.chat_search_current = 0;
+            self.search_target_message_id = None;
+            cx.notify();
+            return;
+        }
+        let matches: Vec<String> = self
+            .store
+            .messages
+            .iter()
+            .filter(|m| {
+                crate::attachments::bubble_text(m).to_lowercase().contains(&query_lower)
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        self.chat_search_matches = matches;
+        if !self.chat_search_matches.is_empty() {
+            self.chat_search_current = 1;
+            let target_id = self.chat_search_matches[0].clone();
+            self.scroll_to_message(&target_id);
+            self.search_target_message_id = Some(target_id);
+        } else {
+            self.chat_search_current = 0;
+            self.search_target_message_id = None;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn chat_search_next(&mut self, cx: &mut Context<Self>) {
+        if self.chat_search_matches.is_empty() {
+            return;
+        }
+        if self.chat_search_current >= self.chat_search_matches.len() {
+            self.chat_search_current = 1;
+        } else {
+            self.chat_search_current += 1;
+        }
+        let target_id = self.chat_search_matches[self.chat_search_current - 1].clone();
+        self.scroll_to_message(&target_id);
+        self.search_target_message_id = Some(target_id);
+        cx.notify();
+    }
+
+    pub(crate) fn chat_search_prev(&mut self, cx: &mut Context<Self>) {
+        if self.chat_search_matches.is_empty() {
+            return;
+        }
+        if self.chat_search_current <= 1 {
+            self.chat_search_current = self.chat_search_matches.len();
+        } else {
+            self.chat_search_current -= 1;
+        }
+        let target_id = self.chat_search_matches[self.chat_search_current - 1].clone();
+        self.scroll_to_message(&target_id);
+        self.search_target_message_id = Some(target_id);
+        cx.notify();
+    }
+
+    pub(crate) fn close_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_search_open = false;
+        self.chat_search_query.clear();
+        self.chat_search_matches.clear();
+        self.chat_search_current = 0;
+        self.search_target_message_id = None;
+        self.chat_search_input.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
     pub(crate) fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
         self.search_generation = self.search_generation.wrapping_add(1);
@@ -2034,6 +2130,12 @@ impl Whatfast {
 
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.store.screen != Screen::Chats {
+            return;
+        }
+        if self.store.selected_chat_id.is_some() {
+            self.chat_search_open = true;
+            self.chat_search_input.update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
             return;
         }
         self.settings_open = false;
@@ -2400,8 +2502,10 @@ impl Whatfast {
                 previous_unread,
             } = &pending
             {
-                self.store.restore_unread(chat_id, *previous_unread);
-                self.store.last_mark_read_id = None;
+                if self.store.selected_chat_id.as_deref() != Some(chat_id.as_str()) {
+                    self.store.restore_unread(chat_id, *previous_unread);
+                    self.store.last_mark_read_id = None;
+                }
             }
             // The changes below are optimistic: the client shows them before
             // the backend answers, so a failure has to put them back.
@@ -6783,6 +6887,10 @@ impl Whatfast {
         if self.quick_ask.is_open() {
             self.close_quick_ask(window, cx);
             cx.notify();
+            return;
+        }
+        if self.chat_search_open {
+            self.close_chat_search(window, cx);
             return;
         }
         if self.replying_to_message_id.is_some() {

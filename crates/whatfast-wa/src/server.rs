@@ -3131,6 +3131,7 @@ fn connection_changed(state: ConnectionState, detail: String) -> BackendEvent {
 }
 
 /// A dispatch failure that maps onto an `RpcError` code.
+#[derive(Debug)]
 struct Failure {
     code: String,
     message: String,

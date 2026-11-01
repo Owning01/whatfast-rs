@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use whatfast_protocol::{
-    Chat, ChatKind, GetChatInfoRequest, GetMessageAttachmentRequest, ListChatsRequest,
-    ListMessagesRequest, Message, MessageStatus, SearchLocalRequest, SendTextRequest, message,
-    rpc_request, rpc_response::Result as RpcResult,
+    AttachmentKind, Chat, ChatKind, GetChatInfoRequest, GetMessageAttachmentRequest, ListChatsRequest,
+    ListMessagesRequest, Message, MessageStatus, SearchLocalRequest, SendAttachmentRequest,
+    SendImageRequest, SendReactionRequest, SendTextRequest, message, rpc_request,
+    rpc_response::Result as RpcResult,
 };
 
 use crate::{
@@ -167,6 +168,36 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["draft_id", "send"]
             }
         }),
+        json!({
+            "name": "message_send_media",
+            "title": "Send a media attachment",
+            "description": "Sends an image, video, audio, or document file to one chat with an optional caption.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "file_path": {"type": "string", "description": "Absolute path to the file on disk."},
+                    "caption": {"type": "string", "description": "Optional caption for the media."},
+                    "kind": {"type": "string", "enum": ["image", "video", "audio", "document"], "description": "Kind of media; defaults to image or inferred from extension."},
+                    "reply_to_message_id": {"type": "string", "description": "Optional message ID to reply to."}
+                },
+                "required": ["chat_id", "file_path"]
+            }
+        }),
+        json!({
+            "name": "message_react",
+            "title": "React to a message",
+            "description": "Reacts with an emoji to an existing message in a chat. Send an empty string or 'remove' to clear the reaction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "emoji": {"type": "string", "description": "Emoji character (e.g. 👍, ❤️, ✅) or empty to clear."}
+                },
+                "required": ["chat_id", "message_id", "emoji"]
+            }
+        }),
     ]
 }
 
@@ -184,6 +215,8 @@ pub fn call(client: &mut Client, name: &str, arguments: &Value) -> Result<Value,
         "draft_propose" => draft_propose(client, arguments),
         "drafts_list" => drafts_list(client, arguments),
         "draft_decide" => draft_decide(client, arguments),
+        "message_send_media" => message_send_media(client, arguments),
+        "message_react" => message_react(client, arguments),
         other => return Err(format!("unknown tool {other}")),
     };
     match &result {
@@ -855,6 +888,103 @@ fn text(arguments: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .filter(|value| !value.is_empty())
+}
+
+
+fn message_send_media(client: &mut Client, arguments: &Value) -> Result<Value, String> {
+    let chat_id = required(arguments, "chat_id")?;
+    let file_path = required(arguments, "file_path")?;
+    let caption = text(arguments, "caption").unwrap_or_default();
+    let reply_to = text(arguments, "reply_to_message_id").unwrap_or_default();
+    let kind = text(arguments, "kind").unwrap_or_default().to_lowercase();
+    let client_message_id = uuid4();
+
+    if !std::path::Path::new(&file_path).is_file() {
+        return Err(format!("file not found at {file_path}"));
+    }
+
+    let is_image = kind == "image"
+        || file_path.ends_with(".png")
+        || file_path.ends_with(".jpg")
+        || file_path.ends_with(".jpeg")
+        || file_path.ends_with(".webp");
+
+    let answer = if is_image && kind != "document" {
+        client.call(
+            rpc_request::Request::SendImage(SendImageRequest {
+                client_message_id: client_message_id.clone(),
+                chat_id: chat_id.clone(),
+                image_path: file_path,
+                caption,
+                reply_to_message_id: reply_to,
+                reply_to_chat_id: String::new(),
+            }),
+            ATTACHMENT_TIMEOUT,
+        )
+    } else {
+        let is_voice = kind == "voice";
+        let attachment_kind = match kind.as_str() {
+            "video" => AttachmentKind::Video,
+            "audio" | "voice" => AttachmentKind::Audio,
+            _ => AttachmentKind::Document,
+        };
+        client.call(
+            rpc_request::Request::SendAttachment(SendAttachmentRequest {
+                client_message_id: client_message_id.clone(),
+                chat_id: chat_id.clone(),
+                file_path,
+                kind: attachment_kind as i32,
+                caption,
+                reply_to_message_id: reply_to,
+                reply_to_chat_id: String::new(),
+                voice_note: is_voice,
+            }),
+            ATTACHMENT_TIMEOUT,
+        )
+    };
+
+    match answer {
+        Ok(RpcResult::SendImage(_)) | Ok(RpcResult::SendAttachment(_)) => {
+            Ok(json!({
+                "status": "sent",
+                "chat_id": chat_id,
+                "client_message_id": client_message_id,
+            }))
+        }
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn message_react(client: &mut Client, arguments: &Value) -> Result<Value, String> {
+    let chat_id = required(arguments, "chat_id")?;
+    let message_id = required(arguments, "message_id")?;
+    let emoji = text(arguments, "emoji").unwrap_or_default();
+    let emoji = if emoji == "remove" { String::new() } else { emoji };
+    let client_reaction_id = uuid4();
+
+    let answer = client.call(
+        rpc_request::Request::SendReaction(SendReactionRequest {
+            chat_id: chat_id.clone(),
+            message_id: message_id.clone(),
+            emoji: emoji.clone(),
+            client_reaction_id,
+        }),
+        WRITE_TIMEOUT,
+    );
+
+    match answer {
+        Ok(RpcResult::SendReaction(_)) => {
+            Ok(json!({
+                "status": "reacted",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "emoji": emoji,
+            }))
+        }
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn required(arguments: &Value, key: &str) -> Result<String, String> {
