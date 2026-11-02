@@ -8373,10 +8373,16 @@ impl Whatfast {
                 // En multilínea el texto usa el ancho completo y la fila de hora/estado
                 // se coloca abajo en un v_flex con .gap_0p5().
                 let is_multiline = text.contains('\n') || text.chars().count() > 38;
+                // El texto de la burbuja es un `TextView` con tope de
+                // `TEXT_MAX_WIDTH` (ver `render_linkified_text`). Medir el
+                // corte con el ancho de la burbuja (24 px mas) daba una linea
+                // de menos en los mensajes que caen justo en el borde, y la
+                // fila siguiente se pintaba encima de la ultima linea.
+                let text_width = px(TEXT_MAX_WIDTH * self.ui_scale).min(wrap_width);
                 let (text_wrap_width, time_row_height) = if text.is_empty() {
                     (wrap_width, px(0.))
                 } else if is_multiline {
-                    (wrap_width, px(18. * self.ui_scale))
+                    (text_width, px(18. * self.ui_scale))
                 } else {
                     let timestamp_ms = self.store.messages[index].timestamp_ms;
                     let label = bubble_time_label(timestamp_ms, local_offset_minutes(timestamp_ms));
