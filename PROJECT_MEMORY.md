@@ -3160,3 +3160,20 @@ caia en el brazo generico de `session.rs` y la fila seguia visible.
 **Trampas**: el tombstone se escribe aunque la fila no exista todavia, para que una pagina de historia posterior no la reviva (`merge_message` conserva `revoked`). `mark_message_revoked` y este brazo devuelven la vista previa al ultimo mensaje visible; el revoke por `ProtocolMessage` sigue dejando "Message deleted" en la vista previa, como el Go.
 
 **Pendiente**: la app instalada sigue en 0.2.31; el fix no llega hasta compilar e instalar. Commit y push sin permiso.
+
+## 2026-11-02 - Commit, push e instalacion del lote
+
+**Que**: `392e41d` en `main`, 44 archivos. El push dejo `main` igual a `origin/main`.
+`scripts\build.cmd` compilo en release (`Finished` en 22m 40s) y `scripts\instalar.ps1`
+dejo los dos ejecutables en `%LOCALAPPDATA%\Programs\Whatfast`.
+
+**Por que**: lo pidio el usuario.
+
+**Evidencia**: el SHA256 de `dist\whatfast.exe` y `dist\whatfast-backend.exe` es el
+mismo que el de los archivos instalados.
+
+**Trampas**: el enlace de devtree queda fuera del commit porque declara dependencias
+por ruta a `G:\Proyectos\devtree` y rompe el build en otra maquina. Sigue activo en la
+copia local: `Cargo.toml`, `main.rs`, `Cargo.lock` y `devtree_enlace.rs` quedan sin
+versionar a proposito. `whatfast.old.exe` sigue en la carpeta hasta que se cierre la
+app que estaba abierta.
