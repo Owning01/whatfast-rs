@@ -3177,3 +3177,23 @@ por ruta a `G:\Proyectos\devtree` y rompe el build en otra maquina. Sigue activo
 copia local: `Cargo.toml`, `main.rs`, `Cargo.lock` y `devtree_enlace.rs` quedan sin
 versionar a proposito. `whatfast.old.exe` sigue en la carpeta hasta que se cierre la
 app que estaba abierta.
+
+## 2026-11-02 - Alerta de Dependabot y medicion del texto
+
+**Que**: `time` sube de 0.3.45 a 0.3.55 (`0ec0403`) y el alto de las burbujas se
+mide con el ancho real del `TextView` (512 px) y no con el de la burbuja
+(536 px) (`8107dc0`).
+
+**Por que**: la alerta 1 marcaba `time < 0.3.47` con agotamiento de pila; entra
+por `whatsapp-rust` -> `rtc-dtls`. La medicion 24 px mas ancha daba una linea de
+menos en los mensajes que caen justo en el borde, y la fila siguiente se pintaba
+encima de la ultima linea.
+
+**Evidencia**: `gh api repos/Owning01/whatfast-rs/dependabot/alerts/1` devuelve
+`state: fixed`; `cargo test -p whatfast-ui` da 323 en verde; el release se
+instalo y la app corre con los ejecutables nuevos (SHA256 igual a `dist\`).
+
+**Trampas**: el CI falla en `cargo fmt --all --check` desde el 2026-10-27, por
+archivos que estos cambios no tocan. El enlace de devtree sigue fuera del
+commit: sus dependencias por ruta a `G:\Proyectos\devtree` rompen el build en
+otra maquina.
