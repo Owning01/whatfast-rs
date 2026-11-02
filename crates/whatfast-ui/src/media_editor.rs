@@ -1,21 +1,26 @@
 //! The image and media editor: WhatsApp Desktop full-screen experience.
 //!
-//! Visual fidelity matches WhatsApp Desktop reference:
+//! Visual fidelity and full interactivity matching WhatsApp Desktop:
 //! - Full-screen immersive workspace (#0c1317 background).
-//! - Top Bar:
+//! - Responsive image canvas that scales small and large images up to 920x580 containment.
+//! - Top Bar with active/hover states:
 //!   - Close (✕)
 //!   - Undo (↶) & Redo (↷)
-//!   - Center Tools: Crop & Rotate (⛶), Filters (🪄), Pen (✏️), Text (Aa),
-//!     Shapes (⬜), Blur / Mosaic (▦), Stickers / Emojis (😊), Sticker Cutout (🏷️), HD quality ([HD]).
-//!   - Right: Download / Save (📥).
-//! - Sub-toolbar for active tool (rotation 90°, aspect ratios, filter presets, color picker, brush sizes, mosaic intensity).
-//! - Canvas: Large containment preview with crop handles, rule-of-thirds grid, strokes, blurs, text and emoji overlays.
-//! - Floating Caption Bar: Rounded capsule (#202c33) with "Añade un comentario" and inline emoji picker button.
+//!   - Crop & Rotate (⛶) with 90° rotation, aspect ratios (1:1, 4:3, 16:9, Libre), reset.
+//!   - Filters (🪄) with live presets (Normal, Pop, B&N, Cálido, Frío, Sepia).
+//!   - Pen (✏️) with real-time drawing, color palette, brush thickness, clear strokes.
+//!   - Text (Aa) with custom text input, color palette, background box toggle, movable overlays.
+//!   - Shapes (⬜) with rectangle, circle, and arrow overlays.
+//!   - Blur / Mosaic (▦) with censorship pixelation, block size, drag-to-blur, auto-censor.
+//!   - Stickers (😊) with emoji palette, draggable emojis, clear emojis.
+//!   - Sticker Cutout (🏷️).
+//!   - HD Quality ([HD]) toggle with green badge.
+//!   - Save / Download (📥) saving directly to user Downloads folder.
+//! - Floating Capsule Caption Bar (#202c33) with "Añade un comentario" and emoji picker.
 //! - Bottom Bar:
-//!   - Audience Privacy pill: "◎ Estado (221 excluidos)" with interactive selector.
-//!   - Media Carousel: Multi-image thumbnails (active with green border #00a884) and "+" button to add more images.
+//!   - Audience Privacy pill: "◎ Estado (221 excluidos)" with interactive modal.
+//!   - Media Carousel with active green border, plus button that activates new images, remove thumbnails.
 //!   - Circular WhatsApp Green Send Button (➤).
-//! - Backend export: `apply_media_edit` applies rotation, filters, blur mosaic, pen strokes, text overlays, and crop.
 
 #![allow(dead_code)]
 
@@ -43,7 +48,7 @@ use gpui_component::{
 use whatfast_core::media_crop::{self, CropRect, EditPlan, PixelSize, Rotation};
 use crate::icons::WhatfastIcon;
 
-/// The longest edge of the preview, in pixels.
+/// The longest edge of the preview buffer in pixels.
 pub(crate) const PREVIEW_EDGE: f64 = 620.0;
 
 /// The smallest crop the user can leave behind, in preview pixels.
@@ -115,6 +120,25 @@ pub(crate) struct EmojiOverlay {
     pub(crate) size: f32,
 }
 
+/// Shape kinds for shape overlays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShapeKind {
+    Rectangle,
+    Circle,
+    Arrow,
+}
+
+/// A floating shape overlay.
+#[derive(Debug, Clone)]
+pub(crate) struct ShapeOverlay {
+    pub(crate) kind: ShapeKind,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) color: [u8; 4],
+}
+
 /// The handle the user is dragging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DragMode {
@@ -149,6 +173,7 @@ pub(crate) struct ItemStateSnapshot {
     blurs: Vec<BlurRegion>,
     texts: Vec<TextOverlay>,
     emojis: Vec<EmojiOverlay>,
+    shapes: Vec<ShapeOverlay>,
 }
 
 /// One media item in the editor batch / carousel.
@@ -164,6 +189,7 @@ pub(crate) struct MediaItem {
     pub(crate) blurs: Vec<BlurRegion>,
     pub(crate) texts: Vec<TextOverlay>,
     pub(crate) emojis: Vec<EmojiOverlay>,
+    pub(crate) shapes: Vec<ShapeOverlay>,
     pub(crate) caption: String,
     pub(crate) is_hd: bool,
     pub(crate) preview_base: Option<image::RgbaImage>,
@@ -192,6 +218,7 @@ impl MediaItem {
             blurs: Vec::new(),
             texts: Vec::new(),
             emojis: Vec::new(),
+            shapes: Vec::new(),
             caption: String::new(),
             is_hd: false,
             preview_base: None,
@@ -210,6 +237,7 @@ impl MediaItem {
             blurs: self.blurs.clone(),
             texts: self.texts.clone(),
             emojis: self.emojis.clone(),
+            shapes: self.shapes.clone(),
         }
     }
 
@@ -221,6 +249,7 @@ impl MediaItem {
         self.blurs = snapshot.blurs;
         self.texts = snapshot.texts;
         self.emojis = snapshot.emojis;
+        self.shapes = snapshot.shapes;
         self.rebake_preview();
     }
 
@@ -330,12 +359,8 @@ impl std::fmt::Display for MediaEditError {
 
 /// Applies a complete plan of edit (rotation, filter, blur mosaic, pen strokes, text overlays, crop) to a picture.
 pub(crate) fn apply_media_edit(edit: &MediaEdit, destination: &Path) -> Result<(), String> {
-    let picture = image::ImageReader::open(&edit.path)
-        .map_err(|error| format!("the picture could not be opened: {error}"))?
-        .with_guessed_format()
-        .map_err(|error| format!("the format of the picture is unknown: {error}"))?
-        .decode()
-        .map_err(|error| format!("the picture could not be decoded: {error}"))?;
+    let picture = image::open(&edit.path)
+        .map_err(|error| format!("the picture could not be opened: {error}"))?;
 
     let mut rotated = match edit.plan.rotation {
         Rotation::Deg0 => picture.into_rgba8(),
@@ -401,6 +426,9 @@ pub(crate) struct MediaEditor {
     pub(crate) pen_color: [u8; 4],
     pub(crate) pen_width: f64,
     pub(crate) blur_block_size: u32,
+    pub(crate) text_color: [u8; 4],
+    pub(crate) text_has_bg: bool,
+    pub(crate) shape_color: [u8; 4],
     pub(crate) active_stroke: Option<DrawStroke>,
     pub(crate) active_blur_start: Option<(f64, f64)>,
     pub(crate) active_blur_rect: Option<CropRect>,
@@ -411,12 +439,11 @@ pub(crate) struct MediaEditor {
     pub(crate) redo_stack: Vec<ItemStateSnapshot>,
     pub(crate) surface: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) caption: Option<gpui::Entity<InputState>>,
+    pub(crate) text_input: Option<gpui::Entity<InputState>>,
     pub(crate) caption_emoji_open: bool,
     pub(crate) status_privacy_open: bool,
     pub(crate) status_privacy_mode: String,
     pub(crate) save_notice: Option<String>,
-    pub(crate) text_input_open: bool,
-    pub(crate) text_draft: String,
 }
 
 impl EventEmitter<MediaEditorEvent> for MediaEditor {}
@@ -426,6 +453,9 @@ impl MediaEditor {
         let caption = cx.new(|cx| {
             InputState::new(window, cx).placeholder(i18n::t("Añade un comentario"))
         });
+        let text_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(i18n::t("Escribe tu texto..."))
+        });
         let initial_item = MediaItem::new(path.to_path_buf());
         let mut editor = Self {
             items: vec![initial_item],
@@ -434,6 +464,9 @@ impl MediaEditor {
             pen_color: [0, 168, 132, 255], // WhatsApp green
             pen_width: 5.0,
             blur_block_size: 14,
+            text_color: [255, 255, 255, 255], // White
+            text_has_bg: true,
+            shape_color: [0, 168, 132, 255], // WhatsApp green
             active_stroke: None,
             active_blur_start: None,
             active_blur_rect: None,
@@ -444,12 +477,11 @@ impl MediaEditor {
             redo_stack: Vec::new(),
             surface: Rc::new(Cell::new(None)),
             caption: Some(caption),
+            text_input: Some(text_input),
             caption_emoji_open: false,
             status_privacy_open: false,
             status_privacy_mode: "Estado (221 excluidos)".to_string(),
             save_notice: None,
-            text_input_open: false,
-            text_draft: String::new(),
         };
         editor.load_item(0, cx);
         editor
@@ -524,6 +556,28 @@ impl MediaEditor {
         cx.notify();
     }
 
+    pub(crate) fn set_aspect_ratio(&mut self, ratio: f64, cx: &mut Context<Self>) {
+        self.push_undo();
+        let frame = self.rotated_size();
+        if frame.width <= 0.0 || frame.height <= 0.0 {
+            return;
+        }
+        let (crop_w, crop_h) = if frame.width / frame.height > ratio {
+            (frame.height * ratio, frame.height)
+        } else {
+            (frame.width, frame.width / ratio)
+        };
+        let crop_x = (frame.width - crop_w) / 2.0;
+        let crop_y = (frame.height - crop_h) / 2.0;
+        self.active_item_mut().crop = Some(CropRect {
+            x: crop_x.max(0.0),
+            y: crop_y.max(0.0),
+            width: crop_w.min(frame.width),
+            height: crop_h.min(frame.height),
+        });
+        cx.notify();
+    }
+
     pub(crate) fn set_filter(&mut self, filter: ImageFilter, cx: &mut Context<Self>) {
         if self.active_item().filter != filter {
             self.push_undo();
@@ -536,6 +590,76 @@ impl MediaEditor {
     pub(crate) fn toggle_hd(&mut self, cx: &mut Context<Self>) {
         let is_hd = self.active_item().is_hd;
         self.active_item_mut().is_hd = !is_hd;
+        self.save_notice = Some(if !is_hd {
+            i18n::t("Calidad HD activada").to_string()
+        } else {
+            i18n::t("Calidad estándar activada").to_string()
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn add_text_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self
+            .text_input
+            .as_ref()
+            .map(|i| i.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let center = self.rotated_size();
+        let color = self.text_color;
+        let has_bg = self.text_has_bg;
+        self.active_item_mut().texts.push(TextOverlay {
+            text: text.clone(),
+            x: (center.width / 2.0).max(30.0),
+            y: (center.height / 2.0).max(30.0),
+            color,
+            has_bg,
+        });
+        if let Some(inp) = self.text_input.as_ref() {
+            inp.update(cx, |input, cx| {
+                input.set_value(String::new(), window, cx);
+            });
+        }
+        self.save_notice = Some(i18n::t("Texto añadido").to_string());
+        cx.notify();
+    }
+
+    pub(crate) fn add_shape(&mut self, kind: ShapeKind, cx: &mut Context<Self>) {
+        self.push_undo();
+        let center = self.rotated_size();
+        let (sw, sh) = (140.0_f64.min(center.width * 0.5), 90.0_f64.min(center.height * 0.5));
+        let color = self.shape_color;
+        self.active_item_mut().shapes.push(ShapeOverlay {
+            kind,
+            x: ((center.width - sw) / 2.0).max(10.0),
+            y: ((center.height - sh) / 2.0).max(10.0),
+            width: sw,
+            height: sh,
+            color,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn add_auto_blur(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
+        let center = self.rotated_size();
+        let (bw, bh) = (160.0_f64.min(center.width * 0.6), 80.0_f64.min(center.height * 0.4));
+        let bx = ((center.width - bw) / 2.0).max(0.0);
+        let by = ((center.height - bh) / 2.0).max(0.0);
+        let b = self.blur_block_size;
+        self.active_item_mut().blurs.push(BlurRegion {
+            rect: CropRect {
+                x: bx,
+                y: by,
+                width: bw,
+                height: bh,
+            },
+            block_size: b,
+        });
+        self.active_item_mut().rebake_preview();
         cx.notify();
     }
 
@@ -576,6 +700,7 @@ impl MediaEditor {
             self.items.push(item);
             let idx = self.items.len() - 1;
             self.load_item(idx, cx);
+            self.active_index = idx; // Activate the newly added photo immediately!
         }
         cx.notify();
     }
@@ -638,7 +763,7 @@ impl MediaEditor {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(()) => {
-                        this.save_notice = Some(format!("Foto guardada en Descargas"));
+                        this.save_notice = Some(i18n::t("Foto guardada en Descargas").to_string());
                     }
                     Err(err) => {
                         this.error = Some(format!("Error al guardar: {err}"));
@@ -722,7 +847,9 @@ impl MediaEditor {
                             this.items[index].rebake_preview();
                         }
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        this.error = Some(error);
+                    }
                 }
                 cx.notify();
             })
@@ -747,28 +874,43 @@ impl MediaEditor {
         self.active_item().rotated_size()
     }
 
+    /// Size of the canvas containment on screen.
     fn drawn_size(&self) -> PixelSize {
         let rotated = self.rotated_size();
-        let scale = preview_scale(rotated);
+        if rotated.width <= 0.0 || rotated.height <= 0.0 {
+            return PixelSize {
+                width: 460.0,
+                height: 320.0,
+            };
+        }
+        let scale = display_scale(rotated);
         PixelSize {
-            width: (rotated.width * scale).round(),
-            height: (rotated.height * scale).round(),
+            width: (rotated.width * scale).round().max(40.0),
+            height: (rotated.height * scale).round().max(40.0),
         }
     }
 
     fn window_per_picture(&self) -> (f64, f64) {
+        if let Some(bounds) = self.surface.get() {
+            let rotated = self.rotated_size();
+            let bw = f32::from(bounds.size.width) as f64;
+            let bh = f32::from(bounds.size.height) as f64;
+            if bw > 0.0 && bh > 0.0 && rotated.width > 0.0 && rotated.height > 0.0 {
+                return (bw / rotated.width, bh / rotated.height);
+            }
+        }
         let drawn = self.drawn_size();
         let rotated = self.rotated_size();
         (
             if drawn.width > 0.0 && rotated.width > 0.0 {
                 drawn.width / rotated.width
             } else {
-                0.0
+                1.0
             },
             if drawn.height > 0.0 && rotated.height > 0.0 {
                 drawn.height / rotated.height
             } else {
-                0.0
+                1.0
             },
         )
     }
@@ -1060,11 +1202,11 @@ impl MediaEditor {
             .absolute()
             .inset_0()
             .occlude()
-            .bg(rgb(0x0c1317)) // Official dark workspace
+            .bg(rgb(0x0c1317)) // Official WhatsApp dark workspace
             .flex()
             .flex_col()
             .justify_between()
-                        .on_mouse_up(
+            .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     this.end_drag();
@@ -1077,7 +1219,7 @@ impl MediaEditor {
             .when(active_tool != EditorTool::None, |root| {
                 root.child(self.render_sub_toolbar(active_tool, cx))
             })
-            // Center Canvas Area
+            // Center Canvas Area (Large Containment)
             .child(
                 div()
                     .flex_1()
@@ -1086,6 +1228,7 @@ impl MediaEditor {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .p_4()
                     .child(self.surface(cx)),
             )
             // Floating Caption Bar
@@ -1122,34 +1265,34 @@ impl MediaEditor {
             })
     }
 
-fn render_crop_icon(is_active: bool) -> impl IntoElement {
-    let col = if is_active { rgb(0x00a884) } else { rgb(0xd1d7db) };
-    div()
-        .size(px(16.))
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w(px(11.))
-                .h(px(11.))
-                .border_l_2()
-                .border_t_2()
-                .border_color(col),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom_0()
-                .right_0()
-                .w(px(11.))
-                .h(px(11.))
-                .border_r_2()
-                .border_b_2()
-                .border_color(col),
-        )
-}
+    fn render_crop_icon(is_active: bool) -> impl IntoElement {
+        let col = if is_active { rgb(0x00a884) } else { rgb(0xd1d7db) };
+        div()
+            .size(px(16.))
+            .relative()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(11.))
+                    .h(px(11.))
+                    .border_l_2()
+                    .border_t_2()
+                    .border_color(col),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(11.))
+                    .h(px(11.))
+                    .border_r_2()
+                    .border_b_2()
+                    .border_color(col),
+            )
+    }
 
     fn render_top_bar(
         &self,
@@ -1524,6 +1667,34 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     )
                     .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
                     .child(
+                        Button::new("crop-aspect-1-1")
+                            .ghost()
+                            .small()
+                            .label("1:1")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_aspect_ratio(1.0, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("crop-aspect-4-3")
+                            .ghost()
+                            .small()
+                            .label("4:3")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_aspect_ratio(4.0 / 3.0, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("crop-aspect-16-9")
+                            .ghost()
+                            .small()
+                            .label("16:9")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_aspect_ratio(16.0 / 9.0, cx);
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
+                    .child(
                         Button::new("crop-reset")
                             .ghost()
                             .small()
@@ -1599,7 +1770,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                         );
                     }
                     list = list.child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)));
-                    let widths = [(2.0, px(3.)), (5.0, px(6.)), (10.0, px(10.))];
+                    let widths = [(3.0, px(3.)), (7.0, px(7.)), (14.0, px(12.))];
                     for (idx, (w, dot_size)) in widths.into_iter().enumerate() {
                         let is_sel = (self.pen_width - w).abs() < 0.1;
                         list = list.child(
@@ -1624,14 +1795,136 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                                 })),
                         );
                     }
+                    list = list.child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)));
+                    list = list.child(
+                        Button::new("pen-clear")
+                            .ghost()
+                            .small()
+                            .label("Limpiar trazos")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.push_undo();
+                                this.active_item_mut().strokes.clear();
+                                this.active_item_mut().rebake_preview();
+                                cx.notify();
+                            })),
+                    );
                     list
                 }
+                EditorTool::Text => {
+                    let mut list = container;
+                    if let Some(inp) = self.text_input.as_ref() {
+                        list = list.child(
+                            div()
+                                .w(px(200.))
+                                .child(Input::new(inp)),
+                        );
+                    }
+                    list = list.child(
+                        Button::new("text-add-btn")
+                            .ghost()
+                            .small()
+                            .label("+ Añadir")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_text_from_input(window, cx);
+                            })),
+                    );
+                    list = list.child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)));
+                    let colors: [([u8; 4], &str); 4] = [
+                        ([255, 255, 255, 255], "Blanco"),
+                        ([0, 168, 132, 255], "Verde"),
+                        ([251, 188, 4, 255], "Amarillo"),
+                        ([234, 67, 53, 255], "Rojo"),
+                    ];
+                    for (idx, (col, _)) in colors.iter().enumerate() {
+                        let col = *col;
+                        let is_selected = self.text_color == col;
+                        let r = col[0];
+                        let g = col[1];
+                        let b = col[2];
+                        list = list.child(
+                            div()
+                                .id(ElementId::named_usize("text-col", idx))
+                                .size(px(16.))
+                                .rounded_full()
+                                .bg(rgb((r as u32) << 16 | (g as u32) << 8 | b as u32))
+                                .border_2()
+                                .border_color(if is_selected { rgb(0xffffff) } else { rgb(0x2a3942) })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.text_color = col;
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    list = list.child(
+                        Button::new("text-bg-toggle")
+                            .ghost()
+                            .small()
+                            .label(if self.text_has_bg { "Fondo: Sí" } else { "Fondo: No" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.text_has_bg = !this.text_has_bg;
+                                cx.notify();
+                            })),
+                    );
+                    list = list.child(
+                        Button::new("text-clear-btn")
+                            .ghost()
+                            .small()
+                            .label("Limpiar textos")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.push_undo();
+                                this.active_item_mut().texts.clear();
+                                cx.notify();
+                            })),
+                    );
+                    list
+                }
+                EditorTool::Shapes => container
+                    .child(
+                        Button::new("shape-rect")
+                            .ghost()
+                            .small()
+                            .label("▢ Rectángulo")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_shape(ShapeKind::Rectangle, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("shape-circle")
+                            .ghost()
+                            .small()
+                            .label("◯ Círculo")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_shape(ShapeKind::Circle, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("shape-arrow")
+                            .ghost()
+                            .small()
+                            .label("➜ Flecha")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_shape(ShapeKind::Arrow, cx);
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
+                    .child(
+                        Button::new("shape-clear")
+                            .ghost()
+                            .small()
+                            .label("Limpiar formas")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.push_undo();
+                                this.active_item_mut().shapes.clear();
+                                cx.notify();
+                            })),
+                    ),
                 EditorTool::Blur => container
                     .child(
                         Button::new("blur-normal")
                             .ghost()
                             .small()
-                            .label("Mosaico 14px")
+                            .label("14px")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.blur_block_size = 14;
                                 cx.notify();
@@ -1641,10 +1934,19 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                         Button::new("blur-heavy")
                             .ghost()
                             .small()
-                            .label("Mosaico 24px")
+                            .label("24px")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.blur_block_size = 24;
                                 cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("blur-center-auto")
+                            .ghost()
+                            .small()
+                            .label("+ Censurar centro")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_auto_blur(cx);
                             })),
                     )
                     .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)))
@@ -1662,7 +1964,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     ),
                 EditorTool::Stickers => {
                     let mut list = container;
-                    for (idx, &emoji) in ["😀", "😂", "😍", "🔥", "🎉", "👍", "💯", "👏", "❤️", "🚀", "🐶", "🍕"].iter().enumerate() {
+                    for (idx, &emoji) in ["😀", "😂", "😍", "🔥", "🎉", "👍", "💯", "👏", "❤️", "🚀", "🐶", "🍕", "🥳", "🤩"].iter().enumerate() {
                         list = list.child(
                             div()
                                 .id(ElementId::named_usize("sticker-em", idx))
@@ -1686,6 +1988,18 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                                 })),
                         );
                     }
+                    list = list.child(div().w(px(1.)).h(px(16.)).bg(rgb(0x2a3942)));
+                    list = list.child(
+                        Button::new("stickers-clear")
+                            .ghost()
+                            .small()
+                            .label("Limpiar emojis")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.push_undo();
+                                this.active_item_mut().emojis.clear();
+                                cx.notify();
+                            })),
+                    );
                     list
                 }
                 _ => container.child(
@@ -2031,7 +2345,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
             )
     }
 
-    /// The surface of the preview: image, blurs, strokes, texts, emojis, and crop handles.
+    /// The surface of the preview: image, blurs, strokes, texts, emojis, shapes, and crop handles.
     fn surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (scale_x, scale_y) = self.window_per_picture();
         let crop = self.crop();
@@ -2039,16 +2353,20 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
         let surface_bounds = Rc::clone(&self.surface);
         let rendered = self.rendered_preview();
         let working = self.is_working();
-        let error = self.error.is_some();
+        let error = self.error.clone();
         let active_tool = self.active_tool;
 
         let mut handles = Vec::new();
-        let edge = HANDLE_EDGE * (scale_x + scale_y) / 2.0;
+        let edge = HANDLE_EDGE;
         for (x, y) in [
             (crop.x, crop.y),
             (crop.x + crop.width, crop.y),
             (crop.x, crop.y + crop.height),
             (crop.x + crop.width, crop.y + crop.height),
+            (crop.x + crop.width / 2.0, crop.y),
+            (crop.x + crop.width / 2.0, crop.y + crop.height),
+            (crop.x, crop.y + crop.height / 2.0),
+            (crop.x + crop.width, crop.y + crop.height / 2.0),
         ] {
             handles.push(
                 div()
@@ -2057,18 +2375,24 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     .top(px((y * scale_y - edge / 2.0) as f32))
                     .size(px(edge as f32))
                     .rounded_sm()
-                    .bg(primary),
+                    .bg(primary)
+                    .border_1()
+                    .border_color(rgb(0xffffff)),
             );
         }
 
         let drawn = self.drawn_size();
         let emojis = self.active_item().emojis.clone();
+        let texts = self.active_item().texts.clone();
+        let shapes = self.active_item().shapes.clone();
 
         let mut surface = div()
             .relative()
             .w(px(drawn.width as f32))
             .h(px(drawn.height as f32))
             .overflow_hidden()
+            .rounded_md()
+            .bg(rgb(0x182229))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -2087,6 +2411,32 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     cx.notify();
                 }),
             )
+            // Base preview image (absolute to fill the surface container)
+            .child(match rendered {
+                Some(image) => img(ImageSource::Render(image))
+                    .absolute()
+                    .size_full()
+                    .object_fit(ObjectFit::Fill)
+                    .into_any_element(),
+                None => div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .text_center()
+                    .text_sm()
+                    .text_color(rgb(0x8696a0))
+                    .child(if let Some(err) = error {
+                        format!("No se pudo cargar la imagen: {err}")
+                    } else if working {
+                        "Cargando imagen...".to_string()
+                    } else {
+                        "Selecciona una foto".to_string()
+                    })
+                    .into_any_element(),
+            })
             .child(
                 canvas(
                     move |bounds, _window, _cx| {
@@ -2094,30 +2444,83 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     },
                     |_bounds, _value, _window, _cx| {},
                 )
+                .absolute()
                 .size_full(),
-            )
-            // Base preview image
-            .child(match rendered {
-                Some(image) => img(ImageSource::Render(image))
-                    .size_full()
-                    .object_fit(ObjectFit::Fill)
-                    .into_any_element(),
-                None => div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(0x8696a0))
-                    .child(if error {
-                        i18n::t("The photo could not be edited")
-                    } else if working {
-                        "Preparando foto..."
-                    } else {
-                        ""
-                    })
-                    .into_any_element(),
-            });
+            );
+
+        // Floating shapes on canvas
+        for shape in shapes {
+            let r = shape.color[0];
+            let g = shape.color[1];
+            let b = shape.color[2];
+            let col = rgb((r as u32) << 16 | (g as u32) << 8 | b as u32);
+            let sx = (shape.x * scale_x) as f32;
+            let sy = (shape.y * scale_y) as f32;
+            let sw = (shape.width * scale_x) as f32;
+            let sh = (shape.height * scale_y) as f32;
+            match shape.kind {
+                ShapeKind::Rectangle => {
+                    surface = surface.child(
+                        div()
+                            .absolute()
+                            .left(px(sx))
+                            .top(px(sy))
+                            .w(px(sw))
+                            .h(px(sh))
+                            .border_3()
+                            .border_color(col)
+                            .rounded_sm(),
+                    );
+                }
+                ShapeKind::Circle => {
+                    surface = surface.child(
+                        div()
+                            .absolute()
+                            .left(px(sx))
+                            .top(px(sy))
+                            .w(px(sw))
+                            .h(px(sh))
+                            .border_3()
+                            .border_color(col)
+                            .rounded_full(),
+                    );
+                }
+                ShapeKind::Arrow => {
+                    surface = surface.child(
+                        div()
+                            .absolute()
+                            .left(px(sx))
+                            .top(px(sy))
+                            .text_size(px(32.))
+                            .text_color(col)
+                            .child("➔"),
+                    );
+                }
+            }
+        }
+
+        // Floating texts on canvas
+        for text in texts {
+            let r = text.color[0];
+            let g = text.color[1];
+            let b = text.color[2];
+            let col = rgb((r as u32) << 16 | (g as u32) << 8 | b as u32);
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px((text.x * scale_x) as f32))
+                    .top(px((text.y * scale_y) as f32))
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if text.has_bg { rgba(0x000000aa) } else { rgba(0x00000000) })
+                    .text_color(col)
+                    .font_weight(FontWeight::BOLD)
+                    .text_lg()
+                    .shadow_md()
+                    .child(text.text),
+            );
+        }
 
         // Floating emojis on canvas
         for em in emojis {
@@ -2127,7 +2530,6 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     .left(px((em.x * scale_x - (em.size as f64 / 2.0)) as f32))
                     .top(px((em.y * scale_y - (em.size as f64 / 2.0)) as f32))
                     .text_size(px(em.size))
-                    .cursor_pointer()
                     .child(em.emoji),
             );
         }
@@ -2141,10 +2543,32 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                     .top(px((r.y * scale_y) as f32))
                     .w(px((r.width * scale_x) as f32))
                     .h(px((r.height * scale_y) as f32))
-                    .border_1()
+                    .border_2()
                     .border_color(rgb(0x00a884))
-                    .bg(rgba(0x00a88430)),
+                    .bg(rgba(0x00a88435)),
             );
+        }
+
+        // Active pen stroke live preview
+        if let Some(stroke) = &self.active_stroke {
+            if stroke.points.len() > 1 {
+                let r = stroke.color[0];
+                let g = stroke.color[1];
+                let b = stroke.color[2];
+                let col = rgb((r as u32) << 16 | (g as u32) << 8 | b as u32);
+                let w = (stroke.width * (scale_x + scale_y) / 2.0).max(2.0) as f32;
+                for pt in &stroke.points {
+                    surface = surface.child(
+                        div()
+                            .absolute()
+                            .left(px((pt.0 * scale_x - (w / 2.0) as f64) as f32))
+                            .top(px((pt.1 * scale_y - (w / 2.0) as f64) as f32))
+                            .size(px(w))
+                            .rounded_full()
+                            .bg(col),
+                    );
+                }
+            }
         }
 
         // Crop overlay and rule-of-thirds grid (only when Crop tool is active or dragging crop)
@@ -2172,7 +2596,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                             .top_0()
                             .bottom_0()
                             .w(px(1.))
-                            .bg(rgba(0xffffff40)),
+                            .bg(rgba(0xffffff45)),
                     )
                     .child(
                         div()
@@ -2181,7 +2605,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                             .top_0()
                             .bottom_0()
                             .w(px(1.))
-                            .bg(rgba(0xffffff40)),
+                            .bg(rgba(0xffffff45)),
                     )
                     // Rule of thirds horizontal lines
                     .child(
@@ -2191,7 +2615,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                             .left_0()
                             .right_0()
                             .h(px(1.))
-                            .bg(rgba(0xffffff40)),
+                            .bg(rgba(0xffffff45)),
                     )
                     .child(
                         div()
@@ -2200,7 +2624,7 @@ fn render_crop_icon(is_active: bool) -> impl IntoElement {
                             .left_0()
                             .right_0()
                             .h(px(1.))
-                            .bg(rgba(0xffffff40)),
+                            .bg(rgba(0xffffff45)),
                     ),
             );
 
@@ -2217,6 +2641,18 @@ impl Render for MediaEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.draw(cx)
     }
+}
+
+/// Dynamic scale factor so image comfortably fits the editor canvas up to 920x580.
+fn display_scale(rotated: PixelSize) -> f64 {
+    if rotated.width <= 0.0 || rotated.height <= 0.0 {
+        return 1.0;
+    }
+    let max_w = 900.0;
+    let max_h = 580.0;
+    let scale_w = max_w / rotated.width;
+    let scale_h = max_h / rotated.height;
+    scale_w.min(scale_h).min(2.5).max(0.05)
 }
 
 /// The scale of the preview: the picture is reduced until its longest edge is `PREVIEW_EDGE` pixels.
@@ -2271,12 +2707,8 @@ struct LoadedPicture {
 }
 
 fn load_picture(path: &Path) -> Result<LoadedPicture, String> {
-    let decoded = image::ImageReader::open(path)
-        .map_err(|error| format!("the photo could not be read: {error}"))?
-        .with_guessed_format()
-        .map_err(|error| format!("the photo could not be read: {error}"))?
-        .decode()
-        .map_err(|error| format!("the photo could not be decoded: {error}"))?;
+    let decoded = image::open(path)
+        .map_err(|error| format!("the photo could not be read: {error}"))?;
     let (width, height) = (decoded.width(), decoded.height());
     let natural = PixelSize {
         width: width as f64,
@@ -2479,6 +2911,9 @@ mod tests {
             pen_color: [0, 168, 132, 255],
             pen_width: 5.0,
             blur_block_size: 14,
+            text_color: [255, 255, 255, 255],
+            text_has_bg: true,
+            shape_color: [0, 168, 132, 255],
             active_stroke: None,
             active_blur_start: None,
             active_blur_rect: None,
@@ -2489,12 +2924,11 @@ mod tests {
             redo_stack: Vec::new(),
             surface: Rc::new(Cell::new(None)),
             caption: None,
+            text_input: None,
             caption_emoji_open: false,
             status_privacy_open: false,
             status_privacy_mode: "Estado (221 excluidos)".to_string(),
             save_notice: None,
-            text_input_open: false,
-            text_draft: String::new(),
         }
     }
 

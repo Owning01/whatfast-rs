@@ -9266,9 +9266,7 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.media_editor.is_some() {
-            return;
-        }
+        self.media_editor = None;
         self.media_editor_target = target;
         let editor = cx.new(|cx| MediaEditor::new(&path, window, cx));
         let subscription = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
