@@ -3849,7 +3849,7 @@ impl Whatfast {
                             )
                             .track_scroll(&self.message_scroll)
                             .p_4()
-                            .gap(px(2. * self.ui_scale)),
+                            .gap(px(3. * self.ui_scale)),
                         ),
                     )
                     // The button that jumps to the latest messages floats over
@@ -8357,24 +8357,25 @@ impl Whatfast {
                             .replace('\t', "    "),
                     )
                 };
-                // The hour goes at the end of the text, inside the bubble:
-                // the text wraps before it, so the width it takes is not
-                // there for the text.
-                let time_width = if text.is_empty() {
-                    px(0.)
+                // En multilínea el texto usa el ancho completo y la fila de hora/estado
+                // se coloca abajo en un v_flex con .gap_0p5().
+                let is_multiline = text.contains('\n') || text.chars().count() > 38;
+                let (text_wrap_width, time_row_height) = if text.is_empty() {
+                    (wrap_width, px(0.))
+                } else if is_multiline {
+                    (wrap_width, px(18. * self.ui_scale))
                 } else {
                     let timestamp_ms = self.store.messages[index].timestamp_ms;
                     let label = bubble_time_label(timestamp_ms, local_offset_minutes(timestamp_ms));
-                    // La tilde va pegada a la hora: la medida del texto le
-                    // tiene que dejar el lugar o el texto se le va encima.
                     let ticks = if self.store.messages[index].from_me {
                         px(18. * self.ui_scale)
                     } else {
                         px(0.)
                     };
-                    bubble_time_width(window, &label, font_size) + ticks
+                    let time_width = bubble_time_width(window, &label, font_size) + ticks;
+                    let wrap = (wrap_width - time_width - px(8. * self.ui_scale)).max(px(60.));
+                    (wrap, px(0.))
                 };
-                let text_wrap_width = (wrap_width - time_width).max(px(60.));
                 let text_height = if text.is_empty() {
                     px(0.)
                 } else {
@@ -8440,11 +8441,18 @@ impl Whatfast {
                     }
                     _ => px(0.),
                 };
-                let bubble_vertical_padding = px(if self.density == Density::Compact {
-                    8.
+                let sticker = match self.store.messages[index].content.as_ref() {
+                    Some(proto::message::Content::Image(image)) => image.sticker,
+                    _ => false,
+                };
+                let starts_cluster = self.starts_cluster(index);
+                let bubble_vertical_padding = if sticker {
+                    px(0.)
+                } else if self.density == Density::Compact {
+                    px((if starts_cluster { 6. } else { 4. }) * self.ui_scale)
                 } else {
-                    12.
-                } * self.ui_scale);
+                    px((if starts_cluster { 10. } else { 7. }) * self.ui_scale)
+                };
                 // El aviso y el enlace del mensaje de visualizacion unica se
                 // miden como un solo bloque de texto: el circulo del 1 deja
                 // su lugar a la izquierda.
@@ -8477,17 +8485,18 @@ impl Whatfast {
                     px(0.)
                 };
                 let time_fallback = if text.is_empty()
+                    && !sticker
                     && (image_height > px(0.)
                         || attachment_height > px(0.)
-                        || view_once_height > px(0.))
+                        || view_once_height > px(0.)
+                        || card_height > px(0.))
                 {
                     px(18. * self.ui_scale)
                 } else {
                     px(0.)
                 };
                 // La burbuja apila sus hijos con un hueco de 4 px entre uno y
-                // otro. Ese hueco no estaba en la cuenta y una burbuja con
-                // tarjeta y texto se dibujaba sobre la fila siguiente.
+                // otro.
                 let mut blocks = 0;
                 if sender_header_height > px(0.) {
                     blocks += 1;
@@ -8498,7 +8507,7 @@ impl Whatfast {
                 if view_once_height > px(0.) {
                     blocks += 1;
                 }
-                if image_height > px(0.) {
+                if image_height > px(0.) && !sticker {
                     blocks += 1;
                 }
                 if link_preview_height > px(0.) {
@@ -8510,9 +8519,11 @@ impl Whatfast {
                 if card_height > px(0.) {
                     blocks += 1;
                 }
-                // La fila de la hora existe siempre: sola, o al lado del
-                // texto.
-                blocks += 1;
+                if !text.is_empty() {
+                    blocks += 1;
+                } else if time_fallback > px(0.) {
+                    blocks += 1;
+                }
                 if reaction_height > px(0.) {
                     blocks += 1;
                 }
@@ -8522,6 +8533,7 @@ impl Whatfast {
                     px(0.)
                 };
                 let height = text_height
+                    + time_row_height
                     + image_height
                     + link_preview_height
                     + attachment_height
@@ -8548,13 +8560,9 @@ impl Whatfast {
                 } else {
                     px(0.)
                 };
-            let separator_gap = if self.density == Density::Compact {
-                4.
-            } else {
-                DAY_SEPARATOR_GAP
-            };
             let separator_height = if self.starts_a_day(index) {
-                px(DAY_SEPARATOR_HEIGHT + separator_gap)
+                let pad = if self.density == Density::Compact { 8. } else { 16. };
+                px((DAY_SEPARATOR_HEIGHT + pad) * self.ui_scale)
             } else {
                 px(0.)
             };
@@ -9325,10 +9333,8 @@ fn chat_subtitle(chat: &proto::Chat) -> String {
 const DAY_SEPARATOR_HEIGHT: f32 = 22.;
 
 /// The gap between the pill of the day and the message below it.
-const DAY_SEPARATOR_GAP: f32 = 8.;
-
 /// The extra gap above a message that starts a new cluster from a sender.
-const CLUSTER_SEPARATOR_GAP: f32 = 6.;
+const CLUSTER_SEPARATOR_GAP: f32 = 7.;
 
 /// The opacity of the pattern of the background of the conversation.
 const WALLPAPER_OPACITY: f32 = 0.055;
