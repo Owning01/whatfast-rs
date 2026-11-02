@@ -26,6 +26,64 @@ use whatsapp_rust::voip::{
     AudioSink, AudioSource, CallEvent, CallHandle, VideoFrame, VideoSink, VideoSource,
 };
 
+/// A bounded queue of media frames, with the receiver's clone kept beside
+/// the sender.
+///
+/// A live call produces frames at a fixed rate and a stalled consumer must
+/// not accumulate them: the queue has a ceiling and, when it is full, the
+/// oldest frame leaves so the reader always sees the present. The writer
+/// never blocks, because the thread that feeds it is real time.
+pub struct FramePipe<T> {
+    sender: async_channel::Sender<T>,
+    oldest: async_channel::Receiver<T>,
+}
+
+impl<T> FramePipe<T> {
+    /// Splits a bounded queue into the writer and the handle that throws the
+    /// oldest frame away.
+    fn new(capacity: usize) -> (Self, async_channel::Receiver<T>) {
+        let (sender, receiver) = async_channel::bounded(capacity);
+        let oldest = receiver.clone();
+        (Self { sender, oldest }, receiver)
+    }
+
+    /// Enqueues the frame; when the queue is full, the oldest one leaves.
+    /// Returns `false` when the reader is gone: the call is over.
+    fn push(&self, value: T) -> bool {
+        push_latest(&self.sender, &self.oldest, value)
+    }
+}
+
+impl<T> Clone for FramePipe<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            oldest: self.oldest.clone(),
+        }
+    }
+}
+
+/// Enqueues the value and, when the queue is full, throws the oldest one
+/// away and retries with the new value.
+///
+/// Returns `false` when the reader is gone: the call is over.
+fn push_latest<T>(
+    tx: &async_channel::Sender<T>,
+    oldest: &async_channel::Receiver<T>,
+    mut value: T,
+) -> bool {
+    loop {
+        match tx.try_send(value) {
+            Ok(()) => return true,
+            Err(async_channel::TrySendError::Full(returned)) => {
+                let _ = oldest.try_recv();
+                value = returned;
+            }
+            Err(async_channel::TrySendError::Closed(_)) => return false,
+        }
+    }
+}
+
 /// The microphone half: the engine reads frames the desktop sends. Muting
 /// substitutes zeros at this boundary, so the engine never sees the diff.
 struct BridgeMic {
@@ -35,7 +93,10 @@ struct BridgeMic {
 
 impl AudioSource for BridgeMic {
     fn frames(&self) -> async_channel::Receiver<Vec<i16>> {
-        let (tx, rx) = async_channel::unbounded();
+        // 160 ms of sound: the engine already keeps its own jitter cushion,
+        // and anything older is worse than a gap.
+        let (tx, rx) = async_channel::bounded(8);
+        let drop_rx = rx.clone();
         let muted = Arc::clone(&self.muted);
         let upstream = self.upstream.clone();
         tokio::spawn(async move {
@@ -43,7 +104,7 @@ impl AudioSource for BridgeMic {
                 if muted.load(Ordering::SeqCst) {
                     frame.fill(0);
                 }
-                if tx.send(frame).await.is_err() {
+                if !push_latest(&tx, &drop_rx, frame) {
                     return; // the call is over
                 }
             }
@@ -54,17 +115,17 @@ impl AudioSource for BridgeMic {
 
 /// The speaker half: the engine writes playout frames, the bridge drains.
 struct BridgeSpeaker {
-    downstream: async_channel::Sender<Vec<i16>>,
+    downstream: FramePipe<Vec<i16>>,
 }
 
 impl AudioSink for BridgeSpeaker {
     fn playout(&self) -> async_channel::Sender<Vec<i16>> {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(16);
         let downstream = self.downstream.clone();
         tokio::spawn(async move {
             while let Ok(frame) = rx.recv().await {
-                // Loss tolerant: a full downstream drops the frame.
-                if downstream.send(frame).await.is_err() {
+                // Loss tolerant: a full downstream throws the oldest frame.
+                if !downstream.push(frame) {
                     return; // the call is over
                 }
             }
@@ -83,8 +144,10 @@ impl VideoSource for BridgeVideo {
     fn frames(&self) -> async_channel::Receiver<Vec<u8>> {
         // The desktop forwards the encoder's byte stream in arbitrary
         // chunks: the splitter of the library cuts the access units, which
-        // is what the engine stamps and sends.
-        let (tx, rx) = async_channel::unbounded();
+        // is what the engine stamps and sends. Eight units is about half a
+        // second at fifteen frames per second.
+        let (tx, rx) = async_channel::bounded(8);
+        let drop_rx = rx.clone();
         let upstream = self.upstream.clone();
         tokio::spawn(async move {
             let mut splitter = wacore::voip::h264::AnnexBAuSplitter::default();
@@ -92,7 +155,7 @@ impl VideoSource for BridgeVideo {
                 let mut units = Vec::new();
                 splitter.push(&chunk, &mut units);
                 for unit in units {
-                    if tx.send(unit).await.is_err() {
+                    if !push_latest(&tx, &drop_rx, unit) {
                         return; // the call is over
                     }
                 }
@@ -111,16 +174,18 @@ impl VideoSource for BridgeVideo {
 /// The peer's video half: the engine reassembles access units and the bridge
 /// drains them toward the desktop, where a decoder paints them.
 struct BridgeVideoSink {
-    downstream: async_channel::Sender<VideoFrame>,
+    downstream: FramePipe<VideoFrame>,
 }
 
 impl VideoSink for BridgeVideoSink {
     fn playout(&self) -> async_channel::Sender<VideoFrame> {
-        let (tx, rx) = async_channel::unbounded();
+        // Two pictures: a decoder that falls behind shows the present, not
+        // a backlog of the past.
+        let (tx, rx) = async_channel::bounded(2);
         let downstream = self.downstream.clone();
         tokio::spawn(async move {
             while let Ok(frame) = rx.recv().await {
-                if downstream.send(frame).await.is_err() {
+                if !downstream.push(frame) {
                     return; // the call is over
                 }
             }
@@ -134,11 +199,11 @@ pub struct ActiveCall {
     pub call_id: String,
     pub chat: String,
     pub handle: Arc<CallHandle>,
-    pub mic: async_channel::Sender<Vec<i16>>,
+    pub mic: FramePipe<Vec<i16>>,
     pub muted: Arc<AtomicBool>,
     /// The camera pipe, when the call carries video: the desktop writes the
     /// access units here and the engine sends them.
-    pub video: Option<async_channel::Sender<Vec<u8>>>,
+    pub video: Option<FramePipe<Vec<u8>>>,
 }
 
 /// The call registry: at most one live call, plus the offers still ringing.
@@ -433,28 +498,30 @@ impl CallsInner {
                 false,
             )
         })?;
-        let (mic_tx, mic_rx) = async_channel::unbounded();
-        let (out_tx, out_rx) = async_channel::unbounded();
+        // A live call produces audio at a fixed rate: the queues have a
+        // ceiling and the oldest frame leaves when they fill. 160 ms of
+        // microphone and 320 ms of speaker cover the jitter cushion of the
+        // engine without ever keeping a backlog.
+        let (mic, mic_rx) = FramePipe::new(8);
+        let (out, out_rx) = FramePipe::new(16);
         let muted = Arc::new(AtomicBool::new(false));
         let source = BridgeMic {
             upstream: mic_rx,
             muted: Arc::clone(&muted),
         };
-        let sink = BridgeSpeaker { downstream: out_tx };
+        let sink = BridgeSpeaker { downstream: out };
         let voip = client.voip();
         let mut call = voip.call(&peer).audio(source, sink);
         // The video ports exist only when the call carries video: the engine
         // refuses them on an offer that did not ask for video.
         let video_ports = if video {
-            let (au_tx, au_rx) = async_channel::unbounded::<Vec<u8>>();
-            let (peer_tx, peer_rx) = async_channel::unbounded::<VideoFrame>();
+            let (au, au_rx) = FramePipe::<Vec<u8>>::new(8);
+            let (peer, peer_rx) = FramePipe::<VideoFrame>::new(2);
             call = call.video(
                 BridgeVideo { upstream: au_rx },
-                BridgeVideoSink {
-                    downstream: peer_tx,
-                },
+                BridgeVideoSink { downstream: peer },
             );
-            Some((au_tx, peer_rx))
+            Some((au, peer_rx))
         } else {
             None
         };
@@ -468,9 +535,9 @@ impl CallsInner {
             call_id: call_id.clone(),
             chat: chat_id.to_owned(),
             handle: Arc::clone(&handle),
-            mic: mic_tx,
+            mic,
             muted: Arc::clone(&muted),
-            video: video_ports.as_ref().map(|(au_tx, _)| au_tx.clone()),
+            video: video_ports.as_ref().map(|(au, _)| au.clone()),
         });
         let registry = self
             .self_ref
@@ -512,26 +579,28 @@ impl CallsInner {
                 &incoming.action,
                 wacore::types::call::CallAction::Offer { is_video: true, .. }
             );
-        let (mic_tx, mic_rx) = async_channel::unbounded();
-        let (out_tx, out_rx) = async_channel::unbounded();
+        // A live call produces audio at a fixed rate: the queues have a
+        // ceiling and the oldest frame leaves when they fill. 160 ms of
+        // microphone and 320 ms of speaker cover the jitter cushion of the
+        // engine without ever keeping a backlog.
+        let (mic, mic_rx) = FramePipe::new(8);
+        let (out, out_rx) = FramePipe::new(16);
         let muted = Arc::new(AtomicBool::new(false));
         let source = BridgeMic {
             upstream: mic_rx,
             muted: Arc::clone(&muted),
         };
-        let sink = BridgeSpeaker { downstream: out_tx };
+        let sink = BridgeSpeaker { downstream: out };
         let voip = client.voip();
         let mut call = voip.accept(&incoming).audio(source, sink);
         let video_ports = if with_video {
-            let (au_tx, au_rx) = async_channel::unbounded::<Vec<u8>>();
-            let (peer_tx, peer_rx) = async_channel::unbounded::<VideoFrame>();
+            let (au, au_rx) = FramePipe::<Vec<u8>>::new(8);
+            let (peer, peer_rx) = FramePipe::<VideoFrame>::new(2);
             call = call.video(
                 BridgeVideo { upstream: au_rx },
-                BridgeVideoSink {
-                    downstream: peer_tx,
-                },
+                BridgeVideoSink { downstream: peer },
             );
-            Some((au_tx, peer_rx))
+            Some((au, peer_rx))
         } else {
             None
         };
@@ -544,9 +613,9 @@ impl CallsInner {
             call_id: call_id.to_owned(),
             chat: crate::ingest::jid_text(&incoming.from),
             handle: Arc::clone(&handle),
-            mic: mic_tx,
+            mic,
             muted: Arc::clone(&muted),
-            video: video_ports.as_ref().map(|(au_tx, _)| au_tx.clone()),
+            video: video_ports.as_ref().map(|(au, _)| au.clone()),
         });
         let registry = self
             .self_ref
@@ -613,15 +682,16 @@ impl CallsInner {
         Ok(())
     }
 
-    /// Feeds one microphone frame from the desktop. Full queues drop the
-    /// frame: the engine's jitter cushion absorbs far more than one.
+    /// Feeds one microphone frame from the desktop. When the queue is full
+    /// the oldest frame leaves: the engine's jitter cushion absorbs far more
+    /// than one.
     pub fn audio_in(&self, call_id: &str, pcm: Vec<i16>) -> Result<(), (String, String, bool)> {
         let live = self.live.lock().expect("calls lock");
         let call = live
             .as_ref()
             .filter(|call| call.call_id == call_id)
             .ok_or_else(|| ("not_found".into(), "no such live call".into(), false))?;
-        let _ = call.mic.try_send(pcm);
+        let _ = call.mic.push(pcm);
         Ok(())
     }
 
@@ -635,7 +705,7 @@ impl CallsInner {
             .filter(|call| call.call_id == call_id)
             .ok_or_else(|| ("not_found".into(), "no such live call".into(), false))?;
         if let Some(video) = &call.video {
-            let _ = video.try_send(au);
+            let _ = video.push(au);
         }
         Ok(())
     }

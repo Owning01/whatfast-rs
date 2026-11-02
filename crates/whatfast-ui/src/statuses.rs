@@ -821,7 +821,7 @@ impl StatusStrip {
                                                 .text_xs()
                                                 .text_color(muted)
                                                 .child(if has_own_status {
-                                                    i18n::t("Haz clic para añadir un nuevo estado")
+                                                    i18n::t("Click to add a new status")
                                                 } else {
                                                     i18n::t("Click to add a status update")
                                                 }),
@@ -849,7 +849,7 @@ impl StatusStrip {
                                                     .on_click(cx.listener(move |app, _, _, cx| {
                                                         open_viewer(app, &state_v, own_idx, "me@s.whatsapp.net", cx);
                                                     }))
-                                                    .child(i18n::t("Ver estado")),
+                                                    .child(i18n::t("View status")),
                                             )
                                             .when_some(msg_id_opt, |row, msg_id| {
                                                 row.child(
@@ -1132,7 +1132,12 @@ impl StatusStrip {
         let viewer = self.viewer()?;
         let scale = app.ui_scale;
         let groups = app.store.statuses();
-        let group = groups.get(viewer.group_index)?;
+        let Some(group) = groups.get(viewer.group_index) else {
+            // El grupo no está en el modelo (se borró o el refresco lo quitó):
+            // el visor se cierra solo, en vez de dejar la ventana sin pintar.
+            self.state.borrow_mut().viewer = None;
+            return None;
+        };
         let message = group.messages.get(viewer.message_index);
 
         let background = message
@@ -1722,7 +1727,7 @@ pub(crate) fn choose_photo_status(
         files: true,
         directories: false,
         multiple: false,
-        prompt: Some(i18n::t("Elige una foto para tu estado").into()),
+        prompt: Some(i18n::t("Choose a photo for your status").into()),
     });
     let view = cx.entity();
     cx.spawn_in(window, async move |_, window| {
@@ -1934,9 +1939,15 @@ pub(crate) fn reply_to_the_open_status(
     let (author, status_id, status_chat) = {
         let groups = app.store.statuses();
         let Some(group) = groups.get(viewer.group_index) else {
+            // El grupo se fue mientras el visor estaba abierto (el autor lo
+            // borró o el refresco lo quitó): el visor no se queda en negro.
+            app.status_strip.state.borrow_mut().viewer = None;
+            cx.notify();
             return false;
         };
         let Some(message) = group.messages.get(viewer.message_index) else {
+            app.status_strip.state.borrow_mut().viewer = None;
+            cx.notify();
             return false;
         };
         (
@@ -1945,6 +1956,15 @@ pub(crate) fn reply_to_the_open_status(
             statuses_chat_id(app),
         )
     };
+    // Un estado local no existe en el servidor: citarlo haría fallar el
+    // envío. Se manda como texto normal a la conversación elegida.
+    if author.is_empty()
+        || author == "me@s.whatsapp.net"
+        || status_id.starts_with("local-status-")
+    {
+        app.send_text(window, cx);
+        return true;
+    }
     if app.store.connection != ConnectionState::Connected {
         app.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
         return false;
@@ -2006,7 +2026,7 @@ fn preload_viewer_media(app: &mut Whatfast, state: &Rc<RefCell<StatusStripState>
     let Some(group) = groups.get(viewer.group_index) else { return };
     let Some(message) = group.messages.get(viewer.message_index) else { return };
     if let Some(Content::Image(image)) = &message.content {
-        if image.local_path.is_empty() || !std::path::Path::new(&image.local_path).is_file() {
+        if image.local_path.is_empty() || !app.store.media_exists(&image.local_path) {
             app.load_message_image(message.chat_id.clone(), message.id.clone());
         }
     }
@@ -2190,11 +2210,11 @@ fn render_message(
     if let Some(Content::Image(image)) = &message.content {
         let mut image_elem = None;
         let path = if !image.local_path.is_empty()
-            && std::path::Path::new(&image.local_path).is_file()
+            && app.store.media_exists(&image.local_path)
         {
             Some(image.local_path.clone())
         } else if !image.thumbnail_path.is_empty()
-            && std::path::Path::new(&image.thumbnail_path).is_file()
+            && app.store.media_exists(&image.thumbnail_path)
         {
             Some(image.thumbnail_path.clone())
         } else {
@@ -2246,7 +2266,7 @@ fn render_message(
 
     if let Some(Content::Attachment(attachment)) = &message.content {
         if !attachment.local_path.is_empty()
-            && std::path::Path::new(&attachment.local_path).is_file()
+            && app.store.media_exists(&attachment.local_path)
         {
             let mut container = v_flex().items_center().justify_center().child(
                 img(PathBuf::from(&attachment.local_path))
@@ -2275,7 +2295,7 @@ fn render_message(
     }
 
     if let Some(path) = message_image_path(message) {
-        if std::path::Path::new(&path).is_file() {
+        if app.store.media_exists(&path) {
             return v_flex().items_center().justify_center().child(
                 img(PathBuf::from(path))
                     .max_h(px(640. * scale))

@@ -9,6 +9,7 @@ description = "Sidecar that owns the WhatsApp session (linking, messaging, calls
 
 [dependencies]
 anyhow.workspace = true
+mimalloc.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -23,9 +24,16 @@ whatfast-core = { path = "../whatfast-core" }
 # The page of a link is read once, on the send: the same TLS stack the
 # WhatsApp library already carries, without a second HTTP client.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# The link of the message is parsed before it is fetched: the host, the
+# scheme and the address it resolves to decide whether the preview goes out.
+url = "2"
 # The picture of the card is decoded and shrunk to the JPEG the message
 # carries.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# The shared contact card is stored as a small JSON array in `contacts_json`;
+# the wire parses it to show the name instead of an empty "Contact".
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # The agents database, their grants, the pace and the schedule of the
 # automations: the tables the local endpoint is guarded with.
 whatfast-auto = { path = "../whatfast-auto" }

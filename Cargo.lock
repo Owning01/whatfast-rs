@@ -2562,6 +2562,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontdue"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e796cb6894e6418daacea84b28dd4f98d3b32c74d5bb452ba1ecfbf5ad8e84ca"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3412,6 +3422,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
  "serde",
 ]
@@ -4228,6 +4240,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4581,6 +4602,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -9615,6 +9645,8 @@ dependencies = [
 name = "whatfast-i18n"
 version = "0.2.31"
 dependencies = [
+ "phf 0.11.3",
+ "phf_codegen",
  "serde_json",
 ]
 
@@ -9665,12 +9697,14 @@ dependencies = [
  "cpal",
  "embed-resource",
  "emojis",
+ "fontdue",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
  "image",
  "libc",
+ "mimalloc",
  "notify-rust",
  "ogg",
  "opus-decoder",
@@ -9679,10 +9713,12 @@ dependencies = [
  "qrcode",
  "raw-window-handle",
  "rodio",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "smol",
  "tempfile",
+ "ttf-parser",
  "ureq",
  "uuid",
  "whatfast-agents",
@@ -9704,13 +9740,17 @@ dependencies = [
  "async-channel",
  "fs4",
  "image",
+ "mimalloc",
  "prost",
  "rusqlite",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "url",
  "wacore",
  "whatfast-agents",
  "whatfast-auto",

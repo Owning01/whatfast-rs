@@ -406,7 +406,7 @@ async fn the_fold_carries_the_display_state_of_the_retired_twin() {
         .set_chat_flag(phone_chat, ChatFlag::Blocked, true)
         .unwrap();
     store
-        .read(|conn| {
+        .write(|conn| {
             conn.execute(
                 "UPDATE chats SET muted_until=9000, pinned=1 WHERE jid=?1",
                 [lid_chat],

@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "Native GPUI user interface of Whatfast."
 
+[features]
+# The engine of documents (markdown blocks and diagrams) is not connected to
+# the conversation yet, but it is part of the default build: its tests run
+# with the rest. The flag turns it off for a build that does not want it.
+default = ["documents"]
+documents = []
+
 # The build script of the crate: it puts the icon of Whatfast inside the
 # executable of Windows (the Explorer, the task bar and the alt-tab show it).
 [build-dependencies]
@@ -14,6 +21,7 @@ embed-resource = "3.0.11"
 
 [dependencies]
 anyhow.workspace = true
+mimalloc.workspace = true
 async-channel.workspace = true
 whatfast-core = { path = "../whatfast-core" }
 whatfast-i18n = { path = "../whatfast-i18n" }
@@ -39,6 +47,11 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
 emojis = "0.9.0"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# El export del editor dibuja los textos y las formas sobre la foto final: la
+# fuente del sistema se rasteriza con fontdue y los emojis salen de los PNG
+# CBDT de la misma fuente que pinta la ventana.
+fontdue = "0.9"
+ttf-parser = "0.25"
 # La nota de voz se reproduce dentro del chat: el decodificador de Opus es
 # puro Rust (sin libopus ni cmake) y rodio pone la salida del sistema.
 ogg = "0.9.2"
@@ -64,6 +77,8 @@ smol = "2"
 uuid = { version = "1.18", features = ["v4"] }
 # The custom themes of the profile are JSON inside the settings file.
 serde_json = "1.0"
+# The drafts of the composer are JSON too: text, reply and mentions per chat.
+serde = { version = "1", features = ["derive"] }
 # The self-update reads the manifest of the release and downloads the two
 # executables over TLS: the same client the sidecar uses.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }

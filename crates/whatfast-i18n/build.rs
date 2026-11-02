@@ -1,16 +1,17 @@
-//! Finds the language files and embeds them in the binary.
+//! Finds the language files and builds the static dictionaries.
 //!
 //! Every `locales/<code>.json` file is one language. Adding a language is
-//! adding the file: this script reads its `meta.code` and `meta.name`, and
-//! generates the table that [`whatfast_i18n`] reads at startup. There is no
-//! list of languages to edit by hand.
+//! adding the file: this script reads its `meta.code` and `meta.name`, parses
+//! its `strings` and writes a perfect hash map for each one. The map lives in
+//! the read-only segment of the binary: the window never parses JSON, never
+//! allocates a dictionary and never hashes a key at runtime.
 //!
 //! The file has this shape:
 //!
 //! ```json
 //! {
 //!   "meta": { "code": "es", "name": "Español" },
-//!   "strings": { "Type a message": "Escribí un mensaje" }
+//!   "strings": { "Type a message": "Escribe un mensaje" }
 //! }
 //! ```
 //!
@@ -18,6 +19,8 @@
 //! back to English instead of showing a blank.
 
 use std::{env, fs, path::Path};
+
+use phf_codegen::Map;
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("the manifest directory");
@@ -34,11 +37,6 @@ fn main() {
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("a file name")
-                .to_string();
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             let value: serde_json::Value = serde_json::from_str(&text)
@@ -47,13 +45,28 @@ fn main() {
                 .get("meta")
                 .and_then(|meta| meta.get("code"))
                 .and_then(|code| code.as_str())
-                .unwrap_or_else(|| panic!("{} has no meta.code", path.display()));
+                .unwrap_or_else(|| panic!("{} has no meta.code", path.display()))
+                .to_string();
             let name = value
                 .get("meta")
                 .and_then(|meta| meta.get("name"))
                 .and_then(|name| name.as_str())
-                .unwrap_or_else(|| panic!("{} has no meta.name", path.display()));
-            found.push((code.to_string(), name.to_string(), file_name));
+                .unwrap_or_else(|| panic!("{} has no meta.name", path.display()))
+                .to_string();
+            let mut strings = Map::new();
+            let entries = value
+                .get("strings")
+                .and_then(|strings| strings.as_object())
+                .unwrap_or_else(|| panic!("{} has no strings", path.display()));
+            for (key, text) in entries {
+                let text = text
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{}: {key} is not a string", path.display()));
+                // `phf_codegen` writes the literal with the quoting and the
+                // escapes of Rust: a key with quotes or a newline survives.
+                strings.entry(key.as_str(), &format!("{text:?}"));
+            }
+            found.push((code, name, strings.build().to_string()));
         }
     }
     // The order of the language list is the order of the files: a stable
@@ -61,9 +74,9 @@ fn main() {
     found.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut table = String::from("pub(crate) static BUNDLED: &[BundledLocale] = &[\n");
-    for (code, name, file_name) in found {
+    for (code, name, strings) in found {
         table.push_str(&format!(
-            "    BundledLocale {{ code: {code:?}, name: {name:?}, json: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/locales/{file_name}\")) }},\n"
+            "    BundledLocale {{ code: {code:?}, name: {name:?}, strings: {strings} }},\n"
         ));
     }
     table.push_str("];\n");

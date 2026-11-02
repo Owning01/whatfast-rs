@@ -30,12 +30,19 @@ gpui_windows = { path = "vendor/gpui_windows" }
 [workspace.dependencies]
 anyhow = "1.0"
 async-channel = "2.5"
+# The desktop and the sidecar allocate thousands of short-lived Protobuf,
+# image and audio buffers. mimalloc keeps those small blocks per thread and
+# takes less contention than the Windows heap in the multi-threaded loops.
+mimalloc = "0.1"
 prost = "0.14"
 thiserror = "2.0"
 tracing = "0.1"
 
 [profile.release]
-opt-level = "s"
+# `"s"` turned off loop unrolling and most of the autovectorization in the
+# decoders and the layout. The binary grows, the hot loops get the instructions
+# they were written for.
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

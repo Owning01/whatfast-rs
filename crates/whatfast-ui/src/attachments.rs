@@ -34,7 +34,7 @@ use gpui_component::{
 };
 use whatfast_i18n as i18n;
 
-use whatfast_model::model::message_text;
+use whatfast_model::model::{Store, message_text};
 use whatfast_protocol as proto;
 
 use crate::app::Whatfast;
@@ -127,18 +127,19 @@ fn video_height(attachment: &proto::AttachmentContent, scale: f32) -> Pixels {
 ///
 /// A note that was not downloaded yet keeps the card of the attachment, with
 /// the arrow that asks for the file.
-fn is_playable_voice_note(attachment: &proto::AttachmentContent) -> bool {
+fn is_playable_voice_note(store: &Store, attachment: &proto::AttachmentContent) -> bool {
     attachment.voice_note
         && !attachment.local_path.is_empty()
-        && std::path::Path::new(&attachment.local_path).is_file()
+        && store.media_exists(&attachment.local_path)
 }
 
 /// Whether an audio still has to be asked for: the file is not on the disk,
 /// so the player cannot draw its wave or play it.
-pub(crate) fn audio_needs_download(attachment: &proto::AttachmentContent) -> bool {
-    attachment.kind == "audio"
-        && (attachment.local_path.is_empty()
-            || !std::path::Path::new(&attachment.local_path).is_file())
+pub(crate) fn audio_needs_download(
+    store: &Store,
+    attachment: &proto::AttachmentContent,
+) -> bool {
+    attachment.kind == "audio" && !store.media_exists(&attachment.local_path)
 }
 
 /// The chip of the speed of the note: `1x`, `1.5x` or `2x`.
@@ -295,7 +296,7 @@ impl Whatfast {
             return px(0.);
         };
         // The player of the voice note has a height of its own.
-        if is_playable_voice_note(attachment) {
+        if is_playable_voice_note(&self.store, attachment) {
             return voice_note_height(self.ui_scale);
         }
         // El video se mira en su caja, con los mandos debajo.
@@ -785,7 +786,7 @@ impl Whatfast {
     ) -> gpui::Div {
         // La nota de voz que ya esta en el disco se reproduce aca adentro,
         // como en la referencia, y no en el programa del sistema.
-        if is_playable_voice_note(attachment) {
+        if is_playable_voice_note(&self.store, attachment) {
             return self.render_voice_note(index, message, attachment, cx);
         }
         // El video se mira en la burbuja, con su reproductor: el archivo no
@@ -930,6 +931,7 @@ impl Whatfast {
 
 #[cfg(test)]
 mod tests {
+    use whatfast_model::model::Store;
     use whatfast_protocol::AttachmentContent;
 
     use super::{
@@ -978,15 +980,17 @@ mod tests {
 
     #[test]
     fn an_audio_without_the_file_is_asked_for_on_its_own() {
+        let store = Store::default();
         let mut voice = attachment("audio");
         voice.voice_note = true;
-        assert!(audio_needs_download(&voice));
+        assert!(audio_needs_download(&store, &voice));
         // A path that does not point at a file is as good as no path.
         voice.local_path = "C:/whatfast/does-not-exist.ogg".into();
-        assert!(audio_needs_download(&voice));
+        store.remember_media_path(&voice.local_path);
+        assert!(audio_needs_download(&store, &voice));
         // Other kinds have their own path: the audios do not pull them.
-        assert!(!audio_needs_download(&attachment("video")));
-        assert!(!audio_needs_download(&attachment("document")));
+        assert!(!audio_needs_download(&store, &attachment("video")));
+        assert!(!audio_needs_download(&store, &attachment("document")));
     }
 
     #[test]
@@ -1066,15 +1070,27 @@ mod tests {
 
     #[test]
     fn a_note_without_its_file_keeps_the_card_of_the_attachment() {
+        let store = Store::default();
         let mut voice = attachment("audio");
         voice.voice_note = true;
         // Without a path the file is not in the disk.
-        assert!(!is_playable_voice_note(&voice));
+        assert!(!is_playable_voice_note(&store, &voice));
 
         // Any other audio is not a note, even with its file.
         let mut song = attachment("audio");
         song.local_path = "C:/musica/cancion.wav".into();
-        assert!(!is_playable_voice_note(&song));
+        assert!(!is_playable_voice_note(&store, &song));
+    }
+
+    #[test]
+    fn a_note_with_its_file_is_played_in_the_bubble() {
+        let store = Store::default();
+        let mut voice = attachment("audio");
+        voice.voice_note = true;
+        // A file that exists: the map resolves it once, not in the render.
+        voice.local_path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
+        store.refresh_media_path(&voice.local_path);
+        assert!(is_playable_voice_note(&store, &voice));
     }
 
     #[test]

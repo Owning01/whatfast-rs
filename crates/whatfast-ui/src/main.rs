@@ -44,6 +44,11 @@
 // is started from the desktop, from the Start menu or from the installer.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// Los buffers pequenos y efimeros (Protobuf, imagenes, audio) pasan por
+// mimalloc: menos contencion entre el hilo de UI, el del video y los workers.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
@@ -56,7 +61,12 @@ mod automations_panel;
 mod call_audio;
 mod call_video;
 mod chat_drafts;
+mod composer_drafts;
 mod composer_attachments;
+// The document engine (markdown blocks and diagrams) is implemented but not
+// wired into the bubble yet. The feature keeps it compiling and tested when
+// someone asks for it, without 18 dead-code warnings on every build.
+#[cfg(feature = "documents")]
 mod document;
 mod emoji_font;
 mod emoji_recent;
@@ -66,6 +76,7 @@ mod icons;
 mod instance;
 mod local_time;
 mod media_editor;
+mod media_overlays;
 mod members;
 mod message_actions;
 mod navrail;

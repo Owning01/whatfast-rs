@@ -331,6 +331,11 @@ pub(crate) struct MediaEdit {
     pub(crate) blurs: Vec<BlurRegion>,
     pub(crate) texts: Vec<TextOverlay>,
     pub(crate) emojis: Vec<EmojiOverlay>,
+    pub(crate) shapes: Vec<ShapeOverlay>,
+    /// Píxeles de pantalla por píxel de la foto cuando el usuario colocó las
+    /// capas. Los tamaños de letra y emoji están en píxeles de pantalla; el
+    /// export los lleva al tamaño de la foto.
+    pub(crate) overlay_scale: f64,
     pub(crate) is_hd: bool,
 }
 
@@ -379,6 +384,16 @@ pub(crate) fn apply_media_edit(edit: &MediaEdit, destination: &Path) -> Result<(
         apply_stroke_to_image(&mut rotated, stroke);
     }
 
+    // Las capas flotantes de la vista previa también van al archivo. Se
+    // dibujan antes del recorte, en el mismo espacio de la foto rotada.
+    crate::media_overlays::draw(
+        &mut rotated,
+        &edit.shapes,
+        &edit.texts,
+        &edit.emojis,
+        edit.overlay_scale,
+    );
+
     let x = edit.plan.crop.x.round().clamp(0.0, rotated.width() as f64) as u32;
     let y = edit.plan.crop.y.round().clamp(0.0, rotated.height() as f64) as u32;
     let width = (edit.plan.crop.width.round().max(1.0) as u32).min(rotated.width().saturating_sub(x));
@@ -413,6 +428,8 @@ pub(crate) fn apply_edit(source: &Path, plan: &EditPlan, destination: &Path) -> 
         blurs: Vec::new(),
         texts: Vec::new(),
         emojis: Vec::new(),
+        shapes: Vec::new(),
+        overlay_scale: 1.0,
         is_hd: false,
     };
     apply_media_edit(&edit, destination)
@@ -451,10 +468,10 @@ impl EventEmitter<MediaEditorEvent> for MediaEditor {}
 impl MediaEditor {
     pub(crate) fn new(path: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let caption = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(i18n::t("Añade un comentario"))
+            InputState::new(window, cx).placeholder(i18n::t("Add a comment"))
         });
         let text_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(i18n::t("Escribe tu texto..."))
+            InputState::new(window, cx).placeholder(i18n::t("Write your text..."))
         });
         let initial_item = MediaItem::new(path.to_path_buf());
         let mut editor = Self {
@@ -591,9 +608,9 @@ impl MediaEditor {
         let is_hd = self.active_item().is_hd;
         self.active_item_mut().is_hd = !is_hd;
         self.save_notice = Some(if !is_hd {
-            i18n::t("Calidad HD activada").to_string()
+            i18n::t("HD quality on").to_string()
         } else {
-            i18n::t("Calidad estándar activada").to_string()
+            i18n::t("Standard quality on").to_string()
         });
         cx.notify();
     }
@@ -623,7 +640,7 @@ impl MediaEditor {
                 input.set_value(String::new(), window, cx);
             });
         }
-        self.save_notice = Some(i18n::t("Texto añadido").to_string());
+        self.save_notice = Some(i18n::t("Text added").to_string());
         cx.notify();
     }
 
@@ -695,12 +712,22 @@ impl MediaEditor {
     }
 
     pub(crate) fn add_items_from_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut skipped = 0;
         for path in paths {
+            if !is_editable_picture(&path) {
+                skipped += 1;
+                continue;
+            }
             let item = MediaItem::new(path);
             self.items.push(item);
             let idx = self.items.len() - 1;
             self.load_item(idx, cx);
             self.active_index = idx; // Activate the newly added photo immediately!
+        }
+        if skipped > 0 {
+            self.error = Some(
+                i18n::t("Only photos can be added to the editor.").to_string(),
+            );
         }
         cx.notify();
     }
@@ -724,6 +751,7 @@ impl MediaEditor {
     pub(crate) fn save_to_disk(&mut self, cx: &mut Context<Self>) {
         self.sync_current_caption(cx);
         let item = self.active_item();
+        let overlay_scale = self.overlay_scale_for(item);
         let plan = match self.plan_for_item(item) {
             Ok(p) => p,
             Err(e) => {
@@ -741,6 +769,8 @@ impl MediaEditor {
             blurs: item.blurs.clone(),
             texts: item.texts.clone(),
             emojis: item.emojis.clone(),
+            shapes: item.shapes.clone(),
+            overlay_scale,
             is_hd: item.is_hd,
         };
 
@@ -763,7 +793,7 @@ impl MediaEditor {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(()) => {
-                        this.save_notice = Some(i18n::t("Foto guardada en Descargas").to_string());
+                        this.save_notice = Some(i18n::t("Photo saved to Downloads").to_string());
                     }
                     Err(err) => {
                         this.error = Some(format!("Error al guardar: {err}"));
@@ -782,9 +812,11 @@ impl MediaEditor {
         }
         self.sync_current_caption(cx);
         let mut edits = Vec::new();
+        let mut skipped = 0;
         for item in &self.items {
             match self.plan_for_item(item) {
                 Ok(plan) => {
+                    let overlay_scale = self.overlay_scale_for(item);
                     edits.push(MediaEdit {
                         path: item.path.clone(),
                         plan,
@@ -794,8 +826,15 @@ impl MediaEditor {
                         blurs: item.blurs.clone(),
                         texts: item.texts.clone(),
                         emojis: item.emojis.clone(),
+                        shapes: item.shapes.clone(),
+                        overlay_scale,
                         is_hd: item.is_hd,
                     });
+                }
+                // Un video en el carrusel no tiene imagen que editar: se
+                // omite y las fotos válidas siguen su camino.
+                Err(MediaEditError::NoPicture) => {
+                    skipped += 1;
                 }
                 Err(error) => {
                     self.error = Some(error.to_string());
@@ -803,6 +842,16 @@ impl MediaEditor {
                     return;
                 }
             }
+        }
+        if edits.is_empty() {
+            self.error = Some(i18n::t("The photo could not be edited").to_string());
+            cx.notify();
+            return;
+        }
+        if skipped > 0 {
+            self.save_notice = Some(
+                i18n::t("The files that are not photos were skipped.").to_string(),
+            );
         }
         if !edits.is_empty() {
             cx.emit(MediaEditorEvent::Applied(edits));
@@ -888,6 +937,19 @@ impl MediaEditor {
             width: (rotated.width * scale).round().max(40.0),
             height: (rotated.height * scale).round().max(40.0),
         }
+    }
+
+    /// Píxeles de pantalla por píxel de una foto concreta. Es la escala con la
+    /// que el usuario colocó las capas flotantes de esa foto.
+    fn overlay_scale_for(&self, item: &MediaItem) -> f64 {
+        if let Some(bounds) = self.surface.get() {
+            let width = f32::from(bounds.size.width) as f64;
+            let rotated = item.rotated_size();
+            if width > 0.0 && rotated.width > 0.0 {
+                return width / rotated.width;
+            }
+        }
+        1.0
     }
 
     fn window_per_picture(&self) -> (f64, f64) {
@@ -1584,7 +1646,7 @@ impl MediaEditor {
                             .text_color(rgb(0xd1d7db))
                             .child(Icon::new(WhatfastIcon::Sticker).with_size(px(18.)))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_notice = Some(i18n::t("Modo sticker activo").to_string());
+                                this.save_notice = Some(i18n::t("Sticker mode on").to_string());
                                 cx.notify();
                             })),
                     )
@@ -1698,7 +1760,7 @@ impl MediaEditor {
                         Button::new("crop-reset")
                             .ghost()
                             .small()
-                            .label(i18n::t("Restablecer"))
+                            .label(i18n::t("Reset"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reset_crop(cx);
                             })),
@@ -1954,7 +2016,7 @@ impl MediaEditor {
                         Button::new("blur-clear")
                             .ghost()
                             .small()
-                            .label(i18n::t("Limpiar desenfoques"))
+                            .label(i18n::t("Clear blurs"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.push_undo();
                                 this.active_item_mut().blurs.clear();
@@ -2227,7 +2289,7 @@ impl MediaEditor {
                                     files: true,
                                     directories: false,
                                     multiple: true,
-                                    prompt: Some(i18n::t("Elige más fotos o videos").into()),
+                                    prompt: Some(i18n::t("Choose more photos").into()),
                                 });
                                 let view = cx.entity();
                                 cx.spawn_in(window, async move |_, window| {
@@ -2704,6 +2766,19 @@ fn carried_crop(crop: CropRect, frame: PixelSize, steps: u32) -> Option<CropRect
 struct LoadedPicture {
     natural: PixelSize,
     preview: image::RgbaImage,
+}
+
+/// Whether the path is a picture the editor can open.
+fn is_editable_picture(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(
+                extension.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+            )
+        })
 }
 
 fn load_picture(path: &Path) -> Result<LoadedPicture, String> {

@@ -187,6 +187,9 @@ impl StickerTray {
             .shadow_lg()
             .bg(cx.theme().popover)
             .overflow_hidden()
+            // La bandeja flota sobre la conversacion: sin esto el clic de un
+            // sticker tambien llega a la lista de mensajes que queda detras.
+            .occlude()
             // La rueda dentro de la bandeja mueve sus rejillas, no la
             // conversacion que queda detras.
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))

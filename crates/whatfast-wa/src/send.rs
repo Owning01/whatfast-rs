@@ -129,21 +129,11 @@ pub(crate) fn reserve_outgoing(
     }
     row.id = session.client.generate_message_id().to_string();
     row.status = MessageStatus::Pending as i64;
-    store.insert_message(&row).map_err(internal)?;
-    let message_id = row.id.clone();
+    // La fila del mensaje y la de `outgoing_requests` van en la misma
+    // transacción: un fallo de la segunda no deja un PENDING huérfano que un
+    // reintento convierta en un duplicado.
     store
-        .write(|conn| {
-            conn.execute(
-                "INSERT INTO outgoing_requests(client_request_id,chat_jid,text,message_id,created_at)
-                 VALUES(?1,?2,?3,?4,?5)
-                 ON CONFLICT(client_request_id) DO UPDATE SET
-                   chat_jid=excluded.chat_jid,
-                   text=excluded.text,
-                   message_id=excluded.message_id",
-                rusqlite::params![client_message_id, chat_id, fingerprint, message_id, db::now_ms()],
-            )?;
-            Ok(())
-        })
+        .reserve_outgoing(&row, client_message_id, chat_id, fingerprint)
         .map_err(internal)?;
     Ok((row, false))
 }
@@ -388,12 +378,16 @@ pub async fn send_text(
         staged.link_preview_width = i64::from(preview.width);
         staged.link_preview_height = i64::from(preview.height);
     }
+    let fingerprint = format!(
+        "{}\0{}\0{}",
+        request.text, request.reply_to_message_id, request.reply_to_chat_id
+    );
     let (row, already_reserved) = reserve_outgoing(
         session,
         store,
         &request.client_message_id,
         &request.chat_id,
-        &request.text,
+        &fingerprint,
         staged,
     )?;
     if already_reserved {
@@ -428,33 +422,17 @@ pub async fn send_text(
     store
         .set_message_status(&request.chat_id, &row.id, MessageStatus::Sent as i64)
         .map_err(internal)?;
-    refresh_chat_pointer(store, &request.chat_id)
+    store.refresh_chat_pointer(&request.chat_id)
         .map_err(|error| ("internal".into(), format!("{error}"), false))?;
     Ok(row)
 }
 
-/// Recomputes the chat pointer after an outgoing write and answers the
-/// fresh row for the wire event.
+/// Recomputes the chat pointer after an outgoing write and answers the fresh
+/// row for the wire event. It delegates to the store's version, which ignores
+/// the revoked and reaction rows; the old copy in this module did not and put
+/// the text of a deleted message back in the chat list.
 pub fn refresh_chat_pointer(store: &Store, chat_id: &str) -> rusqlite::Result<ChatRow> {
-    store.write(|conn| {
-        conn.execute(
-            "UPDATE chats SET
-               last_message_id=(SELECT id FROM messages WHERE chat_jid=?1
-                                ORDER BY timestamp DESC, id DESC LIMIT 1),
-               last_message_text=(SELECT CASE
-                                    WHEN text<>'' THEN text
-                                    WHEN image_caption<>'' THEN image_caption
-                                    WHEN media_caption<>'' THEN media_caption
-                                    ELSE ''
-                                  END FROM messages WHERE chat_jid=?1
-                                  ORDER BY timestamp DESC, id DESC LIMIT 1),
-               last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1
-                                         ORDER BY timestamp DESC, id DESC LIMIT 1),0)
-             WHERE jid=?1",
-            rusqlite::params![chat_id],
-        )?;
-        Ok(())
-    })?;
+    store.refresh_chat_pointer(chat_id)?;
     store
         .chat(chat_id)?
         .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
@@ -595,7 +573,7 @@ pub async fn edit_message(
     store
         .mark_message_edited(chat_id, message_id, text)
         .map_err(internal)?;
-    refresh_chat_pointer(store, chat_id).map_err(internal)?;
+    store.refresh_chat_pointer(chat_id).map_err(internal)?;
     Ok(())
 }
 
@@ -625,7 +603,7 @@ pub async fn revoke_message(
     store
         .mark_message_revoked(chat_id, message_id)
         .map_err(internal)?;
-    refresh_chat_pointer(store, chat_id).map_err(internal)?;
+    store.refresh_chat_pointer(chat_id).map_err(internal)?;
     Ok(())
 }
 
@@ -712,7 +690,7 @@ pub async fn create_poll(
         )
         .map_err(internal)?;
     remember_outgoing(store, client_message_id, chat_id, &fingerprint, &message_id)?;
-    refresh_chat_pointer(store, chat_id).map_err(internal)?;
+    store.refresh_chat_pointer(chat_id).map_err(internal)?;
     Ok(row)
 }
 
@@ -778,7 +756,7 @@ pub async fn forward_message(
         .ensure_chat(target_chat, target_chat)
         .map_err(internal)?;
     store.insert_message(&row).map_err(internal)?;
-    refresh_chat_pointer(store, target_chat).map_err(internal)?;
+    store.refresh_chat_pointer(target_chat).map_err(internal)?;
     Ok(row)
 }
 

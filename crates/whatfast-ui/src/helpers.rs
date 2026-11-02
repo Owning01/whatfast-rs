@@ -105,8 +105,37 @@ pub(crate) fn image_file_format(bytes: &[u8]) -> Option<gpui::ImageFormat> {
 
 /// The pixel size of a picture, read from its header: PNG, JPEG or WebP.
 /// Answers `None` for anything else or for a file that cannot be read.
+///
+/// The answer is cached per path: the viewer asks on every frame it has no
+/// size for, and reading the header each time is wasted work.
 fn picture_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
-    let bytes = std::fs::read(path).ok()?;
+    thread_local! {
+        static DIMENSIONS: std::cell::RefCell<
+            std::collections::HashMap<PathBuf, Option<(u32, u32)>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    if let Some(hit) = DIMENSIONS.with(|cache| cache.borrow().get(path).copied()) {
+        return hit;
+    }
+    let dimensions = read_picture_dimensions(path);
+    DIMENSIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), dimensions);
+    });
+    dimensions
+}
+
+/// Reads the header of the file. Only the first 256 KiB: a 12 MP JPEG is
+/// several megabytes and the size lives near its start.
+fn read_picture_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(64 * 1024);
+    file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
     png_dimensions(&bytes)
         .or_else(|| jpeg_dimensions(&bytes))
         .or_else(|| webp_dimensions(&bytes))

@@ -715,6 +715,11 @@ impl Server {
                     .message(&request.chat_id, &request.message_id)?
                     .ok_or_else(|| Failure::fatal("not_found", "message is not stored"))?;
                 self.push_event(crate::ingest::message_upserted(&row));
+                // The preview of the chat follows the last visible message:
+                // without this event the sidebar would keep the deleted text.
+                if let Ok(Some(chat)) = self.store.chat(&row.chat_jid) {
+                    self.push_event(crate::ingest::chat_upserted(chat));
+                }
                 Ok(Handled {
                     result: rpc_response::Result::DeleteMessage(
                         whatfast_protocol::DeleteMessageResponse {
@@ -1185,7 +1190,6 @@ impl Server {
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
-                let connected = self.connected();
                 let path = crate::media::fetch_message_media(
                     &session,
                     &self.store,
@@ -1194,10 +1198,10 @@ impl Server {
                     &request.message_id,
                 )
                 .await
-                .map_err(|(_, message, _)| Failure {
-                    code: "attachment_unavailable".into(),
+                .map_err(|(code, message, retryable)| Failure {
+                    code,
                     message,
-                    retryable: connected,
+                    retryable,
                 })?;
                 Ok(Handled {
                     result: rpc_response::Result::GetMessageAttachment(
@@ -1220,7 +1224,6 @@ impl Server {
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
-                let connected = self.connected();
                 let path = crate::media::fetch_message_media(
                     &session,
                     &self.store,
@@ -1229,10 +1232,10 @@ impl Server {
                     &request.message_id,
                 )
                 .await
-                .map_err(|(_, message, _)| Failure {
-                    code: "image_unavailable".into(),
+                .map_err(|(code, message, retryable)| Failure {
+                    code,
                     message,
-                    retryable: connected,
+                    retryable,
                 })?;
                 Ok(Handled {
                     result: rpc_response::Result::GetMessageImage(

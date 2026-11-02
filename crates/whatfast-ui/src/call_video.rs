@@ -125,6 +125,29 @@ fn no_window(command: &mut Command) {
     }
 }
 
+/// Encola el valor y, si la cola está llena, tira el más viejo.
+///
+/// En un flujo de tiempo real la cola no puede crecer: un visor que se atrasa
+/// medio segundo acumularía decenas de megabytes de BGRA y mostraría el
+/// pasado. El productor conserva un clon del receptor solo para descartar la
+/// cabeza de la cola.
+fn push_latest<T>(
+    tx: &async_channel::Sender<T>,
+    drop: &async_channel::Receiver<T>,
+    mut value: T,
+) {
+    loop {
+        match tx.try_send(value) {
+            Ok(()) => return,
+            Err(async_channel::TrySendError::Full(returned)) => {
+                let _ = drop.try_recv();
+                value = returned;
+            }
+            Err(async_channel::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
 /// The camera pipe: the encoder's H.264 byte stream, chunk by chunk.
 pub(crate) struct Camera {
     process: Arc<Mutex<Option<Child>>>,
@@ -147,7 +170,8 @@ impl Camera {
         let ffmpeg = ffmpeg().ok_or_else(|| {
             anyhow::anyhow!("ffmpeg is not installed, so the camera cannot start")
         })?;
-        let (frames_tx, frames_rx) = async_channel::unbounded();
+        let (frames_tx, frames_rx) = async_channel::bounded(8);
+        let drop_frames = frames_rx.clone();
         let process = Arc::new(Mutex::new(None));
         let state = Arc::new(AtomicU8::new(STARTING));
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -174,7 +198,7 @@ impl Camera {
                         None => continue,
                     };
                     *process.lock().expect("camera lock") = Some(child);
-                    let pumped = pump(&mut stdout, &frames_tx, &state);
+                    let pumped = pump(&mut stdout, &frames_tx, &drop_frames, &state);
                     // The process ends when the call does; taking it here
                     // frees the slot and lets the next device try.
                     if let Some(mut child) = process.lock().expect("camera lock").take() {
@@ -270,6 +294,7 @@ fn spawn_encoder(_ffmpeg: &Path, _device: &str) -> std::io::Result<Child> {
 fn pump<R: Read>(
     stdout: &mut R,
     frames: &async_channel::Sender<Vec<u8>>,
+    drop_frames: &async_channel::Receiver<Vec<u8>>,
     state: &AtomicU8,
 ) -> bool {
     let mut buffer = vec![0u8; 8192];
@@ -280,9 +305,7 @@ fn pump<R: Read>(
             Ok(read) => {
                 produced = true;
                 state.store(RUNNING, Ordering::SeqCst);
-                if frames.send_blocking(buffer[..read].to_vec()).is_err() {
-                    return true; // the call ended
-                }
+                push_latest(frames, drop_frames, buffer[..read].to_vec());
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
@@ -302,6 +325,9 @@ pub(crate) struct Decoded {
 pub(crate) struct Decoder {
     process: Arc<Mutex<Option<Child>>>,
     input: async_channel::Sender<Vec<u8>>,
+    /// The consumer's clone, used to drop the oldest access unit when the
+    /// writer falls behind.
+    input_drop: async_channel::Receiver<Vec<u8>>,
     frames: async_channel::Receiver<Decoded>,
 }
 
@@ -349,8 +375,10 @@ impl Decoder {
             .take()
             .ok_or_else(|| anyhow::anyhow!("the decoder has no output"))?;
         let process = Arc::new(Mutex::new(Some(child)));
-        let (input_tx, input_rx) = async_channel::unbounded::<Vec<u8>>();
-        let (frames_tx, frames_rx) = async_channel::unbounded::<Decoded>();
+        let (input_tx, input_rx) = async_channel::bounded::<Vec<u8>>(16);
+        let input_drop = input_rx.clone();
+        let (frames_tx, frames_rx) = async_channel::bounded::<Decoded>(2);
+        let drop_frames = frames_rx.clone();
         std::thread::spawn(move || {
             // The writer blocks on the pipe, never on the interface.
             while let Ok(au) = input_rx.recv_blocking() {
@@ -364,9 +392,7 @@ impl Decoder {
                 let mut frame = vec![0u8; FRAME_BYTES];
                 match stdout.read_exact(&mut frame) {
                     Ok(()) => {
-                        if frames_tx.send_blocking(Decoded { bgra: frame }).is_err() {
-                            return;
-                        }
+                        push_latest(&frames_tx, &drop_frames, Decoded { bgra: frame });
                     }
                     Err(_) => return, // the decoder ended
                 }
@@ -375,14 +401,15 @@ impl Decoder {
         Ok(Self {
             process,
             input: input_tx,
+            input_drop,
             frames: frames_rx,
         })
     }
 
-    /// Hands one access unit to the decoder. A full pipe drops it: the next
-    /// keyframe rebuilds the picture.
+    /// Hands one access unit to the decoder. A full queue drops the oldest
+    /// unit: the decoder always works on the present stream.
     pub(crate) fn push(&self, au: Vec<u8>) {
-        let _ = self.input.try_send(au);
+        push_latest(&self.input, &self.input_drop, au);
     }
 
     /// The next decoded picture, or none when nothing is ready.

@@ -7,15 +7,26 @@
 //! of the oracle: the `media_*` attachment group (the Go reused the `image_*`
 //! columns for every attachment) and `messages.payload` (the original wire
 //! proto, so forwards and resends replay the exact bytes). Timestamps are
-//! Unix milliseconds everywhere. One connection, one writer: the bridge
-//! serves one desktop, and SQLite in WAL mode serializes the rest.
+//! Unix milliseconds everywhere. One writer, a small pool of read-only
+//! connections: the bridge serves one desktop, SQLite in WAL mode serializes
+//! the writes, and every read runs beside them instead of behind them.
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
+
+/// How many read-only connections the store keeps.
+///
+/// WAL lets any number of readers work beside the single writer; four cover
+/// the pages of history, the search and the statuses that the blocking tasks
+/// ask for at the same time, without opening a connection per query.
+const READERS: usize = 4;
 
 /// A row of `chats`, the conversation as the store knows it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -169,7 +180,18 @@ pub struct ReactionRow {
 /// The store: schema owner and the only writer of the profile's chats.db.
 #[derive(Clone)]
 pub struct Store {
+    /// The writer: one connection, one transaction at a time.
     conn: Arc<Mutex<Connection>>,
+    /// The readers of the WAL: a read does not wait behind a write.
+    readers: Arc<Readers>,
+}
+
+/// The pool of read-only connections.
+struct Readers {
+    connections: Vec<Mutex<Connection>>,
+    /// Which reader takes the next query: the turns keep two long pages from
+    /// queueing behind the same mutex.
+    next: AtomicUsize,
 }
 
 /// The trigram index of the searchable fields of the messages.
@@ -455,6 +477,32 @@ CREATE TABLE IF NOT EXISTS sticker_favorites(
 CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(updated_at DESC, id DESC);
 "#;
 
+/// Opens the read-only connections of the pool.
+///
+/// The flag also means a bug cannot write through them: the pool is for
+/// pages, searches and counts, and the writer owns every change.
+fn open_readers(path: &Path, count: usize) -> rusqlite::Result<Vec<Mutex<Connection>>> {
+    let mut connections = Vec::with_capacity(count);
+    for _ in 0..count {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        // The same wait the writer has: a checkpoint of the WAL can hold a
+        // read for a moment.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // The cache and the mapping are per connection: 16 MiB of cache
+        // covers the pages that one page of history or one search touches.
+        conn.execute_batch(
+            "PRAGMA temp_store=MEMORY;
+             PRAGMA cache_size=-16384;
+             PRAGMA mmap_size=134217728;",
+        )?;
+        connections.push(Mutex::new(conn));
+    }
+    Ok(connections)
+}
+
 impl Store {
     /// Opens (creating if needed) the profile's chats.db.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -465,6 +513,16 @@ impl Store {
         // failing a write; the repair passes can overlap a long history batch.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // The page cache serves the history and the search from memory, and
+        // the mmap lets SQLite read the pages without a syscall per page. The
+        // limits are per connection; 32 MiB of cache is enough for the pages
+        // that a chat or a search touches, and 128 MiB of mapping does not
+        // reserve physical memory until a page is read.
+        conn.execute_batch(
+            "PRAGMA temp_store=MEMORY;
+             PRAGMA cache_size=-32768;
+             PRAGMA mmap_size=134217728;",
+        )?;
         conn.execute_batch(SCHEMA)?;
         // The search index follows the table with triggers; it is created
         // before the migrations so a delete of an old row keeps it in sync.
@@ -504,6 +562,10 @@ impl Store {
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Readers {
+                connections: open_readers(path, READERS)?,
+                next: AtomicUsize::new(0),
+            }),
         })
     }
 
@@ -520,13 +582,19 @@ impl Store {
         Ok(value)
     }
 
-    /// Runs one read closure. Reads take the same lock as writes: the
-    /// volumes are small and the bridge is the only client.
+    /// Runs one read closure on one of the read-only connections.
+    ///
+    /// The readers take turns: two pages of history do not queue behind the
+    /// same mutex, and a read never waits for the writer's lock. A read that
+    /// arrives while a write holds the writer still sees the last committed
+    /// state, which is what SQLite promises in WAL mode.
     pub fn read<T>(
         &self,
         work: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let conn = self.conn.lock().expect("store lock");
+        let readers = &self.readers.connections;
+        let index = self.readers.next.fetch_add(1, Ordering::Relaxed) % readers.len();
+        let conn = readers[index].lock().expect("reader lock");
         work(&conn)
     }
 
@@ -680,7 +748,17 @@ impl Store {
         } else {
             message.timestamp
         };
-        self.write(|conn| {
+        self.write(|conn| Self::insert_message_in(conn, message, timestamp))
+    }
+
+    /// El cuerpo de `insert_message`, sobre una conexión que el llamador ya
+    /// tiene abierta. La reserva de un envío escribe la fila del mensaje y la
+    /// de `outgoing_requests` en una sola transacción.
+    fn insert_message_in(
+        conn: &Connection,
+        message: &MessageRow,
+        timestamp: i64,
+    ) -> rusqlite::Result<bool> {
             if let Some(old) = conn
                 .query_row(
                     &format!("{MESSAGE_SELECT} WHERE m.chat_jid=?1 AND m.id=?2"),
@@ -752,6 +830,86 @@ impl Store {
                 return Ok(false);
             }
             finish_message_write(conn, message, timestamp, true)
+    }
+
+    /// Reserva un mensaje saliente y su fila de `outgoing_requests` en una sola
+    /// transacción. Si la segunda escritura falla, la primera también se
+    /// revierte: no queda una fila PENDING huérfana.
+    pub fn reserve_outgoing(
+        &self,
+        message: &MessageRow,
+        client_request_id: &str,
+        chat_id: &str,
+        fingerprint: &str,
+    ) -> rusqlite::Result<bool> {
+        let timestamp = if message.timestamp == 0 {
+            now_ms()
+        } else {
+            message.timestamp
+        };
+        self.write(|conn| {
+            let created = Self::insert_message_in(conn, message, timestamp)?;
+            conn.execute(
+                "INSERT INTO outgoing_requests(client_request_id,chat_jid,text,message_id,created_at)
+                 VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(client_request_id) DO UPDATE SET
+                   chat_jid=excluded.chat_jid,
+                   text=excluded.text,
+                   message_id=excluded.message_id",
+                params![
+                    client_request_id,
+                    chat_id,
+                    fingerprint,
+                    message.id,
+                    now_ms()
+                ],
+            )?;
+            Ok(created)
+        })
+    }
+
+    /// Guards a message that could not be stored: the row stays in the
+    /// journal with the error, so the integrity panel and the operator can
+    /// see it instead of the message disappearing. The payload is the raw
+    /// envelope when the library gave one.
+    pub fn journal_inbound(&self, message: &MessageRow, error: &str) -> rusqlite::Result<()> {
+        self.write(|conn| {
+            conn.execute(
+                "INSERT INTO inbound_messages(
+                   chat_jid,message_id,payload,increment_unread,attempts,
+                   next_attempt_at,last_error,created_at)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?5)",
+                params![
+                    message.chat_jid,
+                    message.id,
+                    message.payload,
+                    message.unread as i64,
+                    now_ms(),
+                    error
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Guards one event that is not a message (a receipt, a reaction) after
+    /// its write failed.
+    pub fn journal_inbound_event(
+        &self,
+        kind: &str,
+        chat_jid: &str,
+        entity_id: &str,
+        error: &str,
+    ) -> rusqlite::Result<()> {
+        self.write(|conn| {
+            conn.execute(
+                "INSERT INTO inbound_events(
+                   event_kind,chat_jid,entity_id,payload,attempts,
+                   next_attempt_at,last_error,created_at)
+                 VALUES(?1,?2,?3,x'',1,?4,?5,?4)",
+                params![kind, chat_jid, entity_id, now_ms(), error],
+            )?;
+            Ok(())
         })
     }
 
@@ -1301,11 +1459,11 @@ impl Store {
                           m.media_file_name, m.contacts_json, m.location_name,
                           m.location_address
                    FROM messages m
-                   WHERE m.rowid IN (
-                       SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1
-                   )
+                   JOIN messages_fts ON messages_fts.rowid = m.rowid
+                   WHERE messages_fts MATCH ?1
                      AND m.kind<>'reaction' AND m.revoked=0
-                   ORDER BY m.timestamp DESC, m.id DESC LIMIT 256";
+                   ORDER BY bm25(messages_fts), m.timestamp DESC, m.id DESC
+                   LIMIT 512";
         let candidates = self.read(|conn| {
             let mut statement = conn.prepare(&sql)?;
             let rows = statement
@@ -1699,23 +1857,29 @@ impl Store {
     /// `RepairDerivedState` did: the pointer, its preview, the unread counter
     /// and the last sender. Reaction pseudo-messages never count.
     pub fn refresh_chat_pointer(&self, jid: &str) -> rusqlite::Result<()> {
-        self.write(|conn| {
-            conn.execute(
-                "UPDATE chats SET
-                   last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
-                   last_message_text=COALESCE((SELECT CASE
-                        WHEN text<>'' THEN text
-                        WHEN image_caption<>'' THEN image_caption
-                        WHEN media_caption<>'' THEN media_caption
-                        ELSE '' END
-                      FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
-                   last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),0),
-                   unread_count=(SELECT count(*) FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 AND unread=1)
-                 WHERE jid=?1",
-                params![jid],
-            )?;
-            Ok(())
-        })
+        self.write(|conn| Self::refresh_chat_pointer_in(conn, jid))
+    }
+
+    /// The pointer of one chat, on a connection the caller already holds.
+    ///
+    /// A revoked row is never the preview: the four subqueries skip it and
+    /// the chat falls back to the last message that can be seen.
+    fn refresh_chat_pointer_in(conn: &Connection, jid: &str) -> rusqlite::Result<()> {
+        conn.execute(
+            "UPDATE chats SET
+               last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+               last_message_text=COALESCE((SELECT CASE
+                    WHEN text<>'' THEN text
+                    WHEN image_caption<>'' THEN image_caption
+                    WHEN media_caption<>'' THEN media_caption
+                    ELSE '' END
+                  FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+               last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 ORDER BY timestamp DESC,id DESC LIMIT 1),0),
+               unread_count=(SELECT count(*) FROM messages WHERE chat_jid=?1 AND kind<>'reaction' AND revoked=0 AND unread=1)
+             WHERE jid=?1",
+            params![jid],
+        )?;
+        Ok(())
     }
 
     /// Every chat jid that carries one of the given addresses, so a

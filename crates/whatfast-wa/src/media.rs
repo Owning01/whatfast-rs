@@ -32,6 +32,56 @@ const MAX_OUTGOING_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 8192;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 
+/// Reads the file of an outgoing message, off the async thread.
+///
+/// The upload of the library takes the whole file as one buffer, so the read
+/// cannot stream into the request. It can at least stay off the async thread,
+/// where a slow disk would stall the bridge.
+async fn read_upload(
+    path: &str,
+    what: &'static str,
+) -> Result<Vec<u8>, (String, String, bool)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(|error| {
+            (
+                "internal".to_string(),
+                format!("the read of the {what} was interrupted: {error}"),
+                true,
+            )
+        })?
+        .map_err(|error| {
+            (
+                "invalid_argument".to_string(),
+                format!("reading the {what}: {error}"),
+                false,
+            )
+        })
+}
+
+/// The size of a local file, read off the async thread: the caller refuses
+/// an oversized upload before it allocates the buffer.
+async fn upload_size(path: &str) -> Result<u64, (String, String, bool)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || std::fs::metadata(&path).map(|meta| meta.len()))
+        .await
+        .map_err(|error| {
+            (
+                "internal".to_string(),
+                format!("the size of the file could not be read: {error}"),
+                true,
+            )
+        })?
+        .map_err(|error| {
+            (
+                "invalid_argument".to_string(),
+                format!("reading the file: {error}"),
+                false,
+            )
+        })
+}
+
 /// Sends a local image with an optional caption.
 #[expect(clippy::too_many_arguments)]
 pub async fn send_image(
@@ -44,13 +94,18 @@ pub async fn send_image(
     reply_to_message_id: &str,
     reply_to_chat_id: &str,
 ) -> Result<MessageRow, (String, String, bool)> {
-    let bytes = std::fs::read(image_path).map_err(|error| {
-        (
+    let size = upload_size(image_path).await?;
+    if size == 0 || size > MAX_OUTGOING_IMAGE_BYTES as u64 {
+        return Err((
             "invalid_argument".into(),
-            format!("reading the image: {error}"),
+            format!(
+                "image must be a regular file between 1 byte and {} MiB",
+                MAX_OUTGOING_IMAGE_BYTES / (1024 * 1024)
+            ),
             false,
-        )
-    })?;
+        ));
+    }
+    let bytes = read_upload(image_path, "image").await?;
     let fingerprint = format!("image\u{0}{caption}\u{0}{}", hash_hex(&bytes));
     if let Some(row) =
         crate::send::stored_outgoing(store, client_message_id, chat_id, &fingerprint)?
@@ -430,13 +485,14 @@ pub async fn send_attachment(
             false,
         ));
     }
-    let bytes = std::fs::read(file_path).map_err(|error| {
-        (
-            "invalid_argument".into(),
-            format!("reading the attachment: {error}"),
+    if upload_size(file_path).await? > MAX_MEDIA_BYTES {
+        return Err((
+            "failed_precondition".into(),
+            "attachment exceeds the 2 GiB upload limit".into(),
             false,
-        )
-    })?;
+        ));
+    }
+    let bytes = read_upload(file_path, "attachment").await?;
     let file_name = std::path::Path::new(file_path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -951,13 +1007,24 @@ pub(crate) async fn fetch_message_media(
                     true,
                 )
             })?;
-        file.sync_all().map_err(|error| {
-            (
-                "internal".into(),
-                format!("flushing the download: {error}"),
-                false,
-            )
-        })?;
+        // Flushing a large file waits on the disk: it runs off the async
+        // thread, or the bridge stops answering until the write lands.
+        tokio::task::spawn_blocking(move || file.sync_all())
+            .await
+            .map_err(|error| {
+                (
+                    "internal".to_string(),
+                    format!("flushing the download was interrupted: {error}"),
+                    true,
+                )
+            })?
+            .map_err(|error| {
+                (
+                    "internal".into(),
+                    format!("flushing the download: {error}"),
+                    false,
+                )
+            })?;
         Ok(())
     };
     if let Err(error) = download.await {

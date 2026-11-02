@@ -3081,3 +3081,82 @@ problema estaba despues, en el recorte. La fuente de Apple tiene
 El `eprintln!` de `is_color_glyph` que quedaba del trabajo anterior se borro.
 
 **Pendiente**: Nada de codigo. El commit y el push siguen sin permiso.
+
+## 2026-11-02 - Auditoria P0, rendimiento base e i18n
+
+**Que**: Se aplico el mega plan `docs/mega-plan-2026-11-02.md`. Sidecar: la
+reserva del saliente y de `outgoing_requests` va en una transaccion, un fallo
+de SQLite se guarda en `inbound_messages`/`inbound_events`, la tarjeta de
+contacto parsea su JSON, la busqueda ordena por `bm25` antes del limite y los
+errores de media conservan `code` y `retryable`. UI: borradores del compositor
+en `<data>/drafts.json`, toast con cierre automatico y por clic, estados
+locales que sobreviven al refresco, foto devuelta a la bandeja si falla el
+envio y arranque sin la espera de 1,5 s por la fuente de emojis. Rendimiento:
+mimalloc en los dos binarios, `opt-level = 3`, pragmas de SQLite y el wallpaper
+pintado por un solo `canvas`.
+
+**Evidencia**: `cargo check --workspace --all-targets` termina en `Finished`;
+`cargo test --workspace` da 1036 pruebas en verde (la linea base era 1023:
++13 de regresion). Tests nuevos: journal del mensaje fallido, reserva atomica,
+contactos, estado local conservado y detalles del remitente.
+
+**Trampas**: `Concurrent` no existe para `Option`; el toast se cierra por el
+barrido de un segundo y no por un timer por cada texto. GPUI no pinta un
+`Canvas` como `Div`: el wallpaper va dentro de un `div` contenedor.
+
+**Pendiente**: zoom hacia el cursor y arrastre del visor, seek de la nota de
+voz, alturas lazy, LRU si algun dia hay cache propio, split de `render.rs` y
+`app.rs`, los 29 `unwrap` de produccion y los temporales de los tests. El
+commit y el push siguen sin permiso.
+
+## 2026-11-02 - El clic del emoji ya no atraviesa el panel
+
+**Que**: El panel de emojis, la bandeja de stickers, la lista de menciones y
+la barra de respuesta declaran `.occlude()`. Antes el clic sobre un emoji
+tambien llegaba a la lista de mensajes que queda detras del panel.
+
+**Por que**: GPUI entrega el clic a todos los hitboxes bajo el puntero hasta
+uno con `HitboxBehavior::BlockMouse` (`hit_test` en `gpui/src/window.rs`).
+Sin `occlude`, el mensaje de atras recibia el mismo clic; con el, su
+`is_hovered` da falso y no dispara.
+
+**Evidencia**: `cargo check -p whatfast-ui --all-targets` termina en
+`Finished`; `cargo test -p whatfast-ui` da 322 pruebas en verde.
+
+**Pendiente**: nada de codigo. El commit y el push siguen sin permiso.
+
+## 2026-11-02 - Revision de los 11 hallazgos
+
+**Que**: Se cerraron el punto 1 (la nota de voz usa `Store::media_exists` y
+`refresh_media_path`; `render.rs`, `attachments.rs` y `statuses.rs` ya no
+llaman `is_file` al pintar), el punto 5 (`whatfast-auto` suma dos lectores
+WAL, como `whatfast-wa`) y el callback de VoIP (sin Mutex y sin un `Vec` por
+frame: el canal lleva arrays fijos de 960 muestras).
+
+**Parciales**: el 2 sigue con el lock y el crecimiento del `Vec` en la
+grabacion; el 6 lee el adjunto entero en RAM (hasta 2 GiB) porque la API de
+subida pide un `Vec`; el 9 ordena por pagina pero reindexa y recalcula
+alturas de toda la ventana.
+
+**Pendiente**: el 10 (manifiesto sin firma Ed25519 y PIN que se desactiva
+borrando el hash) espera la decision de clave y de DPAPI. El 4 (ffmpeg) queda
+para Linux, como pidio el usuario.
+
+**Evidencia**: `cargo check --workspace --all-targets` termina en `Finished`;
+`cargo test -p whatfast-model -p whatfast-auto -p whatfast-ui` da 77, 68 y
+323 pruebas en verde.
+
+## 2026-11-02 - El borrado "para mi" del telefono llega al escritorio
+
+**Que**: `whatfast-wa/src/ingest.rs` ahora reduce `Event::DeleteMessageForMeUpdate`:
+resuelve el chat canonico, escribe la lapida con `revoked=1, kind='revoked'`,
+refresca el puntero del chat y anuncia el mensaje y el chat. Antes el evento
+caia en el brazo generico de `session.rs` y la fila seguia visible.
+
+**Por que**: WhatsApp sincroniza "eliminar para mi" como mutacion de app-state (`deleteMessageForMe`), no como `ProtocolMessage::Revoke`. El sidecar solo reducia el revoke, asi que el mensaje borrado desde el telefono seguia en el hilo y en la vista previa.
+
+**Evidencia**: `cargo test -p whatfast-wa` da 96 (lib) + 49 (store) y siguientes en verde, incluido `a_delete_for_me_from_another_device_hides_the_message`; `cargo test -p whatfast-model -p whatfast-ui` da 77 y 323 en verde; `cargo check --workspace --all-targets` termina en `Finished`.
+
+**Trampas**: el tombstone se escribe aunque la fila no exista todavia, para que una pagina de historia posterior no la reviva (`merge_message` conserva `revoked`). `mark_message_revoked` y este brazo devuelven la vista previa al ultimo mensaje visible; el revoke por `ProtocolMessage` sigue dejando "Message deleted" en la vista previa, como el Go.
+
+**Pendiente**: la app instalada sigue en 0.2.31; el fix no llega hasta compilar e instalar. Commit y push sin permiso.

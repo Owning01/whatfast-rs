@@ -9,6 +9,11 @@
 //! The height of a document is measured here too, and with the same numbers
 //! that draw it: the conversation is a virtual list, and a row whose measured
 //! height differs from the drawn one makes the list jump.
+//!
+//! The engine is ready but not connected to the bubble yet: nothing in the
+//! window calls it, so the whole module would be dead code. The attribute is
+//! the explicit statement of that state; it goes away with the first caller.
+#![allow(dead_code)]
 
 use gpui::{
     Div, ElementId, FontWeight, Hsla, ParentElement as _, Pixels, SharedString, Styled as _,

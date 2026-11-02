@@ -12,11 +12,14 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use sha2::{Digest, Sha256};
 
 use crate::grant::{ChatFilter, Grant, Scope, Window};
@@ -273,10 +276,48 @@ pub struct Call {
     pub detail: Option<String>,
 }
 
+/// The readers of the WAL: a read does not wait behind a write.
+const READERS: usize = 2;
+
 /// The database of the profile.
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    /// The readers of the WAL: a read does not wait behind a write.
+    readers: Arc<Readers>,
+}
+
+/// The pool of read-only connections.
+struct Readers {
+    connections: Vec<Mutex<Connection>>,
+    /// Which reader takes the next query: the turns keep two reads from
+    /// queueing behind the same mutex.
+    next: AtomicUsize,
+}
+
+impl Readers {
+    fn empty() -> Self {
+        Self {
+            connections: Vec::new(),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Opens the read-only connections of the pool.
+///
+/// The flag also means a bug cannot write through them: the pool is for
+/// reads, and the writer owns every change.
+fn open_readers(path: &Path, count: usize) -> rusqlite::Result<Vec<Mutex<Connection>>> {
+    let mut connections = Vec::with_capacity(count);
+    for _ in 0..count {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        // The same wait the writer has: a checkpoint of the WAL can hold a
+        // read for a moment.
+        conn.busy_timeout(Duration::from_secs(5))?;
+        connections.push(Mutex::new(conn));
+    }
+    Ok(connections)
 }
 
 impl Db {
@@ -297,8 +338,13 @@ impl Db {
             "ALTER TABLE agents ADD COLUMN humanize INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        let readers = open_readers(path, READERS)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Readers {
+                connections: readers,
+                next: AtomicUsize::new(0),
+            }),
         })
     }
 
@@ -311,9 +357,9 @@ impl Db {
     pub fn grant_of(path: &Path, agent: &str) -> Option<Grant> {
         let conn = Connection::open_with_flags(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .ok()?;
         conn.busy_timeout(Duration::from_millis(500)).ok()?;
@@ -345,6 +391,9 @@ impl Db {
         conn.execute_batch(SCHEMA)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            // One in-memory database cannot be opened twice: the tests read
+            // through the writer instead of a pool.
+            readers: Arc::new(Readers::empty()),
         })
     }
 
@@ -360,12 +409,18 @@ impl Db {
         Ok(value)
     }
 
-    /// One read.
+    /// One read: the pool of the WAL takes it, so a write does not hold it.
     fn read<T>(
         &self,
         work: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let conn = self.conn.lock().expect("agents lock");
+        let readers = &self.readers.connections;
+        if readers.is_empty() {
+            let conn = self.conn.lock().expect("agents lock");
+            return work(&conn);
+        }
+        let index = self.readers.next.fetch_add(1, Ordering::Relaxed) % readers.len();
+        let conn = readers[index].lock().expect("agents reader lock");
         work(&conn)
     }
 

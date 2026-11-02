@@ -631,6 +631,7 @@ impl EventHandler for EventPump {
                     Event::Receipt(_)
                         | Event::ChatPresence(_)
                         | Event::UndecryptableMessage(_)
+                        | Event::DeleteMessageForMeUpdate(_)
                 ) {
                     tracing::debug!("event not carried by the bridge yet: {other:?}");
                 }

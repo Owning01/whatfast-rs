@@ -12,6 +12,15 @@ use whatfast_protocol::{
 
 use crate::db::{ChatRow, MessageRow, PollSnapshot, ReactionRow};
 
+/// One contact of the JSON array that `contacts_json` stores.
+#[derive(serde::Deserialize)]
+struct StoredContact {
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    vcard: String,
+}
+
 /// The conversation kind of a chat, by the transport JID's server.
 fn chat_kind(jid: &str) -> ChatKind {
     if jid.ends_with("@g.us") || jid.ends_with("@broadcast") {
@@ -213,10 +222,13 @@ fn wire_content(
             })
         }
         "contacts" => C::Contacts(ContactsContent {
-            contacts: message
-                .contacts_json
-                .lines()
-                .map(|_| ContactContent::default())
+            contacts: serde_json::from_str::<Vec<StoredContact>>(&message.contacts_json)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|contact| ContactContent {
+                    display_name: contact.display_name,
+                    vcard: contact.vcard,
+                })
                 .collect(),
         }),
         "location" => C::Location(LocationContent {
@@ -477,5 +489,35 @@ mod tests {
         assert_eq!(poll.options[1].vote_count, 1);
         assert!(poll.options[1].selected_by_me);
         assert!(poll.options[1].voters[0].from_me);
+    }
+
+    #[test]
+    fn a_contact_card_shows_the_names_of_its_json() {
+        let mut message = row("contacts");
+        message.contacts_json = concat!(
+            "[{\"display_name\":\"Ana\",\"vcard\":\"BEGIN:VCARD\"},",
+            "{\"display_name\":\"Beto\",\"vcard\":\"BEGIN:VCARD\"}]"
+        )
+        .into();
+        let Some(whatfast_protocol::message::Content::Contacts(contacts)) =
+            wire_message(&message).content
+        else {
+            panic!("expected contacts content");
+        };
+        let names: Vec<&str> = contacts
+            .contacts
+            .iter()
+            .map(|contact| contact.display_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Ana", "Beto"]);
+
+        // Un JSON roto no rompe la burbuja: queda una lista sin nombres.
+        message.contacts_json = "not json".into();
+        let Some(whatfast_protocol::message::Content::Contacts(contacts)) =
+            wire_message(&message).content
+        else {
+            panic!("expected contacts content");
+        };
+        assert!(contacts.contacts.is_empty());
     }
 }

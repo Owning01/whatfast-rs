@@ -1052,7 +1052,7 @@ fn mark_read_with_no_flagged_rows_heals_the_counter() {
     // Simulate the drift of an older build: the row lost its flag while
     // the cached counter kept it.
     store
-        .read(|conn| {
+        .write(|conn| {
             conn.execute("UPDATE messages SET unread=1 WHERE id='m1'", [])
                 .unwrap();
             conn.execute(

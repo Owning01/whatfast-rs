@@ -12,10 +12,7 @@
 //! WhatsApp Web's first calls shipped with — use a headset. The AEC port
 //! (`sonora`) is its own follow-up.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{SampleFormat, StreamConfig};
@@ -29,7 +26,7 @@ const FRAME_SAMPLES: usize = 960;
 /// The live capture: drops into `frames` as engine-clock i16 chunks.
 pub struct Capture {
     _stream: cpal::Stream,
-    frames: async_channel::Receiver<Vec<i16>>,
+    frames: async_channel::Receiver<[i16; FRAME_SAMPLES]>,
 }
 
 impl Capture {
@@ -47,26 +44,35 @@ impl Capture {
         if channels == 0 || device_rate == 0 {
             anyhow::bail!("the microphone has no channels");
         }
-        let (frames_tx, frames_rx) = async_channel::unbounded::<Vec<i16>>();
-        let state = Arc::new(CaptureState {
-            rate: device_rate,
-            channels,
-            carry: std::sync::Mutex::new(Vec::new()),
-            pending: std::sync::Mutex::new(Vec::new()),
-            position: std::sync::atomic::AtomicU64::new(0),
-        });
+        let (frames_tx, frames_rx) = async_channel::bounded::<[i16; FRAME_SAMPLES]>(4);
+        let oldest = frames_rx.clone();
         let config: StreamConfig = supported.into();
         let format = supported.sample_format();
         let stream = match format {
-            SampleFormat::F32 => {
-                capture_build::<f32>(&device, config, Arc::clone(&state), frames_tx)
-            }
-            SampleFormat::I16 => {
-                capture_build::<i16>(&device, config, Arc::clone(&state), frames_tx)
-            }
-            SampleFormat::U16 => {
-                capture_build::<u16>(&device, config, Arc::clone(&state), frames_tx)
-            }
+            SampleFormat::F32 => capture_build::<f32>(
+                &device,
+                config,
+                device_rate,
+                channels,
+                frames_tx,
+                oldest,
+            ),
+            SampleFormat::I16 => capture_build::<i16>(
+                &device,
+                config,
+                device_rate,
+                channels,
+                frames_tx,
+                oldest,
+            ),
+            SampleFormat::U16 => capture_build::<u16>(
+                &device,
+                config,
+                device_rate,
+                channels,
+                frames_tx,
+                oldest,
+            ),
             other => {
                 anyhow::bail!("the microphone samples in a format that is not supported: {other:?}")
             }
@@ -83,7 +89,10 @@ impl Capture {
 
     /// The next engine-clock frames, or none when the microphone closed.
     pub fn try_take(&self) -> Option<Vec<i16>> {
-        self.frames.try_recv().ok()
+        self.frames
+            .try_recv()
+            .ok()
+            .map(|frame| frame.as_slice().to_vec())
     }
 
     /// Silences the outgoing frames without closing the microphone.
@@ -94,64 +103,109 @@ impl Capture {
 
 static MUTE: AtomicBool = AtomicBool::new(false);
 
-/// The resampler's shared state: device geometry and the leftover samples
-/// between callbacks.
-struct CaptureState {
+/// The resampler's state: the device geometry and the buffers it reuses.
+///
+/// The callback owns this value, so it never locks a mutex and never allocates
+/// once the buffers reached their size. The frame that leaves is a fixed array:
+/// the queue stores it inline and the heap stays out of the audio thread.
+struct Resampler {
     rate: u32,
     channels: usize,
-    carry: std::sync::Mutex<Vec<f32>>,
-    /// Engine-clock samples that wait for a whole frame of 960.
-    pending: std::sync::Mutex<Vec<i16>>,
-    position: std::sync::atomic::AtomicU64,
+    buffers: CaptureBuffers,
 }
 
-impl CaptureState {
+/// The buffers of the capture, reused on every callback.
+#[derive(Default)]
+struct CaptureBuffers {
+    /// Device-rate mono samples left over between callbacks.
+    carry: Vec<f32>,
+    /// Engine-clock samples that wait for a whole frame of 960.
+    pending: Vec<i16>,
+    /// The mono samples of the callback being converted.
+    mono: Vec<f32>,
+    /// The engine-clock samples of the callback being resampled.
+    engine: Vec<i16>,
+    /// The position of the next sample, relative to the start of `carry`.
+    /// It keeps its fraction: a 48 kHz device steps by three, so the
+    /// fraction is not always zero.
+    position: f64,
+}
+
+impl Resampler {
+    fn new(rate: u32, channels: usize) -> Self {
+        Self {
+            rate,
+            channels,
+            buffers: CaptureBuffers::default(),
+        }
+    }
+
     /// Converts one device callback into engine-clock mono frames of
     /// exactly 960 samples (60 ms), the size the sidecar's pipes expect.
-    fn accept(&self, samples: &[i16], out: &async_channel::Sender<Vec<i16>>) {
-        let mono: Vec<f32> = samples
-            .chunks(self.channels.max(1))
-            .map(|frame| {
-                let sum: f32 = frame.iter().map(|sample| f32::from(*sample)).sum();
-                sum / self.channels.max(1) as f32
-            })
-            .collect();
-        let mut carry = self.carry.lock().expect("carry lock");
-        carry.extend_from_slice(&mono);
-        let ratio = f64::from(self.rate) / f64::from(RATE);
+    fn accept(
+        &mut self,
+        samples: &[i16],
+        out: &async_channel::Sender<[i16; FRAME_SAMPLES]>,
+        oldest: &async_channel::Receiver<[i16; FRAME_SAMPLES]>,
+    ) {
+        let channels = self.channels.max(1);
+        let rate = self.rate;
+        let muted = MUTE.load(Ordering::Relaxed);
+        let CaptureBuffers {
+            carry,
+            pending,
+            mono,
+            engine,
+            position,
+        } = &mut self.buffers;
+        mono.clear();
+        mono.extend(samples.chunks(channels).map(|chunk| {
+            let sum: f32 = chunk.iter().map(|sample| f32::from(*sample)).sum();
+            sum / channels as f32
+        }));
+        carry.extend_from_slice(mono);
+        let ratio = f64::from(rate) / f64::from(RATE);
         // The position is relative to the first sample of the carry, and it
-        // keeps its fraction: a 48 kHz device steps by three, so the fraction
-        // is not always zero.
-        let mut position = f64::from_bits(self.position.load(Ordering::Relaxed));
-        let mut engine: Vec<i16> = Vec::with_capacity(carry.len());
-        while ((position as usize) + 1) < carry.len() {
-            let index = position as usize;
-            let fraction = (position - index as f64) as f32;
+        // keeps its fraction.
+        engine.clear();
+        while ((*position as usize) + 1) < carry.len() {
+            let index = *position as usize;
+            let fraction = (*position - index as f64) as f32;
             let sample = carry[index] * (1.0 - fraction) + carry[index + 1] * fraction;
-            let muted_sample: i16 = if MUTE.load(Ordering::SeqCst) {
+            let muted_sample: i16 = if muted {
                 0
             } else {
                 (sample.clamp(-1.0, 1.0) * 32_767.0) as i16
             };
             engine.push(muted_sample);
-            position += ratio;
+            *position += ratio;
         }
         // The step can pass the end of the carry: the samples before the next
         // position are consumed, and the position becomes relative to the new
         // first sample. Draining the raw position would cut more than the
         // carry holds and panic on the next block.
-        let consumed = (position as usize).min(carry.len());
+        let consumed = (*position as usize).min(carry.len());
         carry.drain(..consumed);
-        self.position
-            .store((position - consumed as f64).to_bits(), Ordering::Relaxed);
-        if !engine.is_empty() {
-            // The engine only accepts frames of exactly 960 samples: the
-            // samples of a short callback wait here for the next one.
-            let mut pending = self.pending.lock().expect("pending lock");
-            pending.extend_from_slice(&engine);
-            while pending.len() >= FRAME_SAMPLES {
-                let frame: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
-                let _ = out.try_send(frame);
+        *position -= consumed as f64;
+        if engine.is_empty() {
+            return;
+        }
+        // The engine only accepts frames of exactly 960 samples: the samples
+        // of a short callback wait here for the next one.
+        pending.extend_from_slice(engine);
+        while pending.len() >= FRAME_SAMPLES {
+            let mut frame = [0_i16; FRAME_SAMPLES];
+            frame.copy_from_slice(&pending[..FRAME_SAMPLES]);
+            pending.drain(..FRAME_SAMPLES);
+            match out.try_send(frame) {
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Full(frame)) => {
+                    // The reader is behind: the oldest frame leaves so the
+                    // newest one is what plays next.
+                    let _ = oldest.try_recv();
+                    let _ = out.try_send(frame);
+                }
+                Err(async_channel::TrySendError::Closed(_)) => return,
             }
         }
     }
@@ -160,17 +214,24 @@ impl CaptureState {
 fn capture_build<T>(
     device: &cpal::Device,
     config: StreamConfig,
-    state: Arc<CaptureState>,
-    frames: async_channel::Sender<Vec<i16>>,
+    rate: u32,
+    channels: usize,
+    frames: async_channel::Sender<[i16; FRAME_SAMPLES]>,
+    oldest: async_channel::Receiver<[i16; FRAME_SAMPLES]>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample + IntoSample<i16>,
 {
+    // The scratch buffer and the resampler live in the callback: no lock and,
+    // after the first callbacks, no allocation on the audio thread.
+    let mut converted: Vec<i16> = Vec::new();
+    let mut resampler = Resampler::new(rate, channels);
     device.build_input_stream(
         config,
         move |samples: &[T], _: &cpal::InputCallbackInfo| {
-            let converted: Vec<i16> = samples.iter().map(|sample| sample.into_sample()).collect();
-            state.accept(&converted, &frames);
+            converted.clear();
+            converted.extend(samples.iter().map(|sample| sample.into_sample()));
+            resampler.accept(&converted, &frames, &oldest);
         },
         move |error| eprintln!("microphone error: {error}"),
         None,
@@ -243,8 +304,8 @@ impl Playback {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureState, FRAME_SAMPLES, MUTE};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use super::{FRAME_SAMPLES, MUTE, Resampler};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn the_capture_hands_the_engine_frames_of_sixty_milliseconds() {
@@ -252,17 +313,12 @@ mod tests {
         // calls back with 1024 samples at 48 kHz produces shorter chunks, so
         // the capture has to wait and join them.
         MUTE.store(false, Ordering::SeqCst);
-        let (tx, rx) = async_channel::unbounded();
-        let state = CaptureState {
-            rate: 48_000,
-            channels: 1,
-            carry: std::sync::Mutex::new(Vec::new()),
-            pending: std::sync::Mutex::new(Vec::new()),
-            position: AtomicU64::new(0),
-        };
+        let (tx, rx) = async_channel::bounded(64);
+        let oldest = rx.clone();
+        let mut resampler = Resampler::new(48_000, 1);
         let block = vec![0i16; 1024];
         for _ in 0..10 {
-            state.accept(&block, &tx);
+            resampler.accept(&block, &tx, &oldest);
         }
         let mut frames = Vec::new();
         while let Ok(frame) = rx.try_recv() {

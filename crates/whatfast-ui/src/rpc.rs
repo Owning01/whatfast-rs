@@ -104,6 +104,8 @@ pub(crate) enum PendingRequest {
         chat_id: String,
         draft_text: String,
         reply_to_message_id: Option<String>,
+        /// La foto que viaja en este pedido: si falla, vuelve a la bandeja.
+        image_path: String,
     },
     SendSticker,
     MessageImage {

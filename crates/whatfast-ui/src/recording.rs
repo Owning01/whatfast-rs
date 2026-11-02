@@ -75,9 +75,19 @@ pub(crate) enum RecorderEvent {
 pub(crate) struct VoiceRecorder {
     commands: Sender<Command>,
     events: Receiver<RecorderEvent>,
-    /// The loudness of the latest chunks of the microphone, for the wave of
-    /// the pill that draws the recording.
-    levels: Arc<Mutex<VecDeque<f32>>>,
+    /// What the microphone keeps for the window: the samples of the note and
+    /// the loudness of its latest chunks.
+    captured: Arc<Mutex<Captured>>,
+}
+
+/// Everything the audio callback shares with the window.
+///
+/// One mutex guards both fields so the callback takes one lock, not two, and
+/// the samples and their bar never disagree.
+struct Captured {
+    samples: Vec<f32>,
+    /// The loudest sample of the latest chunks, for the wave of the pill.
+    levels: VecDeque<f32>,
 }
 
 /// How many levels the shared buffer keeps: at the rate of the audio callback
@@ -90,17 +100,20 @@ impl VoiceRecorder {
     pub(crate) fn new() -> Self {
         let (commands, command_receiver) = async_channel::unbounded();
         let (event_sender, events) = async_channel::unbounded();
-        let levels = Arc::new(Mutex::new(VecDeque::with_capacity(LEVELS_BUFFER)));
-        let thread_levels = levels.clone();
+        let captured = Arc::new(Mutex::new(Captured {
+            samples: Vec::new(),
+            levels: VecDeque::with_capacity(LEVELS_BUFFER),
+        }));
+        let thread_captured = captured.clone();
         // A thread that cannot start only leaves the notes silent: the
         // window keeps working, so the failure is not fatal.
         let _ = std::thread::Builder::new()
             .name("whatfast-recorder".into())
-            .spawn(move || run_recorder(command_receiver, event_sender, thread_levels));
+            .spawn(move || run_recorder(command_receiver, event_sender, thread_captured));
         Self {
             commands,
             events,
-            levels,
+            captured,
         }
     }
 
@@ -131,9 +144,9 @@ impl VoiceRecorder {
 
     /// Takes the levels that the microphone kept since the last call.
     pub(crate) fn take_levels(&self) -> Vec<f32> {
-        self.levels
+        self.captured
             .lock()
-            .map(|mut levels| levels.drain(..).collect())
+            .map(|mut captured| captured.levels.drain(..).collect())
             .unwrap_or_default()
     }
 
@@ -148,14 +161,14 @@ struct Session {
     /// Pausing the stream stops the microphone without losing the samples
     /// that are already in the buffer.
     stream: cpal::Stream,
-    samples: Arc<Mutex<Vec<f32>>>,
+    captured: Arc<Mutex<Captured>>,
     sample_rate: u32,
     channels: usize,
 }
 
 impl Session {
     /// Opens the default microphone of the system.
-    fn open(levels: Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<Self> {
+    fn open(captured: Arc<Mutex<Captured>>) -> anyhow::Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -170,23 +183,22 @@ impl Session {
         }
         let format = supported.sample_format();
         let config: StreamConfig = supported.into();
-        let samples = Arc::new(Mutex::new(Vec::new()));
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, config, samples.clone(), levels),
-            SampleFormat::F64 => build::<f64>(&device, config, samples.clone(), levels),
-            SampleFormat::I16 => build::<i16>(&device, config, samples.clone(), levels),
-            SampleFormat::U16 => build::<u16>(&device, config, samples.clone(), levels),
-            SampleFormat::I32 => build::<i32>(&device, config, samples.clone(), levels),
-            SampleFormat::U32 => build::<u32>(&device, config, samples.clone(), levels),
-            SampleFormat::I8 => build::<i8>(&device, config, samples.clone(), levels),
-            SampleFormat::U8 => build::<u8>(&device, config, samples.clone(), levels),
+            SampleFormat::F32 => build::<f32>(&device, config, captured.clone()),
+            SampleFormat::F64 => build::<f64>(&device, config, captured.clone()),
+            SampleFormat::I16 => build::<i16>(&device, config, captured.clone()),
+            SampleFormat::U16 => build::<u16>(&device, config, captured.clone()),
+            SampleFormat::I32 => build::<i32>(&device, config, captured.clone()),
+            SampleFormat::U32 => build::<u32>(&device, config, captured.clone()),
+            SampleFormat::I8 => build::<i8>(&device, config, captured.clone()),
+            SampleFormat::U8 => build::<u8>(&device, config, captured.clone()),
             other => bail!("the microphone samples in a format that is not supported: {other:?}"),
         }
         .context("the microphone could not be opened")?;
         stream.play().context("the microphone could not start")?;
         Ok(Self {
             stream,
-            samples,
+            captured,
             sample_rate,
             channels,
         })
@@ -205,9 +217,9 @@ impl Session {
     /// The samples that the microphone kept, and their length.
     fn take(&self) -> (Vec<f32>, Option<Duration>) {
         let samples = self
-            .samples
+            .captured
             .lock()
-            .map(|mut samples| std::mem::take(&mut *samples))
+            .map(|mut captured| std::mem::take(&mut captured.samples))
             .unwrap_or_default();
         let frames = samples.len() / self.channels.max(1);
         let duration = (self.sample_rate > 0)
@@ -220,39 +232,34 @@ impl Session {
 fn build<T>(
     device: &cpal::Device,
     config: StreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
-    levels: Arc<Mutex<VecDeque<f32>>>,
+    captured: Arc<Mutex<Captured>>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample + ToAmplitude,
 {
-    let error_samples = samples.clone();
     device.build_input_stream(
         config,
         move |data: &[T], _| {
-            let Ok(mut target) = samples.lock() else {
+            let Ok(mut captured) = captured.lock() else {
                 return;
             };
             // The loudest sample of the chunk is one bar of the wave of the
             // pill: the window reads these levels on every tick.
             let mut peak = 0f32;
-            target.reserve(data.len());
+            captured.samples.reserve(data.len());
             for sample in data {
                 let value = sample.to_amplitude();
                 peak = peak.max(value.abs());
-                target.push(value);
+                captured.samples.push(value);
             }
-            if let Ok(mut levels) = levels.lock() {
-                if levels.len() >= LEVELS_BUFFER {
-                    levels.pop_front();
-                }
-                levels.push_back(peak);
+            if captured.levels.len() >= LEVELS_BUFFER {
+                captured.levels.pop_front();
             }
+            captured.levels.push_back(peak);
         },
         move |_error| {
             // A device that disappears stops the samples: the window learns
             // it when the note comes out empty.
-            let _ = &error_samples;
         },
         None,
     )
@@ -315,7 +322,7 @@ impl ToAmplitude for u8 {
 fn run_recorder(
     commands: Receiver<Command>,
     events: Sender<RecorderEvent>,
-    levels: Arc<Mutex<VecDeque<f32>>>,
+    captured: Arc<Mutex<Captured>>,
 ) {
     let mut session: Option<Session> = None;
     while let Ok(command) = commands.recv_blocking() {
@@ -324,7 +331,13 @@ fn run_recorder(
                 if session.is_some() {
                     continue;
                 }
-                match Session::open(levels.clone()) {
+                // A note starts clean: a callback that outlived the previous
+                // session must not prepend a tail to this one.
+                if let Ok(mut captured) = captured.lock() {
+                    captured.samples.clear();
+                    captured.levels.clear();
+                }
+                match Session::open(captured.clone()) {
                     Ok(open) => {
                         session = Some(open);
                         let _ = events.send_blocking(RecorderEvent::Started);
@@ -351,6 +364,9 @@ fn run_recorder(
                 let Some(open) = session.take() else {
                     continue;
                 };
+                // The device stops before the buffer is read: a callback in
+                // flight must not add a tail to the note.
+                open.pause();
                 let (samples, _) = open.take();
                 if samples.is_empty() {
                     let _ = events.send_blocking(RecorderEvent::Failed(
@@ -373,6 +389,10 @@ fn run_recorder(
             }
             Command::Cancel => {
                 session = None;
+                if let Ok(mut captured) = captured.lock() {
+                    captured.samples.clear();
+                    captured.levels.clear();
+                }
                 let _ = events.send_blocking(RecorderEvent::Cancelled);
             }
         }

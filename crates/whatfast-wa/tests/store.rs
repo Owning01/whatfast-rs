@@ -1277,7 +1277,7 @@ fn mark_read_ids_heals_an_inflated_counter() {
         .unwrap();
     // Simulate the drift: rows cleared without the counter.
     store
-        .read(|conn| {
+        .write(|conn| {
             conn.execute(
                 "UPDATE messages SET unread=0 WHERE chat_jid='c@s.whatsapp.net'",
                 [],
@@ -1496,8 +1496,47 @@ fn opening_an_old_profile_folds_the_hd_halves_it_already_stored() {
     assert_eq!(version, 4, "el esquema sube al indice de busqueda");
 }
 
-/// The migration against a copy of a real profile.
-///
+#[test]
+fn a_failed_inbound_message_is_journaled_with_its_error() {
+    let (_dir, store) = temp_store("journal");
+    store.ensure_chat("a@x", "a@x").unwrap();
+    let row = message("a@x", "m1", 100, false, "hi");
+    store.journal_inbound(&row, "disk full").unwrap();
+    let (count, error): (i64, String) = store
+        .read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MAX(last_error) FROM inbound_messages WHERE message_id='m1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(count, 1, "the message is not lost");
+    assert_eq!(error, "disk full", "the reason stays for the operator");
+}
+
+#[test]
+fn reserve_outgoing_writes_the_message_and_the_request_together() {
+    let (_dir, store) = temp_store("reserve");
+    store.ensure_chat("a@x", "a@x").unwrap();
+    let row = message("a@x", "out1", 100, true, "hi");
+    let created = store
+        .reserve_outgoing(&row, "req1", "a@x", "hi")
+        .unwrap();
+    assert!(created);
+    let requests: i64 = store
+        .read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM outgoing_requests WHERE client_request_id='req1'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(requests, 1);
+}
+
+/// The migration against a copy of a real profile.///
 /// Runs only when `WHATFAST_STORE_SAMPLE` names a chats.db: the profile of
 /// the machine is never touched by the tests.
 #[test]
@@ -1528,3 +1567,52 @@ fn a_real_profile_loses_the_hd_halves_it_stored() {
     assert_eq!(version, 4, "el esquema sube al indice de busqueda");
 }
 
+/// A read does not wait for the write that is open: WAL gives every reader
+/// its own connection, and the history keeps painting while a batch lands.
+#[test]
+fn a_read_runs_beside_an_open_write() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_dir, store) = temp_store("wal-readers");
+    let chat = "c@s.whatsapp.net";
+    store.ensure_chat(chat, chat).unwrap();
+    store
+        .insert_message(&message(chat, "m1", 1000, false, "hi"))
+        .unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let writer_store = store.clone();
+    let writer = std::thread::spawn(move || {
+        writer_store
+            .write(|conn| {
+                conn.execute("UPDATE chats SET name='otro' WHERE jid=?1", [chat])?;
+                entered_tx.send(()).expect("the test is listening");
+                release_rx.recv().expect("the test releases the write");
+                Ok(())
+            })
+            .unwrap();
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the write started");
+
+    let (read_tx, read_rx) = mpsc::channel();
+    let reader_store = store.clone();
+    let reader = std::thread::spawn(move || {
+        let row = reader_store.chat(chat).unwrap().unwrap();
+        read_tx.send(row.jid).unwrap();
+    });
+    let outcome = read_rx.recv_timeout(Duration::from_millis(500));
+
+    // The write is released whether the read passed or not, so a regression
+    // fails the assertion and never hangs the suite.
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(
+        outcome.expect("the read waited for the open write"),
+        chat
+    );
+}

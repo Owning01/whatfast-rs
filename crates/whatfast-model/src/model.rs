@@ -6,6 +6,7 @@
 //! instead of the origin's private `proto` module.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
 };
@@ -177,6 +178,11 @@ pub struct Store {
     /// the outer key so a lookup borrows both ids instead of building a pair
     /// of `String`s on every frame (`message_is_starred` runs per message).
     starred_messages: HashMap<String, HashSet<String>>,
+    /// Whether a media file exists, resolved once when a message or a
+    /// download enters the model. The render loop reads this map and never
+    /// asks the file system: `is_file()` in the paint path is a syscall on
+    /// the UI thread, and Defender or a busy disk turns it into frame drops.
+    media_presence: RefCell<HashMap<String, bool>>,
     /// The library of stickers, grouped in packs.
     pub sticker_packs: Vec<whatfast_protocol::StickerPack>,
     /// The statuses of the profile, grouped by their sender.
@@ -389,12 +395,14 @@ impl Store {
             self.remove_message(&chat_id, &id);
             return;
         }
+        self.remember_message_media(&message);
         for heights in self.message_height_cache.values_mut() {
             heights.remove(&message.id);
         }
         let old_index = self.message_index.remove(&message.id);
         if let Some(index) = old_index {
             preserve_local_image_path(&mut message, &self.messages[index]);
+            preserve_sender_details(&mut message, &self.messages[index]);
             self.messages.remove(index);
         }
         let index = self
@@ -414,28 +422,7 @@ impl Store {
     }
 
     pub fn prepend_messages(&mut self, incoming: Vec<whatfast_protocol::Message>) {
-        let mut by_id: HashMap<String, whatfast_protocol::Message> = self
-            .messages
-            .drain(..)
-            .map(|message| (message.id.clone(), message))
-            .collect();
-        for mut message in incoming {
-            // Un mensaje eliminado no entra al hilo, ni siquiera en la
-            // historia que se pide al abrir la conversacion.
-            if message_is_hidden(&message) {
-                by_id.remove(&message.id);
-                continue;
-            }
-            for heights in self.message_height_cache.values_mut() {
-                heights.remove(&message.id);
-            }
-            if let Some(existing) = by_id.get(&message.id) {
-                preserve_local_image_path(&mut message, existing);
-            }
-            by_id.insert(message.id.clone(), message);
-        }
-        self.messages = by_id.into_values().collect();
-        self.messages.sort_by(compare_messages);
+        self.merge_messages(incoming);
         if self.messages.len() > MAX_ACTIVE_MESSAGES {
             self.messages.truncate(MAX_ACTIVE_MESSAGES);
             self.has_newer_messages = true;
@@ -450,28 +437,7 @@ impl Store {
         incoming: Vec<whatfast_protocol::Message>,
         has_more: bool,
     ) {
-        let mut by_id: HashMap<String, whatfast_protocol::Message> = self
-            .messages
-            .drain(..)
-            .map(|message| (message.id.clone(), message))
-            .collect();
-        for mut message in incoming {
-            // Un mensaje eliminado no entra al hilo, ni siquiera en la
-            // historia que se pide al abrir la conversacion.
-            if message_is_hidden(&message) {
-                by_id.remove(&message.id);
-                continue;
-            }
-            for heights in self.message_height_cache.values_mut() {
-                heights.remove(&message.id);
-            }
-            if let Some(existing) = by_id.get(&message.id) {
-                preserve_local_image_path(&mut message, existing);
-            }
-            by_id.insert(message.id.clone(), message);
-        }
-        self.messages = by_id.into_values().collect();
-        self.messages.sort_by(compare_messages);
+        self.merge_messages(incoming);
         if self.messages.len() > MAX_ACTIVE_MESSAGES {
             let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
             self.messages.drain(..excess);
@@ -483,6 +449,77 @@ impl Store {
         self.rebuild_message_sizes();
     }
 
+    /// Merges one page of the thread into the window that is on screen.
+    ///
+    /// A page is already sorted, and so is the window: the new rows are
+    /// ordered among themselves and the two runs merge in one pass. Rebuilding
+    /// a map of every message and sorting the whole window again turned each
+    /// page of a scroll into O(n log n) work with a clone of every id; this
+    /// leaves the order of the window alone and touches only the page.
+    ///
+    /// The caller reindexes after this: the positions move when the page
+    /// lands between rows that were already there.
+    fn merge_messages(&mut self, incoming: Vec<whatfast_protocol::Message>) {
+        let mut fresh: Vec<whatfast_protocol::Message> = Vec::with_capacity(incoming.len());
+        let mut removed: Vec<String> = Vec::new();
+        for mut message in incoming {
+            for heights in self.message_height_cache.values_mut() {
+                heights.remove(&message.id);
+            }
+            // Un mensaje eliminado no entra al hilo, ni siquiera en la
+            // historia que se pide al abrir la conversacion.
+            if message_is_hidden(&message) {
+                removed.push(message.id);
+                continue;
+            }
+            self.remember_message_media(&message);
+            if let Some(index) = self.message_index.get(&message.id).copied() {
+                if let Some(existing) = self.messages.get(index) {
+                    preserve_local_image_path(&mut message, existing);
+                }
+                self.messages[index] = message;
+            } else {
+                fresh.push(message);
+            }
+        }
+        if !removed.is_empty() {
+            self.messages
+                .retain(|message| !removed.contains(&message.id));
+        }
+        if !fresh.is_empty() {
+            fresh.sort_by(compare_messages);
+            let existing = std::mem::take(&mut self.messages);
+            let mut merged = Vec::with_capacity(existing.len() + fresh.len());
+            let mut existing = existing.into_iter().peekable();
+            let mut fresh = fresh.into_iter().peekable();
+            loop {
+                let take_fresh = match (existing.peek(), fresh.peek()) {
+                    (Some(left), Some(right)) => compare_messages(left, right).is_gt(),
+                    (Some(_), None) => false,
+                    (None, Some(_)) => true,
+                    (None, None) => break,
+                };
+                if take_fresh {
+                    if let Some(message) = fresh.next() {
+                        merged.push(message);
+                    }
+                } else if let Some(message) = existing.next() {
+                    merged.push(message);
+                }
+            }
+            self.messages = merged;
+        }
+        // A row that was already there keeps its place; if the page changed
+        // its timestamp the window is sorted again, which is the rare case.
+        if !self
+            .messages
+            .windows(2)
+            .all(|pair| !compare_messages(&pair[0], &pair[1]).is_gt())
+        {
+            self.messages.sort_by(compare_messages);
+        }
+    }
+
     pub fn replace_message_window(
         &mut self,
         mut messages: Vec<whatfast_protocol::Message>,
@@ -491,6 +528,9 @@ impl Store {
     ) {
         // Lo que ya venia eliminado no se dibuja.
         messages.retain(|message| !message_is_hidden(message));
+        for message in &messages {
+            self.remember_message_media(message);
+        }
         messages.sort_by(compare_messages);
         if messages.len() > MAX_ACTIVE_MESSAGES {
             messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
@@ -573,6 +613,10 @@ impl Store {
         image_path: String,
         thumbnail_path: String,
     ) -> bool {
+        // The download just told the model where the file is: resolve its
+        // presence here, once, and not in the paint of every frame.
+        self.refresh_media_path(&image_path);
+        self.refresh_media_path(&thumbnail_path);
         let mut updated = false;
         for group in &mut self.statuses {
             for message in &mut group.messages {
@@ -615,8 +659,74 @@ impl Store {
         true
     }
 
-    pub fn participant_avatar_path(&self, participant_id: &str) -> Option<&str> {
-        self.participant_avatar_paths
+    /// Answers whether a media file exists, from the map the model filled
+    /// when the message arrived or the download ended.
+    ///
+    /// A path the model never saw answers `true`: the element that paints the
+    /// picture shows its own fallback if the file is not there. The important
+    /// half is that this never touches the file system.
+    pub fn media_exists(&self, path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        self.media_presence
+            .borrow()
+            .get(path)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    /// Resolves the presence of one media path and keeps the answer.
+    ///
+    /// Called when a message enters the model (history, live event, status or
+    /// download). The file system is read here, in the event, never in the
+    /// render of a frame.
+    pub fn remember_media_path(&self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        let mut presence = self.media_presence.borrow_mut();
+        if !presence.contains_key(path) {
+            presence.insert(path.to_owned(), std::path::Path::new(path).is_file());
+        }
+    }
+
+    /// Resolves one media path again and overwrites the answer.
+    ///
+    /// A download that just wrote the file, or a path that was cleared, must
+    /// not keep the answer of the previous state. Like [`Self::remember_media_path`],
+    /// this reads the file system in the event, never in the render of a frame.
+    pub fn refresh_media_path(&self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        self.media_presence
+            .borrow_mut()
+            .insert(path.to_owned(), std::path::Path::new(path).is_file());
+    }
+
+    /// Forgets every answered path: the media cache was emptied and the files
+    /// may be gone. The next message that enters the model fills the map
+    /// again.
+    pub fn forget_media_presence(&self) {
+        self.media_presence.borrow_mut().clear();
+    }
+
+    /// Resolves the presence of every file one message paints.
+    fn remember_message_media(&self, message: &whatfast_protocol::Message) {
+        match message.content.as_ref() {
+            Some(whatfast_protocol::message::Content::Image(image)) => {
+                self.remember_media_path(&image.local_path);
+                self.remember_media_path(&image.thumbnail_path);
+            }
+            Some(whatfast_protocol::message::Content::Attachment(attachment)) => {
+                self.remember_media_path(&attachment.local_path);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn participant_avatar_path(&self, participant_id: &str) -> Option<&str> {        self.participant_avatar_paths
             .get(participant_id)
             .map(String::as_str)
             .filter(|path| !path.is_empty())
@@ -877,10 +987,50 @@ impl Store {
     /// Keeps the statuses of the profile and the conversation that carries
     /// them.
     pub fn set_statuses(&mut self, chat_id: String, mut groups: Vec<whatfast_protocol::StatusGroup>) {
+        // Los estados que publica este dispositivo (texto y foto) no viajan al
+        // backend: viven solo en memoria. Un snapshot del backend no los debe
+        // borrar, o el estado que el usuario acaba de subir desaparece de la
+        // tira al llegar el primer refresco.
+        let local: Vec<whatfast_protocol::Message> = self
+            .statuses
+            .iter()
+            .flat_map(|group| group.messages.iter())
+            .filter(|message| message.id.starts_with("local-status-"))
+            .cloned()
+            .collect();
+        for message in local {
+            if groups
+                .iter()
+                .any(|group| group.messages.iter().any(|item| item.id == message.id))
+            {
+                continue;
+            }
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.sender_id == message.sender_id)
+            {
+                group.messages.push(message);
+            } else {
+                groups.insert(
+                    0,
+                    whatfast_protocol::StatusGroup {
+                        sender_id: message.sender_id.clone(),
+                        sender_name: message.sender_name.clone(),
+                        sender_phone_number: message.sender_phone_number.clone(),
+                        messages: vec![message],
+                    },
+                );
+            }
+        }
         for group in &mut groups {
             group
                 .messages
                 .sort_by(|a, b| a.timestamp_ms.cmp(&b.timestamp_ms).then_with(|| a.id.cmp(&b.id)));
+        }
+        for group in &groups {
+            for message in &group.messages {
+                self.remember_message_media(message);
+            }
         }
         self.statuses_chat_id = chat_id;
         self.statuses = groups;
@@ -945,6 +1095,9 @@ impl Store {
         message_id: &str,
         path: String,
     ) -> bool {
+        // The download just wrote the file: the answer of the map changes
+        // here, in the event, and the paint of the bubble only reads it.
+        self.refresh_media_path(&path);
         let mut updated = false;
         for group in &mut self.statuses {
             for message in &mut group.messages {
@@ -1304,6 +1457,25 @@ fn optimistic_poll_vote(
     }
 }
 
+fn preserve_sender_details(
+    incoming: &mut whatfast_protocol::Message,
+    existing: &whatfast_protocol::Message,
+) {
+    if incoming.sender_name.is_empty() {
+        incoming.sender_name.clone_from(&existing.sender_name);
+    }
+    if incoming.sender_phone_number.is_empty() {
+        incoming
+            .sender_phone_number
+            .clone_from(&existing.sender_phone_number);
+    }
+    if incoming.sender_avatar_path.is_empty() {
+        incoming
+            .sender_avatar_path
+            .clone_from(&existing.sender_avatar_path);
+    }
+}
+
 fn preserve_local_image_path(
     incoming: &mut whatfast_protocol::Message,
     existing: &whatfast_protocol::Message,
@@ -1519,6 +1691,19 @@ mod tests {
             timestamp_ms: id as i64,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_download_refreshes_the_presence_of_the_media_path() {
+        let store = Store::default();
+        let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/src/does-not-exist.ogg");
+        store.remember_media_path(missing);
+        assert!(!store.media_exists(missing));
+
+        // A download just wrote the file: the event overwrites the answer.
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        store.refresh_media_path(existing);
+        assert!(store.media_exists(existing));
     }
 
     #[test]
@@ -2192,6 +2377,47 @@ mod tests {
     }
 
     #[test]
+    fn a_page_in_the_middle_keeps_the_window_sorted() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1), message(3), message(5)], false, false);
+        store.prepend_messages(vec![message(4), message(2)]);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3", "4", "5"]
+        );
+        // The index follows the new order: the lookup by id finds the row.
+        assert_eq!(store.message("4").map(|message| message.timestamp_ms), Some(4));
+    }
+
+    #[test]
+    fn a_deleted_row_leaves_the_window_when_a_page_carries_it() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1), message(2), message(3)], false, false);
+        let mut deleted = message(2);
+        deleted.revoked = true;
+        store.prepend_messages(vec![deleted]);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "3"]
+        );
+        assert!(store.message("2").is_none());
+    }
+
+    #[test]
     fn clearing_account_state_removes_cross_account_data() {
         let mut store = Store {
             selected_chat_id: Some("private-chat".into()),
@@ -2801,5 +3027,75 @@ mod tests {
             .map(|option| option.vote_count)
             .collect();
         assert_eq!(counts, vec![1, 1]);
+    }
+
+    #[test]
+    fn a_backend_snapshot_keeps_the_statuses_published_on_this_device() {
+        let mut store = Store::default();
+        let chat_id = "status@broadcast".to_string();
+        store.set_statuses(
+            chat_id.clone(),
+            vec![whatfast_protocol::StatusGroup {
+                sender_id: "me@s.whatsapp.net".into(),
+                sender_name: "You".into(),
+                messages: vec![whatfast_protocol::Message {
+                    id: "local-status-42".into(),
+                    chat_id: chat_id.clone(),
+                    sender_id: "me@s.whatsapp.net".into(),
+                    timestamp_ms: 42,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        store.set_statuses(
+            chat_id.clone(),
+            vec![whatfast_protocol::StatusGroup {
+                sender_id: "ana@s.whatsapp.net".into(),
+                sender_name: "Ana".into(),
+                messages: vec![whatfast_protocol::Message {
+                    id: "remote-1".into(),
+                    chat_id: chat_id.clone(),
+                    sender_id: "ana@s.whatsapp.net".into(),
+                    timestamp_ms: 10,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let ids: Vec<&str> = store
+            .statuses()
+            .iter()
+            .flat_map(|group| group.messages.iter())
+            .map(|message| message.id.as_str())
+            .collect();
+        assert!(ids.contains(&"remote-1"));
+        assert!(ids.contains(&"local-status-42"));
+    }
+
+    #[test]
+    fn a_partial_update_does_not_erase_the_sender_details() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.upsert_message(whatfast_protocol::Message {
+            id: "m1".into(),
+            chat_id: "chat".into(),
+            sender_name: "Ana".into(),
+            sender_phone_number: "5491100000000".into(),
+            timestamp_ms: 1,
+            ..Default::default()
+        });
+        // El evento posterior trae el texto pero no la identidad: si pisara la
+        // fila, la burbuja quedaría sin nombre ni teléfono.
+        store.upsert_message(whatfast_protocol::Message {
+            id: "m1".into(),
+            chat_id: "chat".into(),
+            timestamp_ms: 1,
+            ..Default::default()
+        });
+        assert_eq!(store.messages[0].sender_name, "Ana");
+        assert_eq!(store.messages[0].sender_phone_number, "5491100000000");
     }
 }

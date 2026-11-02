@@ -11,7 +11,8 @@
 use std::sync::Arc;
 
 use wacore::types::events::{
-    ChatPresenceUpdate, Event, InboundMessage, Receipt, UnavailableType, UndecryptableMessage,
+    ChatPresenceUpdate, DeleteMessageForMeUpdate, Event, InboundMessage, Receipt, UnavailableType,
+    UndecryptableMessage,
 };
 use wacore::types::message::{MessageInfo, StanzaMessageType};
 use wacore::types::presence::{ChatActivity, ReceiptType};
@@ -1878,7 +1879,24 @@ pub fn apply_event(
                 // the unread counter from the row's own flag; the reducer must
                 // not write the pointer itself or an out-of-order message
                 // drags the preview backwards.
-                if store.insert_message(&message).is_err() {
+                if let Err(error) = store.insert_message(&message) {
+                    // WhatsApp already acknowledged this message. Dropping it
+                    // with a bare `continue` lost it forever; the journal keeps
+                    // the row and the error visible.
+                    tracing::error!(
+                        chat = %message.chat_jid,
+                        id = %message.id,
+                        %error,
+                        "the message could not be stored"
+                    );
+                    if let Err(journal) = store.journal_inbound(&message, &error.to_string()) {
+                        tracing::error!(
+                            chat = %message.chat_jid,
+                            id = %message.id,
+                            %journal,
+                            "the message could not be journaled"
+                        );
+                    }
                     continue;
                 }
                 persist_poll_definition(store, &message);
@@ -1899,16 +1917,103 @@ pub fn apply_event(
         {
             store_view_once(store, identity, undecryptable)
         }
-        Event::Receipt(receipt) => (
-            store_receipt(store, receipt).unwrap_or_default(),
-            Vec::new(),
-        ),
+        Event::Receipt(receipt) => match store_receipt(store, receipt) {
+            Ok(events) => (events, Vec::new()),
+            Err(error) => {
+                tracing::error!(%error, "the receipt could not be stored");
+                if let Err(journal) =
+                    store.journal_inbound_event("receipt", "", "", &error.to_string())
+                {
+                    tracing::error!(%journal, "the receipt could not be journaled");
+                }
+                (Vec::new(), Vec::new())
+            }
+        },
         Event::ChatPresence(presence) => (
             store_chat_presence(store, presence).into_iter().collect(),
             Vec::new(),
         ),
+        Event::DeleteMessageForMeUpdate(update) => store_delete_for_me(store, identity, update),
         _ => (Vec::new(), Vec::new()),
     }
+}
+
+/// Applies a "delete for me" that another device of this account made.
+///
+/// WhatsApp syncs that deletion as an app-state mutation, not as a revoke
+/// message: the phone deletes the row and every linked device must do the
+/// same. The row may not be in the cache yet, because a full sync can carry
+/// the mutation before the history that holds the message. The tombstone is
+/// written either way: `merge_message` ORs `revoked`, so a later history page
+/// cannot make the message visible again.
+fn store_delete_for_me(
+    store: &Store,
+    identity: &crate::identity::Identity,
+    update: &DeleteMessageForMeUpdate,
+) -> (Vec<BackendEvent>, Vec<Ingested>) {
+    let raw_chat = jid_text(&update.chat_jid);
+    let (canonical, _folds) = crate::reconcile::canonical_chat(store, identity, &raw_chat);
+    if let Err(error) = store.ensure_chat(&canonical, &raw_chat) {
+        tracing::error!(chat = %canonical, %error, "the chat of a delete-for-me could not be stored");
+        return (Vec::new(), Vec::new());
+    }
+    let tombstone = MessageRow {
+        id: update.message_id.clone(),
+        chat_jid: canonical.clone(),
+        transport_jid: raw_chat,
+        timestamp: update.timestamp.timestamp_millis(),
+        from_me: update.from_me,
+        kind: "revoked".into(),
+        text: "Message deleted".into(),
+        revoked: true,
+        ..MessageRow::default()
+    };
+    if let Err(error) = store.insert_message(&tombstone) {
+        tracing::error!(
+            chat = %canonical,
+            id = %update.message_id,
+            %error,
+            "the delete-for-me could not be stored"
+        );
+        if let Err(journal) = store.journal_inbound_event(
+            "delete_for_me",
+            &canonical,
+            &update.message_id,
+            &error.to_string(),
+        ) {
+            tracing::error!(%journal, "the delete-for-me could not be journaled");
+        }
+        return (Vec::new(), Vec::new());
+    }
+    // The action can ask to delete the cached media too, so the file does not
+    // stay in the profile after the message is gone.
+    if update.action.delete_media.unwrap_or(false)
+        && let Ok(Some(row)) = store.message(&canonical, &update.message_id)
+    {
+        let path = if row.image_local_path.is_empty() {
+            row.media_local_path
+        } else {
+            row.image_local_path
+        };
+        if !path.is_empty() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    // The pointer of the chat goes back to the last message that can be
+    // seen: `finish_message_write` may have pointed it at the tombstone.
+    if let Err(error) = store.refresh_chat_pointer(&canonical) {
+        tracing::error!(chat = %canonical, %error, "the pointer of a delete-for-me could not be refreshed");
+    }
+    let mut events = Vec::new();
+    if let Ok(Some(row)) = store.message(&canonical, &update.message_id) {
+        events.push(message_upserted(&row));
+    }
+    // The sidebar preview follows the pointer, which `insert_message` moved
+    // to the last visible message.
+    if let Ok(Some(chat)) = store.chat(&canonical) {
+        events.push(chat_upserted(chat));
+    }
+    (events, Vec::new())
 }
 
 /// Stores the envelope of a view-once message. The phone keeps the content,
@@ -1948,7 +2053,16 @@ fn store_view_once(
     let (canonical, _folds) = crate::reconcile::canonical_chat(store, identity, &chat_jid);
     message.chat_jid = canonical.clone();
     store.ensure_chat(&canonical, &chat_jid).ok();
-    if store.insert_message(&message).is_err() {
+    if let Err(error) = store.insert_message(&message) {
+        tracing::error!(
+            chat = %message.chat_jid,
+            id = %message.id,
+            %error,
+            "the view-once message could not be stored"
+        );
+        if let Err(journal) = store.journal_inbound(&message, &error.to_string()) {
+            tracing::error!(%journal, "the view-once message could not be journaled");
+        }
         return (Vec::new(), Vec::new());
     }
     let mut events = Vec::new();
@@ -2028,7 +2142,23 @@ pub(crate) fn apply_reaction(
         timestamp,
         from_me,
     };
-    store.set_reaction(&reaction).ok();
+    if let Err(error) = store.set_reaction(&reaction) {
+        tracing::error!(
+            chat = %reaction.chat_jid,
+            message = %reaction.message_id,
+            %error,
+            "the reaction could not be stored"
+        );
+        if let Err(journal) = store.journal_inbound_event(
+            "reaction",
+            &reaction.chat_jid,
+            &reaction.message_id,
+            &error.to_string(),
+        ) {
+            tracing::error!(%journal, "the reaction could not be journaled");
+        }
+        return;
+    }
     events.push(reaction_updated(&reaction, emoji.is_empty()));
 }
 
@@ -2309,6 +2439,103 @@ mod tests {
         assert_eq!(row.kind, "view_once");
         assert_eq!(row.text, "One-time message");
         assert!(!row.from_me);
+    }
+
+    #[test]
+    fn a_delete_for_me_from_another_device_hides_the_message() {
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-wa-delete-for-me-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("chats.db")).unwrap();
+        let identity = crate::identity::Identity::open(&dir);
+        store.ensure_chat("120363@g.us", "120363@g.us").unwrap();
+        let original = MessageRow {
+            id: "MSG1".into(),
+            chat_jid: "120363@g.us".into(),
+            transport_jid: "120363@g.us".into(),
+            sender_jid: "5491100000000@s.whatsapp.net".into(),
+            text: "hola".into(),
+            timestamp: 1_700_000_000_000,
+            kind: "text".into(),
+            ..MessageRow::default()
+        };
+        store.insert_message(&original).unwrap();
+        store
+            .insert_message(&MessageRow {
+                id: "MSG0".into(),
+                text: "anterior".into(),
+                timestamp: 1_699_999_999_000,
+                ..original.clone()
+            })
+            .unwrap();
+        let update = |id: &str| {
+            DeleteMessageForMeUpdate::builder()
+                .chat_jid("120363@g.us".parse().unwrap())
+                .message_id(id.to_string())
+                .from_me(false)
+                .timestamp(
+                    whatsapp_rust::chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+                        .unwrap(),
+                )
+                .action(Box::new(
+                    wa::sync_action_value::DeleteMessageForMeAction::default(),
+                ))
+                .from_full_sync(false)
+                .build()
+        };
+        let (events, _) = apply_event(
+            &store,
+            &identity,
+            &Event::DeleteMessageForMeUpdate(update("MSG1")),
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.event.as_ref(),
+            Some(whatfast_protocol::backend_event::Event::MessageUpserted(message))
+                if message.message.as_ref().is_some_and(|message| message.revoked)
+        )));
+        assert!(
+            store
+                .message("120363@g.us", "MSG1")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        // A message deleted for me leaves no trace: the preview falls back to
+        // the last message that is still visible.
+        let chat = store.chat("120363@g.us").unwrap().unwrap();
+        assert_eq!(chat.last_message_text, "anterior");
+        assert_eq!(chat.last_message_at, 1_699_999_999_000);
+
+        // The mutation can arrive before the history that holds the message:
+        // the tombstone keeps the later row hidden.
+        let (events, _) = apply_event(
+            &store,
+            &identity,
+            &Event::DeleteMessageForMeUpdate(update("MSG2")),
+        );
+        assert!(!events.is_empty());
+        store
+            .insert_message(&MessageRow {
+                id: "MSG2".into(),
+                text: "historia".into(),
+                kind: "text".into(),
+                timestamp: 1_700_000_000_001,
+                ..original
+            })
+            .unwrap();
+        assert!(
+            store
+                .message("120363@g.us", "MSG2")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
     }
 
     #[test]

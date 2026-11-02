@@ -15,19 +15,23 @@
 //! assert_eq!(whatfast_i18n::t("Type a message"), "Escribí un mensaje");
 //! ```
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// One language file, as the build script found it.
+/// One language, as the build script found it.
+///
+/// The strings are a perfect hash map built at compile time: the table lives
+/// in the read-only segment of the binary. No JSON is parsed at startup, no
+/// string is leaked into the heap, and a lookup is O(1) without hashing the
+/// key at runtime.
 pub(crate) struct BundledLocale {
     /// The code of the language: `en`, `es`, `zh`.
     pub(crate) code: &'static str,
     /// The name of the language in its own language: `English`, `Español`,
     /// `中文`. It is what the settings panel shows.
     pub(crate) name: &'static str,
-    /// The JSON of the file, embedded in the binary.
-    pub(crate) json: &'static str,
+    /// The strings of the file, in the read-only segment.
+    pub(crate) strings: phf::Map<&'static str, &'static str>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/locales.rs"));
@@ -41,66 +45,28 @@ pub struct Language {
     pub name: &'static str,
 }
 
-/// The strings of one language, parsed once.
-struct Dictionary {
-    code: &'static str,
-    name: &'static str,
-    strings: HashMap<&'static str, &'static str>,
-}
-
-/// Every language, in the order of the file names.
-///
-/// The strings live for the whole process: the module leaks them on purpose,
-/// because the interface reads them on every frame and copying them would
-/// allocate on each label.
-static DICTIONARIES: LazyLock<Vec<Dictionary>> =
-    LazyLock::new(|| BUNDLED.iter().map(parse).collect());
-
 /// The index of the language in use.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// The language of a profile that never chose one.
 pub const DEFAULT_LANGUAGE: &str = "en";
 
-/// Leaks a string of a dictionary: it lives as long as the process.
-fn leak(text: String) -> &'static str {
-    Box::leak(text.into_boxed_str())
-}
-
-/// Reads one embedded file.
-fn parse(bundle: &BundledLocale) -> Dictionary {
-    let value: serde_json::Value = serde_json::from_str(bundle.json)
-        .unwrap_or_else(|error| panic!("locale {} is not valid JSON: {error}", bundle.code));
-    let mut strings = HashMap::new();
-    if let Some(map) = value.get("strings").and_then(|strings| strings.as_object()) {
-        for (key, value) in map {
-            if let Some(text) = value.as_str() {
-                strings.insert(leak(key.clone()), leak(text.to_string()));
-            }
-        }
-    }
-    Dictionary {
-        code: bundle.code,
-        name: bundle.name,
-        strings,
-    }
-}
-
-/// The index of English: the fallback of every missing string.
-fn english_index() -> usize {
-    DICTIONARIES
+/// The index of English: the fallback of every missing string. It is found
+/// once, not on every lookup that misses.
+static ENGLISH_INDEX: LazyLock<usize> = LazyLock::new(|| {
+    BUNDLED
         .iter()
-        .position(|dictionary| dictionary.code == DEFAULT_LANGUAGE)
+        .position(|language| language.code == DEFAULT_LANGUAGE)
         .unwrap_or(0)
-}
+});
 
 /// The languages the application can speak, English first.
 pub fn languages() -> Vec<Language> {
-    let mut languages: Vec<Language> = DICTIONARIES
+    let mut languages: Vec<Language> = BUNDLED
         .iter()
-        .map(|dictionary| Language {
-            code: dictionary.code,
-            name: dictionary.name,
+        .map(|language| Language {
+            code: language.code,
+            name: language.name,
         })
         .collect();
     languages.sort_by_key(|language| (language.code != DEFAULT_LANGUAGE, language.code));
@@ -112,9 +78,9 @@ pub fn languages() -> Vec<Language> {
 /// Returns `false` when the code is not one of the embedded languages; the
 /// active language does not change in that case.
 pub fn set_language(code: &str) -> bool {
-    let Some(index) = DICTIONARIES
+    let Some(index) = BUNDLED
         .iter()
-        .position(|dictionary| dictionary.code.eq_ignore_ascii_case(code))
+        .position(|language| language.code.eq_ignore_ascii_case(code))
     else {
         return false;
     };
@@ -124,16 +90,15 @@ pub fn set_language(code: &str) -> bool {
 
 /// The code of the active language.
 pub fn current_language() -> &'static str {
-    let dictionaries = &*DICTIONARIES;
-    dictionaries[ACTIVE.load(Ordering::Relaxed).min(dictionaries.len() - 1)].code
+    BUNDLED[ACTIVE.load(Ordering::Relaxed).min(BUNDLED.len() - 1)].code
 }
 
 /// Whether a language has a translation for a key.
 pub fn has_translation(code: &str, key: &str) -> bool {
-    DICTIONARIES
+    BUNDLED
         .iter()
-        .find(|dictionary| dictionary.code.eq_ignore_ascii_case(code))
-        .is_some_and(|dictionary| dictionary.strings.contains_key(key))
+        .find(|language| language.code.eq_ignore_ascii_case(code))
+        .is_some_and(|language| language.strings.contains_key(key))
 }
 
 /// The text of a key in the active language.
@@ -141,12 +106,11 @@ pub fn has_translation(code: &str, key: &str) -> bool {
 /// Falls back to English and then to the key itself, so a missing translation
 /// never hides a label.
 pub fn t(key: &'static str) -> &'static str {
-    let dictionaries = &*DICTIONARIES;
-    let active = &dictionaries[ACTIVE.load(Ordering::Relaxed).min(dictionaries.len() - 1)];
+    let active = &BUNDLED[ACTIVE.load(Ordering::Relaxed).min(BUNDLED.len() - 1)];
     if let Some(text) = active.strings.get(key) {
         return text;
     }
-    if let Some(text) = dictionaries[english_index()].strings.get(key) {
+    if let Some(text) = BUNDLED[*ENGLISH_INDEX].strings.get(key) {
         return text;
     }
     key
@@ -172,15 +136,15 @@ pub fn t_args(key: &'static str, args: &[(&str, &str)]) -> String {
 /// crate prints it, and the script uses the same numbers to tell a
 /// translator what is left.
 pub fn coverage(code: &str) -> (usize, usize) {
-    let total: usize = DICTIONARIES
+    let total = BUNDLED
         .iter()
-        .map(|dictionary| dictionary.strings.len())
+        .map(|language| language.strings.len())
         .max()
         .unwrap_or(0);
-    let translated = DICTIONARIES
+    let translated = BUNDLED
         .iter()
-        .find(|dictionary| dictionary.code.eq_ignore_ascii_case(code))
-        .map_or(0, |dictionary| dictionary.strings.len());
+        .find(|language| language.code.eq_ignore_ascii_case(code))
+        .map_or(0, |language| language.strings.len());
     (translated, total)
 }
 
@@ -259,10 +223,10 @@ mod tests {
     #[test]
     fn every_translation_keeps_the_placeholders_of_its_key() {
         for language in languages() {
-            for (key, value) in super::DICTIONARIES
+            for (key, value) in super::BUNDLED
                 .iter()
-                .find(|dictionary| dictionary.code == language.code)
-                .map(|dictionary| dictionary.strings.iter().collect::<Vec<_>>())
+                .find(|bundle| bundle.code == language.code)
+                .map(|bundle| bundle.strings.entries().collect::<Vec<_>>())
                 .unwrap_or_default()
             {
                 for placeholder in placeholders(key) {

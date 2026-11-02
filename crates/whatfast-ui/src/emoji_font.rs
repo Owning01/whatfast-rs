@@ -40,6 +40,17 @@ const FONT: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
 /// The family of the font that is in use.
 static FAMILY: OnceLock<String> = OnceLock::new();
 
+/// The bytes of the font that is in use, for the offscreen rasterizer of the
+/// media editor: the export draws the emoji with the same art as the window.
+static BYTES: OnceLock<Cow<'static, [u8]>> = OnceLock::new();
+
+/// The bytes of the emoji font of the process.
+pub(crate) fn bytes() -> &'static [u8] {
+    BYTES
+        .get_or_init(|| load().bytes)
+        .as_ref()
+}
+
 /// The family that the fallbacks of the window have to name.
 pub(crate) fn family() -> &'static str {
     FAMILY.get().map(String::as_str).unwrap_or(NOTO_FAMILY)
@@ -60,11 +71,19 @@ struct EmojiFont {
 pub(crate) fn install(cx: &gpui::App) {
     let font = load();
     let _ = FAMILY.set(font.family.clone());
+    let _ = BYTES.set(font.bytes.clone());
+    // Solo la primera instalación toca el registro y espera a la colección del
+    // sistema. En los arranques siguientes el archivo ya está y la colección ya
+    // lo conoce: esperar 1,5 s ahí era tiempo perdido en cada inicio.
     #[cfg(windows)]
-    let _ = install_for_the_user(&font);
+    let installed_now = install_for_the_user(&font)
+        .map(|(_, copied)| copied)
+        .unwrap_or(false);
     let _ = cx.text_system().add_fonts(vec![font.bytes]);
     #[cfg(windows)]
-    wait_for_the_system_collection(cx);
+    if installed_now {
+        wait_for_the_system_collection(cx);
+    }
 }
 
 /// The font of the user if there is one, and the Google set otherwise.
@@ -148,8 +167,12 @@ fn family_name(bytes: &[u8]) -> Option<String> {
 }
 
 /// Copies the font to the folder of the fonts of the user and registers it.
+///
+/// Answers the path and whether the file was copied now. A file that is
+/// already there with the same size is not registered again: the registry and
+/// the collection of the system already know it from the previous run.
 #[cfg(windows)]
-fn install_for_the_user(font: &EmojiFont) -> std::io::Result<PathBuf> {
+fn install_for_the_user(font: &EmojiFont) -> std::io::Result<(PathBuf, bool)> {
     let path = font_path(&font.file).ok_or_else(|| std::io::Error::other("no folder of fonts"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -157,11 +180,15 @@ fn install_for_the_user(font: &EmojiFont) -> std::io::Result<PathBuf> {
     let size = std::fs::metadata(&path)
         .map(|meta| meta.len())
         .unwrap_or_default();
+    let mut copied = false;
     if size != font.bytes.len() as u64 {
         std::fs::write(&path, &font.bytes)?;
+        copied = true;
     }
-    register(&path, &font.family)?;
-    Ok(path)
+    if copied {
+        register(&path, &font.family)?;
+    }
+    Ok((path, copied))
 }
 
 /// The path of the font in the profile of the user.

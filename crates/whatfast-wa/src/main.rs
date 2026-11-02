@@ -29,6 +29,11 @@ use whatfast_wa::{
     socket::{self, Origin},
 };
 
+// The ingest loop, the media decoder and the RPC handlers allocate thousands
+// of small blocks per second. mimalloc keeps them per thread.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,

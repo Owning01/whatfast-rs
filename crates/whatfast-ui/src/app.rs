@@ -426,7 +426,7 @@ fn note_target(state: Option<&RecordingState>) -> Option<&str> {
 }
 
 /// What the user wrote in one conversation, and what it replies to.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ChatDraft {
     pub(crate) text: String,
     pub(crate) reply_to_message_id: Option<String>,
@@ -443,7 +443,7 @@ pub(crate) struct ChatDraft {
 }
 
 /// One participant the user tagged with the @ picker.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MentionEntry {
     pub(crate) display_name: String,
     pub(crate) jid: String,
@@ -885,6 +885,14 @@ pub(crate) struct Whatfast {
     pub(crate) viewer_info_open: bool,
     pub(crate) replying_to_message_id: Option<String>,
     pub(crate) chat_drafts: HashMap<String, ChatDraft>,
+    /// Whether `chat_drafts` changed since the last write to the disk.
+    pub(crate) drafts_dirty: bool,
+    /// When the drafts were written the last time.
+    pub(crate) drafts_saved_at: Instant,
+    /// The error the toast shows and when it appeared: the sweep closes it
+    /// after a few seconds so a stale red box does not stay over the window.
+    pub(crate) toast_error_seen: Option<String>,
+    pub(crate) toast_error_at: Instant,
     pub(crate) recent_chat_ids: Vec<String>,
     pub(crate) chat_switcher: Option<ChatSwitcher>,
     pub(crate) chat_info: Option<ChatInfoState>,
@@ -1129,6 +1137,9 @@ pub(crate) struct Whatfast {
     /// The button of the clip of the composer.
     pub(crate) attachment_bar: Entity<AttachmentBar>,
     pub(crate) _subscriptions: Vec<Subscription>,
+    /// La suscripción del editor abierto. Se reemplaza al abrir otro editor y
+    /// no se acumula en `_subscriptions`, que vive lo que vive la ventana.
+    pub(crate) media_editor_subscription: Option<Subscription>,
 }
 
 impl Whatfast {
@@ -1375,10 +1386,23 @@ impl Whatfast {
         let view = cx.entity();
         cx.spawn_in(window, async move |_, window| {
             while let Ok(message) = receiver.recv().await {
+                // Los eventos de un mismo instante (una ráfaga de mensajes de
+                // un grupo, un historial que llega por partes) se atienden en
+                // un solo turno y un solo `notify`: antes cada evento pedía su
+                // propio cuadro.
+                let mut batch = vec![message];
+                while let Ok(next) = receiver.try_recv() {
+                    batch.push(next);
+                    if batch.len() >= 512 {
+                        break;
+                    }
+                }
                 if window
                     .update(|window, cx| {
                         view.update(cx, |this, cx| {
-                            this.handle_bridge(message, window, cx);
+                            for message in batch {
+                                this.handle_bridge(message, window, cx);
+                            }
                             cx.notify();
                         })
                     })
@@ -1452,7 +1476,11 @@ impl Whatfast {
             viewer_reactions_open: false,
             viewer_info_open: false,
             replying_to_message_id: None,
-            chat_drafts: HashMap::new(),
+            chat_drafts: crate::composer_drafts::load(),
+            drafts_dirty: false,
+            drafts_saved_at: Instant::now(),
+            toast_error_seen: None,
+            toast_error_at: Instant::now(),
             recent_chat_ids: Vec::new(),
             chat_switcher: None,
             chat_info: None,
@@ -1566,6 +1594,7 @@ impl Whatfast {
             tab_strip,
             media_editor: None,
             media_editor_target: MediaEditorTarget::Chat,
+            media_editor_subscription: None,
             confirm_delete_status: None,
             newsletter_panel: NewsletterPanel::new(window, cx),
             status_strip: StatusStrip::new(window, cx),
@@ -1737,14 +1766,32 @@ impl Whatfast {
 
     /// Sends a request to the backend, or shows the fatal screen when the
     /// request could not even be queued.
-    pub(crate) fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
+    pub(crate) fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) -> bool {
         let sent = self.rpc.send(request, pending);
+        let queued = sent.is_ok();
         report_failed_request(&mut self.store, sent);
+        queued
     }
 
     /// Sweeps the requests that outlived their deadline and undoes what they
     /// had already changed locally.
     pub(crate) fn expire_stalled_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Los borradores del compositor se escriben con un debounce: el
+        // barrido de un segundo es el reloj que los baja al disco.
+        self.save_drafts_if_due();
+        // El aviso de error también se cierra solo: si cambió el texto, el
+        // reloj arranca de nuevo; si no, a los ocho segundos se va. Un toast
+        // que queda para siempre tapa el botón que está debajo.
+        if self.store.toast_error != self.toast_error_seen {
+            self.toast_error_seen = self.store.toast_error.clone();
+            self.toast_error_at = Instant::now();
+        } else if self.store.toast_error.is_some()
+            && self.toast_error_at.elapsed() >= Duration::from_secs(8)
+        {
+            self.store.toast_error = None;
+            self.toast_error_seen = None;
+            cx.notify();
+        }
         // Piggyback on the 1s sweep: typing indicators expire locally because
         // the peer's terminal "paused" update can be lost.
         let now = Instant::now();
@@ -1836,7 +1883,7 @@ impl Whatfast {
                             Some(i18n::t("Sending timed out. Try again.").into());
                         continue;
                     }
-                    self.restore_failed_draft(
+                    let restored = self.restore_failed_draft(
                         &chat_id,
                         &draft_text,
                         reply_to_message_id,
@@ -1845,24 +1892,36 @@ impl Whatfast {
                         cx,
                     );
                     self.store.toast_error = Some(
-                        i18n::t("Sending timed out. Your draft was restored; try again.").into(),
+                        if restored {
+                            i18n::t("Sending timed out. Your draft was restored; try again.")
+                        } else {
+                            i18n::t("Sending timed out. Try again.")
+                        }
+                        .into(),
                     );
                 }
                 PendingRequest::SendImage {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
+                    image_path,
                 } => {
-                    self.restore_failed_draft(
+                    let restored = self.restore_failed_draft(
                         &chat_id,
                         &draft_text,
-                        reply_to_message_id,
+                        reply_to_message_id.clone(),
                         &[],
                         window,
                         cx,
                     );
+                    self.return_failed_image(&image_path);
                     self.store.toast_error = Some(
-                        i18n::t("Sending timed out. Your draft was restored; try again.").into(),
+                        if restored {
+                            i18n::t("Sending timed out. Your draft was restored; try again.")
+                        } else {
+                            i18n::t("Sending timed out. Try again.")
+                        }
+                        .into(),
                     );
                 }
                 PendingRequest::SendReaction {
@@ -2304,9 +2363,21 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(result) = response.result else {
-            self.store.toast_error = Some(i18n::t("Backend returned an empty response").into());
-            return;
+        let result = match response.result {
+            Some(result) => result,
+            None => {
+                // Un sobre sin `result` es un backend roto. Se convierte en
+                // error para que corra el rollback del pendiente: antes solo
+                // aparecía un toast y el mensaje optimista quedaba pegado en
+                // la pantalla.
+                self.store.toast_error =
+                    Some(i18n::t("Backend returned an empty response").into());
+                rpc_response::Result::Error(whatfast_protocol::RpcError {
+                    code: "empty_response".into(),
+                    message: "the backend answered without a result".into(),
+                    retryable: true,
+                })
+            }
         };
         // The tray of the drafts sends its text with the same RPC as the
         // composer. A row that is waiting closes here: a failed send is taken
@@ -2358,26 +2429,32 @@ impl Whatfast {
                     draft_text,
                     reply_to_message_id,
                     mentions,
-                } => self.restore_failed_draft(
-                    chat_id,
-                    draft_text,
-                    reply_to_message_id.clone(),
-                    mentions,
-                    window,
-                    cx,
-                ),
+                } => {
+                    self.restore_failed_draft(
+                        chat_id,
+                        draft_text,
+                        reply_to_message_id.clone(),
+                        mentions,
+                        window,
+                        cx,
+                    );
+                }
                 PendingRequest::SendImage {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
-                } => self.restore_failed_draft(
-                    chat_id,
-                    draft_text,
-                    reply_to_message_id.clone(),
-                    &[],
-                    window,
-                    cx,
-                ),
+                    image_path,
+                } => {
+                    self.restore_failed_draft(
+                        chat_id,
+                        draft_text,
+                        reply_to_message_id.clone(),
+                        &[],
+                        window,
+                        cx,
+                    );
+                    self.return_failed_image(&image_path);
+                }
                 _ => {}
             }
             if matches!(&pending, PendingRequest::RepairRecentReactions { .. })
@@ -3104,6 +3181,7 @@ impl Whatfast {
                 // the paths of this session would paint a hole, so they go
                 // back to empty and the next paint asks for the picture.
                 self.store.forget_avatars();
+                self.store.forget_media_presence();
                 self.avatar_attempted.clear();
                 self.participant_avatar_attempted.clear();
                 // The rows that pointed at the deleted files were reset by
@@ -3412,7 +3490,13 @@ impl Whatfast {
                     } else if let Some(draft) = self.chat_drafts.get_mut(&chat_id) {
                         // The chat changed while the agent was writing: the
                         // answer waits in the draft of its own conversation.
-                        draft.text = text;
+                        // If the user already wrote there, the answer is added
+                        // below; it never replaces what the user typed.
+                        if draft.text.trim().is_empty() {
+                            draft.text = text;
+                        } else {
+                            draft.text = format!("{}\n{}", draft.text.trim_end(), text);
+                        }
                     } else {
                         self.chat_drafts.insert(
                             chat_id,
@@ -3422,6 +3506,7 @@ impl Whatfast {
                             },
                         );
                     }
+                    self.drafts_dirty = true;
                 }
             }
             (PendingRequest::Schedules, rpc_response::Result::ScheduleList(list)) => {
@@ -3455,12 +3540,16 @@ impl Whatfast {
                     Some(call) => call.placed(response.call_id),
                     // The user hung up before the id arrived: the call would
                     // keep ringing on the other phone with nobody to end it.
-                    None => self.request(
-                        rpc_request::Request::CallHangup(whatfast_protocol::CallHangupRequest {
-                            call_id: response.call_id,
-                        }),
-                        PendingRequest::CallHangup,
-                    ),
+                    None => {
+                        self.request(
+                            rpc_request::Request::CallHangup(
+                                whatfast_protocol::CallHangupRequest {
+                                    call_id: response.call_id,
+                                },
+                            ),
+                            PendingRequest::CallHangup,
+                        );
+                    }
                 }
             }
             (PendingRequest::CallAccept, rpc_response::Result::CallAccept(_)) => {
@@ -3493,7 +3582,11 @@ impl Whatfast {
     /// front. The history that the first sync brings is not news: only
     /// recent messages are announced.
     fn notify_message(&self, message: &Message, window: &Window) {
-        if !self.settings.notifications_enabled || !self.store.sync_complete || message.from_me {
+        if !self.settings.notifications_enabled
+            || !self.store.sync_complete
+            || message.from_me
+            || message.revoked
+        {
             return;
         }
         if now_ms().saturating_sub(message.timestamp_ms) > NOTIFICATION_MAX_AGE_MS {
@@ -4044,6 +4137,7 @@ impl Whatfast {
                         }
                     }
                     if self.store.has_newer_messages
+                        && !message.revoked
                         && self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str())
                     {
                         self.store.newer_activity = true;
@@ -4298,22 +4392,32 @@ impl Whatfast {
 
     pub(crate) fn pump_image_download_queue(&mut self) {
         while self.rpc.pending_media_count() < 4 {
-            if let Some((chat_id, message_id)) = self.image_download_queue.pop_front() {
-                let key = (chat_id.clone(), message_id.clone());
-                if !self.image_download_attempted.contains(&key) {
-                    self.image_download_attempted.insert(key);
-                    self.request(
-                        rpc_request::Request::GetMessageImage(whatfast_protocol::GetMessageImageRequest {
-                            chat_id: chat_id.clone(),
-                            message_id: message_id.clone(),
-                        }),
-                        PendingRequest::MessageImage {
-                            chat_id,
-                            message_id,
-                        },
-                    );
-                }
+            let Some((chat_id, message_id)) = self.image_download_queue.pop_front() else {
+                break;
+            };
+            let key = (chat_id.clone(), message_id.clone());
+            if self.image_download_attempted.contains(&key) {
+                continue;
+            }
+            let queued = self.request(
+                rpc_request::Request::GetMessageImage(whatfast_protocol::GetMessageImageRequest {
+                    chat_id: chat_id.clone(),
+                    message_id: message_id.clone(),
+                }),
+                PendingRequest::MessageImage {
+                    chat_id,
+                    message_id,
+                },
+            );
+            if queued {
+                // La clave se marca recién cuando el pedido quedó encolado:
+                // antes se marcaba y un transporte caído dejaba la foto sin
+                // reintento para siempre.
+                self.image_download_attempted.insert(key);
             } else {
+                // El pedido no entró: la clave vuelve al final y se corta el
+                // bombeo para no girar en vacío.
+                self.image_download_queue.push_back(key);
                 break;
             }
         }
@@ -4330,17 +4434,19 @@ impl Whatfast {
             }
             return;
         }
-        self.image_download_attempted.insert(key);
-        self.request(
+        let queued = self.request(
             rpc_request::Request::GetMessageImage(whatfast_protocol::GetMessageImageRequest {
-                chat_id: chat_id.clone(),
-                message_id: message_id.clone(),
-            }),
-            PendingRequest::MessageImage {
                 chat_id,
                 message_id,
+            }),
+            PendingRequest::MessageImage {
+                chat_id: key.0.clone(),
+                message_id: key.1.clone(),
             },
         );
+        if queued {
+            self.image_download_attempted.insert(key);
+        }
     }
 
     pub(crate) fn retry_message_image(&mut self, chat_id: String, message_id: String) {
@@ -4388,7 +4494,7 @@ impl Whatfast {
             .store
             .messages
             .iter()
-            .filter_map(crate::render::viewer_item)
+            .filter_map(|message| crate::render::viewer_item(&self.store, message))
             .collect();
         let Some(index) = gallery
             .iter()
@@ -4728,6 +4834,7 @@ impl Whatfast {
         if draft.is_empty() {
             self.chat_drafts.remove(&chat_id);
         }
+        self.drafts_dirty = true;
     }
 
     pub(crate) fn update_active_draft_reply(&mut self, reply_to_message_id: Option<String>) {
@@ -4739,6 +4846,7 @@ impl Whatfast {
         if draft.is_empty() {
             self.chat_drafts.remove(&chat_id);
         }
+        self.drafts_dirty = true;
     }
 
     pub(crate) fn clear_active_draft(&mut self) {
@@ -4746,6 +4854,24 @@ impl Whatfast {
             self.chat_drafts.remove(chat_id);
         }
         self.replying_to_message_id = None;
+        self.drafts_dirty = true;
+    }
+
+    /// Writes the drafts to the disk when the debounce expired.
+    pub(crate) fn save_drafts_if_due(&mut self) {
+        if !self.drafts_dirty || self.drafts_saved_at.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        crate::composer_drafts::save(&self.chat_drafts);
+        self.drafts_dirty = false;
+        self.drafts_saved_at = Instant::now();
+    }
+
+    /// Writes the drafts now, before a close or an update.
+    pub(crate) fn save_drafts_now(&mut self) {
+        crate::composer_drafts::save(&self.chat_drafts);
+        self.drafts_dirty = false;
+        self.drafts_saved_at = Instant::now();
     }
 
     /// Re-evaluates the composer text around the cursor and opens or closes
@@ -4879,6 +5005,7 @@ impl Whatfast {
                 display_name: name,
                 jid: participant.participant_id.clone(),
             });
+            self.drafts_dirty = true;
         }
         self.composer.update(cx, |input, cx| {
             input.set_value(new_text, window, cx);
@@ -4894,7 +5021,7 @@ impl Whatfast {
         mentions: &[(String, String)],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let failed_draft = ChatDraft {
             text: draft_text.to_owned(),
             reply_to_message_id,
@@ -4907,27 +5034,30 @@ impl Whatfast {
                 .collect(),
             editing_message_id: None,
         };
-        self.restore_draft(chat_id, failed_draft, window, cx);
+        self.restore_draft(chat_id, failed_draft, window, cx)
     }
 
     /// Puts a draft back into the composer, when the message it carries
-    /// could not be sent.
+    /// could not be sent. Answers false when a newer draft already holds the
+    /// field: the failed text is not thrown away silently, but it is not put
+    /// over what the user has written since.
     fn restore_draft(
         &mut self,
         chat_id: &str,
         failed_draft: ChatDraft,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let should_restore = self
             .chat_drafts
             .get(chat_id)
             .is_none_or(ChatDraft::is_empty);
         if !should_restore {
-            return;
+            return false;
         }
         self.chat_drafts
             .insert(chat_id.to_owned(), failed_draft.clone());
+        self.drafts_dirty = true;
         if self.store.selected_chat_id.as_deref() == Some(chat_id)
             && self.composer.read(cx).value().is_empty()
         {
@@ -4936,6 +5066,7 @@ impl Whatfast {
                 input.set_value(failed_draft.text, window, cx)
             });
         }
+        true
     }
 
     pub(crate) fn start_reply(&mut self, message_id: String) {
@@ -5537,6 +5668,7 @@ impl Whatfast {
         // The sidecar runs the executable of the backend: it has to end
         // before the files move. The interface is about to exit, so a
         // backend that does not answer is not a reason to stay.
+        self.save_drafts_now();
         self.rpc.stop_backend();
         let exe = std::env::current_exe().unwrap_or_default();
         match crate::update::install(&manifest, &staging, &exe) {
@@ -7062,6 +7194,8 @@ impl Whatfast {
         self.chat_switcher = None;
         self.chat_info = None;
         self.store.set_chat_filter(ChatFilter::All);
+        self.drafts_dirty = true;
+        self.save_drafts_now();
         self.request(
             rpc_request::Request::StartPairing(whatfast_protocol::StartPairingRequest {}),
             PendingRequest::Pairing,
@@ -7311,17 +7445,27 @@ impl Whatfast {
     }
 
     /// Writes the answer of an agent into the composer, without sending it.
+    ///
+    /// Si el usuario ya escribió algo, la respuesta se agrega debajo en vez de
+    /// reemplazarlo: el borrador del usuario no se pierde por una respuesta
+    /// que llegó tarde.
     pub(crate) fn apply_agent_answer(
         &mut self,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let existing = self.composer.read(cx).value().to_string();
+        let merged = if existing.trim().is_empty() {
+            text
+        } else {
+            format!("{}\n{}", existing.trim_end(), text)
+        };
         self.composer.update(cx, |input, cx| {
-            input.set_value(text.clone(), window, cx);
+            input.set_value(merged.clone(), window, cx);
             input.focus(window, cx);
         });
-        self.update_active_draft_text(text);
+        self.update_active_draft_text(merged);
     }
 
     ///
@@ -7463,7 +7607,28 @@ impl Whatfast {
                     chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
                     draft_text: draft_text.clone(),
                     reply_to_message_id,
+                    image_path: image.path.to_string_lossy().into_owned(),
                 },
+            );
+        }
+    }
+
+    /// Devuelve a la bandeja la foto de un envío que falló.
+    ///
+    /// La foto ya había salido de la bandeja cuando se encoló el pedido. Si el
+    /// backend la rechaza o no contesta, el usuario no tiene que buscarla de
+    /// nuevo en el disco.
+    fn return_failed_image(&mut self, path: &str) {
+        if path.is_empty() || !self.pending_images.can_add_more() {
+            return;
+        }
+        if self
+            .pending_images
+            .stage(PathBuf::from(path))
+            .is_ok()
+        {
+            self.store.toast_error = Some(
+                i18n::t("The photo could not be sent; it is back in the tray").into(),
             );
         }
     }
@@ -7593,6 +7758,7 @@ impl Whatfast {
             if draft.is_empty() {
                 self.chat_drafts.remove(&chat_id);
             }
+            self.drafts_dirty = true;
         }
         if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
             && self.replying_to_message_id == reply_to_message_id
@@ -7712,6 +7878,7 @@ impl Whatfast {
 
     /// Asks the sidecar to stop.
     pub(crate) fn shutdown(&mut self) {
+        self.save_drafts_now();
         report_failed_request(&mut self.store, self.rpc.request_shutdown());
     }
 
@@ -8301,6 +8468,14 @@ impl Whatfast {
                     _ => break,
                 }
             }
+            // Toda salida del reloj apaga la bandera: antes, un error de la
+            // ventana o del modelo la dejaba en `true` y el siguiente video no
+            // arrancaba su reloj.
+            let _ = window.update(|_, cx| {
+                view.update(cx, |this, _| {
+                    this.video_tick = false;
+                })
+            });
         })
         .detach();
     }
@@ -8722,6 +8897,7 @@ impl Whatfast {
         draft.reply_to_message_id = None;
         draft.mentions.clear();
         draft.editing_message_id = Some(message_id);
+        self.drafts_dirty = true;
         self.replying_to_message_id = None;
         self.composer
             .update(cx, |input, cx| input.set_value(text, window, cx));
@@ -8736,6 +8912,7 @@ impl Whatfast {
         };
         self.chat_drafts.remove(&chat_id);
         self.replying_to_message_id = None;
+        self.drafts_dirty = true;
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
     }
@@ -9292,7 +9469,7 @@ impl Whatfast {
             }
             cx.notify();
         });
-        self._subscriptions.push(subscription);
+        self.media_editor_subscription = Some(subscription);
         self.media_editor = Some(editor);
         self.sync_shell(cx);
     }
@@ -9387,7 +9564,7 @@ impl Whatfast {
             }
             drop(inner);
             self.stop_video();
-            self.store.toast_info = Some(i18n::t("Estado eliminado").into());
+            self.store.toast_info = Some(i18n::t("Status deleted").into());
             cx.notify();
         }
     }

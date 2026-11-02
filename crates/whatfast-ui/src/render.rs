@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ use gpui::{
     div, img, point, px, relative, rgb, rgba, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, IconNamed as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
@@ -2191,13 +2191,13 @@ impl Whatfast {
                         div()
                             .text_base()
                             .font_weight(FontWeight::BOLD)
-                            .child(i18n::t("¿Eliminar estado?")),
+                            .child(i18n::t("Delete status?")),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child(i18n::t("Esta actualización de estado se eliminará para ti y tus contactos.")),
+                            .child(i18n::t("This status update will be deleted for you and your contacts.")),
                     )
                     .child(
                         h_flex()
@@ -2205,7 +2205,7 @@ impl Whatfast {
                             .gap_2()
                             .child(
                                 Button::new("delete-status-cancel")
-                                    .label(i18n::t("Cancelar"))
+                                    .label(i18n::t("Cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.confirm_delete_status = None;
                                         cx.notify();
@@ -2214,7 +2214,7 @@ impl Whatfast {
                             .child(
                                 Button::new("delete-status-confirm")
                                     .danger()
-                                    .label(i18n::t("Eliminar"))
+                                    .label(i18n::t("Delete"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let id = message_id.clone();
                                         this.confirm_delete_status = None;
@@ -3365,6 +3365,9 @@ impl Whatfast {
                     .gap_3()
                     .rounded_md()
                     .bg(cx.theme().secondary)
+                    // La barra flota sobre la conversacion: el clic en su
+                    // texto o en la cruz no debe llegar al mensaje de abajo.
+                    .occlude()
                     .child(
                         v_flex()
                             .min_w_0()
@@ -3802,7 +3805,10 @@ impl Whatfast {
                                         .filter_map(|message| match message.content.as_ref() {
                                             Some(proto::message::Content::Attachment(
                                                 attachment,
-                                            )) if attachments::audio_needs_download(attachment) => {
+                                            )) if attachments::audio_needs_download(
+                                                &this.store,
+                                                attachment,
+                                            ) => {
                                                 Some((message.chat_id.clone(), message.id.clone()))
                                             }
                                             _ => None,
@@ -4222,6 +4228,9 @@ impl Whatfast {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
+            // La lista flota sobre la conversacion: el clic en una mencion no
+            // debe llegar al mensaje que queda detras.
+            .occlude()
             .when(matches.is_empty(), |column| {
                 column.child(
                     div()
@@ -4339,6 +4348,10 @@ impl Whatfast {
             .bg(cx.theme().popover)
             .shadow_lg()
             .overflow_hidden()
+            // El panel flota sobre la conversacion: sin esto el clic del
+            // emoji tambien llega a la lista de mensajes que queda detras y
+            // abre el mensaje de abajo.
+            .occlude()
             // La rueda dentro del panel mueve su rejilla, no la conversacion
             // que queda detras: la lista de abajo ya se movio cuando el evento
             // llega aca, asi que se corta la propagacion.
@@ -7705,7 +7718,7 @@ impl Whatfast {
                 // el no se mueve nada.
                 let image_path = image_source_candidates(&image, &row_path, &viewer_path)
                     .into_iter()
-                    .find(|path| !path.is_empty() && Path::new(*path).is_file())
+                    .find(|path| !path.is_empty() && self.store.media_exists(path))
                     .unwrap_or_default()
                     .to_string();
                 let image_is_cached = !image_path.is_empty();
@@ -8581,6 +8594,10 @@ impl Whatfast {
     /// GPUI cannot repeat an image, so the pattern is a grid of small glyphs
     /// of the icon set, painted with a very low opacity. The layer is
     /// absolute, so it does not move when the list of the messages scrolls.
+    ///
+    /// The grid is painted by one `canvas` and not by one `div` per glyph: a
+    /// 1600×1000 window has about 140 cells, and 140 elements per frame cost
+    /// more than the pattern itself.
     fn conversation_wallpaper(
         &self,
         width: Pixels,
@@ -8591,27 +8608,48 @@ impl Whatfast {
         let glyphs = wallpaper_glyphs();
         let columns = (f32::from(width) / f32::from(WALLPAPER_STEP_X)).ceil() as usize + 1;
         let rows = (f32::from(height) / f32::from(WALLPAPER_STEP_Y)).ceil() as usize + 1;
-        let mut layer = div().absolute().inset_0().overflow_hidden();
+        let mut cells = Vec::with_capacity(columns * rows);
         for row in 0..rows {
             for column in 0..columns {
                 let index = row * columns + column;
-                let glyph = glyphs[index % glyphs.len()].clone();
                 // The pattern of the reference is not a perfect grid: a small
                 // offset per cell keeps it from looking like a table.
                 let offset_x = ((gpui::hash(&index) % 21) as f32 - 10.) * 2.5;
                 let offset_y = ((gpui::hash(&(index + 1)) % 15) as f32 - 7.) * 2.5;
-                let size = px(f32::from(WALLPAPER_GLYPH_SIZE) * (0.85 + (index % 4) as f32 * 0.1));
-                layer = layer.child(
-                    div()
-                        .absolute()
-                        .left(px(f32::from(WALLPAPER_STEP_X) * column as f32 + offset_x))
-                        .top(px(f32::from(WALLPAPER_STEP_Y) * row as f32 + offset_y))
-                        .size(size)
-                        .child(glyph.with_size(size).text_color(color)),
-                );
+                let glyph_size = f32::from(WALLPAPER_GLYPH_SIZE) * (0.85 + (index % 4) as f32 * 0.1);
+                cells.push((
+                    f32::from(WALLPAPER_STEP_X) * column as f32 + offset_x,
+                    f32::from(WALLPAPER_STEP_Y) * row as f32 + offset_y,
+                    glyph_size,
+                    index % glyphs.len(),
+                ));
             }
         }
-        layer
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .child(canvas(
+                move |_, _, _| (cells, glyphs),
+                move |bounds, (cells, glyphs), window, cx| {
+                    for (left, top, glyph_size, glyph) in cells {
+                        let glyph_bounds = gpui::Bounds {
+                            origin: point(bounds.origin.x + px(left), bounds.origin.y + px(top)),
+                            size: size(px(glyph_size), px(glyph_size)),
+                        };
+                        let _ = window.paint_svg(
+                            glyph_bounds,
+                            glyphs[glyph].clone(),
+                            None,
+                            gpui::TransformationMatrix::unit(),
+                            color,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0())
     }
 
     /// Whether the message is the first one of its day.
@@ -8641,7 +8679,10 @@ impl Whatfast {
 /// La foto de un mensaje, con lo que el visor necesita para el encabezado y
 /// el carrusel. Responde `None` cuando el mensaje no es una foto o cuando el
 /// archivo no esta en el disco: el visor no puede mostrar lo que no tiene.
-pub(crate) fn viewer_item(message: &proto::Message) -> Option<crate::app::ViewerItem> {
+pub(crate) fn viewer_item(
+    store: &whatfast_model::model::Store,
+    message: &proto::Message,
+) -> Option<crate::app::ViewerItem> {
     let Some(proto::message::Content::Image(image)) = message.content.as_ref() else {
         return None;
     };
@@ -8649,13 +8690,13 @@ pub(crate) fn viewer_item(message: &proto::Message) -> Option<crate::app::Viewer
     let viewer_path = image_viewer_path(image);
     // El visor abre el archivo entero cuando esta en el disco: el thumbnail
     // se ve borroso a pantalla completa. Si no esta, muestra el mismo archivo
-    // que la burbuja pinta.
-    let path = if Path::new(viewer_path).is_file() {
+    // que la burbuja pinta. La presencia la resolvio el modelo, no este frame.
+    let path = if store.media_exists(viewer_path) {
         viewer_path.to_string()
     } else {
         image_source_candidates(image, &row_path, &viewer_path)
             .into_iter()
-            .find(|path| !path.is_empty() && Path::new(*path).is_file())?
+            .find(|path| !path.is_empty() && store.media_exists(path))?
             .to_string()
     };
     Some(crate::app::ViewerItem {
@@ -8907,6 +8948,16 @@ impl Render for Whatfast {
                     cx.notify();
                     return;
                 }
+                // Ctrl+C copia la foto que se está mirando.
+                if this.image_viewer.is_some()
+                    && event.keystroke.modifiers.secondary()
+                    && event.keystroke.key.eq_ignore_ascii_case("c")
+                {
+                    this.copy_viewed_image(cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.status_strip.viewer().is_some() {
                     if event.keystroke.key == "escape" {
                         this.stop_video();
@@ -9010,6 +9061,7 @@ impl Render for Whatfast {
             .when_some(self.store.toast_info.clone(), |root, info| {
                 root.child(
                     div()
+                        .id("toast-info")
                         .absolute()
                         .bottom_4()
                         .right_4()
@@ -9018,12 +9070,18 @@ impl Render for Whatfast {
                         .rounded_lg()
                         .bg(rgb(0x14532d))
                         .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.store.toast_info = None;
+                            cx.notify();
+                        }))
                         .child(info),
                 )
             })
             .when_some(self.store.toast_error.clone(), |root, error| {
                 root.child(
                     div()
+                        .id("toast-error")
                         .absolute()
                         .bottom_4()
                         .right_4()
@@ -9032,6 +9090,12 @@ impl Render for Whatfast {
                         .rounded_lg()
                         .bg(rgb(0x7f1d1d))
                         .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.store.toast_error = None;
+                            this.toast_error_seen = None;
+                            cx.notify();
+                        }))
                         .child(error),
                 )
             })
@@ -9555,16 +9619,19 @@ fn bubble_tail(color: gpui::Hsla, from_me: bool, scale: f32) -> impl IntoElement
 }
 
 /// The glyphs of the pattern of the background of the conversation.
-fn wallpaper_glyphs() -> Vec<Icon> {
+///
+/// The paths of the assets, not the icons: the wallpaper paints them itself
+/// with one `canvas`, so it does not build an element per glyph.
+fn wallpaper_glyphs() -> Vec<SharedString> {
     vec![
-        Icon::new(WhatfastIcon::Smile),
-        Icon::new(IconName::Heart),
-        Icon::new(IconName::Star),
-        Icon::new(WhatfastIcon::Bell),
-        Icon::new(WhatfastIcon::Clock),
-        Icon::new(WhatfastIcon::Globe),
-        Icon::new(WhatfastIcon::Chat),
-        Icon::new(IconName::Moon),
+        WhatfastIcon::Smile.path(),
+        IconName::Heart.path(),
+        IconName::Star.path(),
+        WhatfastIcon::Bell.path(),
+        WhatfastIcon::Clock.path(),
+        WhatfastIcon::Globe.path(),
+        WhatfastIcon::Chat.path(),
+        IconName::Moon.path(),
     ]
 }
 
