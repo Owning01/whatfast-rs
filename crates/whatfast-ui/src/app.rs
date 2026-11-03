@@ -6606,7 +6606,54 @@ impl Whatfast {
     /// The "typing…" line for a chat, or None when nobody is typing there.
     /// `group` picks the phrasing that names the member.
     pub(crate) fn typing_label(&self, chat_id: &str, group: bool) -> Option<String> {
-        format_typing_label(self.typing_indicators.get(chat_id)?, group, Instant::now())
+        let indicators = self.typing_indicators.get(chat_id)?;
+        format_typing_label(indicators, group, Instant::now(), |sender_id, indicator| {
+            if let Some(name) = self.participant_display_name(chat_id, sender_id) {
+                return name;
+            }
+            // Un jid crudo no es un nombre. Sin agenda, la linea dice
+            // "Someone" en vez de repetir el numero del remitente.
+            let raw = indicator.sender_name.trim();
+            if raw.is_empty() || raw.contains('@') {
+                String::new()
+            } else {
+                raw.to_string()
+            }
+        })
+    }
+
+    /// El nombre visible de un miembro del grupo, con la misma cadena que la
+    /// cabecera de la burbuja: la agenda del grupo, el titulo de su chat y,
+    /// si no hay nombre, nada (el llamador decide el texto).
+    fn participant_display_name(&self, chat_id: &str, sender_id: &str) -> Option<String> {
+        if let Some(participant) = self
+            .mention_directories
+            .get(chat_id)
+            .and_then(|members| {
+                members.iter().find(|m| {
+                    m.participant_id == sender_id
+                        || (!m.phone_number.is_empty() && sender_id.starts_with(&m.phone_number))
+                        || (!m.participant_id.is_empty()
+                            && sender_id.split('@').next()
+                                == m.participant_id.split('@').next())
+                })
+            })
+        {
+            let name = crate::text::mention_display_name(participant);
+            if !name.trim().is_empty() {
+                return Some(name);
+            }
+        }
+        let digits = sender_id.split('@').next().unwrap_or("").trim();
+        if digits.is_empty() {
+            return None;
+        }
+        let chat = self.store.chats.iter().find(|c| {
+            let c_id = c.id.split('@').next().unwrap_or("");
+            !c_id.is_empty() && c_id == digits
+        })?;
+        let title = chat.title.trim();
+        (!title.is_empty()).then(|| title.to_string())
     }
 
     /// Broadcasts the local composing state, re-signalling at most once per

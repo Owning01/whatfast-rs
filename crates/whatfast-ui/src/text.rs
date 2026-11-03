@@ -192,16 +192,20 @@ pub(crate) fn format_typing_label(
     indicators: &HashMap<String, TypingIndicator>,
     group: bool,
     now: Instant,
+    name_of: impl Fn(&str, &TypingIndicator) -> String,
 ) -> Option<String> {
+    // The name of each member is resolved by the caller: the indicator keeps
+    // the id of the sender, and the agenda of the chat decides how it reads.
     let mut indicators = indicators
-        .values()
-        .filter(|indicator| indicator.expires_at > now)
+        .iter()
+        .filter(|(_, indicator)| indicator.expires_at > now)
+        .map(|(sender_id, indicator)| (name_of(sender_id, indicator), indicator.recording))
         .collect::<Vec<_>>();
     if indicators.is_empty() {
         return None;
     }
-    indicators.sort_by_key(|indicator| indicator.sender_name.to_lowercase());
-    let action = if indicators.iter().all(|indicator| indicator.recording) {
+    indicators.sort_by_key(|(name, _)| name.to_lowercase());
+    let action = if indicators.iter().all(|(_, recording)| *recording) {
         "recording audio…"
     } else {
         "typing…"
@@ -211,8 +215,8 @@ pub(crate) fn format_typing_label(
     }
     let names = indicators
         .iter()
-        .map(|indicator| {
-            let name = indicator.sender_name.trim();
+        .map(|(name, _)| {
+            let name = name.trim();
             if name.is_empty() { "Someone" } else { name }
         })
         .collect::<Vec<_>>();
@@ -227,5 +231,45 @@ pub(crate) fn format_typing_label(
             ))
         }
         [] => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn indicator(name: &str, recording: bool, now: Instant) -> TypingIndicator {
+        TypingIndicator {
+            sender_name: name.to_owned(),
+            recording,
+            expires_at: now + Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn the_typing_line_names_the_member_the_caller_resolved() {
+        let now = Instant::now();
+        let mut indicators = HashMap::new();
+        indicators.insert(
+            "193522787418362@lid".to_string(),
+            indicator("193522787418362@lid", false, now),
+        );
+        // The lid of the member is not a name: the caller resolves it and the
+        // line reads like the header of the bubble.
+        let label = format_typing_label(&indicators, true, now, |_, _| "Gatt".to_string());
+        assert_eq!(label.as_deref(), Some("Gatt is typing…"));
+    }
+
+    #[test]
+    fn without_a_name_the_line_does_not_repeat_the_jid() {
+        let now = Instant::now();
+        let mut indicators = HashMap::new();
+        indicators.insert(
+            "193522787418362@lid".to_string(),
+            indicator("193522787418362@lid", false, now),
+        );
+        let label = format_typing_label(&indicators, true, now, |_, _| String::new());
+        assert_eq!(label.as_deref(), Some("Someone is typing…"));
     }
 }

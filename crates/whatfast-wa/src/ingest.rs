@@ -1784,7 +1784,11 @@ pub fn store_receipt(store: &Store, receipt: &Receipt) -> rusqlite::Result<Vec<B
 ///
 /// Nothing is persisted: the indicators are transient and expire on the
 /// desktop side, like the Go's `reduceChatPresence`.
-pub fn store_chat_presence(store: &Store, presence: &ChatPresenceUpdate) -> Option<BackendEvent> {
+pub fn store_chat_presence(
+    store: &Store,
+    identity: &crate::identity::Identity,
+    presence: &ChatPresenceUpdate,
+) -> Option<BackendEvent> {
     // The Go dropped our own presence: another device of this account typing
     // is not a peer state the desktop shows.
     if presence.source.is_from_me {
@@ -1793,6 +1797,27 @@ pub fn store_chat_presence(store: &Store, presence: &ChatPresenceUpdate) -> Opti
     let chat_jid = store
         .resolve_chat_id(&jid_text(&presence.source.chat))
         .unwrap_or_else(|_| jid_text(&presence.source.chat));
+    // In a group the presence arrives under the member's lid, not the phone
+    // number. The map of the session gives the phone jid, which is the id the
+    // chat rows and the desktop use, and the agenda gives the name the
+    // headers already show.
+    let raw_sender = jid_text(&presence.source.sender.to_non_ad());
+    let sender_id = identity
+        .pn_of(&raw_sender)
+        .unwrap_or_else(|| raw_sender.clone());
+    let sender_name = identity
+        .lookup_name(&raw_sender)
+        .map(|(name, _phone)| name)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            store
+                .chat(&sender_id)
+                .ok()
+                .flatten()
+                .map(|chat| chat.display_title())
+                .filter(|title| !title.trim().is_empty())
+        })
+        .unwrap_or_default();
     let (typing, recording) = match presence.state {
         ChatActivity::Typing => (true, false),
         ChatActivity::RecordingAudio => (true, true),
@@ -1804,8 +1829,8 @@ pub fn store_chat_presence(store: &Store, presence: &ChatPresenceUpdate) -> Opti
         event: Some(whatfast_protocol::backend_event::Event::TypingChanged(
             TypingChanged {
                 chat_id: chat_jid,
-                sender_id: jid_text(&presence.source.sender.to_non_ad()),
-                sender_name: presence.source.sender.to_non_ad_string(),
+                sender_id,
+                sender_name,
                 typing,
                 recording,
             },
@@ -1930,7 +1955,9 @@ pub fn apply_event(
             }
         },
         Event::ChatPresence(presence) => (
-            store_chat_presence(store, presence).into_iter().collect(),
+            store_chat_presence(store, identity, presence)
+                .into_iter()
+                .collect(),
             Vec::new(),
         ),
         Event::DeleteMessageForMeUpdate(update) => store_delete_for_me(store, identity, update),
