@@ -3197,3 +3197,25 @@ instalo y la app corre con los ejecutables nuevos (SHA256 igual a `dist\`).
 archivos que estos cambios no tocan. El enlace de devtree sigue fuera del
 commit: sus dependencias por ruta a `G:\Proyectos\devtree` rompen el build en
 otra maquina.
+
+## 2026-11-03 - La linea de "escribiendo" con el nombre del miembro
+
+**Que**: `store_chat_presence` mapea el lid del miembro a su jid de telefono
+(`identity::pn_of`) y resuelve el nombre en la agenda o en el titulo del chat;
+la interfaz resuelve el nombre con la misma cadena que la cabecera de la
+burbuja y, si no hay, dice "Someone" (`af5effb`).
+
+**Por que**: en un grupo la presencia llega con `...@lid` y el sidecar mandaba
+ese jid como `sender_name`: la linea mostraba `193522787418362@lid is typing...`.
+
+**Evidencia**: `cargo test -p whatfast-wa -p whatfast-ui` da 96 + 49 y 325 en
+verde, con `the_typing_line_names_the_member_the_caller_resolved` y
+`without_a_name_the_line_does_not_repeat_the_jid`. El release se instalo; la app
+toma el build nuevo al reiniciar.
+
+**Trampas**: el enlace local de devtree (`devtree_enlace.rs`, el `mod` de
+`main.rs` y las tres dependencias por ruta) se perdio: vivia solo en el arbol de
+trabajo y las copias temporales se borraron al reiniciar el servidor. Los crates
+de `G:\Proyectos\devtree` siguen intactos; el enlace hay que rehacerlo. Quedan
+`whatfast.old.exe` y `whatfast-backend.old.exe` en la carpeta instalada hasta
+que se cierre la app.
