@@ -851,6 +851,9 @@ pub(crate) struct Whatfast {
     /// video is not there, when it is not.
     pub(crate) call_video: crate::call_video::CallVideo,
     pub(crate) composer: Entity<InputState>,
+    /// El cache de las imagenes decodificadas. GPUI guarda todas para
+    /// siempre: un sticker animado son cientos de cuadros de 512×512.
+    pub(crate) images: Entity<crate::image_cache::BoundedImageCache>,
     /// The pictures that the user pasted or picked and that wait for the
     /// button of the send, the same way the reference shows them over the
     /// field of the message.
@@ -1195,6 +1198,7 @@ impl Whatfast {
                 .submit_on_enter(false)
                 .clean_on_escape()
         });
+        let images = crate::image_cache::BoundedImageCache::new(cx);
         let emoji_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search emoji")));
         let chat_search_input = cx.new(|cx| {
@@ -1611,6 +1615,7 @@ impl Whatfast {
             forward_picker: None,
             poll_composer: None,
             attachment_bar,
+            images,
             _subscriptions,
         };
         // El icono de la bandeja: cerrar la ventana la esconde y la
@@ -2456,6 +2461,20 @@ impl Whatfast {
                     self.return_failed_image(&image_path);
                 }
                 _ => {}
+            }
+            if matches!(
+                &pending,
+                PendingRequest::SendSticker | PendingRequest::SendStickerFromLibrary { .. }
+            ) {
+                self.store.toast_error = Some(
+                    if error.code == "not_found" {
+                        i18n::t("That sticker is no longer available")
+                    } else {
+                        i18n::t("The sticker could not be sent. Try again.")
+                    }
+                    .into(),
+                );
+                return;
             }
             if matches!(&pending, PendingRequest::RepairRecentReactions { .. })
                 && error.code == "not_found"

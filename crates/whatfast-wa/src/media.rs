@@ -1116,6 +1116,14 @@ pub(crate) async fn fetch_favorite_sticker(
         return Ok(path);
     }
 
+    // An older download may have left the file under another name; the
+    // library shows it from that path, so sending has to accept it too.
+    if !fav.local_path.is_empty()
+        && std::fs::metadata(&fav.local_path).is_ok_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(fav.local_path.clone());
+    }
+
     if fav.direct_path.is_empty() || fav.media_key.len() != 32 || fav.file_enc_sha256.len() != 32 {
         return Err((
             "not_found".into(),

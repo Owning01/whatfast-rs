@@ -1049,6 +1049,91 @@ impl RpcClient {
     }
 }
 
+/// The Windows job that owns the sidecar.
+///
+/// The backend is a child of this process, but a crash or a kill from the
+/// Task Manager does not run the destructor that asks it to stop. A job with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` closes with the process, and Windows
+/// ends every process of the job at that moment. Hiding the window in the
+/// tray keeps the app alive, so the job is untouched until the real exit.
+#[cfg(windows)]
+mod backend_job {
+    use std::{ffi::c_void, mem::size_of, sync::OnceLock};
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::{
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+            Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+        },
+    };
+
+    /// The handle of the job, or zero when Windows refused to create it.
+    static JOB: OnceLock<isize> = OnceLock::new();
+
+    fn job() -> Option<HANDLE> {
+        let handle = *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if configured == 0 {
+                CloseHandle(job);
+                return 0;
+            }
+            job as isize
+        });
+        (handle != 0).then_some(handle as HANDLE)
+    }
+
+    /// Puts the sidecar in the job. Best effort: a refusal only loses the
+    /// guarantee of a crash, not the backend.
+    pub(super) fn adopt(child: &std::process::Child) -> bool {
+        let Some(job) = job() else {
+            return false;
+        };
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, child.id()) };
+        if process.is_null() {
+            return false;
+        }
+        let assigned = unsafe { AssignProcessToJobObject(job, process) } != 0;
+        unsafe {
+            CloseHandle(process);
+        }
+        assigned
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_backend_joins_the_job_of_the_app() {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("the child starts");
+            assert!(adopt(&child));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Spawn the Go sidecar and hand the process over to the transport.
 ///
 /// port: the origin did this inside its `bridge.rs`, with the same flags and
@@ -1076,6 +1161,10 @@ fn spawn_backend() -> Result<transport::BackendClient> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("start backend {}", executable.display()))?;
+    // El backend no puede sobrevivir a esta aplicacion, ni siquiera cuando el
+    // proceso muere sin pasar por el `Drop` que le pide apagarse.
+    #[cfg(windows)]
+    let _ = backend_job::adopt(&child);
     Ok(transport::BackendClient::from_child(child)?)
 }
 

@@ -2308,20 +2308,31 @@ impl Store {
     pub fn recent_sticker_messages(
         &self,
         limit: u32,
+        only_sent: bool,
     ) -> rusqlite::Result<Vec<StickerCandidateRow>> {
         let limit = if limit == 0 || limit > 5000 {
             2000
         } else {
             limit
         };
+        // The recent pack only wants the stickers this account sent, and the
+        // caller can ask for them without walking every incoming one.
+        let query = if only_sent {
+            "SELECT chat_jid,id,from_me,timestamp,image_mime,image_file_sha256,
+                    image_width,image_height,image_animated,image_local_path
+             FROM messages
+             WHERE kind='sticker' AND revoked=0 AND from_me<>0
+                   AND image_file_sha256<>X''
+             ORDER BY timestamp DESC,id DESC LIMIT ?1"
+        } else {
+            "SELECT chat_jid,id,from_me,timestamp,image_mime,image_file_sha256,
+                    image_width,image_height,image_animated,image_local_path
+             FROM messages
+             WHERE kind='sticker' AND revoked=0 AND image_file_sha256<>X''
+             ORDER BY timestamp DESC,id DESC LIMIT ?1"
+        };
         self.read(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT chat_jid,id,from_me,timestamp,image_mime,image_file_sha256,
-                        image_width,image_height,image_animated,image_local_path
-                 FROM messages
-                 WHERE kind='sticker' AND revoked=0 AND image_file_sha256<>X''
-                 ORDER BY timestamp DESC,id DESC LIMIT ?1",
-            )?;
+            let mut statement = conn.prepare(query)?;
             let rows = statement
                 .query_map(params![limit], |row| {
                     let digest: Vec<u8> = row.get(5)?;

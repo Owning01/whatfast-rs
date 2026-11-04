@@ -23,6 +23,8 @@ embed-resource = "3.0.11"
 anyhow.workspace = true
 mimalloc.workspace = true
 async-channel.workspace = true
+# El cache de imagenes comparte la tarea de decodificacion entre dibujos.
+futures = "0.3"
 whatfast-core = { path = "../whatfast-core" }
 whatfast-i18n = { path = "../whatfast-i18n" }
 # The catalog of the agent harnesses and the registration of the server in the
@@ -96,6 +98,7 @@ raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",

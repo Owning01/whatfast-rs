@@ -6566,6 +6566,7 @@ impl Whatfast {
             );
 
         let picture = img(PathBuf::from(path.clone()))
+            .id("image-viewer-picture")
             .w(picture_width)
             .h(picture_height)
             .object_fit(ObjectFit::Contain)
@@ -7780,6 +7781,7 @@ impl Whatfast {
                             };
                             container.child(
                                 img(PathBuf::from(image_path.clone()))
+                                    .id(("message-image-element", index))
                                     .size_full()
                                     .object_fit(fit)
                                     .with_loading(move || {
@@ -8797,6 +8799,10 @@ impl Render for Whatfast {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
+            // El cache de las imagenes vive en la raiz: todo lo que se pinta
+            // debajo comparte el presupuesto y los stickers animados se
+            // descartan cuando dejan de verse.
+            .image_cache(self.images.clone())
             // El emoji que la fuente de la interfaz no tiene se pinta con la
             // del telefono: el corazon, la carita y la bandera son los de
             // WhatsApp, no los de Windows.

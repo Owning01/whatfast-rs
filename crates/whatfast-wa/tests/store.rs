@@ -792,6 +792,30 @@ fn sticker_lookup_skips_revoked_rows() {
 }
 
 #[test]
+fn the_sticker_pages_split_sent_and_received() {
+    let (_dir, store) = temp_store("sticker-page");
+    store.ensure_chat("a@x", "a@x").unwrap();
+
+    let mut received = message("a@x", "s1", 100, false, "");
+    received.kind = "sticker".into();
+    received.image_file_sha256 = vec![0x11u8; 32];
+    store.insert_message(&received).unwrap();
+
+    let mut sent = message("a@x", "s2", 200, true, "");
+    sent.kind = "sticker".into();
+    sent.image_file_sha256 = vec![0x22u8; 32];
+    store.insert_message(&sent).unwrap();
+
+    let all = store.recent_sticker_messages(10, false).unwrap();
+    assert_eq!(all.len(), 2);
+
+    let recent = store.recent_sticker_messages(10, true).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert!(recent[0].from_me);
+    assert_eq!(recent[0].message_id, "s2");
+}
+
+#[test]
 fn resolve_chat_prefers_a_live_chat_over_a_stale_redirect() {
     let (_dir, store) = temp_store("resolve");
     store.ensure_chat("live@x", "live@x").unwrap();

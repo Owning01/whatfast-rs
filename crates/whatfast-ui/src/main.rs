@@ -73,6 +73,7 @@ mod emoji_recent;
 mod harness_logos;
 mod helpers;
 mod icons;
+mod image_cache;
 mod instance;
 mod local_time;
 mod media_editor;

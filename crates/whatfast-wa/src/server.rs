@@ -1438,28 +1438,38 @@ impl Server {
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
-                let source = self
-                    .store
-                    .message_by_sticker_id(&request.sticker_id)?
-                    .ok_or_else(|| {
-                        Failure::fatal(
-                            "invalid_argument",
-                            "sticker_id was not found in the library",
+                // A library sticker normally replays the wire bytes of its
+                // stored message. The favourites synced from another device
+                // have no row in this database, only a cached file: those are
+                // uploaded again, which is the only way to send them.
+                let row = match self.store.message_by_sticker_id(&request.sticker_id)? {
+                    Some((source_chat, source_message)) => {
+                        match crate::send::forward_message(
+                            &session,
+                            &self.store,
+                            &source_chat,
+                            &source_message,
+                            &request.chat_id,
                         )
-                    })?;
-                let row = crate::send::forward_message(
-                    &session,
-                    &self.store,
-                    &source.0,
-                    &source.1,
-                    &request.chat_id,
-                )
-                .await
-                .map_err(|(code, message, retryable)| Failure {
-                    code,
-                    message,
-                    retryable,
-                })?;
+                        .await
+                        {
+                            Ok(row) => row,
+                            Err((code, message, retryable)) if !retryable => {
+                                // A row without wire bytes cannot be
+                                // forwarded; the file of the favourite still
+                                // can be sent.
+                                match self.send_favorite_sticker(&session, &request).await {
+                                    Ok(row) => row,
+                                    Err(_) => return Err(Failure { code, message, retryable }),
+                                }
+                            }
+                            Err((code, message, retryable)) => {
+                                return Err(Failure { code, message, retryable });
+                            }
+                        }
+                    }
+                    None => self.send_favorite_sticker(&session, &request).await?,
+                };
                 Ok(Handled {
                     result: rpc_response::Result::SendStickerFromLibrary(
                         whatfast_protocol::SendStickerFromLibraryResponse {
@@ -2461,6 +2471,75 @@ impl Server {
             .collect())
     }
 
+    /// The cached file of one favourite sticker, when it is already on disk.
+    ///
+    /// The favourites that another device synced have no message row in this
+    /// database; the file is the only copy the account can send from.
+    fn favorite_sticker_file(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        let Some(favorite) = self.store.favorite_sticker(id)? else {
+            return Ok(None);
+        };
+        let target = self.media_dir.join(format!("fav-{}.webp", favorite.id));
+        if target
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+        {
+            return Ok(Some(target.to_string_lossy().into_owned()));
+        }
+        if !favorite.local_path.is_empty()
+            && std::fs::metadata(&favorite.local_path).is_ok_and(|metadata| metadata.len() > 0)
+        {
+            return Ok(Some(favorite.local_path));
+        }
+        Ok(None)
+    }
+
+    /// Sends a favourite sticker whose stored message is gone: the cached
+    /// file is fetched if it is missing, then uploaded like a new sticker.
+    ///
+    /// The favourites that another device synced have only a descriptor and a
+    /// cached file; there is no message row to replay, so forwarding them can
+    /// never work.
+    async fn send_favorite_sticker(
+        &self,
+        session: &Session,
+        request: &whatfast_protocol::SendStickerFromLibraryRequest,
+    ) -> Result<crate::db::MessageRow, Failure> {
+        let path = match self.favorite_sticker_file(&request.sticker_id)? {
+            Some(path) => path,
+            None => crate::media::fetch_favorite_sticker(
+                session,
+                &self.store,
+                &self.media_dir,
+                &request.sticker_id,
+            )
+            .await
+            .map_err(|(code, message, retryable)| Failure {
+                code,
+                message,
+                retryable,
+            })?,
+        };
+        let webp_data = std::fs::read(&path).map_err(|error| {
+            Failure::fatal("not_found", format!("reading the cached sticker: {error}"))
+        })?;
+        crate::media::send_sticker(
+            session,
+            &self.store,
+            &request.client_message_id,
+            &request.chat_id,
+            &webp_data,
+            &request.reply_to_message_id,
+            &request.reply_to_chat_id,
+        )
+        .await
+        .map_err(|(code, message, retryable)| Failure {
+            code,
+            message,
+            retryable,
+        })
+    }
+
     /// The sticker library, the three packs the Go `StickerLibrary` answered:
     /// the synced favourites, the account's own recent sends, and every
     /// sticker message still in local history.
@@ -2508,29 +2587,41 @@ impl Server {
                 }
             })
             .collect();
-        let candidates = self.store.recent_sticker_messages(0)?;
+        // Cada pack pide solo lo suyo: recorrer todas las filas para llenar
+        // los dos costaba miles de `exists()` y congelaba el loop.
+        let candidates = self
+            .store
+            .recent_sticker_messages(STICKER_PACK_LIMIT as u32, false)?;
+        let recent = self
+            .store
+            .recent_sticker_messages(STICKER_PACK_LIMIT as u32, true)?;
         let mut all_pack = Vec::with_capacity(candidates.len().min(STICKER_PACK_LIMIT));
-        let mut recent_pack = Vec::with_capacity(candidates.len().min(STICKER_PACK_LIMIT));
+        let mut recent_pack = Vec::with_capacity(recent.len().min(STICKER_PACK_LIMIT));
         for candidate in &candidates {
-            if all_pack.len() >= STICKER_PACK_LIMIT && recent_pack.len() >= STICKER_PACK_LIMIT {
+            if all_pack.len() >= STICKER_PACK_LIMIT {
                 break;
             }
+            if all_pack
+                .iter()
+                .any(|sticker: &whatfast_protocol::Sticker| sticker.id == candidate.id)
+            {
+                continue;
+            }
             let favorite = favorite_ids.contains(&candidate.id.as_str());
-            if all_pack.len() < STICKER_PACK_LIMIT
-                && !all_pack
-                    .iter()
-                    .any(|sticker: &whatfast_protocol::Sticker| sticker.id == candidate.id)
-            {
-                all_pack.push(self.sticker_candidate(candidate, favorite));
+            all_pack.push(self.sticker_candidate(candidate, favorite));
+        }
+        for candidate in &recent {
+            if recent_pack.len() >= STICKER_PACK_LIMIT {
+                break;
             }
-            if candidate.from_me
-                && recent_pack.len() < STICKER_PACK_LIMIT
-                && !recent_pack
-                    .iter()
-                    .any(|sticker: &whatfast_protocol::Sticker| sticker.id == candidate.id)
+            if recent_pack
+                .iter()
+                .any(|sticker: &whatfast_protocol::Sticker| sticker.id == candidate.id)
             {
-                recent_pack.push(self.sticker_candidate(candidate, favorite));
+                continue;
             }
+            let favorite = favorite_ids.contains(&candidate.id.as_str());
+            recent_pack.push(self.sticker_candidate(candidate, favorite));
         }
         Ok(vec![
             whatfast_protocol::StickerPack {
@@ -2558,21 +2649,26 @@ impl Server {
         candidate: &crate::db::StickerCandidateRow,
         favorite: bool,
     ) -> whatfast_protocol::Sticker {
-        let cached = crate::media::cached_media_path(
-            &self.media_dir,
-            &candidate.chat_jid,
-            &candidate.message_id,
-            &candidate.mime,
-            "",
-        );
-        let local_path = if cached.exists() && cached.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            cached.to_string_lossy().into_owned()
-        } else if !candidate.local_path.is_empty()
+        // El camino que ya guardo la descarga se prueba primero: casi todas
+        // las filas lo tienen, y el `exists()` del camino calculado solo se
+        // paga cuando falta.
+        let local_path = if !candidate.local_path.is_empty()
             && std::path::Path::new(&candidate.local_path).exists()
         {
             candidate.local_path.clone()
         } else {
-            String::new()
+            let cached = crate::media::cached_media_path(
+                &self.media_dir,
+                &candidate.chat_jid,
+                &candidate.message_id,
+                &candidate.mime,
+                "",
+            );
+            if cached.exists() && cached.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                cached.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            }
         };
         whatfast_protocol::Sticker {
             id: candidate.id.clone(),
@@ -2637,7 +2733,7 @@ impl Server {
                 }
             }
 
-            if let Ok(candidates) = store.recent_sticker_messages(60) {
+            if let Ok(candidates) = store.recent_sticker_messages(60, false) {
                 for candidate in candidates {
                     let cached = crate::media::cached_media_path(
                         &media_dir,
@@ -3891,6 +3987,71 @@ fn poll_creation(
 #[cfg(test)]
 mod tests {
     use super::{is_uuid, newsletter_invite_key, valid_reaction_emoji};
+    use std::sync::Arc;
+
+    /// A server on a throwaway profile. The directory stays behind: Windows
+    /// keeps the handle of the database open until the test process ends.
+    fn temporary_server(label: &str) -> (std::path::PathBuf, super::Server) {
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-server-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after the epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("media")).expect("the profile directory is created");
+        let store = crate::db::Store::open(&dir.join("chats.db")).expect("the store opens");
+        let (events, _) = async_channel::unbounded();
+        (dir.clone(), super::Server::new(dir, Arc::new(store), events))
+    }
+
+    /// The favourites synced from the phone have a descriptor and a cached
+    /// file, but no message row of their own. Before this, sending one was
+    /// refused as "not found in the library".
+    #[test]
+    fn a_favourite_without_a_message_is_sent_from_its_cached_file() {
+        let (dir, server) = temporary_server("favourite-file");
+        let cached = dir.join("media").join("fav-abc.webp");
+        std::fs::write(&cached, b"RIFF").expect("the cached file is written");
+        server
+            .store
+            .upsert_favorite_sticker(&crate::db::FavoriteStickerRow {
+                id: "abc".into(),
+                mime: "image/webp".into(),
+                direct_path: "https://example.invalid/sticker".into(),
+                media_key: vec![0; 32],
+                file_enc_sha256: vec![0; 32],
+                width: 512,
+                height: 512,
+                animated: true,
+                file_size: 4,
+                local_path: String::new(),
+                updated_at: 1,
+            })
+            .expect("the favourite is stored");
+
+        assert!(
+            server
+                .store
+                .message_by_sticker_id("abc")
+                .expect("the lookup succeeds")
+                .is_none(),
+            "the favourite has no message row to replay"
+        );
+        assert_eq!(
+            server
+                .favorite_sticker_file("abc")
+                .expect("the lookup succeeds"),
+            Some(cached.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            server
+                .favorite_sticker_file("missing")
+                .expect("the lookup succeeds"),
+            None
+        );
+    }
 
     #[test]
     fn only_canonical_uuids_pass() {

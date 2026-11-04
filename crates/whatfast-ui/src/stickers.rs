@@ -341,28 +341,10 @@ impl StickerTray {
             .iter()
             .filter(|sticker| sticker_matches(sticker, query))
             .collect::<Vec<_>>();
-        let missing: Vec<(String, String)> = stickers
-            .iter()
-            .take(100)
-            .filter(|s| {
-                s.local_path.is_empty()
-                    && !s.source_chat_id.is_empty()
-                    && !s.source_message_id.is_empty()
-            })
-            .map(|s| (s.source_chat_id.clone(), s.source_message_id.clone()))
-            .collect();
-        if !missing.is_empty() {
-            cx.spawn(async move |weak, cx| {
-                weak.update(cx, |app, cx| {
-                    for (chat_id, message_id) in missing {
-                        app.load_message_image(chat_id, message_id);
-                    }
-                    cx.notify();
-                })
-                .ok();
-            })
-            .detach();
-        }
+        // La descarga de los stickers la hace el sidecar en segundo plano
+        // (`ListStickers` arranca el prefetch) y avisa con `StickersChanged`.
+        // Pedir cien imagenes desde la rejilla saturaba el loop del backend:
+        // cada descarga fallida lo retenia segundos y todo lo demas vencia.
         h_flex()
             .id("sticker-grid")
             .flex_1()
@@ -396,6 +378,9 @@ impl StickerTray {
                     .child(match path {
                         Some(path) => div().child(
                             img(path)
+                                // La rejilla se queda en el primer cuadro: son
+                                // cientos de celdas y animarlas todas cuesta
+                                // CPU y memoria. El chat y el visor si animan.
                                 .size(px((CELL_SIZE - 2. * CELL_PADDING) * scale))
                                 .object_fit(ObjectFit::Contain),
                         ),
