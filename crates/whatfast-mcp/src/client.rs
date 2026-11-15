@@ -18,11 +18,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{Receiver, Sender, bounded, unbounded};
 use tokio::io::AsyncWriteExt as _;
 use whatfast_protocol::{
-    Envelope, HelloRequest, ReconnectRequest, RpcError, RpcRequest, ShutdownRequest, envelope,
-    local, rpc_request, rpc_response::Result as RpcResult, transport::PROTOCOL_VERSION,
+    Envelope, HelloRequest, ReconnectRequest, RpcError, RpcRequest, ShutdownRequest,
+    backend_event, envelope, local, rpc_request, rpc_response::Result as RpcResult,
+    transport::PROTOCOL_VERSION,
 };
 
 use crate::IDLE_EXIT;
@@ -112,6 +113,7 @@ pub struct Client {
 struct Connection {
     outgoing: Sender<Envelope>,
     answers: Receiver<Envelope>,
+    events: Receiver<()>,
 }
 
 impl Client {
@@ -215,6 +217,24 @@ impl Client {
         }
     }
 
+    /// Clears any queued message-wake signal before waiting for the next event.
+    pub fn drain_events(&self) {
+        if let Some(connection) = self.connection.as_ref() {
+            while connection.events.try_recv().is_ok() {}
+        }
+    }
+
+    /// Waits up to `timeout` for a push event from the backend (e.g. a new message).
+    pub fn wait_event(&self, timeout: Duration) -> bool {
+        let Some(connection) = self.connection.as_ref() else {
+            thread::sleep(timeout);
+            return false;
+        };
+        let events = connection.events.clone();
+        self.runtime
+            .block_on(async move { tokio::time::timeout(timeout, events.recv()).await.is_ok() })
+    }
+
     /// Stops the backend this process started, if it started one.
     ///
     /// A backend that was already running belongs to the application: the
@@ -295,6 +315,7 @@ impl Client {
     async fn connect(&self) -> Result<Connection, Error> {
         let (outgoing, queue) = unbounded::<Envelope>();
         let (frames, answers) = unbounded::<Envelope>();
+        let (event_tx, events) = bounded::<()>(1);
         #[cfg(windows)]
         let stream = {
             use tokio::net::windows::named_pipe::ClientOptions;
@@ -306,8 +327,13 @@ impl Client {
         let stream = tokio::net::UnixStream::connect(&self.endpoint)
             .await
             .map_err(open_error)?;
-        self.runtime.spawn(hold_stream(stream, queue, frames));
-        let connection = Connection { outgoing, answers };
+        self.runtime
+            .spawn(hold_stream(stream, queue, frames, event_tx));
+        let connection = Connection {
+            outgoing,
+            answers,
+            events,
+        };
         self.handshake(&connection).await?;
         self.welcome(&connection).await?;
         Ok(connection)
@@ -418,8 +444,12 @@ impl Client {
 
 /// Owns one stream: takes the queued requests out, writes them, and forwards
 /// the answers back. One operation at a time, on purpose (see the module).
-async fn hold_stream<S>(mut stream: S, queue: Receiver<Envelope>, answers: Sender<Envelope>)
-where
+async fn hold_stream<S>(
+    mut stream: S,
+    queue: Receiver<Envelope>,
+    answers: Sender<Envelope>,
+    event_tx: Sender<()>,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     loop {
@@ -435,6 +465,16 @@ where
             },
             answer = read_answer(&mut stream) => match answer {
                 Ok(Some(envelope)) => {
+                    if let Some(envelope::Body::Event(ref ev)) = envelope.body {
+                        if matches!(
+                            ev.event,
+                            Some(backend_event::Event::MessageUpserted(_))
+                                | Some(backend_event::Event::ChatUpserted(_))
+                        ) {
+                            let _ = event_tx.try_send(());
+                        }
+                        continue;
+                    }
                     if answers.send(envelope).await.is_err() {
                         break;
                     }

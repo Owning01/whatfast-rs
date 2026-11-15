@@ -308,10 +308,17 @@ async fn serve(
                 Err(_) => break Stop::IncomingClosed,
             },
             // The desk is closed and the profile has an agent: the tasks that
-            // came due run on their own, and leave their answer as a draft.
+            // came due run on their own, and deliver their answer the way the
+            // task says (a draft, or the message itself).
             _ = schedule_timer.tick(), if guard.is_some() => {
                 if let Some(guard) = guard.as_ref() {
-                    let started = scheduler::dispatch(guard, &chats_db, now_ms() as i64);
+                    let started = scheduler::dispatch(
+                        guard,
+                        &chats_db,
+                        srv.session(),
+                        &srv.events(),
+                        now_ms() as i64,
+                    );
                     if started > 0 {
                         tracing::info!("{started} automations started");
                     }

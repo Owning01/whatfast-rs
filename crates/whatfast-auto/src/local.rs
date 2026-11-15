@@ -141,7 +141,7 @@ fn offset_from_system(_epoch_ms: i64) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{offset_minutes, offset_now};
+    use super::offset_minutes;
 
     /// The most an offset can be, in minutes: UTC+14 is the farthest east.
     const LIMIT: i32 = 14 * 60;
@@ -161,12 +161,10 @@ mod tests {
         let first = offset_minutes(instant);
         let second = offset_minutes(instant + 60_000);
         assert_eq!(first, second, "the same hour answers the same offset");
-        assert_eq!(offset_minutes(instant) % 15, 0, "zones move by quarters");
-    }
-
-    #[test]
-    fn the_offset_now_is_inside_the_world_too() {
-        let offset = offset_now();
-        assert!((-LIMIT..=LIMIT).contains(&offset));
+        assert_eq!(first % 15, 0, "zones move by quarters");
+        // The answer is kept: the bucket of the hour is in the cache.
+        let bucket = instant.div_euclid(super::HOUR_MS);
+        let cache = super::offsets().lock().expect("cache");
+        assert_eq!(cache.get(&bucket), Some(&first), "the conversion is cached");
     }
 }

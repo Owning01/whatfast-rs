@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn two_instants_of_the_same_hour_have_the_same_offset() {
-        let base = 1_700_000_000_000;
+        let base = 472_222 * 3_600_000;
         assert_eq!(
             local_offset_minutes(base),
             local_offset_minutes(base + 3_599_999)

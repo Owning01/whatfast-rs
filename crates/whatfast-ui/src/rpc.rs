@@ -88,6 +88,10 @@ pub(crate) enum PendingRequest {
     ChatInfo {
         chat_id: String,
     },
+    ChatMedia {
+        chat_id: String,
+        category: String,
+    },
     MentionDirectory {
         chat_id: String,
     },
@@ -274,6 +278,12 @@ pub(crate) enum PendingRequest {
     ScheduleRemove {
         id: i64,
     },
+    /// The card the composer shows while the user types: the desktop asks
+    /// for the first link of its draft. A late answer is thrown away when
+    /// the draft already points at another link.
+    LinkPreview {
+        url: String,
+    },
 }
 
 impl PendingRequest {
@@ -298,6 +308,7 @@ impl PendingRequest {
             | Self::Avatar { .. }
             | Self::ParticipantAvatar { .. }
             | Self::ChatInfo { .. }
+            | Self::ChatMedia { .. }
             | Self::MentionDirectory { .. }
             | Self::MessageImage { .. }
             | Self::SyncStatus
@@ -311,7 +322,8 @@ impl PendingRequest {
             | Self::Statuses
             | Self::Newsletters
             | Self::NewsletterMessages { .. }
-            | Self::Schedules => RequestClass::Read,
+            | Self::Schedules
+            | Self::LinkPreview { .. } => RequestClass::Read,
             Self::Pairing
             | Self::SetTyping
             | Self::SendText { .. }
@@ -459,8 +471,8 @@ pub(crate) struct RpcClient {
     backend: Backend,
     /// The mechanics: the ids and the deadlines.
     tracker: RequestTracker,
-    /// The meaning: what each request that is still in flight is waiting for.
-    pending: HashMap<u64, PendingRequest>,
+    /// The meaning: what each request that is still in flight is waiting for, plus start time for RTT.
+    pending: HashMap<u64, (PendingRequest, Instant)>,
     /// The instant the deadlines are measured from.
     epoch: Instant,
 }
@@ -522,7 +534,7 @@ impl RpcClient {
         pending: PendingRequest,
     ) -> Result<u64> {
         let request_id = self.tracker.begin(pending.class(), self.epoch.elapsed())?;
-        self.pending.insert(request_id, pending);
+        self.pending.insert(request_id, (pending, Instant::now()));
         if let Err(error) = self.backend.send(request_id, request) {
             // A request that could not be queued is not pending anymore.
             self.tracker.complete(request_id);
@@ -662,6 +674,17 @@ impl RpcClient {
         self.send(
             rpc_request::Request::ListStickers(whatfast_protocol::ListStickersRequest {}),
             PendingRequest::Stickers,
+        )
+    }
+
+    /// The card of one link of the draft, so the composer can draw it before
+    /// the send. A page without a card answers empty, which is not an error.
+    pub(crate) fn request_link_preview(&mut self, url: String) -> Result<u64> {
+        self.send(
+            rpc_request::Request::GetLinkPreview(whatfast_protocol::GetLinkPreviewRequest {
+                url: url.clone(),
+            }),
+            PendingRequest::LinkPreview { url },
         )
     }
 
@@ -1001,9 +1024,9 @@ impl RpcClient {
                 self.tracker.complete(request_id);
                 self.pending
                     .remove(&request_id)
-                    .map_or(RpcIncoming::Ignore, |pending| RpcIncoming::Response {
-                        pending,
-                        response,
+                    .map_or(RpcIncoming::Ignore, |(pending, sent_at)| {
+                        crate::dev_stats::record_rpc_rtt_ms(sent_at.elapsed().as_millis() as u64);
+                        RpcIncoming::Response { pending, response }
                     })
             }
             Some(envelope::Body::Event(event)) if request_id == 0 => RpcIncoming::Event(event),
@@ -1019,14 +1042,14 @@ impl RpcClient {
             .filter_map(|(request_id, _)| {
                 self.pending
                     .remove(&request_id)
-                    .map(|pending| (request_id, pending))
+                    .map(|(pending, _)| (request_id, pending))
             })
             .collect()
     }
 
     /// The requests that are still in flight.
     pub(crate) fn pending_requests(&self) -> impl Iterator<Item = &PendingRequest> {
-        self.pending.values()
+        self.pending.values().map(|(req, _)| req)
     }
 
     /// How many media downloads are in flight.
@@ -1189,180 +1212,152 @@ fn backend_executable() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The class of a request decides its deadline: a read that waits for
-    /// the backend and an upload of a big file cannot share one.
+    /// The class of a request decides its deadline: a read that waits for the
+    /// backend, a write that reaches WhatsApp and a file of the cache cannot
+    /// share one.
     #[test]
     fn the_new_reads_have_the_deadline_of_the_reads() {
-        assert_eq!(PendingRequest::SyncStatus.class(), RequestClass::Read);
-        assert_eq!(
-            PendingRequest::OlderHistory {
-                chat_id: "chat".into()
-            }
-            .class(),
-            RequestClass::Read
-        );
-        assert_eq!(
-            PendingRequest::HistoryCoverage {
-                chat_id: "chat".into()
-            }
-            .class(),
-            RequestClass::Read
-        );
-        assert_eq!(PendingRequest::HistoryOverview.class(), RequestClass::Read);
-        assert_eq!(PendingRequest::IntegrityStatus.class(), RequestClass::Read);
-        assert_eq!(PendingRequest::Stickers.class(), RequestClass::Read);
-        assert_eq!(
-            PendingRequest::PinnedMessages {
-                chat_id: "chat".into()
-            }
-            .class(),
-            RequestClass::Read
-        );
-        assert_eq!(PendingRequest::Statuses.class(), RequestClass::Read);
-        assert_eq!(PendingRequest::Newsletters.class(), RequestClass::Read);
-        assert_eq!(
-            PendingRequest::NewsletterMessages { jid: "jid".into() }.class(),
-            RequestClass::Read
-        );
-    }
-
-    /// The class of a request decides its deadline: a write that reaches
-    /// WhatsApp waits longer than a read.
-    #[test]
-    fn the_new_writes_have_the_deadline_of_the_writes() {
-        assert_eq!(
-            PendingRequest::RepairLocalCache.class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SendStickerFromLibrary {
-                chat_id: "chat".into(),
-                sticker_id: "sticker".into(),
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::ForwardMessage {
-                source_chat_id: "chat".into(),
-                message_id: "message".into(),
-                target_chat_id: "other".into(),
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::EditMessage {
-                chat_id: "chat".into(),
-                message_id: "message".into(),
-                draft_text: "text".into(),
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::DeleteMessage {
-                chat_id: "chat".into(),
-                message_id: "message".into(),
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SetMessagePin {
-                chat_id: "chat".into(),
-                message_id: "message".into(),
-                generation: 1,
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::CreatePoll {
-                chat_id: "chat".into()
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::VotePoll {
-                chat_id: "chat".into(),
-                poll_message_id: "message".into(),
-                generation: 1,
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SubscribeNewsletter.class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::UnsubscribeNewsletter { jid: "jid".into() }.class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SetChatPin {
-                chat_id: "chat".into(),
-                previous_pinned: false,
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SetChatArchive {
-                chat_id: "chat".into(),
-                previous_archived: false,
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SetChatMute {
-                chat_id: "chat".into(),
-                previous_muted: false,
-                previous_mute_until_ms: 0,
-            }
-            .class(),
-            RequestClass::Write
-        );
-        assert_eq!(
-            PendingRequest::SetChatBlock {
-                chat_id: "chat".into(),
-                previous_blocked: false,
-            }
-            .class(),
-            RequestClass::Write
-        );
-    }
-
-    /// The two requests that drive the sidecar itself are the ones with the
-    /// shortest deadline.
-    #[test]
-    fn the_new_controls_have_the_deadline_of_the_controls() {
-        assert_eq!(PendingRequest::Reconnect.class(), RequestClass::Control);
-        assert_eq!(PendingRequest::Shutdown.class(), RequestClass::Control);
-    }
-
-    /// A file that goes in or out of the local cache has the deadline of the
-    /// attachments, which is the only one long enough for a big file.
-    #[test]
-    fn the_new_attachments_have_the_deadline_of_the_attachments() {
-        assert_eq!(
-            PendingRequest::SendAttachment {
-                chat_id: "chat".into()
-            }
-            .class(),
-            RequestClass::Attachment
-        );
-        assert_eq!(
-            PendingRequest::MessageAttachment {
-                chat_id: "chat".into(),
-                message_id: "message".into(),
-            }
-            .class(),
-            RequestClass::Attachment
-        );
+        let cases: [(PendingRequest, RequestClass); 29] = [
+            (PendingRequest::SyncStatus, RequestClass::Read),
+            (
+                PendingRequest::OlderHistory {
+                    chat_id: "chat".into(),
+                },
+                RequestClass::Read,
+            ),
+            (
+                PendingRequest::HistoryCoverage {
+                    chat_id: "chat".into(),
+                },
+                RequestClass::Read,
+            ),
+            (PendingRequest::HistoryOverview, RequestClass::Read),
+            (PendingRequest::IntegrityStatus, RequestClass::Read),
+            (PendingRequest::Stickers, RequestClass::Read),
+            (
+                PendingRequest::PinnedMessages {
+                    chat_id: "chat".into(),
+                },
+                RequestClass::Read,
+            ),
+            (PendingRequest::Statuses, RequestClass::Read),
+            (PendingRequest::Newsletters, RequestClass::Read),
+            (
+                PendingRequest::NewsletterMessages { jid: "jid".into() },
+                RequestClass::Read,
+            ),
+            (
+                PendingRequest::LinkPreview {
+                    url: "https://example.com".into(),
+                },
+                RequestClass::Read,
+            ),
+            (PendingRequest::RepairLocalCache, RequestClass::Write),
+            (
+                PendingRequest::SendStickerFromLibrary {
+                    chat_id: "chat".into(),
+                    sticker_id: "sticker".into(),
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::ForwardMessage {
+                    source_chat_id: "chat".into(),
+                    message_id: "message".into(),
+                    target_chat_id: "other".into(),
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::EditMessage {
+                    chat_id: "chat".into(),
+                    message_id: "message".into(),
+                    draft_text: "text".into(),
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::DeleteMessage {
+                    chat_id: "chat".into(),
+                    message_id: "message".into(),
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::SetMessagePin {
+                    chat_id: "chat".into(),
+                    message_id: "message".into(),
+                    generation: 1,
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::CreatePoll {
+                    chat_id: "chat".into(),
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::VotePoll {
+                    chat_id: "chat".into(),
+                    poll_message_id: "message".into(),
+                    generation: 1,
+                },
+                RequestClass::Write,
+            ),
+            (PendingRequest::SubscribeNewsletter, RequestClass::Write),
+            (
+                PendingRequest::UnsubscribeNewsletter { jid: "jid".into() },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::SetChatPin {
+                    chat_id: "chat".into(),
+                    previous_pinned: false,
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::SetChatArchive {
+                    chat_id: "chat".into(),
+                    previous_archived: false,
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::SetChatMute {
+                    chat_id: "chat".into(),
+                    previous_muted: false,
+                    previous_mute_until_ms: 0,
+                },
+                RequestClass::Write,
+            ),
+            (
+                PendingRequest::SetChatBlock {
+                    chat_id: "chat".into(),
+                    previous_blocked: false,
+                },
+                RequestClass::Write,
+            ),
+            (PendingRequest::Reconnect, RequestClass::Control),
+            (PendingRequest::Shutdown, RequestClass::Control),
+            (
+                PendingRequest::SendAttachment {
+                    chat_id: "chat".into(),
+                },
+                RequestClass::Attachment,
+            ),
+            (
+                PendingRequest::MessageAttachment {
+                    chat_id: "chat".into(),
+                    message_id: "message".into(),
+                },
+                RequestClass::Attachment,
+            ),
+        ];
+        for (request, class) in cases {
+            assert_eq!(request.class(), class);
+        }
     }
 
     /// Only the requests that fill the local cache count as media, because

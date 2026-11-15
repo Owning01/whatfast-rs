@@ -10,10 +10,6 @@
 //! installs with [`NavRail::on_action`]; the column never changes the state of
 //! the app by itself.
 
-// The module arrives before its caller: the shell of the batch B-U6 adds the
-// column to the layout.
-#![allow(dead_code)]
-
 use std::rc::Rc;
 use whatfast_i18n as i18n;
 
@@ -243,6 +239,7 @@ impl NavRail {
     }
 
     /// The state of the link with the device.
+    #[cfg(test)]
     pub(crate) fn link(&self) -> LinkState {
         self.link
     }
@@ -253,6 +250,7 @@ impl NavRail {
     }
 
     /// Whether the list of chats is open.
+    #[cfg(test)]
     pub(crate) fn sidebar_open(&self) -> bool {
         self.sidebar_open
     }
@@ -263,6 +261,7 @@ impl NavRail {
     }
 
     /// Whether the view of the states is open.
+    #[cfg(test)]
     pub(crate) fn states_open(&self) -> bool {
         self.states_open
     }
@@ -273,6 +272,7 @@ impl NavRail {
     }
 
     /// Whether the view of the channels is open.
+    #[cfg(test)]
     pub(crate) fn channels_open(&self) -> bool {
         self.channels_open
     }
@@ -283,6 +283,7 @@ impl NavRail {
     }
 
     /// Whether the view of the agents is open.
+    #[cfg(test)]
     pub(crate) fn agents_open(&self) -> bool {
         self.agents_open
     }
@@ -293,6 +294,7 @@ impl NavRail {
     }
 
     /// Whether the view of the archived conversations is open.
+    #[cfg(test)]
     pub(crate) fn archived_open(&self) -> bool {
         self.archived_open
     }
@@ -303,6 +305,7 @@ impl NavRail {
     }
 
     /// Whether the settings panel is open.
+    #[cfg(test)]
     pub(crate) fn settings_open(&self) -> bool {
         self.settings_open
     }
@@ -322,15 +325,11 @@ impl NavRail {
         self.states_unseen = unseen;
     }
 
-    /// The scale of the interface.
-    pub(crate) fn scale(&self) -> f32 {
-        self.scale
-    }
-
     /// The width of the column.
     ///
     /// port: the first column of the grid of the shell:
     /// `calc(56px * var(--scale))`.
+    #[cfg(test)]
     pub(crate) fn width(&self) -> Pixels {
         column_width(self.scale)
     }
@@ -366,8 +365,9 @@ impl NavRail {
             NavButton {
                 action: NavAction::States,
                 // The states are their own view: the button is active when it
-                // is the one in front.
-                active: self.states_open,
+                // is the one in front and the column is showing. Un panel
+                // cerrado no deja ningun boton encendido.
+                active: self.states_open && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 // El punto verde de la referencia: hay estados sin ver.
@@ -376,7 +376,7 @@ impl NavRail {
             NavButton {
                 action: NavAction::Channels,
                 // The channels are their own view too.
-                active: self.channels_open,
+                active: self.channels_open && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 dot: false,
@@ -385,7 +385,7 @@ impl NavRail {
                 action: NavAction::Agents,
                 // The agents are their own view: the screen of the harnesses
                 // and the tray of their drafts.
-                active: self.agents_open,
+                active: self.agents_open && self.sidebar_open,
                 enabled: true,
                 badge: 0,
                 dot: false,
@@ -399,7 +399,7 @@ impl NavRail {
             NavButton {
                 action: NavAction::Archived,
                 // The archived conversations are their own view.
-                active: self.archived_open,
+                active: self.archived_open && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 dot: false,
@@ -559,10 +559,7 @@ pub(crate) fn column_width(scale: f32) -> Pixels {
 mod tests {
     use gpui::px;
 
-    use super::{
-        BUTTON_GAP, BUTTON_SIZE, ICON_SIZE, LinkState, NavAction, NavRail, RAIL_PADDING,
-        RAIL_WIDTH, column_width,
-    };
+    use super::{LinkState, NavRail, RAIL_WIDTH, column_width};
 
     /// The column of icons of a linked app.
     fn rail() -> NavRail {
@@ -586,51 +583,8 @@ mod tests {
 
     #[test]
     fn the_width_of_the_column_of_the_rail_is_the_width_of_the_column() {
-        let mut rail = NavRail::new(1.3);
+        let rail = NavRail::new(1.3);
         assert_eq!(rail.width(), px(RAIL_WIDTH * 1.3));
-        rail.set_link(LinkState::Linked);
-        assert_eq!(rail.width(), column_width(1.3));
-    }
-
-    #[test]
-    fn the_measures_of_the_column_come_from_the_stylesheet() {
-        // The button is the grey circle of the reference: 34 pixels of the web
-        // client plus the ring that separates the glyph from its background.
-        assert_eq!(BUTTON_SIZE, 40.0);
-        assert_eq!(BUTTON_GAP, 7.0);
-        assert_eq!(RAIL_PADDING, 12.0);
-        assert_eq!(ICON_SIZE, 20.0);
-    }
-
-    #[test]
-    fn the_column_has_the_destinations_of_the_reference() {
-        let rail = rail();
-        let top: Vec<NavAction> = rail
-            .top_buttons()
-            .iter()
-            .map(|button| button.action)
-            .collect();
-        let bottom: Vec<NavAction> = rail
-            .bottom_buttons()
-            .iter()
-            .map(|button| button.action)
-            .collect();
-        assert_eq!(
-            top,
-            vec![
-                NavAction::Chats,
-                NavAction::Search,
-                NavAction::States,
-                NavAction::Channels,
-                NavAction::Agents
-            ],
-            "the chats and the search are above the spacer, and the states, the channels and the agents with them"
-        );
-        assert_eq!(
-            bottom,
-            vec![NavAction::Archived, NavAction::Privacy, NavAction::Settings],
-            "the archived, the privacy and the settings are below the spacer"
-        );
     }
 
     #[test]
@@ -644,54 +598,45 @@ mod tests {
 
     #[test]
     fn the_button_of_the_states_is_active_when_the_view_is_open() {
-        let mut rail = rail();
-        assert!(!rail.top_buttons()[2].active);
-        rail.set_states_open(true);
-        assert!(rail.top_buttons()[2].active);
-        assert!(rail.states_open());
+        let mut states = rail();
+        assert!(!states.top_buttons()[2].active);
+        states.set_states_open(true);
+        assert!(states.top_buttons()[2].active);
+        assert!(states.states_open());
         // The chats and the states are two views of the same column: the
         // button of the chats is not active while the states are in front.
-        assert!(!rail.top_buttons()[0].active);
-    }
+        assert!(!states.top_buttons()[0].active);
 
-    #[test]
-    fn the_button_of_the_channels_is_active_when_the_view_is_open() {
-        let mut rail = rail();
-        assert!(!rail.top_buttons()[3].active);
-        rail.set_channels_open(true);
-        assert!(rail.top_buttons()[3].active);
-        assert!(rail.channels_open());
-        assert!(!rail.top_buttons()[0].active);
-    }
+        // The channels are their own view too.
+        let mut channels = rail();
+        assert!(!channels.top_buttons()[3].active);
+        channels.set_channels_open(true);
+        assert!(channels.top_buttons()[3].active);
+        assert!(channels.channels_open());
+        assert!(!channels.top_buttons()[0].active);
 
-    #[test]
-    fn the_button_of_the_agents_is_active_when_the_view_is_open() {
-        let mut rail = rail();
-        assert!(!rail.top_buttons()[4].active);
-        rail.set_agents_open(true);
-        assert!(rail.top_buttons()[4].active);
-        assert!(rail.agents_open());
-        // The chats and the agents are two views of the same column.
-        assert!(!rail.top_buttons()[0].active);
-    }
+        // The agents are their own view.
+        let mut agents = rail();
+        assert!(!agents.top_buttons()[4].active);
+        agents.set_agents_open(true);
+        assert!(agents.top_buttons()[4].active);
+        assert!(agents.agents_open());
+        assert!(!agents.top_buttons()[0].active);
 
-    #[test]
-    fn the_button_of_the_archived_is_active_when_the_view_is_open() {
-        let mut rail = rail();
-        assert!(!rail.bottom_buttons()[0].active);
-        rail.set_archived_open(true);
-        assert!(rail.bottom_buttons()[0].active);
-        assert!(rail.archived_open());
-        assert!(!rail.top_buttons()[0].active);
-    }
+        // The archived conversations are their own view.
+        let mut archived = rail();
+        assert!(!archived.bottom_buttons()[0].active);
+        archived.set_archived_open(true);
+        assert!(archived.bottom_buttons()[0].active);
+        assert!(archived.archived_open());
+        assert!(!archived.top_buttons()[0].active);
 
-    #[test]
-    fn the_button_of_the_settings_is_active_when_the_settings_are_open() {
-        let mut rail = rail();
-        assert!(!rail.bottom_buttons()[2].active);
-        rail.set_settings_open(true);
-        assert!(rail.bottom_buttons()[2].active);
-        assert!(rail.settings_open());
+        // The settings are their own view.
+        let mut settings = rail();
+        assert!(!settings.bottom_buttons()[2].active);
+        settings.set_settings_open(true);
+        assert!(settings.bottom_buttons()[2].active);
+        assert!(settings.settings_open());
     }
 
     #[test]

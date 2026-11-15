@@ -56,26 +56,6 @@ pub enum ChatBackground {
     None,
 }
 
-impl ChatBackground {
-    /// The background as the settings file spells it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pattern => "pattern",
-            Self::Color => "color",
-            Self::None => "none",
-        }
-    }
-
-    /// Reads a background, falling back to the pattern.
-    pub fn from_value(value: &str) -> Self {
-        match value {
-            "color" => Self::Color,
-            "none" => Self::None,
-            _ => Self::Pattern,
-        }
-    }
-}
-
 /// How much air the interface leaves between rows and messages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,24 +65,6 @@ pub enum Density {
     Comfortable,
     /// Tighter spacing, for more messages on screen.
     Compact,
-}
-
-impl Density {
-    /// The density as the settings file spells it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Comfortable => "comfortable",
-            Self::Compact => "compact",
-        }
-    }
-
-    /// Reads a density, falling back to the comfortable one.
-    pub fn from_value(value: &str) -> Self {
-        match value {
-            "compact" => Self::Compact,
-            _ => Self::Comfortable,
-        }
-    }
 }
 
 /// The preferences of the profile.
@@ -128,6 +90,15 @@ pub struct Settings {
     pub notifications_enabled: bool,
     /// Whether the toast includes the text of the message.
     pub notification_previews: bool,
+    /// Whether the app plays a sound when a message arrives or when it sends
+    /// one.
+    pub sounds_enabled: bool,
+    /// The sound of a message that arrives: `builtin:<id>`, `file:<path>` or
+    /// `none`. Anything else falls back to the built-in one.
+    pub sound_received: String,
+    /// The sound of a message that this window sends. Same encoding as
+    /// `sound_received`.
+    pub sound_sent: String,
     /// The directory of "Save to folder"; empty asks every time.
     pub download_dir: String,
     /// Whether the chat list stays beside the conversation even on narrow
@@ -163,6 +134,72 @@ pub struct Settings {
     pub app_lock_hash: String,
     /// Whether the app asks the releases for a newer version when it starts.
     pub check_updates: bool,
+    /// Suppresses desktop notification popups and sounds.
+    #[serde(default)]
+    pub do_not_disturb: bool,
+    /// User-defined chat folders (name + chat IDs).
+    #[serde(default)]
+    pub chat_folders: Vec<ChatFolder>,
+    /// Quick `/templates` snippets for the composer.
+    #[serde(default)]
+    pub quick_templates: Vec<QuickTemplate>,
+    /// Renders rich Markdown/code blocks in message bubbles when enabled.
+    #[serde(default = "default_true")]
+    pub rich_documents: bool,
+    /// Starts Whatfast automatically on OS login.
+    #[serde(default)]
+    pub autostart: bool,
+    /// Automatically locks the app after N minutes of inactivity (0 = disabled).
+    #[serde(default)]
+    pub auto_lock_minutes: u32,
+    /// Blurs chat content when the window loses focus (if App Lock is configured).
+    #[serde(default)]
+    pub privacy_blur_on_unfocus: bool,
+    /// Maximum media size in MiB for automatic downloads (0 = unlimited).
+    #[serde(default = "default_auto_download_max_mb")]
+    pub auto_download_max_mb: u32,
+    /// Skips automatic media downloads on metered connections.
+    #[serde(default = "default_true")]
+    pub skip_auto_download_metered: bool,
+    /// Optional HTTP or SOCKS5 proxy URL for WhatsApp network connections.
+    #[serde(default)]
+    pub proxy_url: String,
+    /// Senders whose statuses are muted from the active strip.
+    #[serde(default)]
+    pub muted_status_senders: Vec<String>,
+    /// Accessibility: increases contrast for borders, muted text, and focus rings.
+    #[serde(default)]
+    pub high_contrast: bool,
+    /// Accessibility: reduces UI animations and transitions.
+    #[serde(default)]
+    pub reduced_motion: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_auto_download_max_mb() -> u32 {
+    25
+}
+
+/// A custom folder of conversations shown in the chat filter bar.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatFolder {
+    /// Display name of the folder.
+    pub name: String,
+    /// Chat JIDs included in this folder.
+    #[serde(default)]
+    pub chat_ids: Vec<String>,
+}
+
+/// A reusable quick-reply template triggered with `/templates` in the composer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickTemplate {
+    /// Short command or label (e.g. "saludo").
+    pub name: String,
+    /// Expanded message body.
+    pub body: String,
 }
 
 impl Default for Settings {
@@ -176,6 +213,11 @@ impl Default for Settings {
             enter_to_send: true,
             notifications_enabled: true,
             notification_previews: true,
+            sounds_enabled: true,
+            // The pop of a new message and a shorter ping for the one that
+            // leaves: the same pair the phone plays.
+            sound_received: "builtin:pop".to_string(),
+            sound_sent: "builtin:ping".to_string(),
             download_dir: String::new(),
             split_view: false,
             battery_saver: false,
@@ -190,6 +232,19 @@ impl Default for Settings {
             app_lock_salt: String::new(),
             app_lock_hash: String::new(),
             check_updates: true,
+            do_not_disturb: false,
+            chat_folders: Vec::new(),
+            quick_templates: Vec::new(),
+            rich_documents: true,
+            autostart: false,
+            auto_lock_minutes: 0,
+            privacy_blur_on_unfocus: false,
+            auto_download_max_mb: default_auto_download_max_mb(),
+            skip_auto_download_metered: true,
+            proxy_url: String::new(),
+            muted_status_senders: Vec::new(),
+            high_contrast: false,
+            reduced_motion: false,
         }
     }
 }
@@ -355,6 +410,9 @@ mod tests {
             enter_to_send: false,
             notifications_enabled: false,
             notification_previews: false,
+            sounds_enabled: false,
+            sound_received: "builtin:ding".into(),
+            sound_sent: "file:C:\\sonidos\\enviar.mp3".into(),
             download_dir: "C:\\descargas".into(),
             split_view: true,
             battery_saver: true,
@@ -369,6 +427,7 @@ mod tests {
             app_lock_salt: "una-sal".into(),
             app_lock_hash: "un-hash".into(),
             check_updates: false,
+            ..Settings::default()
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path, &legacy), settings);
@@ -418,6 +477,11 @@ mod tests {
         let settings = load_from(&path, &legacy);
         assert_eq!(settings.ui_scale, 1.1);
         assert_eq!(settings.language, "zh");
+        // The sounds of an older file: the profile never had them, so the
+        // defaults apply. A missing sound must not leave the app silent.
+        assert!(settings.sounds_enabled);
+        assert_eq!(settings.sound_received, "builtin:pop");
+        assert_eq!(settings.sound_sent, "builtin:ping");
     }
 
     #[test]
@@ -460,17 +524,6 @@ mod tests {
         assert_eq!(settings.message_font_scale, super::MAX_MESSAGE_FONT_SCALE);
         assert_eq!(settings.chat_background, super::ChatBackground::Color);
         assert_eq!(settings.chat_background_color, "#aabbcc");
-    }
-
-    #[test]
-    fn the_density_spells_itself_the_way_the_file_does() {
-        assert_eq!(Density::Comfortable.as_str(), "comfortable");
-        assert_eq!(Density::Compact.as_str(), "compact");
-        assert_eq!(Density::from_value("compact"), Density::Compact);
-        assert_eq!(Density::from_value("anything"), Density::Comfortable);
-        assert_eq!(super::ChatBackground::from_value("color"), super::ChatBackground::Color);
-        assert_eq!(super::ChatBackground::from_value("nada"), super::ChatBackground::Pattern);
-        assert_eq!(super::ChatBackground::None.as_str(), "none");
     }
 
     #[test]

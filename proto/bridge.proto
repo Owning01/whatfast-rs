@@ -107,6 +107,11 @@ message RpcRequest {
     // this computer downloaded.
     StorageUsageRequest storage_usage = 80;
     ClearMediaCacheRequest clear_media_cache = 81;
+    // The card the composer shows while the user types: the desktop asks
+    // for the first link of its draft, and the sidecar fetches the page
+    // the way a send would. The receivers never fetch the page themselves.
+    GetLinkPreviewRequest get_link_preview = 82;
+    ListChatMediaRequest list_chat_media = 83;
   }
 }
 
@@ -186,6 +191,8 @@ message RpcResponse {
     CreateGroupResponse create_group = 79;
     StorageUsageResponse storage_usage = 80;
     ClearMediaCacheResponse clear_media_cache = 81;
+    GetLinkPreviewResponse get_link_preview = 82;
+    ListChatMediaResponse list_chat_media = 83;
   }
 }
 
@@ -1010,6 +1017,16 @@ message LinkPreview {
   uint32 thumbnail_height = 6;
 }
 
+// The card of one link of the draft, fetched before the send so the composer
+// can draw it. An empty `preview` means the page had no card: the text still
+// goes out, without one.
+message GetLinkPreviewRequest {
+  string url = 1;
+}
+message GetLinkPreviewResponse {
+  LinkPreview preview = 1;
+}
+
 message ImageContent {
   string caption = 1;
   string mime_type = 2;
@@ -1408,4 +1425,18 @@ message CallVideo {
   // The unit holds an IDR with its SPS/PPS: the safe point to start or
   // restart a decoder.
   bool keyframe = 3;
+}
+
+message ListChatMediaRequest {
+  string chat_id = 1;
+  // "media", "docs", or "links"
+  string category = 2;
+  uint32 limit = 3;
+}
+
+message ListChatMediaResponse {
+  repeated Message messages = 1;
+  uint32 media_count = 2;
+  uint32 doc_count = 3;
+  uint32 link_count = 4;
 }

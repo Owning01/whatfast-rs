@@ -41,7 +41,9 @@ use whatfast_i18n as i18n;
 use whatfast_model::{
     emoji_picker::{EmojiCategory, filtered as filter_emojis},
     favorites,
-    model::{CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, reactions_for_emoji},
+    model::{
+        CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, message_text, reactions_for_emoji,
+    },
     settings::{self, ChatBackground, Density, Settings},
     starred, sticker,
 };
@@ -70,6 +72,7 @@ use crate::message_actions::{
 use crate::navrail::{LinkState, NavAction, NavRail};
 use crate::newsletters::NewsletterPanel;
 use crate::notifications::{Note, Notifier};
+use crate::sounds::{Builtin as BuiltinSound, Choice as SoundChoice, Incoming as IncomingSound, SoundEvent, Sounds};
 use crate::quick_ask::QuickAsk;
 use crate::recording::{MAX_DURATION_SECONDS, MIN_DURATION_SECONDS, RecorderEvent, VoiceRecorder};
 use crate::rpc::{
@@ -115,9 +118,28 @@ actions!(
         SelectPreviousChat,
         SelectNextChat,
         OpenSettingsAction,
-        FocusComposerAction
+        OpenDevStats,
+        OpenCommandPalette,
+        LockAppAction,
+        FocusComposerAction,
+        CyclePaneFocus,
+        CyclePaneFocusReverse,
+        ZoomInAction,
+        ZoomOutAction,
+        ZoomResetAction,
+        ToggleShortcutsHelp
     ]
 );
+
+/// Logical focus landmark cycled by `F6` / `Shift+F6`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FocusZone {
+    NavRail,
+    ChatList,
+    MessageList,
+    #[default]
+    Composer,
+}
 
 /// The colour of the accent of the light theme.
 pub(crate) const DARK_GREEN: u32 = 0x075e54;
@@ -127,6 +149,12 @@ pub(crate) const PANEL: u32 = 0xf7faf9;
 pub(crate) const EMOJI_COLUMNS: usize = 9;
 /// How often a participant's avatar is downloaded again.
 pub(crate) const PARTICIPANT_AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
+
+/// How long a read confirmation waits after a failure before trying again.
+/// The receipt is what marks the chat read on the phone: losing it because
+/// the link was still coming up left the messages unread there until the
+/// next chat switch.
+pub(crate) const MARK_READ_RETRY: Duration = Duration::from_secs(10);
 /// The biggest text message the client sends.
 pub(crate) const MAX_TEXT_BYTES: usize = 65_536;
 /// The biggest caption the client sends with an image.
@@ -350,11 +378,41 @@ pub(crate) struct ChatSelection {
     pub(crate) ids: HashSet<String>,
 }
 
-/// The confirmation dialog to delete a message.
+/// The multiple selection of the messages of the open conversation: the menu
+/// of a bubble starts it and then the user marks the messages to delete,
+/// copy or forward in one step.
+#[derive(Default)]
+pub(crate) struct MessageSelection {
+    /// The conversation the marked messages belong to.
+    pub(crate) chat_id: String,
+    /// The marked messages.
+    pub(crate) ids: HashSet<String>,
+}
+
+impl MessageSelection {
+    /// Marks or unmarks one message.
+    pub(crate) fn toggle(&mut self, message_id: &str) {
+        if !self.ids.remove(message_id) {
+            self.ids.insert(message_id.to_string());
+        }
+    }
+}
+
+/// The confirmation dialog to delete one message or a selection of them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConfirmDeleteMessage {
-    pub(crate) message_id: String,
+    pub(crate) message_ids: Vec<String>,
     pub(crate) delete_for_everyone: bool,
+}
+
+impl ConfirmDeleteMessage {
+    /// The dialog of one message, the one the menu and the viewer open.
+    pub(crate) fn single(message_id: String, delete_for_everyone: bool) -> Self {
+        Self {
+            message_ids: vec![message_id],
+            delete_for_everyone,
+        }
+    }
 }
 
 /// What the PIN dialog does: turn the lock on for the first time, or off.
@@ -440,6 +498,9 @@ pub(crate) struct ChatDraft {
     /// (`editingMessageId`) and sends an edit instead of a text when it is
     /// there.
     pub(crate) editing_message_id: Option<String>,
+    /// Staged attachment paths persisted across restarts.
+    #[serde(default)]
+    pub(crate) pending_attachment_paths: Vec<PathBuf>,
 }
 
 /// One participant the user tagged with the @ picker.
@@ -486,6 +547,10 @@ pub(crate) struct ChatInfoState {
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     pub(crate) info: Option<whatfast_protocol::GetChatInfoResponse>,
+    pub(crate) media_tab: String,
+    pub(crate) media_loading: bool,
+    pub(crate) media_items: Vec<whatfast_protocol::Message>,
+    pub(crate) media_counts: Option<(u32, u32, u32)>,
 }
 
 /// The menu that the right click opens on a row of the list of conversations.
@@ -578,6 +643,34 @@ pub(crate) struct TypingIndicator {
     pub(crate) sender_name: String,
     pub(crate) recording: bool,
     pub(crate) expires_at: Instant,
+}
+
+/// The card the composer draws above the field when the draft carries a link.
+///
+/// `url` is the first link of the draft the card belongs to. `title` and
+/// `description` are what the sidecar answered; both empty means no card is
+/// drawn (the page had none, or its answer is still on the way when
+/// `loading` is set). `dismissed_url` is the link the user closed with the
+/// X: it does not come back while the same link stays in the draft.
+///
+/// The request waits for a pause in the typing: every keystroke moves
+/// `pending_url`, and only the second sweep asks for the link that stayed.
+#[derive(Default)]
+pub(crate) struct ComposerLinkPreview {
+    pub(crate) url: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) loading: bool,
+    pub(crate) dismissed_url: String,
+    pub(crate) pending_url: String,
+    pub(crate) pending_since: Option<Instant>,
+}
+
+impl ComposerLinkPreview {
+    /// Whether the card is worth drawing: a link with something to show.
+    pub(crate) fn visible(&self) -> bool {
+        !self.url.is_empty() && (!self.title.is_empty() || !self.description.is_empty())
+    }
 }
 
 /// What the local search found.
@@ -908,6 +1001,18 @@ pub(crate) struct Whatfast {
     pub(crate) typing_signal: Option<(String, Instant)>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
+    pub(crate) dev_stats_open: bool,
+    pub(crate) dev_stats_snapshot: Option<crate::dev_stats::DevStatsSnapshot>,
+    pub(crate) command_palette: crate::command_palette::CommandPaletteState,
+    pub(crate) active_focus_zone: FocusZone,
+    pub(crate) focused_message_id: Option<String>,
+    pub(crate) show_shortcuts_help: bool,
+    pub(crate) high_contrast: bool,
+    pub(crate) reduced_motion: bool,
+    pub(crate) do_not_disturb: bool,
+    pub(crate) active_chat_folder: Option<String>,
+    pub(crate) last_activity: Instant,
+    pub(crate) offline_outbox: Vec<(String, String, Option<String>)>,
     pub(crate) ui_scale: f32,
     /// The settings of the profile, as the file keeps them.
     pub(crate) settings: Settings,
@@ -956,6 +1061,8 @@ pub(crate) struct Whatfast {
     pub(crate) theme_token_input: Entity<InputState>,
     /// The queue of the toasts of the system.
     pub(crate) notifier: Notifier,
+    /// The queue of the sounds of the messages.
+    pub(crate) sounds: Sounds,
     pub(crate) chat_scroll: UniformListScrollHandle,
     pub(crate) chat_smooth_scroll: SmoothScrollState,
     pub(crate) message_scroll: VirtualListScrollHandle,
@@ -966,6 +1073,7 @@ pub(crate) struct Whatfast {
     pub(crate) settings_smooth_scroll: SmoothScrollState,
     pub(crate) scroll_to_bottom_generation: Option<u64>,
     pub(crate) messages_scrolled_up: bool,
+    pub(crate) sticky_date_label: Option<String>,
     pub(crate) last_event_sequence: u64,
     /// Cuantas veces se volvio a preguntar el estado de la cuenta antes de
     /// mandar al usuario a la pantalla del QR.
@@ -974,6 +1082,9 @@ pub(crate) struct Whatfast {
     pub(crate) account_ready: bool,
     pub(crate) pending_prepend_anchor: Option<(String, Point<Pixels>)>,
     pub(crate) newer_load_failed: bool,
+    /// Cuando puede salir el proximo intento de confirmar un leido. Un
+    /// intento fallido espera unos segundos en vez de uno por cuadro.
+    pub(crate) mark_read_retry_at: Option<Instant>,
     pub(crate) message_generation: u64,
     pub(crate) sync_complete_reloaded: bool,
     pub(crate) confirming_logout: bool,
@@ -1043,6 +1154,9 @@ pub(crate) struct Whatfast {
     pub(crate) create_group: Option<CreateGroupState>,
     /// The multiple selection of the chat list, while the mode is on.
     pub(crate) selection: Option<ChatSelection>,
+    /// The multiple selection of the messages of the open conversation,
+    /// while the mode is on.
+    pub(crate) message_selection: Option<MessageSelection>,
     /// Whether the window is covered by the PIN of the app lock.
     pub(crate) locked: bool,
     /// The digits of the PIN written in the lock screen.
@@ -1073,6 +1187,11 @@ pub(crate) struct Whatfast {
     pub(crate) storage_clearing: bool,
     /// Whether the library of stickers is being loaded.
     pub(crate) sticker_library_loading: bool,
+    /// Whether a change of the library arrived while the tray was showing it.
+    /// The one-second sweep asks for the library once per burst instead of
+    /// once per event: a download of hundreds of stickers reports every six
+    /// files, and every report redrew the whole grid.
+    pub(crate) sticker_refresh_pending: bool,
     /// Whether the newsletters are being loaded.
     pub(crate) newsletters_loading: bool,
     /// The newsletter whose posts are open.
@@ -1129,6 +1248,13 @@ pub(crate) struct Whatfast {
     pub(crate) sticker_tray: StickerTray,
     /// Whether the tray of the stickers is open.
     pub(crate) sticker_tray_open: bool,
+    /// The tray of GIFs.
+    pub(crate) gif_tray: crate::gif_tray::GifTray,
+    /// Whether the GIF tray is open.
+    pub(crate) gif_tray_open: bool,
+    /// The card the composer draws above the field when the draft carries a
+    /// link: what the sidecar answered for its first url.
+    pub(crate) composer_link: ComposerLinkPreview,
     /// The tab of the panel of the composer.
     pub(crate) panel_tab: PanelTab,
     /// The menu of a message, when it is open.
@@ -1143,6 +1269,37 @@ pub(crate) struct Whatfast {
     /// La suscripción del editor abierto. Se reemplaza al abrir otro editor y
     /// no se acumula en `_subscriptions`, que vive lo que vive la ventana.
     pub(crate) media_editor_subscription: Option<Subscription>,
+}
+
+/// What the client observed about the sequence number of an event.
+#[derive(Debug, PartialEq, Eq)]
+enum SequenceObservation {
+    /// The event arrives in order.
+    Accept,
+    /// The backend skipped numbers: the local state is stale and the toast
+    /// says which numbers were lost.
+    Gap { last: u64, received: u64 },
+    /// The event has no sequence number.
+    Invalid,
+    /// The event repeats a sequence the client already saw.
+    Stale,
+}
+
+/// Observe the sequence number of an event against the last one the client saw.
+///
+/// The first event after the start establishes the baseline: it is not a gap,
+/// because there is nothing to compare it with yet.
+fn observe_event_sequence(last: u64, received: u64) -> SequenceObservation {
+    if received == 0 {
+        return SequenceObservation::Invalid;
+    }
+    if received <= last {
+        return SequenceObservation::Stale;
+    }
+    if last != 0 && received > last.saturating_add(1) {
+        return SequenceObservation::Gap { last, received };
+    }
+    SequenceObservation::Accept
 }
 
 impl Whatfast {
@@ -1199,6 +1356,7 @@ impl Whatfast {
                 .clean_on_escape()
         });
         let images = crate::image_cache::BoundedImageCache::new(cx);
+        images.update(cx, |cache, _| cache.set_battery_saver(battery_saver));
         let emoji_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search emoji")));
         let chat_search_input = cx.new(|cx| {
@@ -1289,6 +1447,7 @@ impl Whatfast {
                         } else {
                             let text = composer.read(cx).value().to_string();
                             let composing = !text.trim().is_empty();
+                            this.refresh_composer_link(&text);
                             this.update_active_draft_text(text);
                             let picker_was_open = this.mention_picker.is_some();
                             this.refresh_mention_picker(cx);
@@ -1497,6 +1656,18 @@ impl Whatfast {
             typing_signal: None,
             focus_handle,
             settings_open: false,
+            dev_stats_open: false,
+            dev_stats_snapshot: None,
+            command_palette: crate::command_palette::CommandPaletteState::default(),
+            active_focus_zone: FocusZone::Composer,
+            focused_message_id: None,
+            show_shortcuts_help: false,
+            high_contrast: settings.high_contrast,
+            reduced_motion: settings.reduced_motion,
+            do_not_disturb: settings.do_not_disturb,
+            active_chat_folder: None,
+            last_activity: Instant::now(),
+            offline_outbox: Vec::new(),
             ui_scale,
             settings,
             check_updates,
@@ -1520,6 +1691,7 @@ impl Whatfast {
             theme_token_draft: String::new(),
             theme_token_input,
             notifier: Notifier::new(),
+            sounds: Sounds::new(),
             chat_scroll: UniformListScrollHandle::new(),
             chat_smooth_scroll: SmoothScrollState::default(),
             message_scroll: VirtualListScrollHandle::new(),
@@ -1530,11 +1702,13 @@ impl Whatfast {
             settings_smooth_scroll: SmoothScrollState::default(),
             scroll_to_bottom_generation: None,
             messages_scrolled_up: false,
+            sticky_date_label: None,
             last_event_sequence: 0,
             auth_probe: 0,
             account_ready: false,
             pending_prepend_anchor: None,
             newer_load_failed: false,
+            mark_read_retry_at: None,
             message_generation: 0,
             sync_complete_reloaded: false,
             confirming_logout: false,
@@ -1572,6 +1746,7 @@ impl Whatfast {
             view_once_info_open: false,
             create_group: None,
             selection: None,
+            message_selection: None,
             locked,
             pin_buffer: String::new(),
             lock_error: None,
@@ -1587,6 +1762,7 @@ impl Whatfast {
             storage_usage: None,
             storage_clearing: false,
             sticker_library_loading: false,
+            sticker_refresh_pending: false,
             newsletters_loading: false,
             selected_newsletter: None,
             states_open: false,
@@ -1610,6 +1786,9 @@ impl Whatfast {
             member_panel: MemberPanel::default(),
             sticker_tray: StickerTray::default(),
             sticker_tray_open: false,
+            gif_tray: crate::gif_tray::GifTray::default(),
+            gif_tray_open: false,
+            composer_link: ComposerLinkPreview::default(),
             panel_tab: PanelTab::Emoji,
             message_menu: None,
             forward_picker: None,
@@ -1621,6 +1800,7 @@ impl Whatfast {
         // El icono de la bandeja: cerrar la ventana la esconde y la
         // aplicacion sigue con la sesion del telefono.
         this.tray = crate::tray::Tray::install(window, &*cx);
+        crate::instance::start_wake_listener(window, &*cx);
         // La barra del volumen del video es la que manda: cada vez que el
         // usuario la mueve, el sonido del reproductor la sigue.
         let volume = cx.subscribe(&this.volume_slider, |this, _, event: &SliderEvent, cx| {
@@ -1784,6 +1964,21 @@ impl Whatfast {
         // Los borradores del compositor se escriben con un debounce: el
         // barrido de un segundo es el reloj que los baja al disco.
         self.save_drafts_if_due();
+        // La tarjeta del link tambien espera una pausa: el barrido pide la
+        // que quedo quieta.
+        self.poll_composer_link();
+        // La bandeja de stickers refresca una vez por barrido y no una vez
+        // por aviso: una biblioteca de cientos de stickers avisa cada seis
+        // descargas, y una lista por aviso era el relampago de la rejilla.
+        if self.sticker_refresh_pending {
+            if !self.sticker_tray_open {
+                // Sin bandeja no hay nada que redibujar: la apertura pide la
+                // lista entera igual.
+                self.sticker_refresh_pending = false;
+            } else if !self.sticker_library_loading {
+                self.load_stickers();
+            }
+        }
         // El aviso de error también se cierra solo: si cambió el texto, el
         // reloj arranca de nuevo; si no, a los ocho segundos se va. Un toast
         // que queda para siempre tapa el botón que está debajo.
@@ -1949,6 +2144,12 @@ impl Whatfast {
                     if self.store.selected_chat_id.as_deref() != Some(chat_id.as_str()) {
                         self.store.restore_unread(&chat_id, previous_unread);
                         self.store.last_mark_read_id = None;
+                    } else {
+                        // El aviso no llego al telefono: se prueba de nuevo en
+                        // unos segundos, sin un pedido por cuadro mientras la
+                        // conexion vuelve.
+                        self.store.last_mark_read_id = None;
+                        self.mark_read_retry_at = Some(Instant::now() + MARK_READ_RETRY);
                     }
                 }
                 PendingRequest::Messages { prepend: true, .. } => {
@@ -2071,6 +2272,13 @@ impl Whatfast {
                     self.sticker_library_loading = false;
                     self.store.toast_error =
                         Some(i18n::t("Loading the stickers timed out. Try again.").into());
+                }
+                // The card of the composer is best effort: a page that takes
+                // too long leaves the text without a card, never a toast.
+                PendingRequest::LinkPreview { url } => {
+                    if self.composer_link.url == *url {
+                        self.composer_link.loading = false;
+                    }
                 }
                 PendingRequest::Newsletters => {
                     self.newsletters_loading = false;
@@ -2458,7 +2666,7 @@ impl Whatfast {
                         window,
                         cx,
                     );
-                    self.return_failed_image(&image_path);
+                    self.return_failed_image(image_path);
                 }
                 _ => {}
             }
@@ -2532,6 +2740,14 @@ impl Whatfast {
                 self.clear_reaction_intent_if_current(chat_id, message_id, client_reaction_id);
             }
             if matches!(&pending, PendingRequest::SetTyping) {
+                return;
+            }
+            // The card of the composer is best effort: a page that fails
+            // leaves the text without a card, never a toast in the face.
+            if let PendingRequest::LinkPreview { url } = &pending {
+                if self.composer_link.url == *url {
+                    self.composer_link.loading = false;
+                }
                 return;
             }
             if let PendingRequest::ChatInfo { chat_id } = &pending {
@@ -2628,6 +2844,12 @@ impl Whatfast {
                 if self.store.selected_chat_id.as_deref() != Some(chat_id.as_str()) {
                     self.store.restore_unread(chat_id, *previous_unread);
                     self.store.last_mark_read_id = None;
+                } else if error.retryable {
+                    // La confirmacion no salio y la conexion puede volver: se
+                    // reintenta en unos segundos. Un rechazo de fondo (el
+                    // mensaje no esta) no se repite.
+                    self.store.last_mark_read_id = None;
+                    self.mark_read_retry_at = Some(Instant::now() + MARK_READ_RETRY);
                 }
             }
             // The changes below are optimistic: the client shows them before
@@ -2744,6 +2966,12 @@ impl Whatfast {
             }
             if let PendingRequest::Stickers = &pending {
                 self.sticker_library_loading = false;
+            }
+            if let PendingRequest::LinkPreview { url } = &pending
+                && self.composer_link.url == *url
+            {
+                // The request never left: the card stays hidden without noise.
+                self.composer_link.loading = false;
             }
             if let PendingRequest::Newsletters = &pending {
                 self.newsletters_loading = false;
@@ -3027,12 +3255,14 @@ impl Whatfast {
                 if let Some(message) = sent.message {
                     self.store.upsert_message(message);
                     self.scroll_to_bottom_generation = Some(self.message_generation);
+                    self.play_sent_sound();
                 }
             }
             (PendingRequest::SendImage { .. }, rpc_response::Result::SendImage(sent)) => {
                 if let Some(message) = sent.message {
                     self.store.upsert_message(message);
                     self.scroll_to_bottom_generation = Some(self.message_generation);
+                    self.play_sent_sound();
                 }
             }
             (PendingRequest::SetTyping, rpc_response::Result::SetTyping(_)) => {}
@@ -3048,6 +3278,21 @@ impl Whatfast {
                     state.loading = false;
                     state.error = None;
                     state.info = Some(info);
+                }
+            }
+            (
+                PendingRequest::ChatMedia { chat_id, category },
+                rpc_response::Result::ListChatMedia(resp),
+            ) => {
+                if let Some(state) = self.chat_info.as_mut()
+                    && state.chat_id == chat_id
+                {
+                    state.media_counts =
+                        Some((resp.media_count, resp.doc_count, resp.link_count));
+                    if state.media_tab == category {
+                        state.media_loading = false;
+                        state.media_items = resp.messages;
+                    }
                 }
             }
             (
@@ -3068,6 +3313,7 @@ impl Whatfast {
                     if sent_to_selected_chat {
                         self.scroll_to_bottom_generation = Some(self.message_generation);
                     }
+                    self.play_sent_sound();
                 }
             }
             (
@@ -3241,6 +3487,7 @@ impl Whatfast {
                     if sent_to_selected_chat {
                         self.scroll_to_bottom_generation = Some(self.message_generation);
                     }
+                    self.play_sent_sound();
                 }
             }
             (
@@ -3337,6 +3584,34 @@ impl Whatfast {
             (PendingRequest::Stickers, rpc_response::Result::ListStickers(response)) => {
                 self.sticker_library_loading = false;
                 self.store.set_sticker_packs(response.packs);
+                // Un aviso que llego durante el pedido deja la marca puesta:
+                // el barrido de un segundo pide la lista una vez mas, ya con
+                // los archivos que terminaron de bajar.
+            }
+            (
+                PendingRequest::LinkPreview { url },
+                rpc_response::Result::GetLinkPreview(response),
+            ) => {
+                // A late answer for a link that is already gone is thrown
+                // away: the draft moved on.
+                if self.composer_link.url == url {
+                    self.composer_link.loading = false;
+                    match response.preview {
+                        Some(card)
+                            if !card.title.trim().is_empty()
+                                || !card.description.trim().is_empty() =>
+                        {
+                            self.composer_link.title = card.title;
+                            self.composer_link.description = card.description;
+                        }
+                        _ => {
+                            // The page had no card. The url stays so the same
+                            // draft does not ask again, but nothing is drawn.
+                            self.composer_link.title.clear();
+                            self.composer_link.description.clear();
+                        }
+                    }
+                }
             }
             (
                 PendingRequest::SendStickerFromLibrary { .. },
@@ -3349,6 +3624,7 @@ impl Whatfast {
                     if sent_to_selected_chat {
                         self.scroll_to_bottom_generation = Some(self.message_generation);
                     }
+                    self.play_sent_sound();
                 }
             }
             (
@@ -3362,6 +3638,7 @@ impl Whatfast {
                     if sent_to_selected_chat {
                         self.scroll_to_bottom_generation = Some(self.message_generation);
                     }
+                    self.play_sent_sound();
                 }
             }
             (PendingRequest::EditMessage { .. }, rpc_response::Result::EditMessage(edited)) => {
@@ -3408,6 +3685,7 @@ impl Whatfast {
                 if let Some(message) = created.message {
                     self.store.upsert_message(message);
                     self.scroll_to_bottom_generation = Some(self.message_generation);
+                    self.play_sent_sound();
                 }
             }
             (
@@ -3618,13 +3896,138 @@ impl Whatfast {
             self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
         // port: `shouldNotify` is falsy based: a muted chat, or a chat that
         // the user is looking at, gets no toast.
-        if chat.muted || (window.is_window_active() && chat_in_front) {
+        if self.do_not_disturb || chat.muted || (window.is_window_active() && chat_in_front) {
             return;
         }
         self.notifier.show(Note {
             title: notification_title(chat, message),
             body: notification_body(message, self.settings.notification_previews),
         });
+    }
+
+    /// Plays the sound of a message that arrives, if the profile asks for it.
+    ///
+    /// The silences are the ones of the toast (a muted chat, "Do Not
+    /// Disturb", the history of the first sync), but the sound plays even
+    /// when the conversation is in front: the user asked for the sound of the
+    /// message, not for the popup. `is_new` keeps a message that the store
+    /// already had — an edit, a repeat — from sounding again.
+    fn play_received_sound(&self, message: &Message, is_new: bool) {
+        let Some(chat) = self.store.chat(&message.chat_id) else {
+            return;
+        };
+        let incoming = IncomingSound {
+            enabled: self.settings.sounds_enabled,
+            ready: self.store.sync_complete,
+            from_me: message.from_me,
+            revoked: message.revoked,
+            is_new,
+            age_ms: now_ms().saturating_sub(message.timestamp_ms),
+            muted: chat.muted,
+            do_not_disturb: self.do_not_disturb,
+        };
+        if !incoming.plays(NOTIFICATION_MAX_AGE_MS) {
+            return;
+        }
+        let choice = SoundChoice::from_setting(&self.settings.sound_received, BuiltinSound::Pop);
+        self.sounds.play(&choice);
+    }
+
+    /// Plays the sound of a message that this window just sent.
+    ///
+    /// It is the feedback of the user's own action: neither the muted chat nor
+    /// "Do Not Disturb" applies here. The switch of the sounds is the only
+    /// door.
+    fn play_sent_sound(&self) {
+        if !self.settings.sounds_enabled {
+            return;
+        }
+        let choice = SoundChoice::from_setting(&self.settings.sound_sent, BuiltinSound::Ping);
+        self.sounds.play(&choice);
+    }
+
+    /// Whether the app plays sounds.
+    pub(crate) fn set_sounds_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.sounds_enabled == enabled {
+            return;
+        }
+        self.settings.sounds_enabled = enabled;
+        // Turning them on plays the sound of a new message once: the user
+        // hears what the switch gives before the next message arrives.
+        if enabled {
+            let choice =
+                SoundChoice::from_setting(&self.settings.sound_received, BuiltinSound::Pop);
+            self.sounds.play(&choice);
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Picks the sound of one event and plays it once, so the choice is heard.
+    pub(crate) fn set_sound(&mut self, event: SoundEvent, value: String, cx: &mut Context<Self>) {
+        match event {
+            SoundEvent::Received => self.settings.sound_received = value,
+            SoundEvent::Sent => self.settings.sound_sent = value,
+        }
+        let (stored, fallback) = match event {
+            SoundEvent::Received => (&self.settings.sound_received, BuiltinSound::Pop),
+            SoundEvent::Sent => (&self.settings.sound_sent, BuiltinSound::Ping),
+        };
+        if self.settings.sounds_enabled {
+            self.sounds.play(&SoundChoice::from_setting(stored, fallback));
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Asks for a sound file of the system and uses it for one event.
+    pub(crate) fn choose_sound_file(
+        &mut self,
+        event: SoundEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(i18n::t("Choose a sound").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let chosen = match selected.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    window
+                        .update(|_, cx| {
+                            view.update(cx, |this, cx| {
+                                this.store.toast_error = Some(i18n::t_args(
+                                    "The file selector could not be opened: {error}",
+                                    &[("error", reason.as_str())],
+                                ));
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    None
+                }
+                Err(_) => None,
+            };
+            let Some(path) = chosen else {
+                return;
+            };
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        let value = SoundChoice::File(path).encode();
+                        this.set_sound(event, value, cx);
+                    });
+                })
+                .ok();
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------
@@ -3796,6 +4199,8 @@ impl Whatfast {
         self.call_capture = Some(capture);
         self.call_audio_id = Some(call_id.to_owned());
         cx.spawn_in(window, async move |this, cx| {
+            let mut scratch = Vec::with_capacity(960);
+            let mut echo = crate::call_audio::EchoCanceller::new(128);
             loop {
                 Timer::after(std::time::Duration::from_millis(20)).await;
                 let Ok(live) = this.update(cx, |app, _| {
@@ -3806,8 +4211,13 @@ impl Whatfast {
                     // the mutable borrow of the app ends before the sends.
                     let mut batch: Vec<Vec<u8>> = Vec::new();
                     if let Some(capture) = app.call_capture.as_ref() {
-                        while let Some(frame) = capture.try_take() {
-                            batch.push(frame.iter().flat_map(|s| s.to_le_bytes()).collect());
+                        while capture.try_take_into(&mut scratch) {
+                            echo.process(&mut scratch, &[]);
+                            let mut pcm = Vec::with_capacity(scratch.len() * 2);
+                            for s in &scratch {
+                                pcm.extend_from_slice(&s.to_le_bytes());
+                            }
+                            batch.push(pcm);
                         }
                     }
                     for pcm in batch {
@@ -3997,20 +4407,19 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.sequence == 0 || event.sequence <= self.last_event_sequence {
-            return;
-        }
-        if self.last_event_sequence != 0
-            && event.sequence > self.last_event_sequence.saturating_add(1)
-        {
-            self.store.toast_error = Some(format!(
-                "Backend event gap ({} → {}); refreshing local state",
-                self.last_event_sequence, event.sequence
-            ));
-            self.load_chats(String::new());
-            if self.store.selected_chat_id.is_some() {
-                self.refresh_latest();
+        match observe_event_sequence(self.last_event_sequence, event.sequence) {
+            SequenceObservation::Invalid | SequenceObservation::Stale => return,
+            SequenceObservation::Gap { last, received } => {
+                self.store.toast_error = Some(format!(
+                    "Backend event gap ({} → {}); refreshing local state",
+                    last, received
+                ));
+                self.load_chats(String::new());
+                if self.store.selected_chat_id.is_some() {
+                    self.refresh_latest();
+                }
             }
+            SequenceObservation::Accept => {}
         }
         self.last_event_sequence = event.sequence;
         match event.event {
@@ -4029,6 +4438,28 @@ impl Whatfast {
                         self.begin_pairing();
                     }
                 } else if state == ConnectionState::Connected {
+                    if !self.offline_outbox.is_empty() {
+                        let queued = std::mem::take(&mut self.offline_outbox);
+                        for (chat_id, text, reply_to) in queued {
+                            let client_message_id = Uuid::new_v4().to_string();
+                            self.request(
+                                rpc_request::Request::SendText(whatfast_protocol::SendTextRequest {
+                                    client_message_id,
+                                    chat_id: chat_id.clone(),
+                                    text: text.clone(),
+                                    reply_to_message_id: reply_to.clone().unwrap_or_default(),
+                                    mentioned_jids: Vec::new(),
+                                    reply_to_chat_id: String::new(),
+                                }),
+                                PendingRequest::SendText {
+                                    chat_id,
+                                    draft_text: text,
+                                    reply_to_message_id: reply_to,
+                                    mentions: Vec::new(),
+                                },
+                            );
+                        }
+                    }
                     // La cuenta quedo conectada: si la ventana todavia no
                     // sabe que hay sesion, se le pregunta ahora. Es el caso
                     // en que el QR aparece un segundo y se va solo.
@@ -4049,6 +4480,10 @@ impl Whatfast {
                     if let Some(chat_id) = self.store.selected_chat_id.clone() {
                         self.repair_recent_reactions(chat_id);
                     }
+                    // La conexion volvio: la confirmacion de leido que quedo
+                    // esperando sale ahora, sin aguardar el plazo del reintento.
+                    self.mark_read_retry_at = None;
+                    self.mark_read();
                 }
             }
             Some(backend_event::Event::PairingQr(qr)) => {
@@ -4144,7 +4579,11 @@ impl Whatfast {
                 if let Some(message) = upsert.message {
                     // A message that arrives while the window is in the
                     // background leaves a toast, if the profile asks for it.
+                    // The sound follows the same silences, and a message the
+                    // store already had does not sound again.
+                    let is_new = self.store.message(&message.id).is_none();
                     self.notify_message(&message, window);
+                    self.play_received_sound(&message, is_new);
                     // The typed-out message arrived; drop the indicator now
                     // rather than waiting for the paused update or the TTL.
                     if !message.from_me
@@ -4213,11 +4652,18 @@ impl Whatfast {
             // The sticker tray lives only in the Tauri desktop shell; this
             // legacy GPUI reference only keeps the library.
             Some(backend_event::Event::StickersChanged(_)) => {
-                // port: the origin asks for the library again when it needs
-                // a fresh view. Here the library is only reloaded when it was
-                // already open, so a change does not wake the sidecar.
-                if !self.store.sticker_packs().is_empty() {
-                    self.load_stickers();
+                // La bandeja es la unica que dibuja la biblioteca. Si esta
+                // cerrada, el proximo `load_stickers` de la apertura trae lo
+                // descargado: pedirla ahora solo gasta un viaje al sidecar
+                // por cada sticker que termina de bajar.
+                //
+                // Con la bandeja abierta el aviso solo deja la marca: el
+                // barrido de un segundo pide la lista una vez por tanda. Una
+                // biblioteca de cientos de stickers termina de bajar en
+                // decenas de avisos, y una lista por aviso era el relampago
+                // que se veia en la rejilla.
+                if self.sticker_tray_open {
+                    self.sticker_refresh_pending = true;
                 }
             }
             // Pinned-message browsing lives in the Tauri desktop shell; this
@@ -4249,10 +4695,12 @@ impl Whatfast {
                         video: offer.video,
                         incoming: true,
                     });
-                    self.notifier.show(Note {
-                        title: i18n::t("Incoming WhatsApp call").into(),
-                        body: i18n::t("Open Whatfast to answer.").into(),
-                    });
+                    if !self.do_not_disturb {
+                        self.notifier.show(Note {
+                            title: i18n::t("Incoming WhatsApp call").into(),
+                            body: i18n::t("Open Whatfast to answer.").into(),
+                        });
+                    }
                 }
             }
             Some(backend_event::Event::CallUpdate(update)) => {
@@ -4582,23 +5030,48 @@ impl Whatfast {
             return;
         };
         let path = PathBuf::from(&viewer.path);
-        let copied = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| {
-                crate::helpers::image_file_format(&bytes).map(|format| (format, bytes))
-            })
-            .map(|(format, bytes)| gpui::Image::from_bytes(format, bytes));
-        match copied {
-            Some(image) => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        match crate::clipboard_image::copy_image_file(&path) {
+            Ok(()) => {
                 self.store.toast_info = Some(i18n::t("Photo copied").into());
                 self.clear_toast_info_later(cx);
             }
-            None => {
-                self.store.toast_error = Some(i18n::t("The photo could not be copied.").into());
+            Err(error) => {
+                self.store.toast_error = Some(format!(
+                    "{}: {error}",
+                    i18n::t("The photo could not be copied")
+                ));
             }
         }
         self.image_context_menu = None;
+    }
+
+    /// Copies a message the way WhatsApp does: the picture of an image
+    /// message, and the text of anything else.
+    pub(crate) fn copy_message(
+        &mut self,
+        message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(message) = self.store.message(&message_id)
+            && !message.revoked
+            && let Some(whatfast_protocol::message::Content::Image(image)) = &message.content
+        {
+            match crate::clipboard_image::copy_image_content(image) {
+                Ok(()) => {
+                    self.store.toast_info = Some(i18n::t("Photo copied").into());
+                    self.clear_toast_info_later(cx);
+                }
+                Err(error) => {
+                    self.store.toast_error = Some(format!(
+                        "{}: {error}",
+                        i18n::t("The photo could not be copied")
+                    ));
+                }
+            }
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
     }
 
     /// Opens a file with the default application of the system: the "Open
@@ -4755,6 +5228,10 @@ impl Whatfast {
         crate::statuses::move_viewer(self, &state, false, &groups, cx);
     }
 
+    pub(crate) fn toggle_status_viewer_pause(&mut self, cx: &mut Context<Self>) {
+        self.status_strip.toggle_pause(self, cx);
+    }
+
     pub(crate) fn repair_recent_reactions(&mut self, chat_id: String) {
         if self.store.connection != ConnectionState::Connected
             || !self.reaction_repair_attempted.insert(chat_id.clone())
@@ -4816,6 +5293,7 @@ impl Whatfast {
         match tab {
             PanelTab::Emoji => {
                 self.sticker_tray_open = false;
+                self.gif_tray_open = false;
                 if self.emoji_target.is_none() {
                     self.emoji_target = Some(EmojiTarget::Composer);
                 }
@@ -4826,12 +5304,18 @@ impl Whatfast {
                 if !matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. })) {
                     self.emoji_target = None;
                 }
+                self.gif_tray_open = false;
                 self.sticker_tray_open = true;
                 self.load_stickers();
             }
-            // The app has no pictures with movement: the tab is drawn but it
-            // cannot be pressed.
-            PanelTab::Gif => {}
+            PanelTab::Gif => {
+                if !matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. })) {
+                    self.emoji_target = None;
+                }
+                self.sticker_tray_open = false;
+                self.gif_tray_open = true;
+                self.gif_tray.ensure_loaded(cx);
+            }
         }
         cx.notify();
     }
@@ -5052,6 +5536,7 @@ impl Whatfast {
                 })
                 .collect(),
             editing_message_id: None,
+            ..ChatDraft::default()
         };
         self.restore_draft(chat_id, failed_draft, window, cx)
     }
@@ -5310,6 +5795,9 @@ impl Whatfast {
         self.settings.enter_to_send = self.enter_to_send;
         self.settings.split_view = self.split_view;
         self.settings.battery_saver = self.battery_saver;
+        self.settings.do_not_disturb = self.do_not_disturb;
+        self.settings.high_contrast = self.high_contrast;
+        self.settings.reduced_motion = self.reduced_motion;
         self.settings.theme_id = self.theme_id.clone();
         self.settings.custom_themes = self
             .custom_themes
@@ -5322,6 +5810,51 @@ impl Whatfast {
                 i18n::t("Could not save the settings")
             ));
         }
+    }
+
+    pub(crate) fn lock_now(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.app_lock_hash.is_empty() {
+            self.locked = true;
+            self.pin_buffer.clear();
+            self.lock_error = None;
+        } else {
+            self.settings_open = true;
+            self.store.toast_info = Some(i18n::t("Set an App Lock PIN in Settings first").into());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn export_active_chat_txt(&mut self, cx: &mut Context<Self>) {
+        self.export_active_chat_as("txt", cx);
+    }
+
+    pub(crate) fn export_active_chat_as(&mut self, format: &str, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some(i18n::t("Select a conversation first").into());
+            cx.notify();
+            return;
+        };
+        let title = self
+            .store
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .map(|c| c.title.clone())
+            .unwrap_or_else(|| chat_id.clone());
+        let messages = self.store.messages.clone();
+        match crate::export::export_chat_file(&title, &messages, format) {
+            Ok(path) => {
+                self.store.toast_info = Some(format!(
+                    "{}: {}",
+                    i18n::t("Exported"),
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                self.store.toast_error = Some(format!("Export failed: {err}"));
+            }
+        }
+        cx.notify();
     }
 
     /// Paints the active theme and measures the messages again.
@@ -5338,6 +5871,7 @@ impl Whatfast {
             cx,
         );
         tokens::apply_theme(&theme, self.ui_scale, cx);
+        tokens::apply_accessibility_colors(self.high_contrast, !light, cx);
         apply_theme_scale(self.ui_scale, window, cx);
         self.store.invalidate_all_message_heights();
         cx.notify();
@@ -5468,6 +6002,8 @@ impl Whatfast {
             return;
         }
         self.battery_saver = enabled;
+        self.images
+            .update(cx, |cache, _| cache.set_battery_saver(enabled));
         if enabled {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             self.stop_smooth_scroll(ScrollSurface::ChatList);
@@ -6720,12 +7256,50 @@ impl Whatfast {
             loading: true,
             error: None,
             info: None,
+            media_tab: "media".to_string(),
+            media_loading: true,
+            media_items: Vec::new(),
+            media_counts: None,
         });
         self.request(
             rpc_request::Request::GetChatInfo(whatfast_protocol::GetChatInfoRequest {
                 chat_id: chat_id.clone(),
             }),
-            PendingRequest::ChatInfo { chat_id },
+            PendingRequest::ChatInfo {
+                chat_id: chat_id.clone(),
+            },
+        );
+        self.request(
+            rpc_request::Request::ListChatMedia(whatfast_protocol::ListChatMediaRequest {
+                chat_id: chat_id.clone(),
+                category: "media".to_string(),
+                limit: 60,
+            }),
+            PendingRequest::ChatMedia {
+                chat_id,
+                category: "media".to_string(),
+            },
+        );
+    }
+
+    pub(crate) fn select_chat_info_media_tab(&mut self, category: &str) {
+        let Some(state) = self.chat_info.as_mut() else {
+            return;
+        };
+        let chat_id = state.chat_id.clone();
+        state.media_tab = category.to_string();
+        state.media_loading = true;
+        state.media_items.clear();
+        self.request(
+            rpc_request::Request::ListChatMedia(whatfast_protocol::ListChatMediaRequest {
+                chat_id: chat_id.clone(),
+                category: category.to_string(),
+                limit: 60,
+            }),
+            PendingRequest::ChatMedia {
+                chat_id,
+                category: category.to_string(),
+            },
         );
     }
 
@@ -6837,6 +7411,77 @@ impl Whatfast {
         self.open_chat_with(chat_id, false, window, cx);
     }
 
+    /// Si la columna de la izquierda se esta viendo.
+    ///
+    /// La esconde su boton, y en una ventana angosta se esconde sola cuando hay
+    /// una conversacion abierta: no hay lugar para las dos columnas. La regla
+    /// vive aca y no en el dibujo, porque los botones del riel la necesitan
+    /// para saber si el panel esta abierto.
+    pub(crate) fn sidebar_visible(&self, compact: bool) -> bool {
+        Self::sidebar_shows(
+            self.sidebar_hidden,
+            compact,
+            self.store.selected_chat_id.is_some(),
+        )
+    }
+
+    /// La regla de la columna, con los tres datos que la deciden.
+    ///
+    /// `hidden` es el boton que la esconde, `compact` una ventana angosta donde
+    /// la conversacion se queda con el ancho, y `selected` que hay una
+    /// conversacion abierta. Sin conversacion la columna siempre se ve: es la
+    /// unica cosa que queda en la ventana.
+    pub(crate) fn sidebar_shows(hidden: bool, compact: bool, selected: bool) -> bool {
+        (!hidden && !compact) || !selected
+    }
+
+    /// El ancho de la columna de los chats que entra en esta ventana.
+    ///
+    /// Manda el ancho que guardo el usuario, pero la columna nunca deja a la
+    /// conversacion con menos de la mitad del espacio: al achicar la ventana
+    /// se achica con ella, y al agrandarla vuelve al ancho guardado.
+    pub(crate) fn sidebar_width_for(&self, viewport_width: Pixels) -> f32 {
+        Self::clamp_sidebar_width(self.sidebar_width, viewport_width, self.ui_scale)
+    }
+
+    /// La regla del ancho de la columna, con los tres datos que la deciden.
+    pub(crate) fn clamp_sidebar_width(saved: f32, viewport_width: Pixels, scale: f32) -> f32 {
+        let rail = crate::navrail::column_width(scale);
+        let max_ratio = ((f32::from(viewport_width) - f32::from(rail)) * 0.45) / scale;
+        let max_allowed = MAX_SIDEBAR_WIDTH.min(max_ratio.max(MIN_SIDEBAR_WIDTH));
+        saved.clamp(MIN_SIDEBAR_WIDTH, max_allowed)
+    }
+
+    /// Vuelve a la lista de chats: no queda ninguna conversacion a la vista.
+    ///
+    /// Se usa cuando se cierra la ultima pestaña. Todo lo que pertenecia al
+    /// chat abierto se va con el: la vista previa, la respuesta armada y los
+    /// borradores del agente.
+    pub(crate) fn leave_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.selected_chat_id.take().is_none() {
+            return;
+        }
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.chat_switcher = None;
+        self.chat_info = None;
+        self.message_selection = None;
+        self.cancel_reply();
+        self.reload_agent_drafts();
+        // El campo de escritura se desmonta con la conversacion: si tenia el
+        // foco, la raiz dejaria de recibir las teclas y los atajos moririan.
+        if !self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn open_chat_with(
         &mut self,
         chat_id: String,
@@ -6850,6 +7495,8 @@ impl Whatfast {
         // Volver a tocar la conversacion que ya esta abierta no vacia la
         // bandeja: solo se vacia cuando el usuario se va a otra.
         let switching_chat = self.store.selected_chat_id.as_deref() != Some(chat_id.as_str());
+        // Otra conversacion estrena su propio intento de confirmar el leido.
+        self.mark_read_retry_at = None;
         self.show_chat_in_the_column(&chat_id);
         if record_recent {
             record_recent_chat(&mut self.recent_chat_ids, &chat_id);
@@ -6923,6 +7570,7 @@ impl Whatfast {
         self.image_viewer = None;
         self.chat_info = None;
         self.mention_picker = None;
+        self.message_selection = None;
         self.scroll_to_bottom_generation = None;
         self.search_target_message_id = None;
         self.pending_search_scroll_id = None;
@@ -7081,6 +7729,17 @@ impl Whatfast {
     }
 
     pub(crate) fn handle_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_shortcuts_help {
+            self.show_shortcuts_help = false;
+            cx.notify();
+            return;
+        }
+        if self.command_palette.open {
+            self.command_palette.open = false;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.confirm_delete_status.is_some() {
             self.confirm_delete_status = None;
             cx.notify();
@@ -7088,6 +7747,13 @@ impl Whatfast {
         }
         if self.confirm_delete_message.is_some() {
             self.confirm_delete_message = None;
+            cx.notify();
+            return;
+        }
+        // La seleccion multiple de los mensajes se cierra con escape, como
+        // la de la columna de los chats.
+        if self.message_selection.is_some() {
+            self.message_selection = None;
             cx.notify();
             return;
         }
@@ -7341,12 +8007,23 @@ impl Whatfast {
             self.store.toast_error = Some(i18n::t("Choose a conversation before sending").into());
             return;
         };
-        if self.store.connection != ConnectionState::Connected {
-            self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
-            return;
-        }
         if let Err(error) = validate_text_message(&text) {
             self.store.toast_error = Some(error);
+            return;
+        }
+        if self.store.connection != ConnectionState::Connected {
+            let reply_to_message_id = self.replying_to_message_id.clone();
+            self.offline_outbox
+                .push((chat_id, text, reply_to_message_id));
+            self.mention_picker = None;
+            self.typing_signal = None;
+            self.clear_active_draft();
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.store.toast_info = Some(
+                i18n::t("Offline: message queued and will send on reconnect").into(),
+            );
+            cx.notify();
             return;
         }
         self.store.toast_error = None;
@@ -7751,6 +8428,82 @@ impl Whatfast {
         });
     }
 
+    // ---------------------------------------------------------------------
+    // The link preview of the composer
+    // ---------------------------------------------------------------------
+
+    /// How long the typing pauses before the draft asks for the card of its
+    /// link: one request for the pasted link, not one per keystroke.
+    pub(crate) const COMPOSER_LINK_DEBOUNCE: Duration = Duration::from_millis(800);
+
+    /// Re-evaluates the first link of the draft after the user typed.
+    ///
+    /// A new link arms the debounce; the second sweep asks for the link
+    /// that stayed. The same link asks nothing twice, and the link the user
+    /// dismissed with the X stays dismissed while it remains in the draft.
+    pub(crate) fn refresh_composer_link(&mut self, text: &str) {
+        let link = crate::text::first_web_url(text).unwrap_or_default();
+        if link == self.composer_link.url {
+            self.composer_link.pending_url.clear();
+            self.composer_link.pending_since = None;
+            return;
+        }
+        if link.is_empty() || link == self.composer_link.dismissed_url {
+            self.composer_link.url.clear();
+            self.composer_link.title.clear();
+            self.composer_link.description.clear();
+            self.composer_link.loading = false;
+            self.composer_link.pending_url.clear();
+            self.composer_link.pending_since = None;
+            return;
+        }
+        if link != self.composer_link.pending_url {
+            self.composer_link.pending_url = link;
+        }
+        self.composer_link.pending_since = Some(Instant::now());
+    }
+
+    /// Asks for the card of the link the typing settled on, if any.
+    ///
+    /// It rides the sweep of the second: the typing pauses, the second
+    /// passes, and the sidecar fetches the page once.
+    pub(crate) fn poll_composer_link(&mut self) {
+        if self.composer_link.pending_url.is_empty()
+            || self.composer_link.pending_url == self.composer_link.url
+        {
+            return;
+        }
+        let settled = self
+            .composer_link
+            .pending_since
+            .is_some_and(|since| since.elapsed() >= Self::COMPOSER_LINK_DEBOUNCE);
+        if !settled {
+            return;
+        }
+        let link = std::mem::take(&mut self.composer_link.pending_url);
+        self.composer_link.pending_since = None;
+        self.composer_link.url = link.clone();
+        self.composer_link.title.clear();
+        self.composer_link.description.clear();
+        self.composer_link.loading = true;
+        report_failed_request(&mut self.store, self.rpc.request_link_preview(link));
+    }
+
+    /// Forgets the card of the draft: the X of the composer hides it, and a
+    /// draft without a link has nothing to show.
+    pub(crate) fn dismiss_composer_link(&mut self) {
+        self.composer_link.dismissed_url = self.composer_link.url.clone();
+        if self.composer_link.dismissed_url.is_empty() {
+            self.composer_link.dismissed_url = self.composer_link.pending_url.clone();
+        }
+        self.composer_link.url.clear();
+        self.composer_link.title.clear();
+        self.composer_link.description.clear();
+        self.composer_link.loading = false;
+        self.composer_link.pending_url.clear();
+        self.composer_link.pending_since = None;
+    }
+
     pub(crate) fn choose_sticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             return;
@@ -7837,6 +8590,26 @@ impl Whatfast {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             return;
         };
+        // La puerta de la lista se dibuja en cada cuadro: con un pedido en
+        // vuelo no se manda otro, o una rafaga de eventos llenaba la cola de
+        // confirmaciones y el sidecar no daba abasto.
+        if self.rpc.pending_requests().any(|pending| {
+            matches!(
+                pending,
+                PendingRequest::MarkRead {
+                    chat_id: pending_chat,
+                    ..
+                } if pending_chat == &chat_id
+            )
+        }) {
+            return;
+        }
+        if self
+            .mark_read_retry_at
+            .is_some_and(|at| Instant::now() < at)
+        {
+            return;
+        }
         let previous_unread = self.store.mark_selected_chat_read_locally().unwrap_or(0);
         let through_message_id = self
             .store
@@ -7846,15 +8619,17 @@ impl Whatfast {
             .find(|message| !message.from_me)
             .map(|message| message.id.clone())
             .unwrap_or_default();
-        if !through_message_id.is_empty()
-            && self.store.last_mark_read_id.as_deref() == Some(through_message_id.as_str())
+        // Sin un mensaje entrante a la vista no hay nada que confirmar: la
+        // apertura de la conversacion ya mando su recibo.
+        if through_message_id.is_empty() {
+            return;
+        }
+        if self.store.last_mark_read_id.as_deref() == Some(through_message_id.as_str())
             && previous_unread == 0
         {
             return;
         }
-        if !through_message_id.is_empty() {
-            self.store.last_mark_read_id = Some(through_message_id.clone());
-        }
+        self.store.last_mark_read_id = Some(through_message_id.clone());
         self.request(
             rpc_request::Request::MarkRead(whatfast_protocol::MarkReadRequest {
                 chat_id,
@@ -7973,7 +8748,60 @@ impl Whatfast {
         self.send_attachment_to(chat_id, path, AttachmentKind::Audio, String::new(), true);
     }
 
-    fn send_attachment_to(
+    pub(crate) fn handle_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        for raw in paths {
+            let s = raw.to_string_lossy();
+            let resolved = if let Some(stripped) = s.strip_prefix("file:///") {
+                #[cfg(windows)]
+                {
+                    PathBuf::from(stripped.replace('/', "\\"))
+                }
+                #[cfg(not(windows))]
+                {
+                    PathBuf::from(format!("/{stripped}"))
+                }
+            } else if let Some(stripped) = s.strip_prefix("file://") {
+                PathBuf::from(stripped)
+            } else {
+                raw.clone()
+            };
+            if !resolved.is_file() {
+                continue;
+            }
+            let ext = resolved
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+            ) {
+                if let Err(err) = self.pending_images.stage(resolved.clone()) {
+                    self.store.toast_error = Some(err);
+                } else {
+                    let draft = self.chat_drafts.entry(chat_id.clone()).or_default();
+                    draft.pending_attachment_paths.push(resolved);
+                    self.drafts_dirty = true;
+                }
+            } else {
+                let kind = if matches!(ext.as_str(), "mp4" | "mkv" | "mov" | "webm" | "avi") {
+                    AttachmentKind::Video
+                } else if matches!(ext.as_str(), "mp3" | "ogg" | "opus" | "wav" | "m4a") {
+                    AttachmentKind::Audio
+                } else {
+                    AttachmentKind::Document
+                };
+                self.send_attachment_to(chat_id.clone(), resolved, kind, String::new(), false);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn send_attachment_to(
         &mut self,
         chat_id: String,
         path: PathBuf,
@@ -8446,13 +9274,19 @@ impl Whatfast {
             self.start_video_tick(window, cx);
             return;
         }
-        // El archivo no esta: se baja y el video arranca cuando llega.
+        // El archivo no esta: se baja (si no venia bajando ya) y el video
+        // arranca cuando llega.
+        let already_downloading = self.attachment_download_attempted.contains(key)
+            && !self.attachment_failures.contains_key(key);
         self.store
             .set_message_attachment_path(&key.0, &key.1, String::new());
         self.video.waiting = true;
         self.attachment_play_requested = Some(key.clone());
-        self.attachment_download_attempted.remove(key);
-        self.load_message_attachment(key.0.clone(), key.1.clone());
+        if !already_downloading {
+            self.attachment_failures.remove(key);
+            self.attachment_download_attempted.remove(key);
+            self.load_message_attachment(key.0.clone(), key.1.clone());
+        }
     }
 
     /// Abre el video en el visor que ocupa la ventana entera.
@@ -8879,6 +9713,14 @@ impl Whatfast {
 
     /// Asks the sidecar for the library of stickers.
     pub(crate) fn load_stickers(&mut self) {
+        // Una descarga de stickers avisa varias veces mientras avanza. Con un
+        // pedido en vuelo, el aviso solo deja la marca: el barrido de un
+        // segundo pide la lista nueva una vez por tanda, no una por sticker.
+        if self.sticker_library_loading {
+            self.sticker_refresh_pending = true;
+            return;
+        }
+        self.sticker_refresh_pending = false;
         self.sticker_library_loading = true;
         report_failed_request(&mut self.store, self.rpc.request_stickers());
     }
@@ -8981,6 +9823,196 @@ impl Whatfast {
         self.drafts_dirty = true;
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Starts the multiple selection of the messages of the open conversation
+    /// with one message marked.
+    pub(crate) fn start_message_selection(
+        &mut self,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let Some(message) = self.store.message(&message_id) else {
+            return;
+        };
+        if message.chat_id != chat_id {
+            return;
+        }
+        let same_chat = self
+            .message_selection
+            .as_ref()
+            .is_some_and(|selection| selection.chat_id == chat_id);
+        if same_chat {
+            if let Some(selection) = self.message_selection.as_mut() {
+                selection.ids.insert(message_id);
+            }
+        } else {
+            self.message_selection = Some(MessageSelection {
+                chat_id,
+                ids: HashSet::from([message_id]),
+            });
+        }
+        cx.notify();
+    }
+
+    /// Marks or unmarks one message of the multiple selection.
+    pub(crate) fn toggle_message_selection(
+        &mut self,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.message_selection.as_mut() else {
+            return;
+        };
+        selection.toggle(&message_id);
+        cx.notify();
+    }
+
+    /// Turns the multiple selection of the messages off.
+    pub(crate) fn cancel_message_selection(&mut self, cx: &mut Context<Self>) {
+        self.message_selection = None;
+        cx.notify();
+    }
+
+    /// The marked messages, in the order they appear in the conversation.
+    pub(crate) fn selected_message_ids(&self) -> Vec<String> {
+        let Some(selection) = self.message_selection.as_ref() else {
+            return Vec::new();
+        };
+        self.store
+            .messages
+            .iter()
+            .filter(|message| selection.ids.contains(&message.id))
+            .map(|message| message.id.clone())
+            .collect()
+    }
+
+    /// Whether at least one marked message can be copied: a text, or a
+    /// picture that the device already has.
+    pub(crate) fn selection_has_copyable(&self) -> bool {
+        let Some(selection) = self.message_selection.as_ref() else {
+            return false;
+        };
+        self.store
+            .messages
+            .iter()
+            .filter(|message| selection.ids.contains(&message.id))
+            .any(|message| {
+                !message.revoked
+                    && (!message_text(message).is_empty()
+                        || matches!(
+                            &message.content,
+                            Some(whatfast_protocol::message::Content::Image(image))
+                                if !image.local_path.is_empty()
+                                    || !image.thumbnail_path.is_empty()
+                                    || !image.jpeg_thumbnail.is_empty()
+                        ))
+            })
+    }
+
+    /// Whether at least one marked message can be forwarded: the deleted ones
+    /// carry no content.
+    pub(crate) fn selection_has_forwardable(&self) -> bool {
+        let Some(selection) = self.message_selection.as_ref() else {
+            return false;
+        };
+        self.store
+            .messages
+            .iter()
+            .filter(|message| selection.ids.contains(&message.id))
+            .any(|message| message.content.is_some() && !message.revoked)
+    }
+
+    /// Copies the marked messages: the picture when only one photo is
+    /// marked, and the text of all of them, one per line, otherwise.
+    pub(crate) fn copy_selected_messages(&mut self, cx: &mut Context<Self>) {
+        let message_ids = self.selected_message_ids();
+        if message_ids.is_empty() {
+            return;
+        }
+        if message_ids.len() == 1
+            && let Some(message) = self.store.message(&message_ids[0])
+            && !message.revoked
+            && let Some(whatfast_protocol::message::Content::Image(image)) = &message.content
+        {
+            match crate::clipboard_image::copy_image_content(image) {
+                Ok(()) => {
+                    self.store.toast_info = Some(i18n::t("Photo copied").into());
+                    self.clear_toast_info_later(cx);
+                    self.message_selection = None;
+                }
+                Err(error) => {
+                    self.store.toast_error = Some(format!(
+                        "{}: {error}",
+                        i18n::t("The photo could not be copied")
+                    ));
+                }
+            }
+            cx.notify();
+            return;
+        }
+        let texts: Vec<&str> = message_ids
+            .iter()
+            .filter_map(|message_id| self.store.message(message_id))
+            .filter(|message| !message.revoked)
+            .map(message_text)
+            .filter(|text| !text.is_empty())
+            .collect();
+        if texts.is_empty() {
+            self.store.toast_error =
+                Some(i18n::t("The selected messages have no text to copy").into());
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(texts.join("\n")));
+        self.store.toast_info = Some(i18n::t("The selected messages were copied").into());
+        self.clear_toast_info_later(cx);
+        self.message_selection = None;
+        cx.notify();
+    }
+
+    /// Opens the picker to send every marked message to other conversations.
+    pub(crate) fn forward_selected_messages(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.message_selection.as_ref() else {
+            return;
+        };
+        let chat_id = selection.chat_id.clone();
+        let message_ids: Vec<String> = self
+            .selected_message_ids()
+            .into_iter()
+            .filter(|message_id| {
+                self.store
+                    .message(message_id)
+                    .is_some_and(|message| message.content.is_some() && !message.revoked)
+            })
+            .collect();
+        if message_ids.is_empty() {
+            self.store.toast_error =
+                Some(i18n::t("The selected messages cannot be forwarded").into());
+            return;
+        }
+        self.open_forward_many(chat_id, message_ids, window, cx);
+    }
+
+    /// Deletes several messages of the open conversation, one request each.
+    ///
+    /// The selection goes away with the deletion: the user already chose the
+    /// messages and the dialog confirmed them.
+    pub(crate) fn delete_messages(
+        &mut self,
+        message_ids: Vec<String>,
+        delete_for_everyone: bool,
+    ) {
+        for message_id in message_ids {
+            self.delete_message(message_id, delete_for_everyone);
+        }
+        self.message_selection = None;
     }
 
     /// Deletes one message of the open conversation.
@@ -9268,6 +10300,7 @@ impl Whatfast {
                 reply_to_message_id: None,
                 mentions: Vec::new(),
                 editing_message_id: Some(message_id.to_owned()),
+                ..ChatDraft::default()
             },
             window,
             cx,
@@ -9285,8 +10318,29 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let compact = !self.split_view && window.viewport_size().width < px(800. * self.ui_scale);
+        // Si la columna se veia antes del clic decide si el boton la abre o la
+        // cierra. Sin esto, el panel cerrado no tenia vuelta: la unica salida
+        // era el boton del encabezado de la conversacion.
+        let visible = self.sidebar_visible(compact);
+        // En una ventana angosta la conversacion tapa la columna: pedir
+        // cualquier vista del riel devuelve la columna. Los ajustes son un
+        // panel aparte y no tocan la conversacion abierta.
+        let sidebar_action = !matches!(action, NavAction::Privacy | NavAction::Settings);
+        if sidebar_action && compact && self.store.selected_chat_id.is_some() {
+            self.leave_conversation(window, cx);
+        }
         match action {
             NavAction::Chats => {
+                // El boton de los chats enciende y apaga la columna cuando la
+                // lista ya esta en frente; si otra vista ocupa el lugar, la
+                // cambia por los chats sin cerrar el panel.
+                let in_front = visible
+                    && !self.states_open
+                    && !self.channels_open
+                    && !self.agents_open
+                    && !self.archived_open;
+                self.sidebar_hidden = in_front;
                 self.store.set_chat_filter(ChatFilter::All);
                 self.states_open = false;
                 self.channels_open = false;
@@ -9295,6 +10349,9 @@ impl Whatfast {
                 self.settings_open = false;
             }
             NavAction::Search => {
+                // La busqueda vive en la columna: el boton la trae de vuelta
+                // antes de pedir el foco.
+                self.sidebar_hidden = false;
                 self.states_open = false;
                 self.channels_open = false;
                 self.archived_open = false;
@@ -9304,6 +10361,9 @@ impl Whatfast {
             }
             NavAction::States => {
                 // The states are their own view: they are not conversations.
+                // El boton de la vista que ya esta en frente esconde la
+                // columna, y el mismo boton la vuelve a mostrar.
+                self.sidebar_hidden = visible && self.states_open;
                 self.states_open = true;
                 self.channels_open = false;
                 self.archived_open = false;
@@ -9313,6 +10373,7 @@ impl Whatfast {
             }
             NavAction::Channels => {
                 // The channels are their own view too.
+                self.sidebar_hidden = visible && self.channels_open;
                 self.states_open = false;
                 self.channels_open = true;
                 self.archived_open = false;
@@ -9324,6 +10385,7 @@ impl Whatfast {
                 // The screen of the harnesses is its own view: the catalog of
                 // the machine and the drafts of the profile, with its own
                 // reader of `agents.db`.
+                self.sidebar_hidden = visible && self.agents_open;
                 self.states_open = false;
                 self.channels_open = false;
                 self.archived_open = false;
@@ -9337,6 +10399,7 @@ impl Whatfast {
             }
             NavAction::Archived => {
                 // The archived conversations are their own view.
+                self.sidebar_hidden = visible && self.archived_open;
                 self.states_open = false;
                 self.channels_open = false;
                 self.archived_open = true;
@@ -9411,10 +10474,13 @@ impl Whatfast {
                 self.recent_chat_ids.retain(|id| id != &chat_id);
                 // The closed tab gives the conversation to its neighbour: the
                 // same rule the strip already used to pick the next one.
-                if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
-                    && let Some(next_chat_id) = next_chat_id
-                {
-                    self.select_open_tab(next_chat_id, window, cx);
+                if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str()) {
+                    match next_chat_id {
+                        Some(next_chat_id) => self.select_open_tab(next_chat_id, window, cx),
+                        // Sin pestañas no queda conversacion: la ventana vuelve
+                        // a la lista, como cuando se cierra la ultima solapa.
+                        None => self.leave_conversation(window, cx),
+                    }
                 }
             }
             TabAction::Reorder { chat_id, index, .. } => {
@@ -9425,7 +10491,7 @@ impl Whatfast {
             TabAction::Add => {
                 self.focus_search(window, cx);
             }
-            TabAction::Unhandled | TabAction::Handled | TabAction::Boundary { .. } => {}
+            TabAction::Unhandled | TabAction::Boundary { .. } => {}
         }
         self.sync_shell(cx);
     }
@@ -9469,9 +10535,12 @@ impl Whatfast {
                 .iter()
                 .any(|group| crate::statuses::has_unseen(&state, group))
         };
+        // El boton de los chats se enciende solo con la columna a la vista:
+        // si el panel esta cerrado, ningun boton queda activo.
+        let sidebar_open = !self.sidebar_hidden;
         self.nav_rail.update(cx, |rail, _| {
             rail.set_link(link);
-            rail.set_sidebar_open(true);
+            rail.set_sidebar_open(sidebar_open);
             rail.set_settings_open(settings_open);
             rail.set_states_open(states_open);
             rail.set_channels_open(channels_open);
@@ -9527,6 +10596,21 @@ impl Whatfast {
                                 this.publish_edited_status(edit.clone(), window, cx);
                             }
                         }
+                    }
+                }
+                MediaEditorEvent::SendSticker(webp_data) => {
+                    this.media_editor = None;
+                    if let Some(chat_id) = this.store.selected_chat_id.clone() {
+                        this.send_sticker(
+                            sticker::PreparedSticker {
+                                webp_data: webp_data.clone(),
+                            },
+                            chat_id,
+                            None,
+                        );
+                    } else {
+                        this.store.toast_error =
+                            Some(i18n::t("Choose a conversation before sending").into());
                     }
                 }
                 MediaEditorEvent::Cancelled => {
@@ -9753,30 +10837,186 @@ impl Whatfast {
         let message_id = menu.read(cx).message_id().to_owned();
         let text = menu.read(cx).text().to_owned();
         self.message_menu = None;
+        self.dispatch_message_action(chat_id, message_id, text, action, window, cx);
+    }
+
+    pub(crate) fn dispatch_message_action(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        text: String,
+        action: MessageAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             MessageAction::Reply => self.start_reply(message_id),
             MessageAction::Forward => self.open_forward_picker(chat_id, message_id, window, cx),
             MessageAction::Edit => self.start_edit(message_id, window, cx),
+            MessageAction::SelectMessages => self.start_message_selection(message_id, cx),
             MessageAction::Delete => {
-                self.confirm_delete_message = Some(ConfirmDeleteMessage {
-                    message_id,
-                    delete_for_everyone: false,
-                });
+                self.confirm_delete_message =
+                    Some(ConfirmDeleteMessage::single(message_id, false));
             }
             MessageAction::DeleteForEveryone => {
-                self.confirm_delete_message = Some(ConfirmDeleteMessage {
-                    message_id,
-                    delete_for_everyone: true,
-                });
+                self.confirm_delete_message =
+                    Some(ConfirmDeleteMessage::single(message_id, true));
             }
-            MessageAction::Copy => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            }
+            MessageAction::Copy => self.copy_message(message_id, text, cx),
+            MessageAction::Translate => self.translate_message(message_id, text, cx),
             MessageAction::Pin => self.set_message_pin(message_id, true),
             MessageAction::Unpin => self.set_message_pin(message_id, false),
             MessageAction::Star => self.set_message_star(chat_id, message_id, true, cx),
             MessageAction::Unstar => self.set_message_star(chat_id, message_id, false, cx),
         }
+    }
+
+    pub(crate) fn cycle_pane_focus(
+        &mut self,
+        reverse: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_chat = self.store.selected_chat_id.is_some();
+        let next = match (self.active_focus_zone, reverse) {
+            (FocusZone::NavRail, false) => FocusZone::ChatList,
+            (FocusZone::NavRail, true) => {
+                if has_chat { FocusZone::Composer } else { FocusZone::ChatList }
+            }
+            (FocusZone::ChatList, false) => {
+                if has_chat { FocusZone::MessageList } else { FocusZone::NavRail }
+            }
+            (FocusZone::ChatList, true) => FocusZone::NavRail,
+            (FocusZone::MessageList, false) => {
+                if has_chat { FocusZone::Composer } else { FocusZone::NavRail }
+            }
+            (FocusZone::MessageList, true) => FocusZone::ChatList,
+            (FocusZone::Composer, false) => FocusZone::NavRail,
+            (FocusZone::Composer, true) => {
+                if has_chat { FocusZone::MessageList } else { FocusZone::ChatList }
+            }
+        };
+        self.active_focus_zone = next;
+        match next {
+            FocusZone::Composer if has_chat => {
+                self.composer.update(cx, |input, cx| input.focus(window, cx));
+            }
+            FocusZone::MessageList => {
+                self.focus_handle.focus(window, cx);
+                if self.focused_message_id.is_none()
+                    && let Some(last) = self.store.messages.last()
+                {
+                    self.focused_message_id = Some(last.id.clone());
+                }
+            }
+            FocusZone::ChatList | FocusZone::NavRail => {
+                self.focus_handle.focus(window, cx);
+            }
+            FocusZone::Composer => {
+                self.focus_handle.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn step_focused_message(&mut self, forward: bool) {
+        let messages = &self.store.messages;
+        if messages.is_empty() {
+            self.focused_message_id = None;
+            return;
+        }
+        let current = self
+            .focused_message_id
+            .as_ref()
+            .and_then(|id| messages.iter().position(|m| &m.id == id));
+        let next_idx = match current {
+            Some(idx) => {
+                if forward {
+                    (idx + 1).min(messages.len() - 1)
+                } else {
+                    idx.saturating_sub(1)
+                }
+            }
+            None => messages.len() - 1,
+        };
+        self.focused_message_id = Some(messages[next_idx].id.clone());
+        self.stop_smooth_scroll(ScrollSurface::Messages);
+        self.message_scroll
+            .scroll_to_item(next_idx, ScrollStrategy::Center);
+    }
+
+    pub(crate) fn open_menu_for_focused_message(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(msg_id) = self.focused_message_id.clone() else {
+            return;
+        };
+        let bounds = window.viewport_size();
+        let pos = point(bounds.width * 0.5, bounds.height * 0.5);
+        self.open_message_menu(msg_id, pos, cx);
+        if let Some(menu) = &self.message_menu {
+            menu.update(cx, |m, _| m.move_highlight(true));
+        }
+    }
+
+    pub(crate) fn trigger_focused_message_action(
+        &mut self,
+        action: MessageAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return false;
+        };
+        let Some(msg_id) = self.focused_message_id.clone() else {
+            return false;
+        };
+        let Some(message) = self.store.message(&msg_id).cloned() else {
+            return false;
+        };
+        let action = if action == MessageAction::Star
+            && self.store.message_is_starred(&chat_id, &msg_id)
+        {
+            MessageAction::Unstar
+        } else {
+            action
+        };
+        let text = whatfast_model::model::message_text(&message).to_string();
+        self.dispatch_message_action(chat_id, msg_id, text, action, window, cx);
+        true
+    }
+
+    pub(crate) fn translate_message(
+        &mut self,
+        message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let target_lang = self.settings.language.clone();
+        if let Some(hit) = crate::translate::cached(&message_id, &target_lang) {
+            self.store.toast_info = Some(hit);
+            cx.notify();
+            return;
+        }
+        self.store.toast_info = Some(i18n::t("Translating…").into());
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::translate::translate_sync(&message_id, &text, &target_lang)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(translated) => this.store.toast_info = Some(translated),
+                    Err(err) => this.store.toast_error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Stars a message of this profile, or takes the star off it.
@@ -9811,9 +11051,21 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_forward_many(chat_id, vec![message_id], window, cx);
+    }
+
+    /// Opens the dialog to send one or several messages to other
+    /// conversations.
+    pub(crate) fn open_forward_many(
+        &mut self,
+        chat_id: String,
+        message_ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.entity();
         let picker = cx.new(|cx| {
-            ForwardPicker::new(chat_id, message_id, window, cx).on_action(
+            ForwardPicker::new_many(chat_id, message_ids, window, cx).on_action(
                 move |action, window, cx| {
                     view.update(cx, |this, cx| {
                         this.on_forward_action(action, window, cx);
@@ -9845,13 +11097,20 @@ impl Whatfast {
             return;
         };
         let source_chat_id = picker.read(cx).source_chat_id().to_owned();
-        let message_id = picker.read(cx).message_id().to_owned();
+        let message_ids = picker.read(cx).message_ids().to_vec();
         self.forward_picker = None;
         match action {
             ForwardAction::Forward(targets) => {
                 for target in targets {
-                    self.forward_message(source_chat_id.clone(), message_id.clone(), target);
+                    for message_id in &message_ids {
+                        self.forward_message(
+                            source_chat_id.clone(),
+                            message_id.clone(),
+                            target.clone(),
+                        );
+                    }
                 }
+                self.message_selection = None;
             }
             ForwardAction::Cancel => {}
         }
@@ -9912,6 +11171,9 @@ impl Whatfast {
                 let _ = path;
             }
             AttachmentAction::SaveFailed { message } => {
+                self.store.toast_error = Some(message);
+            }
+            AttachmentAction::Failed { message } => {
                 self.store.toast_error = Some(message);
             }
             AttachmentAction::Photo => {
@@ -10217,13 +11479,32 @@ mod tests {
         assert_eq!(viewer.message_id, "b");
     }
 
+    /// La seleccion multiple de los mensajes marca y desmarca con el mismo
+    /// clic, y nunca repite un mensaje.
+    #[test]
+    fn the_message_selection_toggles_the_same_message() {
+        let mut selection = MessageSelection::default();
+        selection.toggle("a");
+        selection.toggle("b");
+        assert_eq!(selection.ids.len(), 2);
+        selection.toggle("a");
+        assert_eq!(selection.ids.len(), 1);
+        assert!(selection.ids.contains("b"));
+    }
+
     /// The instant of the clock is what the client uses to say until when a
     /// conversation stays muted.
     #[test]
     fn the_instant_of_the_clock_is_in_milliseconds_of_the_epoch() {
         let now = now_ms();
-        assert!(now > 1_700_000_000_000, "the clock is not in milliseconds");
-        assert!(now < 10_000_000_000_000, "the clock is not in milliseconds");
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_millis() as i64;
+        assert!(
+            (now - epoch).abs() < 1_000,
+            "the clock is not in milliseconds"
+        );
     }
 
     /// A request that could not even be queued leaves the client without a
@@ -10283,7 +11564,7 @@ mod tests {
     #[test]
     fn the_clock_of_the_note_leaves_the_pause_out() {
         let state = RecordingState {
-            started: std::time::Instant::now(),
+            started: std::time::Instant::now() - std::time::Duration::from_secs(60),
             finishing: false,
             chat_id: "chat-a".into(),
             discarded: false,
@@ -10292,14 +11573,16 @@ mod tests {
             paused_total: std::time::Duration::from_secs(30),
             levels: Vec::new(),
         };
-        assert!(state.elapsed_seconds() < 1.0);
+        // The sixty seconds of the clock minus the thirty of the pause.
+        assert!((state.elapsed_seconds() - 30.0).abs() < 1.0);
 
         let paused = RecordingState {
             paused: true,
             paused_at: Some(std::time::Instant::now()),
             ..state
         };
-        assert!(paused.elapsed_seconds() < 1.0);
+        // The pause that opened now takes almost nothing out of the clock.
+        assert!((paused.elapsed_seconds() - 30.0).abs() < 1.0);
     }
 
     /// A download that failed must not leave a save waiting: the next time
@@ -10349,5 +11632,75 @@ mod tests {
             ChatDraft::default().is_empty(),
             "a draft with nothing in it is empty"
         );
+    }
+
+    /// La columna de los chats: su boton la esconde y la vuelve a mostrar, y
+    /// sin conversacion abierta no se puede esconder.
+    #[test]
+    fn the_chat_list_hides_only_while_a_conversation_is_open() {
+        assert!(Whatfast::sidebar_shows(false, false, true));
+        assert!(!Whatfast::sidebar_shows(true, false, true));
+        assert!(
+            Whatfast::sidebar_shows(true, false, false),
+            "sin conversacion no quedaria nada en la ventana"
+        );
+        assert!(
+            !Whatfast::sidebar_shows(false, true, true),
+            "en una ventana angosta la conversacion se queda con el ancho"
+        );
+        assert!(
+            Whatfast::sidebar_shows(true, true, false),
+            "sin conversacion la lista vuelve aunque el boton la haya escondido"
+        );
+    }
+
+    /// El ancho de la columna se achica con la ventana: la conversacion
+    /// conserva al menos la mitad del espacio que queda despues del riel.
+    #[test]
+    fn the_chat_list_shrinks_with_the_window() {
+        use gpui::px;
+        // 1180 px: el ancho guardado de 384 entra entero.
+        assert_eq!(Whatfast::clamp_sidebar_width(384.0, px(1180.), 1.0), 384.0);
+        // 800 px: el 45% de 744 son 334.8, asi que la columna baja a eso.
+        let narrow = Whatfast::clamp_sidebar_width(560.0, px(800.), 1.0);
+        assert!((narrow - 334.8).abs() < 0.01, "ancho {narrow}");
+        // Nunca baja del minimo, aunque la ventana sea muy chica.
+        assert_eq!(Whatfast::clamp_sidebar_width(384.0, px(480.), 1.0), 260.0);
+    }
+
+    /// La tarjeta del link del borrador: solo se dibuja con algo que mostrar.
+    #[test]
+    fn the_card_of_the_composer_shows_only_with_something_to_show() {
+        let mut card = ComposerLinkPreview::default();
+        assert!(!card.visible());
+        card.url = "https://example.com/nota".into();
+        assert!(
+            !card.visible(),
+            "un link sin titulo todavia no tiene tarjeta"
+        );
+        card.description = "Lo que cuenta".into();
+        assert!(card.visible());
+    }
+
+    /// The sequence of the events: the client ignores a repeated or missing
+    /// number, accepts the next one, and reports a gap when the backend skips
+    /// numbers. The Gap variant is the one that shows the "Backend event gap"
+    /// toast and reloads the local state.
+    #[test]
+    fn event_sequence_accepts_ordered_events_and_reports_gaps() {
+        assert_eq!(observe_event_sequence(0, 0), SequenceObservation::Invalid);
+        assert_eq!(observe_event_sequence(0, 1), SequenceObservation::Accept);
+        assert_eq!(observe_event_sequence(0, 5), SequenceObservation::Accept);
+        assert_eq!(observe_event_sequence(1, 1), SequenceObservation::Stale);
+        assert_eq!(observe_event_sequence(5, 0), SequenceObservation::Invalid);
+        assert_eq!(
+            observe_event_sequence(1, 3),
+            SequenceObservation::Gap { last: 1, received: 3 }
+        );
+        assert_eq!(
+            observe_event_sequence(5, 7),
+            SequenceObservation::Gap { last: 5, received: 7 }
+        );
+        assert_eq!(observe_event_sequence(3, 4), SequenceObservation::Accept);
     }
 }

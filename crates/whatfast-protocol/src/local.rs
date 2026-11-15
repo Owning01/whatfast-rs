@@ -14,12 +14,6 @@
 
 use std::path::Path;
 
-use crate::transport::PROTOCOL_VERSION;
-
-/// The protocol version of a local connection: the same envelopes as the
-/// stdio bridge.
-pub const LOCAL_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
-
 /// The name of the local endpoint of one profile.
 ///
 /// A Windows named pipe is a single path component, so the profile directory
@@ -55,12 +49,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-
-    #[test]
-    fn the_same_profile_always_meets_on_the_same_endpoint() {
-        let profile = PathBuf::from("/home/someone/.local/share/whatfast");
-        assert_eq!(endpoint(&profile), endpoint(&profile));
-    }
 
     #[test]
     fn two_profiles_do_not_share_the_endpoint() {

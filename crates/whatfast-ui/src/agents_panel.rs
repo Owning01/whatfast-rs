@@ -34,7 +34,9 @@ use gpui_component::{
     v_flex,
 };
 use whatfast_agents::{ClientSpec, McpCommand, token::Token};
-use whatfast_auto::{AgentRow, ChatFilter, Db, Draft, DraftState, Grant, Scope, Window as Hours};
+use whatfast_auto::{
+    AgentRow, Call, ChatFilter, Db, Draft, DraftState, Grant, Scope, Window as Hours,
+};
 use whatfast_core::message_format::{DateLocale, LocalTimestamp, format_day, format_time};
 use whatfast_i18n as i18n;
 use whatfast_model::model::ChatFilter as StoreFilter;
@@ -126,6 +128,10 @@ pub(crate) struct AgentsState {
     pub(crate) db: Option<Db>,
     /// The sends of drafts that are in flight.
     pub(crate) sends: Vec<PendingSend>,
+    /// Recent tool calls from `agent_calls` for the selected harness.
+    pub(crate) audit_calls: Vec<Call>,
+    /// Successful message sends in the last hour for the selected harness.
+    pub(crate) audit_hourly_sends: u32,
 }
 
 impl AgentsState {
@@ -201,7 +207,9 @@ impl AgentsPanel {
             .iter()
             .map(|spec| ClientRow {
                 spec,
-                installed: whatfast_agents::detect::installed(spec),
+                installed: whatfast_agents::detect::installed(spec)
+                    || whatfast_agents::write::saved_path(spec.id)
+                        .is_some_and(|path| path.exists()),
                 connected: false,
             })
             .collect();
@@ -244,7 +252,13 @@ impl AgentsPanel {
             _ => None,
         };
         let selection = selection
-            .or_else(|| state.connected.first().map(|row| row.id.clone()))
+            .or_else(|| {
+                state
+                    .connected
+                    .iter()
+                    .find(|row| row.revoked_ms.is_none())
+                    .map(|row| row.id.clone())
+            })
             .or_else(|| {
                 state
                     .clients
@@ -279,6 +293,20 @@ impl AgentsPanel {
             }
         }
         state.drafts = drafts;
+    }
+
+    pub(crate) fn reload_audit(&self, id: &str) {
+        let mut state = self.state.borrow_mut();
+        let Some(db) = state.db.clone() else {
+            return;
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let hour_ago = now_ms.saturating_sub(3_600_000);
+        state.audit_calls = db.calls(id, 25).unwrap_or_default();
+        state.audit_hourly_sends = db.sends_since(id, hour_ago).unwrap_or(0);
     }
 
     /// Puts the permissions of one harness on the screen.
@@ -435,7 +463,7 @@ impl AgentsPanel {
         let rows: Vec<ClientRow> = self.state.borrow().clients.clone();
         let mut column = v_flex()
             .h_full()
-            .w(px(app.sidebar_width * scale))
+            .w_full()
             .flex_none()
             .border_r_1()
             .border_color(cx.theme().border)
@@ -594,8 +622,10 @@ impl AgentsPanel {
             .gap_4()
             .p(px(16. * scale));
         if let Some(id) = selected {
+            self.reload_audit(&id);
             pane = pane.child(self.render_agent_header(&id, scale, cx));
             pane = pane.child(self.render_permissions(&id, app, scale, cx));
+            pane = pane.child(self.render_audit_log(&id, app, scale, cx));
         }
         pane.child(self.render_drafts(app, cx))
             // The automations sit under the drafts: both are the work the
@@ -603,62 +633,336 @@ impl AgentsPanel {
             .child(app.automations_panel.render(app, cx))
     }
 
-    /// The head of the pane: the harness in front, its lines and its button.
+    /// Audit log card showing recent `agent_calls` and hourly send quota usage.
+    fn render_audit_log(
+        &self,
+        id: &str,
+        app: &Whatfast,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = cx.theme();
+        let border = theme.border;
+        let muted = theme.muted_foreground;
+        let danger = theme.danger;
+        let accent = theme.accent;
+        let st = self.state.borrow();
+        let calls = st.audit_calls.clone();
+        let hourly = st.audit_hourly_sends;
+        let ceiling = st
+            .agent(id)
+            .map(|a| a.grant.per_hour)
+            .unwrap_or(st.edit.per_hour);
+        drop(st);
+
+        v_flex()
+            .id("agent-audit-card")
+            .rounded_xl()
+            .border_1()
+            .border_color(border)
+            .bg(theme.secondary)
+            .p(px(14. * scale))
+            .gap_2()
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13. * scale))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(i18n::t("Agent Audit Log")),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py(px(2. * scale))
+                            .rounded_full()
+                            .bg(accent.opacity(0.14))
+                            .text_size(px(11. * scale))
+                            .text_color(accent)
+                            .child(format!("{hourly}/{ceiling} /h")),
+                    ),
+            )
+            .when(calls.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(i18n::t("No tool calls recorded yet.")),
+                )
+            })
+            .children(calls.into_iter().enumerate().map(|(idx, call)| {
+                let chat_label = call
+                    .chat_id
+                    .as_deref()
+                    .map(|cid| {
+                        app.store
+                            .chats
+                            .iter()
+                            .find(|c| c.id == cid)
+                            .map(|c| c.title.clone())
+                            .unwrap_or_else(|| cid.to_string())
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+                let status_label = if call.ok { "OK" } else { "ERR" };
+                let detail = call.detail.unwrap_or_default();
+                h_flex()
+                    .id(("agent-audit-row", idx))
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.background)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(if call.ok { accent } else { danger })
+                                    .child(status_label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child(call.tool),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .truncate()
+                                    .child(chat_label),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(if detail.is_empty() {
+                                format!("{} ms · {} B", call.ms, call.bytes)
+                            } else {
+                                format!("{} ms · {}", call.ms, detail)
+                            }),
+                    )
+            }))
+    }
+
+    /// The hero cockpit card of the selected harness: status badge, detected path,
+    /// feedback banner, and primary connection controls.
     fn render_agent_header(&self, id: &str, scale: f32, cx: &mut Context<Whatfast>) -> gpui::Div {
-        let muted = cx.theme().muted_foreground;
-        let danger = cx.theme().danger;
-        let accent = cx.theme().accent;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let danger = theme.danger;
+        let accent = theme.accent;
+        let border = theme.border;
+        let card_bg = theme.secondary.opacity(0.35);
         let row = self.state.borrow().client(id).copied();
         let connected = self.state.borrow().is_connected(id);
         let name = row.map(|row| row.spec.name).unwrap_or(id);
         let installed = row.is_some_and(|row| row.installed);
         let error = self.state.borrow().error.clone();
         let notice = self.state.borrow().notice.clone();
-        let status = if connected {
-            i18n::t("Connected")
+
+        let config_path = whatfast_agents::write::saved_path(id).or_else(|| {
+            row.and_then(|r| {
+                let found = whatfast_agents::detect::find(r.spec);
+                found.file.or(found.bin)
+            })
+        });
+
+        let (status_label, status_color, badge_bg) = if connected {
+            (i18n::t("Connected"), accent, accent.opacity(0.14))
         } else if installed {
-            i18n::t("Detected on this machine")
+            (
+                i18n::t("Detected on this machine"),
+                theme.foreground,
+                theme.secondary.opacity(0.8),
+            )
         } else {
-            i18n::t("Not installed")
+            (i18n::t("Not installed"), muted, theme.muted.opacity(0.5))
         };
+
         let own_id = id.to_string();
         let pick_id = own_id.clone();
         let write_id = own_id.clone();
+
         v_flex()
             .w_full()
-            .gap_2()
+            .gap(px(12. * scale))
+            .p(px(16. * scale))
+            .rounded_xl()
+            .border_1()
+            .border_color(if connected {
+                accent.opacity(0.45)
+            } else {
+                border
+            })
+            .bg(card_bg)
             .child(
                 h_flex()
                     .w_full()
                     .gap_3()
-                    .items_center()
+                    .items_start()
+                    .justify_between()
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(20. * scale))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(name.to_string()),
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .size(px(10. * scale))
+                                            .rounded_full()
+                                            .bg(if connected {
+                                                accent
+                                            } else if installed {
+                                                theme.foreground.opacity(0.55)
+                                            } else {
+                                                muted.opacity(0.4)
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(21. * scale))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child(name.to_string()),
+                                    ),
+                            )
+                            .child(div().text_sm().text_color(muted).child(if connected {
+                                i18n::t(
+                                    "The harness reads and writes through the server of Whatfast.",
+                                )
+                            } else {
+                                i18n::t(
+                                    "One click writes the server of Whatfast in the configuration of the harness.",
+                                )
+                            })),
                     )
-                    .child(div().flex_none().text_xs().text_color(muted).child(status)),
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap(px(6. * scale))
+                            .items_center()
+                            .px(px(10. * scale))
+                            .py(px(4. * scale))
+                            .rounded_full()
+                            .bg(badge_bg)
+                            .border_1()
+                            .border_color(if connected {
+                                accent.opacity(0.35)
+                            } else {
+                                border
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(status_color)
+                            .child(status_label),
+                    ),
             )
-            .child(div().text_sm().text_color(muted).child(if connected {
-                i18n::t("The harness reads and writes through the server of Whatfast.")
-            } else {
-                i18n::t(
-                    "One click writes the server of Whatfast in the configuration of the harness.",
+            .when_some(config_path, |this, path| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .px(px(10. * scale))
+                        .py(px(6. * scale))
+                        .rounded_md()
+                        .bg(theme.background.opacity(0.65))
+                        .border_1()
+                        .border_color(border.opacity(0.7))
+                        .child(
+                            Icon::new(IconName::File)
+                                .with_size(px(13. * scale))
+                                .text_color(muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(path.display().to_string()),
+                        ),
                 )
-            }))
+            })
             .when_some(error, |this, message| {
-                this.child(div().text_sm().text_color(danger).child(message))
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .px(px(12. * scale))
+                        .py(px(8. * scale))
+                        .rounded_lg()
+                        .bg(danger.opacity(0.12))
+                        .border_1()
+                        .border_color(danger.opacity(0.4))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .with_size(px(14. * scale))
+                                .text_color(danger),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(message),
+                        ),
+                )
             })
             .when_some(notice, |this, message| {
-                this.child(div().text_sm().text_color(accent).child(message))
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .px(px(12. * scale))
+                        .py(px(8. * scale))
+                        .rounded_lg()
+                        .bg(accent.opacity(0.12))
+                        .border_1()
+                        .border_color(accent.opacity(0.4))
+                        .child(
+                            Icon::new(IconName::Check)
+                                .with_size(px(14. * scale))
+                                .text_color(accent),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(accent)
+                                .child(message),
+                        ),
+                )
             })
             .child(
                 h_flex()
+                    .w_full()
+                    .pt(px(8. * scale))
+                    .border_t_1()
+                    .border_color(border.opacity(0.6))
                     .gap_2()
+                    .items_center()
                     .child(if connected {
                         Button::new("agent-panel-disconnect")
                             .secondary()
@@ -679,6 +983,7 @@ impl AgentsPanel {
                                 cx.notify();
                             }))
                     })
+                    .child(div().flex_1())
                     // The file of the client is a guess about the system. When
                     // the guess is wrong, the user points at the real one.
                     .child(
@@ -707,7 +1012,10 @@ impl AgentsPanel {
             )
     }
 
-    /// The form of the permissions of one agent.
+    /// Bento-style permission cards for the selected harness:
+    /// 1) 3 selectable Access Level cards (`Scope`)
+    /// 2) Two-column split for Conversation Access (`Chats`) and Guardrails (`Limits & Pace`)
+    /// 3) Prominent save footer bar
     fn render_permissions(
         &self,
         id: &str,
@@ -715,101 +1023,246 @@ impl AgentsPanel {
         scale: f32,
         cx: &mut Context<Whatfast>,
     ) -> gpui::Div {
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let accent = theme.accent;
+        let bg = theme.background;
+        let card_bg = theme.secondary.opacity(0.22);
         let connected = self.state.borrow().is_connected(id);
-        let (mode, edit) = {
+        let (mode, edit, checked_count) = {
             let state = self.state.borrow();
-            (state.mode, state.edit.clone())
+            (state.mode, state.edit.clone(), state.checked.len())
         };
         let own_id = id.to_string();
-        let mut form = v_flex()
-            .w_full()
-            .gap_3()
-            .p(px(12. * scale))
-            .rounded_md()
+
+        let mut chats_card = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(10. * scale))
+            .p(px(14. * scale))
+            .rounded_xl()
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(border)
+            .bg(card_bg)
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(muted)
-                    .child(i18n::t("PERMISSIONS")),
-            )
-            .child(render_label("Scope", muted))
-            .child(self.render_scope_row(edit.scope, &own_id, cx))
-            .child(render_label("Chats", muted))
-            .child(self.render_mode_row(mode, &own_id, cx));
-        if mode == ChatsMode::Chosen {
-            form = form.child(self.render_chat_picker(app, scale, cx));
-        }
-        form.child(
-            h_flex()
-                .gap_4()
-                .items_end()
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(render_label("Messages per hour", muted))
-                        .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(render_label("Chats", muted))
+                    .when(mode == ChatsMode::Chosen, |this| {
+                        this.child(
                             div()
-                                .w(px(NUMBER_FIELD_WIDTH * scale))
-                                .child(Input::new(&self.per_hour).small()),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(render_label("Working hours", muted))
-                        .child(Input::new(&self.hours).small())
-                        .child(
-                            div()
+                                .px(px(8. * scale))
+                                .py(px(2. * scale))
+                                .rounded_full()
+                                .bg(accent.opacity(0.14))
                                 .text_xs()
-                                .text_color(muted)
-                                .child(i18n::t("Leave it empty for every hour.")),
-                        ),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(render_label("Pace", muted))
-                .child(
-                    Button::new("agent-pace")
-                        .secondary()
-                        .small()
-                        .label(if edit.humanize {
-                            i18n::t("Human pace")
-                        } else {
-                            i18n::t("Instant")
-                        })
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            let mut state = app.agents_panel.state.borrow_mut();
-                            state.edit.humanize = !state.edit.humanize;
-                            cx.notify();
-                        })),
-                )
-                .child(div().flex_1())
-                .child(
-                    Button::new("agent-save")
-                        .primary()
-                        .small()
-                        .label(i18n::t("Save permissions"))
-                        .disabled(!connected)
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            save_grant(app, window, cx);
-                            cx.notify();
-                        })),
-                ),
-        )
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(accent)
+                                .child(i18n::t_args(
+                                    "{count} chats",
+                                    &[("count", &checked_count.to_string())],
+                                )),
+                        )
+                    }),
+            )
+            .child(self.render_mode_row(mode, &own_id, scale, cx));
+
+        if mode == ChatsMode::Chosen {
+            chats_card = chats_card.child(self.render_chat_picker(app, scale, cx));
+        }
+
+        let guardrails_card = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(12. * scale))
+            .p(px(14. * scale))
+            .rounded_xl()
+            .border_1()
+            .border_color(border)
+            .bg(card_bg)
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(12. * scale))
+                    .items_start()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(render_label("Messages per hour", muted))
+                            .child(
+                                div()
+                                    .w(px(NUMBER_FIELD_WIDTH * scale))
+                                    .child(Input::new(&self.per_hour).small()),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(render_label("Working hours", muted))
+                            .child(Input::new(&self.hours).small())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(i18n::t("Leave it empty for every hour.")),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(6. * scale))
+                    .child(render_label("Pace", muted))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .p(px(3. * scale))
+                            .gap(px(3. * scale))
+                            .rounded_lg()
+                            .bg(bg.opacity(0.6))
+                            .border_1()
+                            .border_color(border)
+                            .child(
+                                div()
+                                    .id("agent-pace-human")
+                                    .flex_1()
+                                    .py(px(5. * scale))
+                                    .px(px(8. * scale))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_center()
+                                    .font_weight(if edit.humanize {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .bg(if edit.humanize {
+                                        accent.opacity(0.16)
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .text_color(if edit.humanize { accent } else { muted })
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.agents_panel.state.borrow_mut().edit.humanize = true;
+                                        cx.notify();
+                                    }))
+                                    .child(i18n::t("Human pace")),
+                            )
+                            .child(
+                                div()
+                                    .id("agent-pace-instant")
+                                    .flex_1()
+                                    .py(px(5. * scale))
+                                    .px(px(8. * scale))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_center()
+                                    .font_weight(if !edit.humanize {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .bg(if !edit.humanize {
+                                        accent.opacity(0.16)
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .text_color(if !edit.humanize { accent } else { muted })
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.agents_panel.state.borrow_mut().edit.humanize = false;
+                                        cx.notify();
+                                    }))
+                                    .child(i18n::t("Instant")),
+                            ),
+                    ),
+            );
+
+        v_flex()
+            .w_full()
+            .gap(px(12. * scale))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(8. * scale))
+                    .p(px(14. * scale))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(border)
+                    .bg(card_bg)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted)
+                                    .child(i18n::t("PERMISSIONS")),
+                            )
+                            .child(render_label("Scope", muted)),
+                    )
+                    .child(self.render_scope_row(edit.scope, &own_id, scale, cx)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(12. * scale))
+                    .items_stretch()
+                    .child(chats_card)
+                    .child(guardrails_card),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .px(px(14. * scale))
+                    .py(px(10. * scale))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(border)
+                    .bg(card_bg)
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(scope_hint(edit.scope)),
+                    )
+                    .child(
+                        Button::new("agent-save")
+                            .primary()
+                            .small()
+                            .label(i18n::t("Save permissions"))
+                            .disabled(!connected)
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                save_grant(app, window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
-    /// The three buttons of the scope.
-    fn render_scope_row(&self, scope: Scope, id: &str, cx: &mut Context<Whatfast>) -> gpui::Div {
-        let muted = cx.theme().muted_foreground;
+    /// The three selectable Access Level cards (`Scope`).
+    fn render_scope_row(
+        &self,
+        scope: Scope,
+        id: &str,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Div {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let accent = theme.accent;
+        let border = theme.border;
+        let foreground = theme.foreground;
         let own_id = id.to_string();
         let choices = [
             (Scope::Read, "Read only"),
@@ -817,93 +1270,141 @@ impl AgentsPanel {
             (Scope::Send, "Send without asking"),
         ];
         h_flex()
-            .gap_2()
-            .items_center()
-            .children(
-                choices
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (value, key))| {
-                        let own_id = own_id.clone();
-                        let button = Button::new(ElementId::named_usize("agent-scope", index))
-                            .small()
-                            .label(i18n::t(key))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                let mut state = app.agents_panel.state.borrow_mut();
-                                if state.selected.as_deref() == Some(own_id.as_str()) {
-                                    state.edit.scope = value;
-                                }
-                                cx.notify();
-                            }));
-                        if scope == value {
-                            button.primary()
-                        } else {
-                            button.secondary()
-                        }
-                        .into_any_element()
-                    }),
-            )
-            .child(
-                div()
+            .w_full()
+            .gap(px(10. * scale))
+            .items_stretch()
+            .children(choices.into_iter().enumerate().map(|(index, (value, key))| {
+                let own_id = own_id.clone();
+                let active = scope == value;
+                v_flex()
+                    .id(ElementId::named_usize("agent-scope-card", index))
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(scope_hint(scope)),
-            )
+                    .gap(px(4. * scale))
+                    .p(px(10. * scale))
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if active { accent } else { border })
+                    .bg(if active {
+                        accent.opacity(0.10)
+                    } else {
+                        theme.background.opacity(0.45)
+                    })
+                    .hover(|s| s.border_color(accent.opacity(0.65)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let mut state = app.agents_panel.state.borrow_mut();
+                        if state.selected.as_deref() == Some(own_id.as_str()) {
+                            state.edit.scope = value;
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(if active { accent } else { foreground })
+                                    .child(i18n::t(key)),
+                            )
+                            .when(active, |card| {
+                                card.child(
+                                    Icon::new(IconName::Check)
+                                        .with_size(px(14. * scale))
+                                        .text_color(accent),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(scope_hint(value)),
+                    )
+                    .into_any_element()
+            }))
     }
 
-    /// The three buttons of the chats.
-    fn render_mode_row(&self, mode: ChatsMode, id: &str, cx: &mut Context<Whatfast>) -> gpui::Div {
-        let muted = cx.theme().muted_foreground;
+    /// Segmented conversation filter selector (`Chats`).
+    fn render_mode_row(
+        &self,
+        mode: ChatsMode,
+        id: &str,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Div {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let accent = theme.accent;
+        let border = theme.border;
+        let foreground = theme.foreground;
         let own_id = id.to_string();
-        let checked = self.state.borrow().checked.len();
         let choices = [
             (ChatsMode::All, "All chats"),
             (ChatsMode::Direct, "Direct chats only"),
             (ChatsMode::Chosen, "Chosen chats"),
         ];
-        h_flex()
-            .gap_2()
-            .items_center()
-            .children(
-                choices
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (value, key))| {
-                        let own_id = own_id.clone();
-                        let button = Button::new(ElementId::named_usize("agent-chats", index))
-                            .small()
-                            .label(i18n::t(key))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                let mut state = app.agents_panel.state.borrow_mut();
-                                if state.selected.as_deref() == Some(own_id.as_str()) {
-                                    state.mode = value;
-                                }
-                                cx.notify();
-                            }));
-                        if mode == value {
-                            button.primary()
-                        } else {
-                            button.secondary()
+        v_flex()
+            .w_full()
+            .gap(px(6. * scale))
+            .children(choices.into_iter().enumerate().map(|(index, (value, key))| {
+                let own_id = own_id.clone();
+                let active = mode == value;
+                h_flex()
+                    .id(ElementId::named_usize("agent-chats-row", index))
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .px(px(10. * scale))
+                    .py(px(7. * scale))
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if active { accent } else { border.opacity(0.7) })
+                    .bg(if active {
+                        accent.opacity(0.10)
+                    } else {
+                        theme.background.opacity(0.4)
+                    })
+                    .hover(|s| s.border_color(accent.opacity(0.6)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let mut state = app.agents_panel.state.borrow_mut();
+                        if state.selected.as_deref() == Some(own_id.as_str()) {
+                            state.mode = value;
                         }
-                        .into_any_element()
-                    }),
-            )
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .size(px(8. * scale))
+                            .rounded_full()
+                            .bg(if active { accent } else { muted.opacity(0.35) }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_weight(if active {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if active { foreground } else { muted })
+                            .child(i18n::t(key)),
+                    )
+                    .into_any_element()
+            }))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(match mode {
-                        ChatsMode::Chosen => {
-                            i18n::t_args("{count} chats", &[("count", &checked.to_string())])
-                        }
-                        other => mode_hint(other).to_string(),
-                    }),
+                    .child(mode_hint(mode)),
             )
     }
 
@@ -1342,6 +1843,13 @@ pub(crate) fn connect(
             return;
         }
     };
+    let grant = match build_grant(app, spec.id, cx) {
+        Ok(grant) => grant,
+        Err(message) => {
+            app.agents_panel.fail(message);
+            return;
+        }
+    };
     if let Err(error) = whatfast_agents::token::write(spec.id, &token) {
         app.agents_panel.fail(i18n::t_args(
             "The token of the agent could not be written: {error}",
@@ -1349,7 +1857,6 @@ pub(crate) fn connect(
         ));
         return;
     }
-    let grant = grant_of_edit(app, spec.id);
     let Ok(db) = open_database(&database_path()) else {
         app.agents_panel.fail(i18n::t_args(
             "The drawer of the agents could not be opened: {error}",
@@ -1403,7 +1910,9 @@ pub(crate) fn write_server(
         return;
     };
     let command = McpCommand::new(exe, spec.id);
-    match whatfast_agents::write::register(spec, &command) {
+    let report = whatfast_agents::write::register(spec, &command);
+    app.agents_panel.reload(window, cx);
+    match report {
         Ok(report) => app.agents_panel.note(i18n::t_args(
             "The server is registered in {target}.",
             &[("target", &report.target)],
@@ -1413,7 +1922,6 @@ pub(crate) fn write_server(
             &[("error", crate::helpers::user_error(&error))],
         )),
     }
-    app.agents_panel.reload(window, cx);
 }
 
 /// Asks the user for the configuration file of one harness and registers the
@@ -1465,6 +1973,7 @@ pub(crate) fn pick_config(
         window
             .update(|window, cx| {
                 view.update(cx, |app, cx| {
+                    app.agents_panel.reload(window, cx);
                     match report {
                         Ok(report) => app.agents_panel.note(i18n::t_args(
                             "The server is registered in {target}.",
@@ -1475,7 +1984,6 @@ pub(crate) fn pick_config(
                             &[("error", crate::helpers::user_error(&error))],
                         )),
                     }
-                    app.agents_panel.reload(window, cx);
                 });
             })
             .ok();
@@ -1519,6 +2027,16 @@ pub(crate) fn disconnect(
         ));
         failed = true;
     }
+    if let (Some(spec), Ok(exe)) = (whatfast_agents::by_id(id), std::env::current_exe())
+        && !matches!(
+            spec.method,
+            whatfast_agents::spec::Method::Cli { .. }
+                | whatfast_agents::spec::Method::JsonArg { .. }
+        )
+    {
+        let command = McpCommand::new(exe, spec.id);
+        let _ = whatfast_agents::write::unregister(spec, &command);
+    }
     app.agents_panel.reload(window, cx);
     if !failed {
         app.agents_panel
@@ -1532,26 +2050,11 @@ pub(crate) fn save_grant(app: &mut Whatfast, window: &mut Window, cx: &mut Conte
     let Some(id) = selected else {
         return;
     };
-    let Ok(per_hour) = app.agents_panel.ceiling_field(cx).trim().parse::<u16>() else {
-        app.agents_panel
-            .fail(i18n::t("The hour ceiling has to be a number.").to_string());
-        return;
-    };
-    let window_hours = match parse_hours(&app.agents_panel.hours_field(cx)) {
-        Ok(hours) => hours,
+    let grant = match build_grant(app, &id, cx) {
+        Ok(grant) => grant,
         Err(message) => {
             app.agents_panel.fail(message);
             return;
-        }
-    };
-    let grant = {
-        let state = app.agents_panel.state.borrow();
-        Grant {
-            scope: state.edit.scope,
-            chats: chats_of(state.mode, &state.checked),
-            per_hour,
-            window: window_hours,
-            humanize: state.edit.humanize,
         }
     };
     let result = match open_database(&database_path()) {
@@ -1606,14 +2109,28 @@ pub(crate) fn discard_draft(app: &mut Whatfast, draft_id: i64) {
     }
 }
 
-/// The grant the form holds for one agent, or the prudent one.
-fn grant_of_edit(app: &Whatfast, id: &str) -> Grant {
-    let state = app.agents_panel.state.borrow();
-    if state.selected.as_deref() == Some(id) {
-        state.edit.clone()
-    } else {
-        Grant::default()
+/// Builds the [`Grant`] from the current form fields when `id` is selected,
+/// or falls back to the prudent default when another harness is shown.
+fn build_grant(app: &Whatfast, id: &str, cx: &mut Context<Whatfast>) -> Result<Grant, String> {
+    let selected_matches = app.agents_panel.state.borrow().selected.as_deref() == Some(id);
+    if !selected_matches {
+        return Ok(Grant::default());
     }
+    let per_hour = app
+        .agents_panel
+        .ceiling_field(cx)
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| i18n::t("The hour ceiling has to be a number.").to_string())?;
+    let window_hours = parse_hours(&app.agents_panel.hours_field(cx))?;
+    let state = app.agents_panel.state.borrow();
+    Ok(Grant {
+        scope: state.edit.scope,
+        chats: chats_of(state.mode, &state.checked),
+        per_hour,
+        window: window_hours,
+        humanize: state.edit.humanize,
+    })
 }
 
 #[cfg(test)]
@@ -1662,7 +2179,8 @@ mod tests {
 
     #[test]
     fn the_confidence_goes_in_percent() {
-        assert_eq!(confidence_label(None), i18n::t("No confidence"));
+        // Without a value there is no percentage to paint.
+        assert!(!confidence_label(None).contains('%'));
         assert!(confidence_label(Some(0.87)).starts_with("Confidence 87%"));
         // A value outside the range is clamped instead of painted as is.
         assert!(confidence_label(Some(4.0)).starts_with("Confidence 100%"));

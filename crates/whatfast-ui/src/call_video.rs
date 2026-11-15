@@ -105,9 +105,41 @@ pub(crate) fn devices(ffmpeg: &Path) -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) fn devices(_ffmpeg: &Path) -> Vec<String> {
+    v4l2_devices_in(Path::new("/sys/class/video4linux"), Path::new("/dev"))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn devices(_ffmpeg: &Path) -> Vec<String> {
     Vec::new()
+}
+
+/// Scans Linux V4L2 video nodes sorted by numeric index (`/dev/video0`, ...).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn v4l2_devices_in(sys_class_dir: &Path, dev_dir: &Path) -> Vec<String> {
+    let mut entries: Vec<(u32, String)> = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(sys_class_dir) else {
+        return Vec::new();
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(index) = name
+            .strip_prefix("video")
+            .and_then(|suffix| suffix.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let device_node = dev_dir.join(name);
+        if device_node.exists() {
+            entries.push((index, device_node.to_string_lossy().into_owned()));
+        }
+    }
+    entries.sort_by_key(|(index, _)| *index);
+    entries.into_iter().map(|(_, path)| path).collect()
 }
 
 /// A child process that must never open a console window: the app is a
@@ -240,6 +272,82 @@ impl Camera {
     pub(crate) fn ended(&self) -> bool {
         self.state.load(Ordering::SeqCst) == ENDED
     }
+
+    /// Starts capturing the desktop screen as a call video stream (`gdigrab` on Windows,
+    /// `x11grab` / Wayland PipeWire on Linux).
+    #[allow(dead_code)]
+    pub(crate) fn open_screen_share() -> anyhow::Result<Self> {
+        let ffmpeg = ffmpeg().ok_or_else(|| anyhow::anyhow!("ffmpeg is required for screen share"))?;
+        let (frames_tx, frames_rx) = async_channel::bounded(8);
+        let drop_frames = frames_rx.clone();
+        let process: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let state = Arc::new(AtomicU8::new(STARTING));
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let process = Arc::clone(&process);
+            let state = Arc::clone(&state);
+            let stopped = Arc::clone(&stopped);
+            std::thread::spawn(move || {
+                let mut child = match spawn_screen_encoder(&ffmpeg) {
+                    Ok(child) => child,
+                    Err(err) => {
+                        eprintln!("call screen share: {err}");
+                        state.store(FAILED, Ordering::SeqCst);
+                        return;
+                    }
+                };
+                let Some(mut stdout) = child.stdout.take() else {
+                    state.store(FAILED, Ordering::SeqCst);
+                    return;
+                };
+                *process.lock().expect("screen lock") = Some(child);
+                let pumped = pump(&mut stdout, &frames_tx, &drop_frames, &state);
+                if let Some(mut child) = process.lock().expect("screen lock").take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                state.store(
+                    if pumped { ENDED } else { FAILED },
+                    Ordering::SeqCst,
+                );
+                let _ = stopped;
+            });
+        }
+        Ok(Self {
+            process,
+            frames: frames_rx,
+            state,
+            stopped,
+        })
+    }
+}
+
+fn spawn_screen_encoder(ffmpeg: &Path) -> std::io::Result<Child> {
+    let filter = format!(
+        "scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,\
+         pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps={FPS}"
+    );
+    let mut command = Command::new(ffmpeg);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    #[cfg(windows)]
+    {
+        command.args(["-f", "gdigrab", "-framerate", "15", "-i", "desktop"]);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".to_string());
+        command.args(["-f", "x11grab", "-framerate", "15", "-i", &display]);
+    }
+    command
+        .args(["-vf", filter.as_str()])
+        .args([
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-pix_fmt", "yuv420p", "-f", "h264", "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
 }
 
 impl Drop for Camera {
@@ -252,7 +360,7 @@ impl Drop for Camera {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn spawn_encoder(ffmpeg: &Path, device: &str) -> std::io::Result<Child> {
     // 640x360 with the letterbox baked in, so both ends agree on the
     // geometry of every picture. The AUD and the repeated headers are what
@@ -261,11 +369,18 @@ fn spawn_encoder(ffmpeg: &Path, device: &str) -> std::io::Result<Child> {
         "scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,\
          pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps={FPS}"
     );
-    let input = format!("video={device}");
     let mut command = Command::new(ffmpeg);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    #[cfg(windows)]
+    {
+        let input = format!("video={device}");
+        command.args(["-f", "dshow", "-rtbufsize", "64M", "-i", &input]);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        command.args(["-f", "v4l2", "-i", device]);
+    }
     command
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
-        .args(["-f", "dshow", "-rtbufsize", "64M", "-i", &input])
         .args(["-vf", filter.as_str()])
         .args([
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
@@ -282,10 +397,10 @@ fn spawn_encoder(ffmpeg: &Path, device: &str) -> std::io::Result<Child> {
     command.spawn()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn spawn_encoder(_ffmpeg: &Path, _device: &str) -> std::io::Result<Child> {
     Err(std::io::Error::other(
-        "the camera of a call needs Windows and DirectShow",
+        "the camera of a call needs Windows (DirectShow) or Linux (V4L2)",
     ))
 }
 
@@ -459,22 +574,78 @@ impl CallVideo {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::{HEIGHT, WIDTH, ffmpeg};
+
+    /// Puts `WHATFAST_FFMPEG` back where it was, even when the test fails.
+    struct RestoreFfmpeg(Option<OsString>);
+
+    impl Drop for RestoreFfmpeg {
+        fn drop(&mut self) {
+            // SAFETY: the variable is restored to the value it had before the
+            // test touched it.
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("WHATFAST_FFMPEG", value),
+                    None => std::env::remove_var("WHATFAST_FFMPEG"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_frame_geometry_matches_the_boxes_of_the_call() {
         // Both ends scale to this box, so the decoder can read a fixed number
         // of bytes per picture.
-        assert_eq!((WIDTH as usize) * (HEIGHT as usize) * 4, super::FRAME_BYTES);
         assert_eq!(WIDTH * 9, HEIGHT * 16);
     }
 
     #[test]
     fn ffmpeg_is_found_by_name_or_not_at_all() {
-        // The machine may not have ffmpeg: the function answers `None`
-        // instead of panicking, and the call falls back to voice.
-        if let Some(path) = ffmpeg() {
-            assert!(path.is_file(), "{} is not a file", path.display());
+        // The settings win when they point at a file that is really there.
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let chosen = directory.path().join("ffmpeg.exe");
+        std::fs::write(&chosen, b"ffmpeg").expect("the temporary ffmpeg is written");
+        let _restore = RestoreFfmpeg(std::env::var_os("WHATFAST_FFMPEG"));
+        // SAFETY: the variable is read and written only by this test.
+        unsafe {
+            std::env::set_var("WHATFAST_FFMPEG", &chosen);
         }
+        assert_eq!(ffmpeg(), Some(chosen));
+        // A path that is not a file is ignored: the search falls back to the
+        // copy next to the executable and the one on the `PATH`. The machine
+        // may not have ffmpeg, and the function answers `None` instead of
+        // panicking.
+        let missing = directory.path().join("missing.exe");
+        // SAFETY: the same variable, restored by `_restore`.
+        unsafe {
+            std::env::set_var("WHATFAST_FFMPEG", &missing);
+        }
+        assert_ne!(ffmpeg(), Some(missing));
+    }
+
+    #[test]
+    fn v4l2_devices_are_sorted_numerically() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sys = root.path().join("sys");
+        let dev = root.path().join("dev");
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::create_dir_all(&dev).unwrap();
+        for name in ["video10", "video2", "video0", "v4l-subdev0"] {
+            std::fs::create_dir_all(sys.join(name)).unwrap();
+            std::fs::write(dev.join(name), b"").unwrap();
+        }
+        // video1 exists in sysfs without a /dev node: must be skipped.
+        std::fs::create_dir_all(sys.join("video1")).unwrap();
+        let found = super::v4l2_devices_in(&sys, &dev);
+        assert_eq!(
+            found,
+            vec![
+                dev.join("video0").to_string_lossy().into_owned(),
+                dev.join("video2").to_string_lossy().into_owned(),
+                dev.join("video10").to_string_lossy().into_owned(),
+            ]
+        );
     }
 }

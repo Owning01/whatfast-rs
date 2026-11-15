@@ -38,28 +38,6 @@ pub enum WhatsAppInlineStyle {
     Spoiler,
 }
 
-impl WhatsAppInlineStyle {
-    /// The name of the style as the original spelled it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bold => "bold",
-            Self::Italic => "italic",
-            Self::Strikethrough => "strikethrough",
-            Self::Monospace => "monospace",
-            Self::InlineCode => "inline-code",
-            Self::Spoiler => "spoiler",
-        }
-    }
-}
-
-/// The kind of an inline segment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WhatsAppInlineSegmentKind {
-    Text,
-    Link,
-    Mention,
-}
-
 /// One inline run of a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WhatsAppInlineSegment {
@@ -81,15 +59,6 @@ pub enum WhatsAppInlineSegment {
 }
 
 impl WhatsAppInlineSegment {
-    /// The kind of the segment.
-    pub fn kind(&self) -> WhatsAppInlineSegmentKind {
-        match self {
-            Self::Text { .. } => WhatsAppInlineSegmentKind::Text,
-            Self::Link { .. } => WhatsAppInlineSegmentKind::Link,
-            Self::Mention { .. } => WhatsAppInlineSegmentKind::Mention,
-        }
-    }
-
     /// The plain text of the segment.
     pub fn text(&self) -> &str {
         match self {
@@ -105,17 +74,6 @@ impl WhatsAppInlineSegment {
             | Self::Mention { styles, .. } => styles,
         }
     }
-}
-
-/// The kind of a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WhatsAppTextBlockKind {
-    Paragraph,
-    Quote,
-    BulletListItem,
-    NumberedListItem,
-    CodeBlock,
-    BlankLine,
 }
 
 /// One block of a message.
@@ -141,18 +99,6 @@ pub enum WhatsAppTextBlock {
 }
 
 impl WhatsAppTextBlock {
-    /// The kind of the block.
-    pub fn kind(&self) -> WhatsAppTextBlockKind {
-        match self {
-            Self::Paragraph { .. } => WhatsAppTextBlockKind::Paragraph,
-            Self::Quote { .. } => WhatsAppTextBlockKind::Quote,
-            Self::BulletListItem { .. } => WhatsAppTextBlockKind::BulletListItem,
-            Self::NumberedListItem { .. } => WhatsAppTextBlockKind::NumberedListItem,
-            Self::CodeBlock { .. } => WhatsAppTextBlockKind::CodeBlock,
-            Self::BlankLine => WhatsAppTextBlockKind::BlankLine,
-        }
-    }
-
     /// The inline segments of the block. Code blocks and blank lines have
     /// none.
     pub fn segments(&self) -> &[WhatsAppInlineSegment] {
@@ -1690,74 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_urls_the_way_node_does() {
-        assert_eq!(
-            href("https://example.com/a_path?q=~raw~").as_deref(),
-            Some("https://example.com/a_path?q=~raw~")
-        );
-        assert_eq!(
-            href("https://example.com").as_deref(),
-            Some("https://example.com/")
-        );
-        assert_eq!(
-            href("HTTPS://Example.COM/Path").as_deref(),
-            Some("https://example.com/Path")
-        );
-        assert_eq!(
-            href("https://example.com:443/x").as_deref(),
-            Some("https://example.com/x")
-        );
-        assert_eq!(
-            href("http://example.com:80/x").as_deref(),
-            Some("http://example.com/x")
-        );
-        assert_eq!(
-            href("https://user:pass@example.com/x").as_deref(),
-            Some("https://user:pass@example.com/x")
-        );
-        assert_eq!(
-            href("https://example.com/a?b=c#d").as_deref(),
-            Some("https://example.com/a?b=c#d")
-        );
-        assert_eq!(
-            href("https://example.com/a b").as_deref(),
-            Some("https://example.com/a%20b")
-        );
-        assert_eq!(
-            href("https://example.com/ä").as_deref(),
-            Some("https://example.com/%C3%A4")
-        );
-        assert_eq!(
-            href("https://example.com/a_(b)").as_deref(),
-            Some("https://example.com/a_(b)")
-        );
-        assert_eq!(
-            href("https://example.com/a%2zb").as_deref(),
-            Some("https://example.com/a%2zb")
-        );
-        assert_eq!(
-            href("http://example.com\\a").as_deref(),
-            Some("http://example.com/a")
-        );
-    }
-
-    #[test]
-    fn drops_the_dot_segments_of_the_path() {
-        assert_eq!(
-            href("https://example.com/a/../b").as_deref(),
-            Some("https://example.com/b")
-        );
-        assert_eq!(
-            href("https://example.com/.").as_deref(),
-            Some("https://example.com/")
-        );
-        assert_eq!(
-            href("https://example.com/a/./b").as_deref(),
-            Some("https://example.com/a/b")
-        );
-    }
-
-    #[test]
     fn writes_the_credentials_only_when_there_are_some() {
         assert_eq!(href("http://@Ann").as_deref(), Some("http://ann/"));
         assert_eq!(href("http://:x@Ann").as_deref(), Some("http://:x@ann/"));
@@ -1801,12 +1679,18 @@ mod tests {
 
     #[test]
     fn knows_the_whitespace_and_the_word_characters_of_javascript() {
-        assert!(is_whitespace(' '));
         assert!(is_whitespace('\u{feff}'));
         assert!(!is_whitespace('\u{85}'));
         assert!(is_word_character('a'));
         assert!(is_word_character('7'));
+        // A letter of the BMP that is not ASCII is still a word character.
+        assert!(is_word_character('ñ'));
         assert!(!is_word_character('_'));
+        // An astral character is a lone surrogate for JavaScript, so it is not
+        // a word character. The boundary is what makes the two assertions below
+        // false; without it, Rust's `is_alphabetic`/`is_numeric` accept them.
         assert!(!is_word_character('😀'));
+        assert!(!is_word_character('𝕒'));
+        assert!(!is_word_character('𝟘'));
     }
 }

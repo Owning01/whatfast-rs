@@ -14,8 +14,6 @@
 //! of the line of text: the text of the message is the name of the place or
 //! the name of the contact, and the card already carries it.
 
-#![allow(dead_code)]
-
 use gpui::{
     App, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement as _,
     ParentElement as _, Rgba, StatefulInteractiveElement as _, Styled as _, div, px,

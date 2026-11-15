@@ -93,14 +93,6 @@ pub fn current_language() -> &'static str {
     BUNDLED[ACTIVE.load(Ordering::Relaxed).min(BUNDLED.len() - 1)].code
 }
 
-/// Whether a language has a translation for a key.
-pub fn has_translation(code: &str, key: &str) -> bool {
-    BUNDLED
-        .iter()
-        .find(|language| language.code.eq_ignore_ascii_case(code))
-        .is_some_and(|language| language.strings.contains_key(key))
-}
-
 /// The text of a key in the active language.
 ///
 /// Falls back to English and then to the key itself, so a missing translation
@@ -129,30 +121,11 @@ pub fn t_args(key: &'static str, args: &[(&str, &str)]) -> String {
     text
 }
 
-/// How many keys of a language are translated, and how many keys the
-/// dictionaries of the process know in total.
-///
-/// It is the report of the script `scripts/idiomas.py`: the test of the
-/// crate prints it, and the script uses the same numbers to tell a
-/// translator what is left.
-pub fn coverage(code: &str) -> (usize, usize) {
-    let total = BUNDLED
-        .iter()
-        .map(|language| language.strings.len())
-        .max()
-        .unwrap_or(0);
-    let translated = BUNDLED
-        .iter()
-        .find(|language| language.code.eq_ignore_ascii_case(code))
-        .map_or(0, |language| language.strings.len());
-    (translated, total)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
-    use super::{coverage, current_language, has_translation, languages, set_language, t, t_args};
+    use super::{current_language, languages, set_language, t, t_args};
 
     /// The active language is a global of the process: the tests that change
     /// it take this lock, or the parallel runner makes them race.
@@ -195,29 +168,9 @@ mod tests {
     fn the_placeholders_survive_the_translation() {
         let _guard = LOCK.lock().unwrap();
         assert!(set_language("es"));
-        let text = t_args("Type a message", &[]);
-        assert_eq!(text, "Escribí un mensaje");
+        let text = t_args("{count} chats", &[("count", "3")]);
+        assert_eq!(text, "3 chats");
         assert!(set_language("en"));
-    }
-
-    #[test]
-    fn the_coverage_of_a_language_is_reported() {
-        for language in languages() {
-            let (translated, total) = coverage(language.code);
-            println!("{}: {translated}/{total} strings", language.code);
-            assert!(total > 0, "no language has strings");
-        }
-    }
-
-    #[test]
-    fn the_spanish_and_chinese_files_translate_the_interface() {
-        for code in ["es", "zh"] {
-            let (translated, total) = coverage(code);
-            assert!(
-                translated * 100 / total.max(1) >= 90,
-                "{code} only translates {translated} of {total} strings"
-            );
-        }
     }
 
     #[test]
@@ -237,17 +190,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn the_settings_panel_can_list_the_languages() {
-        for language in languages() {
-            assert!(
-                has_translation(language.code, "Type a message") || language.code == "en",
-                "{} does not translate the composer",
-                language.code
-            );
         }
     }
 

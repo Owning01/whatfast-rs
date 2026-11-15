@@ -57,3 +57,14 @@ strip = "symbols"
 # the line numbers, so the backtraces still point at a line.
 [profile.dev]
 debug = "line-tables-only"
+# Incremental artifacts were 25 GB here, and they disable sccache: cargo never
+# asks the wrapper on an incremental build, so the cache had 0 hits. Off, an
+# edit recompiles only the crate that changed, and the shared cache covers a
+# full rebuild after a clean.
+incremental = false
+
+# The dependencies do not need debug info: nobody steps through a crate of
+# crates.io. This is the biggest single saving on disk, because deps are the
+# bulk of target/debug. Backtraces keep the line numbers of our own code.
+[profile.dev.package."*"]
+debug = false

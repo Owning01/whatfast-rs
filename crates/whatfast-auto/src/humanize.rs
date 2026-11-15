@@ -36,7 +36,7 @@ impl Pace {
             max_ms: 6_000,
             gap_min_ms: 800,
             gap_max_ms: 1_800,
-            chunk_chars: 700,
+            chunk_chars: 4096,
         }
     }
 
@@ -48,7 +48,7 @@ impl Pace {
             max_ms: 0,
             gap_min_ms: 0,
             gap_max_ms: 0,
-            chunk_chars: 700,
+            chunk_chars: 4096,
         }
     }
 }
@@ -75,14 +75,6 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The whole plan for a text that is already fast.
-    pub fn single(text: &str) -> Self {
-        Self {
-            parts: vec![text.to_string()],
-            waits_ms: vec![0],
-        }
-    }
-
     /// Whether there is nothing to send.
     pub fn is_empty(&self) -> bool {
         self.parts.iter().all(|part| part.trim().is_empty())

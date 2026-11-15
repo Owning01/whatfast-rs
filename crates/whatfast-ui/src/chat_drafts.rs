@@ -327,23 +327,25 @@ mod tests {
     }
 
     #[test]
-    fn the_band_counts_the_drafts_that_do_not_fit() {
-        assert_eq!(hidden(0), 0);
-        assert_eq!(hidden(MAX_ROWS), 0);
-        assert_eq!(hidden(MAX_ROWS + 2), 2);
-    }
-
-    #[test]
     fn the_order_of_the_rows_survives_the_filter() {
         let rows = vec![
             draft("chat-a", "newest", DraftState::Proposed),
             draft("chat-b", "other", DraftState::Proposed),
-            draft("chat-a", "oldest", DraftState::Proposed),
+            draft("chat-a", "alpha", DraftState::Proposed),
         ];
         let texts: Vec<String> = of_chat(rows, "chat-a")
             .into_iter()
             .map(|draft| draft.text)
             .collect();
-        assert_eq!(texts, vec!["newest".to_string(), "oldest".to_string()]);
+        // The database gave the rows newest first: the filter keeps that order
+        // and does not sort them.
+        assert_eq!(texts, vec!["newest".to_string(), "alpha".to_string()]);
+    }
+
+    #[test]
+    fn the_band_counts_the_drafts_that_do_not_fit() {
+        assert_eq!(hidden(MAX_ROWS), 0);
+        assert_eq!(hidden(MAX_ROWS + 1), 1);
+        assert_eq!(hidden(MAX_ROWS + 2), 2);
     }
 }

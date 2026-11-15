@@ -17,11 +17,6 @@
 //! document uses the page of `gpui_component`, the audio the microphone and
 //! the video the camera of the set of Whatfast.
 
-// The card is painted by `crate::render`, and the drawing of the messages
-// lives in the branch of the other agent: until the two halves are joined,
-// the compiler calls every piece of this module dead.
-#![allow(dead_code)]
-
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, FontWeight, InteractiveElement as _, ObjectFit, ParentElement as _, Pixels,
@@ -158,6 +153,16 @@ fn format_speed(speed: f32) -> String {
 pub(crate) fn format_clock(seconds: f32) -> String {
     let total = seconds.max(0.0).round() as u32;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// The second that one bar of the wave points at: the first bar is the
+/// start of the note and the last one its end.
+pub(crate) fn wave_seek_seconds(duration: f32, bar: usize, bars: usize) -> f32 {
+    if bars <= 1 || duration <= 0.0 {
+        return 0.0;
+    }
+    let bar = bar.min(bars - 1);
+    duration * bar as f32 / (bars - 1) as f32
 }
 
 /// The size of a file, in the readable form of the oracle.
@@ -358,6 +363,12 @@ impl Whatfast {
                          cx: &mut Context<Whatfast>| {
             this.toggle_voice_note(&play_chat, &play_message, &play_path, window, cx);
         };
+        // Cada barra de la onda lleva al segundo que representa: el primer
+        // clic vuelve al inicio y el ultimo salta al final.
+        let seek_chat = message.chat_id.clone();
+        let seek_message = message.id.clone();
+        let seek_path = attachment.local_path.clone();
+        let bars = wave.len().max(1);
 
         h_flex()
             .items_center()
@@ -416,22 +427,48 @@ impl Whatfast {
                     .flex_1()
                     .min_w_0()
                     .items_center()
-                    .gap(px(2.0 * scale))
                     .h_full()
                     .cursor_pointer()
                     .on_click(cx.listener(play))
                     .children(wave.iter().enumerate().map(|(bar, height)| {
                         let tall = (6.0 + 24.0 * height) * scale;
+                        let seconds = wave_seek_seconds(duration, bar, bars);
+                        let seek_chat = seek_chat.clone();
+                        let seek_message = seek_message.clone();
+                        let seek_path = seek_path.clone();
+                        // Cada barra ocupa su casilla entera: el clic no
+                        // tiene que apuntarle a los tres puntos del dibujo.
                         div()
+                            .id(format!("voice-bar-{index}-{bar}"))
                             .flex_none()
-                            .w(px(3.0 * scale))
-                            .h(px(tall))
-                            .rounded_full()
-                            .bg(if bar < played {
-                                played_color
-                            } else {
-                                rest_color
-                            })
+                            .w(px(5.0 * scale))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.seek_voice_note(
+                                    &seek_chat,
+                                    &seek_message,
+                                    &seek_path,
+                                    seconds,
+                                    window,
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(3.0 * scale))
+                                    .h(px(tall))
+                                    .rounded_full()
+                                    .bg(if bar < played {
+                                        played_color
+                                    } else {
+                                        rest_color
+                                    }),
+                            )
                     })),
             )
             .child(
@@ -480,10 +517,22 @@ impl Whatfast {
         index: usize,
         message: &proto::Message,
         attachment: &proto::AttachmentContent,
+        max_width: f32,
+        max_height: f32,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let (width, height) =
-            crate::video::status_box_size(attachment.width, attachment.height, self.ui_scale);
+        // El reproductor suma la fila de los controles debajo del cuadro: el
+        // tope del cuadro les deja ese lugar para que el video entero entre
+        // en la ventana.
+        let controls = (VIDEO_META_HEIGHT + VIDEO_META_GAP) * self.ui_scale + 2.;
+        let frame_height = (max_height - controls).max(80. * self.ui_scale);
+        let (width, height) = crate::video::status_box_size(
+            attachment.width,
+            attachment.height,
+            self.ui_scale,
+            max_width,
+            frame_height,
+        );
         self.render_video_player(index, message, attachment, width, height, true, cx)
     }
 
@@ -541,6 +590,7 @@ impl Whatfast {
             )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_video_player(
         &self,
         index: usize,
@@ -594,7 +644,12 @@ impl Whatfast {
                 cx.theme().foreground,
             )
         };
-        let title = if waiting {
+        let downloading = waiting
+            || (self.attachment_download_attempted.contains(&key)
+                && !self.attachment_failures.contains_key(&key)
+                && (attachment.local_path.is_empty()
+                    || !self.store.media_exists(&attachment.local_path)));
+        let title = if downloading {
             i18n::t("Downloading the video").to_string()
         } else {
             attachment_name(attachment)
@@ -796,6 +851,23 @@ impl Whatfast {
         }
         let scale = self.ui_scale;
         let name = attachment_name(attachment);
+        let ext_badge: Option<(String, u32)> = std::path::Path::new(&attachment.file_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_uppercase())
+            .filter(|e| !e.is_empty() && e.len() <= 5)
+            .map(|ext| {
+                let color = match ext.as_str() {
+                    "PDF" => 0xdc2626,
+                    "ZIP" | "RAR" | "7Z" | "TAR" | "GZ" => 0xd97706,
+                    "DOC" | "DOCX" | "ODT" => 0x2563eb,
+                    "XLS" | "XLSX" | "CSV" => 0x16a34a,
+                    "PPT" | "PPTX" => 0xea580c,
+                    "MP3" | "WAV" | "OGG" | "FLAC" => 0x7c3aed,
+                    _ => 0x4b5563,
+                };
+                (ext, color)
+            });
         let details = attachment_details(attachment);
         let failure = self
             .attachment_failures
@@ -848,6 +920,19 @@ impl Whatfast {
                         cx.notify();
                     }))
                     .child(attachment_icon(attachment, scale, cx))
+                    .when_some(ext_badge, |row, (ext, badge_rgb)| {
+                        row.child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(gpui::rgb(badge_rgb))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(gpui::white())
+                                .child(ext),
+                        )
+                    })
                     .child(
                         v_flex()
                             .min_w_0()
@@ -937,7 +1022,7 @@ mod tests {
     use super::{
         attachment_details, attachment_label, attachment_name, audio_needs_download, bubble_text,
         format_bytes, format_clock, format_duration, format_speed, is_playable_voice_note,
-        voice_note_height,
+        voice_note_height, wave_seek_seconds,
     };
 
     /// An attachment with the values that a test needs.
@@ -1027,6 +1112,10 @@ mod tests {
         voice.voice_note = true;
         voice.duration_seconds = 12;
         assert_eq!(attachment_details(&voice), "0:12");
+
+        // The hours appear when the file is longer than an hour.
+        assert_eq!(format_duration(3600), "1:00:00");
+        assert_eq!(format_duration(3725), "1:02:05");
     }
 
     #[test]
@@ -1066,6 +1155,19 @@ mod tests {
         assert_eq!(format_clock(0.0), "0:00");
         assert_eq!(format_clock(7.4), "0:07");
         assert_eq!(format_clock(75.6), "1:16");
+    }
+
+    /// La primera barra de la onda vuelve al inicio, la del medio lleva a la
+    /// mitad y la ultima al final de la nota.
+    #[test]
+    fn every_bar_of_the_wave_points_at_its_second() {
+        assert_eq!(wave_seek_seconds(30.0, 0, 32), 0.0);
+        assert!((wave_seek_seconds(30.0, 31, 32) - 30.0).abs() < 0.01);
+        assert!((wave_seek_seconds(30.0, 15, 32) - 14.516).abs() < 0.01);
+        // Una nota sin duracion, o una onda de una sola barra, no mueven el
+        // reloj.
+        assert_eq!(wave_seek_seconds(0.0, 10, 32), 0.0);
+        assert_eq!(wave_seek_seconds(30.0, 0, 1), 0.0);
     }
 
     #[test]

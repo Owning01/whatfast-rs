@@ -62,6 +62,30 @@ pub(crate) fn verify(pin: &str, salt: &str, hash: &str) -> bool {
             == 0
 }
 
+/// Returns true if `auto_lock_minutes > 0` and idle time exceeded the threshold.
+#[allow(dead_code)]
+pub(crate) fn should_auto_lock(last_activity: std::time::Instant, auto_lock_minutes: u32) -> bool {
+    auto_lock_minutes > 0
+        && last_activity.elapsed() >= std::time::Duration::from_secs(u64::from(auto_lock_minutes) * 60)
+}
+
+/// Attempts optional OS biometric / polkit verification (`fprintd-verify` on Linux).
+#[allow(dead_code)]
+pub(crate) fn try_system_biometric_unlock() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::process::Command::new("fprintd-verify")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            && status.success()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{hash_pin, is_valid_pin, new_salt, verify};

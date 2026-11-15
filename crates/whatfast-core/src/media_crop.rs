@@ -1,5 +1,4 @@
-//! Geometry for the image editor: crop rectangle, rotation and preview
-//! transform.
+//! Geometry for the image editor: crop rectangle and rotation.
 //!
 //! Port of `tauri/src/lib/media-crop.ts`.
 //!
@@ -32,8 +31,7 @@
 //! (a negative width or height means the drag went up or left and moves the
 //! origin), round to whole pixels, then clamp into the source bounds. The
 //! result of every function that returns pixels is therefore an integer and
-//! never `NaN` or `Infinity`. The only fractional numbers the module produces
-//! are the preview scale factors of `crop_transform_for_canvas`.
+//! never `NaN` or `Infinity`.
 //!
 //! port: the original throws a `RangeError` for a broken source size. The
 //! port returns `Result` with `InvalidSourceSize` instead. `thiserror` is not
@@ -107,15 +105,6 @@ pub struct EditPlan {
     pub output: PixelSize,
 }
 
-/// The CSS transform that makes a preview show exactly the cropped region.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CanvasTransform {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
 /// A source size that is not finite or is negative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidSourceSize {
@@ -181,11 +170,6 @@ fn js_min(left: f64, right: f64) -> f64 {
         return right;
     }
     left
-}
-
-/// Negates without producing negative zero.
-fn negate(value: f64) -> f64 {
-    if value == 0.0 { 0.0 } else { -value }
 }
 
 /// Rounds to a whole pixel. Non-finite input becomes 0 and negative zero is
@@ -395,110 +379,6 @@ pub fn plan_edit(
             height: crop.height,
         },
     })
-}
-
-/// The crop that keeps the whole image.
-pub fn default_crop(source: PixelSize) -> Result<CropRect, InvalidSourceSize> {
-    assert_source_size(source, "source")?;
-    Ok(CropRect {
-        x: 0.0,
-        y: 0.0,
-        width: integral(source.width),
-        height: integral(source.height),
-    })
-}
-
-/// Maps a rectangle from one pixel space into another one. It is used to take
-/// the crop the user drew on a scaled down preview back to the original image.
-/// The result is rounded to whole pixels and clamped to the target size.
-pub fn scale_rect(
-    rect: CropRect,
-    from: PixelSize,
-    to: PixelSize,
-) -> Result<CropRect, InvalidSourceSize> {
-    assert_source_size(from, "source")?;
-    assert_source_size(to, "target")?;
-
-    let normalized = normalize_crop_rect(rect, from)?;
-    let factor_x = if from.width > 0.0 {
-        to.width / from.width
-    } else {
-        0.0
-    };
-    let factor_y = if from.height > 0.0 {
-        to.height / from.height
-    } else {
-        0.0
-    };
-
-    let scaled = CropRect {
-        x: integral(normalized.x * factor_x),
-        y: integral(normalized.y * factor_y),
-        width: integral(normalized.width * factor_x),
-        height: integral(normalized.height * factor_y),
-    };
-    normalize_crop_rect(scaled, to)
-}
-
-/// The CSS transform that makes a preview show exactly the cropped region.
-///
-/// `x` and `y` are the negative offsets in canvas pixels: the rectangle is
-/// expected to live in the pixel space of the canvas. `width` and `height` are
-/// the scale factors that map the crop onto the canvas, one per axis.
-///
-/// Apply it as `transform: scale(width, height) translate(x px, y px)` so the
-/// translation is expressed in canvas pixels (the space before the scale) and
-/// the crop lands on the top left corner of the canvas.
-pub fn crop_transform_for_canvas(
-    rect: CropRect,
-    canvas: PixelSize,
-) -> Result<CanvasTransform, InvalidSourceSize> {
-    assert_source_size(canvas, "canvas")?;
-    let normalized = normalize_crop_rect(rect, canvas)?;
-    Ok(CanvasTransform {
-        x: negate(normalized.x),
-        y: negate(normalized.y),
-        width: if normalized.width > 0.0 {
-            canvas.width / normalized.width
-        } else {
-            1.0
-        },
-        height: if normalized.height > 0.0 {
-            canvas.height / normalized.height
-        } else {
-            1.0
-        },
-    })
-}
-
-/// True when the rectangle is fully inside the source image and covers at
-/// least one pixel.
-pub fn is_valid_crop(rect: CropRect, source: PixelSize) -> Result<bool, InvalidSourceSize> {
-    assert_source_size(source, "source")?;
-    let CropRect {
-        x,
-        y,
-        width,
-        height,
-    } = rect;
-    if !x.is_finite() || !y.is_finite() {
-        return Ok(false);
-    }
-    if !width.is_finite() || !height.is_finite() {
-        return Ok(false);
-    }
-    if width < 1.0 || height < 1.0 {
-        return Ok(false);
-    }
-    if x < 0.0 || y < 0.0 {
-        return Ok(false);
-    }
-    Ok(x + width <= source.width && y + height <= source.height)
-}
-
-/// Advances the rotation one step clockwise: 0 -> 90 -> 180 -> 270 -> 0.
-pub fn rotation_after_rotate(rotation: Rotation) -> Rotation {
-    Rotation::from_number((rotation.degrees() as f64 + 90.0) % 360.0)
 }
 
 /// Normalises any number of degrees into the nearest quarter turn. Ties go

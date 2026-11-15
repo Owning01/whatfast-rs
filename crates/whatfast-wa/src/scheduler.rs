@@ -1,4 +1,4 @@
-//! The automations: what comes due, runs, and leaves its answer as a draft.
+//! The automations: what comes due, runs, and delivers its answer.
 //!
 //! The table of `schedules` keeps the tasks, the cron keeps their turns and the
 //! window keeps them inside the hours of the user. This module is the part that
@@ -6,18 +6,22 @@
 //! turn, and asks the harness of the task for an answer without a window in
 //! front of it.
 //!
-//! The answer never leaves on its own. A task leaves a **draft** with the text
-//! the harness wrote: the user reads it and decides. Sending from a schedule is
-//! the next step, and it needs the tray to exist first.
+//! What happens with the answer is the `output` of the task. `read` only
+//! consults and leaves nothing; `draft` leaves the text for the user to
+//! approve; `send` hands it to the WhatsApp session. A send that cannot go
+//! out -the desk is offline, or WhatsApp refuses it- leaves the text as a
+//! draft instead, so the answer of the harness is never lost.
 
 use std::sync::Arc;
 
+use async_channel::Sender;
 use whatfast_auto::{
-    Draft, DraftState, Schedule,
+    Draft, DraftState, Output, Schedule,
     runner::{self, RunError},
 };
+use whatfast_protocol::{BackendEvent, ConnectionState, SendTextRequest};
 
-use crate::{db::Store, guard::Guard};
+use crate::{db::Store, guard::Guard, session::Session};
 
 /// Turns a schedule is carried out with: `once` has no next turn.
 fn next_turn(guard: &Guard, task: &Schedule, now_ms: i64) -> Option<i64> {
@@ -37,12 +41,41 @@ fn next_turn(guard: &Guard, task: &Schedule, now_ms: i64) -> Option<i64> {
     }
 }
 
+/// What the answer of a task does once the harness wrote it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// Nothing: the task only read the chat.
+    Nothing,
+    /// A draft the user reads and approves.
+    Draft,
+    /// The message goes out now.
+    Send,
+}
+
+/// The delivery of one answer, from what the task asks and whether WhatsApp is
+/// up. A send without a connection becomes a draft: the text waits for the
+/// user instead of dying in a failed attempt.
+fn delivery(output: Output, online: bool) -> Delivery {
+    match output {
+        Output::Read => Delivery::Nothing,
+        Output::Draft => Delivery::Draft,
+        Output::Send if online => Delivery::Send,
+        Output::Send => Delivery::Draft,
+    }
+}
+
 /// Runs every task that came due, without holding the serve loop.
 ///
-/// It returns how many it started. Each one runs on the blocking pool: a
-/// harness is another program with its own network, and the backend has a
-/// desktop to answer meanwhile.
-pub fn dispatch(guard: &Arc<Guard>, store: &Arc<Store>, now_ms: i64) -> usize {
+/// It returns how many it started. Each one runs on its own task: a harness is
+/// another program with its own network, and the backend has a desktop to
+/// answer meanwhile.
+pub fn dispatch(
+    guard: &Arc<Guard>,
+    store: &Arc<Store>,
+    session: Option<Arc<Session>>,
+    events: &Sender<BackendEvent>,
+    now_ms: i64,
+) -> usize {
     let due = match guard.db().due(now_ms) {
         Ok(due) => due,
         Err(error) => {
@@ -64,14 +97,24 @@ pub fn dispatch(guard: &Arc<Guard>, store: &Arc<Store>, now_ms: i64) -> usize {
         }
         let guard = Arc::clone(guard);
         let store = Arc::clone(store);
-        tokio::task::spawn_blocking(move || run_one(&guard, &store, &task));
+        let session = session.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            run_one(&guard, &store, session, &events, &task).await;
+        });
         started += 1;
     }
     started
 }
 
 /// One task: the harness, its answer, and the row in the log.
-fn run_one(guard: &Guard, store: &Store, task: &Schedule) {
+async fn run_one(
+    guard: &Guard,
+    store: &Store,
+    session: Option<Arc<Session>>,
+    events: &Sender<BackendEvent>,
+    task: &Schedule,
+) {
     let started = std::time::Instant::now();
     let agent_id = task.agent_id.clone();
     let chat_id = task.chat_id.clone();
@@ -107,43 +150,141 @@ fn run_one(guard: &Guard, store: &Store, task: &Schedule) {
         return;
     };
     let prompt = build_prompt(task);
-    match runner::run(&run, &prompt, runner::DEFAULT_TIMEOUT) {
-        Ok(answer) => {
-            let draft = Draft {
-                id: 0,
-                agent_id: task.agent_id.clone(),
-                chat_id: task.chat_id.clone(),
-                reply_to: None,
-                text: answer.text.clone(),
-                reason: Some(format!("automatización: {}", first_line(&task.prompt))),
-                confidence: None,
-                state: DraftState::Proposed,
-                at_ms: crate::db::now_ms(),
-            };
-            match guard.db().add_draft(&draft) {
-                Ok(id) => {
-                    tracing::info!("the task {} left the draft {id}", task.id);
-                    log(true, None);
-                }
-                Err(error) => log(false, Some(format!("the draft was not saved: {error}"))),
-            }
-        }
-        Err(error) => {
+    // The harness blocks on its own child; the run waits for it on the pool so
+    // the send that follows can await the session.
+    let answer = match tokio::task::spawn_blocking(move || {
+        runner::run(&run, &prompt, runner::DEFAULT_TIMEOUT)
+    })
+    .await
+    {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
             tracing::info!("the task {} did not answer: {error}", task.id);
             log(false, Some(describe(&error)));
+            return;
+        }
+        Err(error) => {
+            log(false, Some(format!("the harness task did not finish: {error}")));
+            return;
+        }
+    };
+
+    let online = session
+        .as_ref()
+        .is_some_and(|session| session.state.connection() == ConnectionState::Connected);
+    match delivery(task.output, online) {
+        Delivery::Nothing => {
+            tracing::info!("the task {} only read the chat", task.id);
+            // The summary has no screen of its own yet: the first line goes to
+            // the log, so the user can still see that the task ran and what it
+            // found.
+            log(true, Some(format!("solo lectura: {}", first_line(&answer.text))));
+        }
+        Delivery::Draft => leave_draft(
+            guard,
+            task,
+            &answer.text,
+            format!("automatización: {}", first_line(&task.prompt)),
+            DraftState::Proposed,
+            &log,
+        ),
+        Delivery::Send => {
+            let Some(session) = session.as_ref() else {
+                // `delivery` never says send without a session; keep the text
+                // anyway if that ever changes.
+                leave_draft(
+                    guard,
+                    task,
+                    &answer.text,
+                    "la automatización no encontró la sesión: el mensaje quedó como borrador"
+                        .to_owned(),
+                    DraftState::Proposed,
+                    &log,
+                );
+                return;
+            };
+            let request = SendTextRequest {
+                client_message_id: crate::send::uuid4(),
+                chat_id: task.chat_id.clone(),
+                text: answer.text.clone(),
+                ..SendTextRequest::default()
+            };
+            match crate::send::send_text(session, store, &request).await {
+                Ok(row) => {
+                    // The same two events the answer of a `SendText` pushes:
+                    // the bubble shows up in the chat and the list moves it up.
+                    let _ = events.send(crate::ingest::message_upserted(&row)).await;
+                    match crate::send::refresh_chat_pointer(store, &row.chat_jid) {
+                        Ok(chat) => {
+                            let _ = events.send(crate::ingest::chat_upserted(chat)).await;
+                        }
+                        Err(error) => {
+                            tracing::warn!("the chat pointer was not refreshed: {error}");
+                        }
+                    }
+                    tracing::info!("the task {} sent a message to {}", task.id, task.chat_id);
+                    log(true, None);
+                }
+                Err((code, message, _)) => {
+                    tracing::warn!("the task {} could not send ({code}): {message}", task.id);
+                    leave_draft(
+                        guard,
+                        task,
+                        &answer.text,
+                        format!("la automatización no pudo enviar ({code}): {message}"),
+                        DraftState::Failed,
+                        &log,
+                    );
+                }
+            }
         }
     }
-    let _ = store;
+}
+
+/// Saves the answer as a draft and logs the result.
+fn leave_draft(
+    guard: &Guard,
+    task: &Schedule,
+    text: &str,
+    reason: String,
+    state: DraftState,
+    log: &impl Fn(bool, Option<String>),
+) {
+    let draft = Draft {
+        id: 0,
+        agent_id: task.agent_id.clone(),
+        chat_id: task.chat_id.clone(),
+        reply_to: None,
+        text: text.to_owned(),
+        reason: Some(reason),
+        confidence: None,
+        state,
+        at_ms: crate::db::now_ms(),
+    };
+    match guard.db().add_draft(&draft) {
+        Ok(id) => {
+            tracing::info!("the task {} left the draft {id}", task.id);
+            log(true, None);
+        }
+        Err(error) => log(false, Some(format!("the draft was not saved: {error}"))),
+    }
 }
 
 /// What the harness is asked: the prompt of the task, its chat and the rule of
-/// the house.
+/// the house, which depends on what the task does with the answer.
 fn build_prompt(task: &Schedule) -> String {
-    format!(
-        "{}\n\nChat: {}\nEscribí el mensaje que hay que mandar a ese chat, y nada más: sin comillas, sin explicación y sin encabezado. Lo que escribas queda como borrador para que el usuario lo apruebe.",
-        task.prompt.trim(),
-        task.chat_id
-    )
+    let tail = match task.output {
+        Output::Read => {
+            "Esta tarea solo consulta: leé ese chat y no escribas un mensaje para mandar."
+        }
+        Output::Draft => {
+            "Escribí el mensaje que hay que mandar a ese chat, y nada más: sin comillas, sin explicación y sin encabezado. Lo que escribas queda como borrador para que el usuario lo apruebe."
+        }
+        Output::Send => {
+            "Escribí el mensaje que hay que mandar a ese chat, y nada más: sin comillas, sin explicación y sin encabezado. Se manda tal cual, así que no agregues notas ni comentarios."
+        }
+    };
+    format!("{}\n\nChat: {}\n{tail}", task.prompt.trim(), task.chat_id)
 }
 
 /// The line of the prompt a schedule shows in the tray.
@@ -186,6 +327,9 @@ mod tests {
         let (_profile, guard) = guard();
         let once = task(Kind::Once, None, Some(1_000));
         assert!(next_turn(&guard, &once, 2_000).is_none());
+        // A cron without an expression has no turn either.
+        let broken = task(Kind::Cron, None, Some(1_000));
+        assert!(next_turn(&guard, &broken, 2_000).is_none());
     }
 
     #[test]
@@ -198,18 +342,42 @@ mod tests {
     }
 
     #[test]
-    fn a_cron_task_without_an_expression_never_turns() {
-        let (_profile, guard) = guard();
-        let broken = task(Kind::Cron, None, Some(1_000));
-        assert!(next_turn(&guard, &broken, 2_000).is_none());
+    fn a_send_task_sends_only_with_a_connection() {
+        assert_eq!(delivery(Output::Send, true), Delivery::Send);
+        // Offline, the answer waits as a draft instead of failing the send.
+        assert_eq!(delivery(Output::Send, false), Delivery::Draft);
+        assert_eq!(delivery(Output::Draft, true), Delivery::Draft);
+        assert_eq!(delivery(Output::Draft, false), Delivery::Draft);
+        // A read leaves nothing, with or without a connection.
+        assert_eq!(delivery(Output::Read, true), Delivery::Nothing);
+        assert_eq!(delivery(Output::Read, false), Delivery::Nothing);
     }
 
     #[test]
     fn the_prompt_says_which_chat_and_what_to_answer() {
         let prompt = build_prompt(&task(Kind::Once, None, Some(1)));
+        // The harness needs the chat it answers and the exact instruction:
+        // without them the draft lands in the wrong place or answers the
+        // wrong thing.
         assert!(prompt.contains("5491100000000@s.whatsapp.net"));
         assert!(prompt.contains("resumí el día"));
+        assert!(prompt.contains("sin comillas, sin explicación"));
         assert!(prompt.contains("borrador"));
+    }
+
+    #[test]
+    fn the_prompt_promises_only_what_the_task_does() {
+        let mut send = task(Kind::Once, None, Some(1));
+        send.output = Output::Send;
+        let prompt = build_prompt(&send);
+        assert!(!prompt.contains("borrador"));
+        assert!(prompt.contains("Se manda tal cual"));
+
+        let mut read = task(Kind::Once, None, Some(1));
+        read.output = Output::Read;
+        let prompt = build_prompt(&read);
+        assert!(!prompt.contains("borrador"));
+        assert!(prompt.contains("no escribas un mensaje"));
     }
 
     #[test]

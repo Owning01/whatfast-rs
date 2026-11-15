@@ -244,19 +244,6 @@ pub fn save_path(agent: &str, path: &Path) -> io::Result<PathBuf> {
     Ok(file)
 }
 
-/// Forgets the file the user picked: the ficha is used again.
-pub fn clear_path(agent: &str) -> io::Result<bool> {
-    let Some(folder) = paths::agents_dir() else {
-        return Ok(false);
-    };
-    let file = folder.join(format!("{agent}.config"));
-    match fs::remove_file(file) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 /// Takes the server out of one file the user picked by hand.
 pub fn unregister_at(spec: &ClientSpec, path: &Path) -> io::Result<()> {
     let name = ClientSpec::SERVER;
@@ -789,8 +776,24 @@ mod tests {
     fn json_replace_is_idempotent() {
         let value = serde_json::json!({"command": "C:/w.exe", "args": ["mcp"]});
         let once = merge_json("{}", "mcpServers", "whatfast", &value).expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(&once).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "mcpServers": {
+                    "whatfast": {
+                        "command": "C:/w.exe",
+                        "args": ["mcp"]
+                    }
+                }
+            })
+        );
         let twice = merge_json(&once, "mcpServers", "whatfast", &value).expect("json");
-        assert_eq!(once, twice);
+        let parsed: serde_json::Value = serde_json::from_str(&twice).expect("json");
+        let servers = parsed["mcpServers"].as_object().expect("object");
+        let keys: Vec<&str> = servers.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["whatfast"]);
+        assert_eq!(servers.get("whatfast"), Some(&value));
     }
 
     #[test]
@@ -839,8 +842,26 @@ mod tests {
     fn opcode_replace_is_idempotent() {
         let argv = vec!["C:/w.exe".to_string(), "mcp".to_string()];
         let once = merge_opencode("", "whatfast", &argv).expect("jsonc");
+        let parsed: serde_json::Value = serde_json::from_str(&once).expect("jsonc");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "mcp": {
+                    "servers": {
+                        "whatfast": {
+                            "type": "local",
+                            "command": ["C:/w.exe", "mcp"]
+                        }
+                    }
+                }
+            })
+        );
         let twice = merge_opencode(&once, "whatfast", &argv).expect("jsonc");
-        assert_eq!(once, twice);
+        let parsed: serde_json::Value = serde_json::from_str(&twice).expect("jsonc");
+        let servers = parsed["mcp"]["servers"].as_object().expect("object");
+        let keys: Vec<&str> = servers.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["whatfast"]);
+        assert_eq!(servers.get("whatfast").expect("whatfast")["type"], "local");
     }
 
     #[test]
@@ -900,9 +921,11 @@ mod tests {
             ("args".to_string(), "[\"mcp\"]".to_string()),
         ];
         let after = upsert_toml(before, "mcp_servers.whatfast", &body);
-        assert!(after.contains("model = \"o3\""));
-        assert!(after.contains("[mcp_servers.whatfast]"));
-        assert!(after.contains("command = \"C:/w.exe\""));
+        assert_eq!(
+            after,
+            "model = \"o3\"\n\n[mcp_servers.whatfast]\ncommand = \"C:/w.exe\"\nargs = [\"mcp\"]\n"
+        );
+        // The second write replaces the table instead of adding it again.
         let twice = upsert_toml(&after, "mcp_servers.whatfast", &body);
         assert_eq!(after, twice);
     }
@@ -912,9 +935,10 @@ mod tests {
         let before = "[mcp_servers.whatfast]\ncommand = \"old\"\nextra = 1\n\n[mcp_servers.other]\ncommand = \"x\"\n";
         let body = vec![("command".to_string(), "\"new\"".to_string())];
         let after = upsert_toml(before, "mcp_servers.whatfast", &body);
-        assert!(after.contains("command = \"new\""));
-        assert!(!after.contains("extra = 1"));
-        assert!(after.contains("[mcp_servers.other]"));
+        assert_eq!(
+            after,
+            "[mcp_servers.whatfast]\ncommand = \"new\"\n[mcp_servers.other]\ncommand = \"x\"\n"
+        );
     }
 
     #[test]
@@ -922,10 +946,11 @@ mod tests {
         let before = "model: x\n";
         let body = vec!["    command: \"C:/w.exe\"".to_string()];
         let after = upsert_yaml(before, "mcp_servers", "whatfast", &body);
-        assert!(after.contains("model: x"));
-        assert!(after.contains("mcp_servers:"));
-        assert!(after.contains("  whatfast:"));
-        assert!(after.contains("    command: \"C:/w.exe\""));
+        assert_eq!(
+            after,
+            "model: x\n\nmcp_servers:\n  whatfast:\n    command: \"C:/w.exe\"\n"
+        );
+        // The second write replaces the mapping instead of adding it again.
         let twice = upsert_yaml(&after, "mcp_servers", "whatfast", &body);
         assert_eq!(after, twice);
     }
@@ -935,8 +960,10 @@ mod tests {
         let before = "mcp_servers:\n  other:\n    command: \"x\"\n";
         let body = vec!["    command: \"C:/w.exe\"".to_string()];
         let after = upsert_yaml(before, "mcp_servers", "whatfast", &body);
-        assert!(after.contains("  other:"));
-        assert!(after.contains("  whatfast:"));
+        assert_eq!(
+            after,
+            "mcp_servers:\n  other:\n    command: \"x\"\n  whatfast:\n    command: \"C:/w.exe\"\n"
+        );
     }
 
     #[test]

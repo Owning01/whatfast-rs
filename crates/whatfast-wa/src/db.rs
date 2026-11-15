@@ -51,8 +51,6 @@ pub struct ChatRow {
     pub push_name: String,
     pub business_name: String,
     pub phone_number: String,
-    /// Whether a group-name backfill already ran for this chat.
-    pub named: bool,
 }
 
 impl ChatRow {
@@ -475,6 +473,13 @@ CREATE TABLE IF NOT EXISTS sticker_favorites(
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(updated_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_jid TEXT NOT NULL,
+  text TEXT NOT NULL,
+  reply_to_id TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Opens the read-only connections of the pool.
@@ -566,6 +571,70 @@ impl Store {
                 connections: open_readers(path, READERS)?,
                 next: AtomicUsize::new(0),
             }),
+        })
+    }
+
+    /// Runs periodic SQLite maintenance: updates planner statistics (`PRAGMA optimize`),
+    /// truncates the WAL file, and compacts free pages (`VACUUM`) when `compact` is
+    /// requested or the freelist grows beyond 1,024 pages.
+    pub fn maintain(&self, compact: bool) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute_batch("PRAGMA optimize;")?;
+        let freelist: i64 = conn
+            .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
+            .unwrap_or(0);
+        if compact || freelist > 1024 {
+            conn.execute_batch("VACUUM;")?;
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Queries a chat's stored media, documents, and link messages along with
+    /// total counts for the Chat Info gallery.
+    pub fn list_chat_media(
+        &self,
+        chat_jid: &str,
+        category: &str,
+        limit: usize,
+    ) -> rusqlite::Result<(Vec<MessageRow>, u32, u32, u32)> {
+        let limit = limit.clamp(1, 200) as i64;
+        self.read(|conn| {
+            let media_count: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE chat_jid=?1 AND revoked=0 AND kind IN ('image','video')",
+                params![chat_jid],
+                |r| r.get(0),
+            )?;
+            let doc_count: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE chat_jid=?1 AND revoked=0 AND (kind='document' OR (kind='attachment' AND media_kind NOT IN ('audio','video','image')))",
+                params![chat_jid],
+                |r| r.get(0),
+            )?;
+            let link_count: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE chat_jid=?1 AND revoked=0 AND kind<>'reaction'
+                   AND (text LIKE '%http://%' OR text LIKE '%https://%' OR image_caption LIKE '%http://%' OR image_caption LIKE '%https://%')",
+                params![chat_jid],
+                |r| r.get(0),
+            )?;
+            let filter_sql = match category {
+                "docs" => "AND (kind='document' OR (kind='attachment' AND media_kind NOT IN ('audio','video','image')))",
+                "links" => "AND (text LIKE '%http://%' OR text LIKE '%https://%' OR image_caption LIKE '%http://%' OR image_caption LIKE '%https://%')",
+                _ => "AND kind IN ('image','video')",
+            };
+            let sql = format!(
+                "SELECT * FROM messages
+                 WHERE chat_jid=?1 AND revoked=0 AND kind<>'reaction' {filter_sql}
+                 ORDER BY timestamp DESC, id DESC
+                 LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![chat_jid, limit], message_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((rows, media_count, doc_count, link_count))
         })
     }
 
@@ -910,56 +979,6 @@ impl Store {
                 params![kind, chat_jid, entity_id, now_ms(), error],
             )?;
             Ok(())
-        })
-    }
-
-    /// The unread counters: `messages.unread` marks the rows, `chats.unread_count`
-    /// caches the total the list shows. Port note: the Go `MarkRead` only
-    /// zeroed the counter and left the rows marked, which its own integrity
-    /// check counts as an inconsistency; this port clears both so derived
-    /// state stays consistent (the Go reached the same end through
-    /// `MarkReadIDs`/`MarkReadThrough`).
-    pub fn mark_chat_read(&self, chat_jid: &str) -> rusqlite::Result<u32> {
-        self.write(|conn| {
-            let changed = conn.execute(
-                "UPDATE messages SET unread=0 WHERE chat_jid=?1 AND unread=1",
-                params![chat_jid],
-            )?;
-            conn.execute(
-                "UPDATE chats SET unread_count=0 WHERE jid=?1",
-                params![chat_jid],
-            )?;
-            Ok(changed as u32)
-        })
-    }
-
-    /// One bounded page, oldest-to-newest, ending strictly before the
-    /// (timestamp,id) cursor. (0,"") means the newest page.
-    pub fn messages_before(
-        &self,
-        chat_jid: &str,
-        before_ts: i64,
-        before_id: &str,
-        limit: u32,
-    ) -> rusqlite::Result<Vec<MessageRow>> {
-        let limit = clamp_limit(limit);
-        self.read(|conn| {
-            let mut statement = conn.prepare(&format!(
-                "{MESSAGE_SELECT}
-                 WHERE m.chat_jid=?1
-                   AND m.kind<>'reaction'
-                   AND (?2 = 0 OR m.timestamp < ?2 OR (m.timestamp = ?2 AND m.id < ?3))
-                 ORDER BY m.timestamp DESC, m.id DESC LIMIT ?4"
-            ))?;
-            let mut rows = statement
-                .query_map(
-                    params![chat_jid, before_ts, before_id, limit],
-                    message_from_row,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            attach_reactions(conn, &mut rows)?;
-            rows.reverse();
-            Ok(rows)
         })
     }
 
@@ -1441,53 +1460,116 @@ impl Store {
         query: &str,
         limit: u32,
     ) -> rusqlite::Result<Vec<(ChatRow, MessageRow)>> {
-        let matcher = SearchMatcher::new(query);
+        let mut has_kind: Option<&'static str> = None;
+        let mut has_link = false;
+        let mut from_filter: Option<String> = None;
+        let mut clean_tokens: Vec<&str> = Vec::new();
+        for token in query.split_whitespace() {
+            let lower = token.to_ascii_lowercase();
+            match lower.as_str() {
+                "has:photo" | "has:image" => has_kind = Some("image"),
+                "has:video" => has_kind = Some("video"),
+                "has:doc" | "has:document" => has_kind = Some("document"),
+                "has:audio" | "has:voice" => has_kind = Some("audio"),
+                "has:link" => has_link = true,
+                _ if lower.starts_with("from:") && token.len() > 5 => {
+                    from_filter = Some(token[5..].to_ascii_lowercase());
+                }
+                _ => clean_tokens.push(token),
+            }
+        }
+        let clean_query = clean_tokens.join(" ");
+        let has_facets = has_kind.is_some() || has_link || from_filter.is_some();
+
+        let limit = if limit == 0 || limit > 20 { 20 } else { limit };
+        let matcher = SearchMatcher::new(&clean_query);
         let trigrams = search_trigrams(&matcher.query);
-        if trigrams.is_empty() {
+        if trigrams.is_empty() && !has_facets {
             return Ok(Vec::new());
         }
-        let limit = if limit == 0 || limit > 20 { 20 } else { limit };
-        // A hit only needs one shared trigram, the same OR the Go built: the
-        // terms go to the index quoted, so a trigram with a quote or a space
-        // is one literal term and not syntax.
-        let terms = trigrams
-            .iter()
-            .map(|trigram| format!("\"{}\"", trigram.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let sql = "SELECT m.chat_jid, m.id, m.timestamp, m.text, m.image_caption,
-                          m.media_file_name, m.contacts_json, m.location_name,
-                          m.location_address
-                   FROM messages m
-                   JOIN messages_fts ON messages_fts.rowid = m.rowid
-                   WHERE messages_fts MATCH ?1
-                     AND m.kind<>'reaction' AND m.revoked=0
-                   ORDER BY bm25(messages_fts), m.timestamp DESC, m.id DESC
-                   LIMIT 512";
-        let candidates = self.read(|conn| {
-            let mut statement = conn.prepare(&sql)?;
-            let rows = statement
-                .query_map([&terms], |row| {
-                    Ok(SearchCandidate {
-                        chat_jid: row.get(0)?,
-                        message_id: row.get(1)?,
-                        timestamp: row.get(2)?,
-                        text: row.get(3)?,
-                        image_caption: row.get(4)?,
-                        media_file_name: row.get(5)?,
-                        contacts_json: row.get(6)?,
-                        location_name: row.get(7)?,
-                        location_address: row.get(8)?,
-                        score: 0,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })?;
+
+        let mut extra_sql = String::new();
+        if let Some(kind) = has_kind {
+            extra_sql.push_str(&format!(" AND m.kind='{kind}'"));
+        }
+        if has_link {
+            extra_sql.push_str(" AND (m.text LIKE '%http://%' OR m.text LIKE '%https://%')");
+        }
+
+        let candidates = if trigrams.is_empty() {
+            let sql = format!(
+                "SELECT m.chat_jid, m.id, m.timestamp, m.text, m.image_caption,
+                        m.media_file_name, m.contacts_json, m.location_name,
+                        m.location_address
+                 FROM messages m
+                 WHERE m.kind<>'reaction' AND m.revoked=0 {extra_sql}
+                 ORDER BY m.timestamp DESC, m.id DESC
+                 LIMIT 256"
+            );
+            self.read(|conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok(SearchCandidate {
+                            chat_jid: row.get(0)?,
+                            message_id: row.get(1)?,
+                            timestamp: row.get(2)?,
+                            text: row.get(3)?,
+                            image_caption: row.get(4)?,
+                            media_file_name: row.get(5)?,
+                            contacts_json: row.get(6)?,
+                            location_name: row.get(7)?,
+                            location_address: row.get(8)?,
+                            score: 100,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })?
+        } else {
+            let terms = trigrams
+                .iter()
+                .map(|trigram| format!("\"{}\"", trigram.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT m.chat_jid, m.id, m.timestamp, m.text, m.image_caption,
+                        m.media_file_name, m.contacts_json, m.location_name,
+                        m.location_address
+                 FROM messages m
+                 JOIN messages_fts ON messages_fts.rowid = m.rowid
+                 WHERE messages_fts MATCH ?1
+                   AND m.kind<>'reaction' AND m.revoked=0 {extra_sql}
+                 ORDER BY bm25(messages_fts), m.timestamp DESC, m.id DESC
+                 LIMIT 512"
+            );
+            self.read(|conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let rows = statement
+                    .query_map([&terms], |row| {
+                        Ok(SearchCandidate {
+                            chat_jid: row.get(0)?,
+                            message_id: row.get(1)?,
+                            timestamp: row.get(2)?,
+                            text: row.get(3)?,
+                            image_caption: row.get(4)?,
+                            media_file_name: row.get(5)?,
+                            contacts_json: row.get(6)?,
+                            location_name: row.get(7)?,
+                            location_address: row.get(8)?,
+                            score: 0,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })?
+        };
         let mut hits: Vec<SearchCandidate> = candidates
             .into_iter()
             .filter_map(|mut candidate| {
-                candidate.score = score_search_candidate(&matcher, &candidate)?;
+                if !trigrams.is_empty() {
+                    candidate.score = score_search_candidate(&matcher, &candidate)?;
+                }
                 Some(candidate)
             })
             .collect();
@@ -1498,12 +1580,24 @@ impl Store {
                 .then(a.chat_jid.cmp(&b.chat_jid))
                 .then(a.message_id.cmp(&b.message_id))
         });
-        hits.truncate(limit as usize);
-        let mut out = Vec::with_capacity(hits.len());
+        let mut out = Vec::with_capacity(limit as usize);
         for hit in hits {
+            if out.len() >= limit as usize {
+                break;
+            }
             let chat = self.chat(&hit.chat_jid)?;
             let message = self.message(&hit.chat_jid, &hit.message_id)?;
             if let (Some(chat), Some(message)) = (chat, message) {
+                if let Some(ref from_q) = from_filter {
+                    let hay = format!(
+                        "{} {} {}",
+                        chat.name, message.sender_jid, chat.jid
+                    )
+                    .to_ascii_lowercase();
+                    if !hay.contains(from_q.as_str()) {
+                        continue;
+                    }
+                }
                 out.push((chat, message));
             }
         }
@@ -2158,12 +2252,42 @@ impl Store {
                  WHERE m.transport_jid='status@broadcast'
                    AND m.timestamp>=?1
                    AND m.kind<>'reaction'
+                   AND m.revoked=0
                  ORDER BY m.timestamp DESC, m.id DESC LIMIT 500"
             ))?;
             let rows = statement
                 .query_map(params![since], message_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        })
+    }
+
+    /// Deletes `status@broadcast` rows older than `cutoff_ms` and returns any
+    /// local media paths they referenced so the caller can remove them from disk.
+    pub fn purge_expired_statuses(&self, cutoff_ms: i64) -> rusqlite::Result<(usize, Vec<String>)> {
+        self.write(|conn| {
+            let mut paths = Vec::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT image_local_path, media_local_path, thumbnail_path
+                     FROM messages
+                     WHERE transport_jid='status@broadcast' AND timestamp < ?1",
+                )?;
+                let mut rows = stmt.query(params![cutoff_ms])?;
+                while let Some(row) = rows.next()? {
+                    for col in 0..3 {
+                        let path: String = row.get(col)?;
+                        if !path.is_empty() {
+                            paths.push(path);
+                        }
+                    }
+                }
+            }
+            let deleted = conn.execute(
+                "DELETE FROM messages WHERE transport_jid='status@broadcast' AND timestamp < ?1",
+                params![cutoff_ms],
+            )?;
+            Ok((deleted, paths))
         })
     }
 
@@ -2469,7 +2593,7 @@ impl Store {
             }
             let mut statement = conn.prepare(
                 "SELECT id,transport_jid,sender_jid,timestamp FROM messages
-                 WHERE chat_jid=?1 AND unread=1
+                 WHERE chat_jid=?1 AND unread=1 AND from_me=0
                    AND (timestamp<?2 OR (timestamp=?2 AND id<=?3))
                  ORDER BY timestamp,id",
             )?;
@@ -2484,6 +2608,60 @@ impl Store {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(UnreadThrough::Rows(rows))
+        })
+    }
+
+    /// The stored row of one incoming message, whether or not it is still
+    /// flagged unread. The read receipt of a message that another device
+    /// already marked read still needs its anchor: without that receipt the
+    /// phone keeps showing the message as unread.
+    pub fn read_anchor(
+        &self,
+        chat_jid: &str,
+        message_id: &str,
+    ) -> rusqlite::Result<Option<UnreadRow>> {
+        let chat_jid = self.resolve_chat_id(chat_jid)?;
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT id,transport_jid,sender_jid,timestamp FROM messages
+                 WHERE chat_jid=?1 AND id=?2 AND from_me=0",
+                params![chat_jid, message_id],
+                |row| {
+                    Ok(UnreadRow {
+                        id: row.get(0)?,
+                        transport_jid: row.get(1)?,
+                        sender_jid: row.get(2)?,
+                        timestamp: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// The newest incoming row of one conversation, whether or not it is
+    /// still flagged unread. It is the anchor of the read receipt when the
+    /// window opens a chat that its own database already marked read: the
+    /// flag only records what this window saw, and the phone keeps its badge
+    /// until a receipt reaches it.
+    pub fn newest_incoming(&self, chat_jid: &str) -> rusqlite::Result<Option<UnreadRow>> {
+        let chat_jid = self.resolve_chat_id(chat_jid)?;
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT id,transport_jid,sender_jid,timestamp FROM messages
+                 WHERE chat_jid=?1 AND from_me=0 AND kind<>'reaction'
+                 ORDER BY timestamp DESC, id DESC LIMIT 1",
+                params![chat_jid],
+                |row| {
+                    Ok(UnreadRow {
+                        id: row.get(0)?,
+                        transport_jid: row.get(1)?,
+                        sender_jid: row.get(2)?,
+                        timestamp: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
         })
     }
 
@@ -2997,40 +3175,6 @@ impl Store {
     // Legacy reaction replays
     // ------------------------------------------------------------------
 
-    /// Records one placeholder the repair wave may resend, the rows the Go
-    /// journal drain queued for `ReserveLegacyReactionReplays`.
-    #[expect(clippy::too_many_arguments, reason = "one argument per replay column")]
-    pub fn record_legacy_replay(
-        &self,
-        chat_jid: &str,
-        transport_jid: &str,
-        event_message_id: &str,
-        sender_jid: &str,
-        timestamp: i64,
-        from_me: bool,
-        status: i64,
-    ) -> rusqlite::Result<()> {
-        let chat_id = self.resolve_chat_id(chat_jid)?;
-        self.write(|conn| {
-            conn.execute(
-                "INSERT INTO legacy_reaction_replays(chat_jid,transport_jid,event_message_id,
-                        sender_jid,timestamp,from_me,status,requested_at,attempts,completed_at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,0,0,0)
-                 ON CONFLICT(chat_jid,event_message_id) DO NOTHING",
-                params![
-                    chat_id,
-                    transport_jid,
-                    event_message_id,
-                    sender_jid,
-                    timestamp,
-                    from_me as i64,
-                    status,
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
     /// The pending placeholder resends of one chat, oldest first, the rows
     /// the Go `ReserveLegacyReactionReplays` picked for one repair call.
     pub fn pending_legacy_replays(
@@ -3320,7 +3464,6 @@ fn chat_from_row(row: &Row) -> rusqlite::Result<ChatRow> {
         push_name: row.get(14)?,
         business_name: row.get(15)?,
         phone_number: row.get(16)?,
-        named: false,
     })
 }
 
@@ -3651,7 +3794,7 @@ fn dedupe_hd_uploads(conn: &Connection) -> rusqlite::Result<usize> {
             "SELECT chat_jid, id, payload FROM messages
              WHERE length(payload)>0 AND kind IN ('image','video')",
         )?;
-        let rows = statement
+        statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3659,8 +3802,7 @@ fn dedupe_hd_uploads(conn: &Connection) -> rusqlite::Result<usize> {
                     row.get::<_, Vec<u8>>(2)?,
                 ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
+            .collect::<Result<Vec<_>, _>>()?
     };
     let mut folded = 0;
     let mut chats: Vec<String> = Vec::new();
@@ -3977,12 +4119,15 @@ fn search_trigrams(query: &str) -> Vec<String> {
     if runes.len() < 3 {
         return Vec::new();
     }
-    let mut seen = std::collections::HashSet::new();
-    let mut terms = Vec::new();
+    let mut seen = std::collections::HashSet::with_capacity(12);
+    let mut terms = Vec::with_capacity(12);
     for window in runes.windows(3) {
-        let term: String = window.iter().collect();
-        if seen.insert(term.clone()) && terms.len() < 12 {
-            terms.push(term);
+        let key = [window[0], window[1], window[2]];
+        if seen.insert(key) {
+            terms.push(key.iter().collect());
+            if terms.len() == 12 {
+                break;
+            }
         }
     }
     terms
@@ -4119,6 +4264,64 @@ fn attach_reactions(conn: &Connection, rows: &mut [MessageRow]) -> rusqlite::Res
         row.reactions = all[start..end].to_vec();
     }
     Ok(())
+}
+
+/// A queued outgoing message waiting for WhatsApp reconnection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEntry {
+    pub id: i64,
+    pub chat_jid: String,
+    pub text: String,
+    pub reply_to_id: String,
+    pub created_at: i64,
+}
+
+impl Store {
+    /// Queues a message in the offline outbox for automatic retry upon reconnect.
+    pub fn enqueue_outbox(
+        &self,
+        chat_jid: &str,
+        text: &str,
+        reply_to_id: &str,
+        created_at: i64,
+    ) -> rusqlite::Result<i64> {
+        self.write(|conn| {
+            conn.execute(
+                "INSERT INTO outbox(chat_jid, text, reply_to_id, created_at) VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![chat_jid, text, reply_to_id, created_at],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Returns all pending outbox messages in FIFO order.
+    pub fn pending_outbox(&self) -> rusqlite::Result<Vec<OutboxEntry>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, chat_jid, text, reply_to_id, created_at FROM outbox ORDER BY id ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(OutboxEntry {
+                        id: row.get(0)?,
+                        chat_jid: row.get(1)?,
+                        text: row.get(2)?,
+                        reply_to_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Removes a flushed outbox entry by id.
+    pub fn remove_outbox(&self, id: i64) -> rusqlite::Result<()> {
+        self.write(|conn| {
+            conn.execute("DELETE FROM outbox WHERE id=?1", [id])?;
+            Ok(())
+        })
+    }
 }
 
 /// The chat flag columns the desktop owns, named so `set_chat_flag` cannot

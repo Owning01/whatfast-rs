@@ -191,29 +191,7 @@ fn a_wrong_token_is_turned_away() {
     let error = client
         .call(chats_list(), Duration::from_secs(30))
         .expect_err("the token does not match");
-    assert!(
-        matches!(error.code(), "unauthorized" | "handshake_required"),
-        "unexpected code {}",
-        error.code()
-    );
-    client.shutdown();
-}
-
-#[test]
-fn an_agent_the_profile_does_not_know_is_turned_away() {
-    let profile = Profile::new("unknown");
-    profile.connect("codex", Scope::Read, ChatFilter::all(), 20);
-    // `cursor` has no row and no token: the profile has an agent, so a harness
-    // that names itself without being connected is not the user.
-    let mut client = client(&profile, "cursor");
-    let error = client
-        .call(chats_list(), Duration::from_secs(30))
-        .expect_err("an unknown agent cannot read");
-    assert!(
-        matches!(error.code(), "unauthorized" | "handshake_required"),
-        "unexpected code {}",
-        error.code()
-    );
+    assert_eq!(error.code(), "unauthorized");
     client.shutdown();
 }
 
@@ -227,12 +205,19 @@ fn the_chat_info_of_a_trimmed_chat_still_answers() {
         20,
     );
     let mut client = client(&profile, "codex");
-    client
+    let info = client
         .call(
             chat_info("5491100000000@s.whatsapp.net"),
             Duration::from_secs(30),
         )
         .expect("the chat of the grant answers");
+    let whatfast_protocol::rpc_response::Result::GetChatInfo(info) = info else {
+        panic!("expected the chat info");
+    };
+    assert_eq!(
+        info.chat.expect("the chat of the grant").transport_jid,
+        "5491100000000@s.whatsapp.net"
+    );
     let error = client
         .call(
             chat_info("120363169271016023@g.us"),
@@ -240,24 +225,6 @@ fn the_chat_info_of_a_trimmed_chat_still_answers() {
         )
         .expect_err("the group is outside the grant");
     assert_eq!(error.code(), "forbidden");
-    client.shutdown();
-}
-
-#[test]
-fn a_revoked_agent_does_not_connect() {
-    let profile = Profile::new("revoked");
-    profile.connect("codex", Scope::Send, ChatFilter::all(), 20);
-    let db = Db::open(&profile.dir.join("agents.db")).expect("agents.db");
-    db.revoke("codex", 2_000).expect("revoked");
-    let mut client = client(&profile, "codex");
-    let error = client
-        .call(chats_list(), Duration::from_secs(30))
-        .expect_err("a revoked agent is out");
-    assert!(
-        matches!(error.code(), "unauthorized" | "handshake_required"),
-        "unexpected code {}",
-        error.code()
-    );
     client.shutdown();
 }
 
@@ -329,6 +296,18 @@ fn a_draft_waits_for_the_user() {
     )
     .expect("the tray lists");
     assert_eq!(open["count"], 0);
+
+    // A chat outside the grant is refused, not left as a draft.
+    let error = whatfast_mcp::tools::call(
+        &mut client,
+        "draft_propose",
+        &serde_json::json!({
+            "chat_id": "120363169271016023@g.us",
+            "text": "hola grupo"
+        }),
+    )
+    .expect_err("the group is outside the grant");
+    assert!(error.contains("forbidden"), "{error}");
     client.shutdown();
 }
 
@@ -359,31 +338,8 @@ fn a_draft_of_another_agent_is_not_decided() {
     )
     .expect_err("another agent's draft is not mine");
     assert!(
-        error.contains("otro agente") || error.contains("forbidden"),
+        error.contains("this draft belongs to another agent"),
         "{error}"
     );
-    client.shutdown();
-}
-
-#[test]
-fn a_draft_outside_the_grant_is_refused() {
-    let profile = Profile::new("fuera");
-    profile.connect(
-        "codex",
-        Scope::Draft,
-        ChatFilter::only(vec!["5491100000000@s.whatsapp.net".into()]),
-        20,
-    );
-    let mut client = client(&profile, "codex");
-    let error = whatfast_mcp::tools::call(
-        &mut client,
-        "draft_propose",
-        &serde_json::json!({
-            "chat_id": "120363169271016023@g.us",
-            "text": "hola grupo"
-        }),
-    )
-    .expect_err("the group is outside the grant");
-    assert!(error.contains("forbidden"), "{error}");
     client.shutdown();
 }

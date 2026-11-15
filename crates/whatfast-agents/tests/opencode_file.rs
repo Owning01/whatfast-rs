@@ -1,10 +1,9 @@
 //! The real configuration of OpenCode, when this machine has one.
 //!
 //! The file of the user is not a fixture: it lives in the home folder and it is
-//! only read here. The test passes on a machine without OpenCode and checks the
-//! real shape —`mcp.servers`, comments, trailing commas— on the one that has it,
-//! which is the only way to know that the merge survives a file nobody wrote for
-//! this program.
+//! only read here. A machine without OpenCode gets a file with the same shape,
+//! so the test always checks the merge: the head comment survives, the entry is
+//! added and removed, and the rest of the file stays.
 
 use std::path::PathBuf;
 
@@ -19,12 +18,33 @@ fn config_file() -> PathBuf {
         .join("opencode.jsonc")
 }
 
+/// The shape of the file on a machine without OpenCode: a head comment, one
+/// key of the user and one server that is not ours.
+const FALLBACK: &str = "// Configuración global.\n{\n  \"theme\": \"dark\",\n  \"mcp\": {\n    \"servers\": {\n      \"other\": { \"command\": [\"x\"], \"type\": \"local\" },\n    },\n  },\n}\n";
+
+/// The comment lines that open the document, which the merge must keep.
+fn head_comments(text: &str) -> String {
+    let mut head = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            head.push_str(line);
+            head.push('\n');
+        } else if trimmed.is_empty() && head.is_empty() {
+            continue;
+        } else {
+            break;
+        }
+    }
+    head
+}
+
 #[test]
 fn the_merge_survives_the_real_file() {
-    let path = config_file();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
+    let real = std::fs::read_to_string(config_file()).ok();
+    let text = real.unwrap_or_else(|| FALLBACK.to_string());
+    let head = head_comments(&text);
+    assert!(!head.is_empty(), "the file must open with a comment");
     let spec = whatfast_agents::by_id("opencode").expect("opencode");
     let command = whatfast_agents::McpCommand::new("C:/Whatfast/whatfast.exe", "opencode");
     let dir = std::env::temp_dir().join(format!(
@@ -42,8 +62,8 @@ fn the_merge_survives_the_real_file() {
     let report = whatfast_agents::write::register_at(spec, &command, &copy).expect("register");
     assert_eq!(report.method, "jsonc");
     let written = std::fs::read_to_string(&copy).expect("read");
-    // The keys of the user are still there: the merge never starts over.
-    assert!(written.contains("disabled_providers"), "{written}");
+    // The head comment stays where it was: the merge never starts over.
+    assert!(written.starts_with(&head), "{written}");
     assert!(written.contains("\"whatfast\""), "{written}");
     assert!(written.contains("--agent"), "{written}");
 
@@ -52,6 +72,6 @@ fn the_merge_survives_the_real_file() {
     assert!(cleaned.is_ok(), "{cleaned:?}");
     let after = std::fs::read_to_string(&copy).expect("read");
     assert!(!after.contains("\"whatfast\""), "{after}");
-    assert!(after.contains("disabled_providers"), "{after}");
+    assert!(after.starts_with(&head), "{after}");
     let _ = std::fs::remove_dir_all(&dir);
 }

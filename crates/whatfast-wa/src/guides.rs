@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn a_known_harness_is_found_by_id() {
         let spec = spec_of("claude-code").expect("claude-code");
-        assert_eq!(spec.id, "claude-code");
+        assert_eq!(spec.name, "Claude Code");
     }
 
     #[test]

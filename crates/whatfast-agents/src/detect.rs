@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::paths::{self, Os};
-use crate::spec::{ClientSpec, Detect, Location, Method};
+use crate::spec::{ClientSpec, Detect, Location};
 
 /// What the detection found.
 #[derive(Clone, Debug, Default)]
@@ -42,18 +42,6 @@ pub fn find(spec: &ClientSpec) -> Found {
 /// True when the client is installed.
 pub fn installed(spec: &ClientSpec) -> bool {
     find(spec).is_some()
-}
-
-/// The configuration file of a client that keeps one on disk.
-pub fn config_path(spec: &ClientSpec) -> Option<PathBuf> {
-    let location = match spec.method {
-        Method::Json { file, .. }
-        | Method::Toml { file, .. }
-        | Method::Yaml { file, .. }
-        | Method::OpenCode { file } => file,
-        Method::Cli { .. } | Method::JsonArg { .. } => return None,
-    };
-    existing(location)
 }
 
 /// The path of a location on this system, expanded.
@@ -130,20 +118,11 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::all;
 
     #[test]
     fn detects_what_the_path_holds() {
         // `cargo` runs this test, so it must be on PATH.
         assert!(which("cargo").is_some());
         assert!(which("whatfast-not-a-program-anywhere").is_none());
-    }
-
-    #[test]
-    fn a_client_without_a_program_still_reports_a_file() {
-        for spec in all() {
-            let found = find(spec);
-            assert_eq!(found.is_some(), installed(spec));
-        }
     }
 }

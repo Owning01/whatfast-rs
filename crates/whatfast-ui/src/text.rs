@@ -55,6 +55,26 @@ pub(crate) fn split_url_token(token: &str) -> Option<(&str, &str, &str)> {
     Some((&token[..start], url, &candidate[url.len()..]))
 }
 
+/// The first link of a text, if it has one.
+///
+/// It uses the same parser the bubbles underline with (and the sidecar
+/// previews with), so the card of the composer never points at a token the
+/// bubble would not draw as a link.
+pub(crate) fn first_web_url(text: &str) -> Option<String> {
+    use whatfast_core::whatsapp_formatting::{
+        WhatsAppInlineSegment, WhatsAppParseOptions, parse_whatsapp_text,
+    };
+    let options = WhatsAppParseOptions::default();
+    for block in parse_whatsapp_text(text, &options) {
+        for segment in block.segments() {
+            if let WhatsAppInlineSegment::Link { text, .. } = segment {
+                return Some(text.clone());
+            }
+        }
+    }
+    None
+}
+
 /// The host of a URL, without its scheme and without the path.
 pub(crate) fn link_preview_host(url: &str) -> &str {
     url.strip_prefix("https://")
@@ -239,6 +259,42 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn the_first_link_of_a_text_is_found() {
+        assert_eq!(
+            first_web_url("mira https://tup-2do.web.app/manuales/hola y despues").as_deref(),
+            Some("https://tup-2do.web.app/manuales/hola")
+        );
+        // A text without a link has no first link.
+        assert_eq!(first_web_url("hola, sin enlaces"), None);
+    }
+
+    /// La foto del visor se copia al portapapeles con el formato que dice su
+    /// cabecera: el sistema no adivina el tipo de los bytes.
+    #[test]
+    fn a_picture_is_recognised_by_its_magic_bytes() {
+        let directory = std::env::temp_dir().join(format!(
+            "whatfast-validate-image-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("the folder is created");
+        let cases: [(&[u8], bool); 5] = [
+            (b"\x89PNG\r\n\x1a\nrest", true),
+            (&[0xFF, 0xD8, 0xFF, 0xE0], true),
+            (b"RIFF\0\0\0\0WEBPVP8 ", true),
+            (b"GIF89a", true),
+            (b"not a picture", false),
+        ];
+        for (index, (bytes, accepted)) in cases.iter().enumerate() {
+            let path = directory.join(format!("picture-{index}"));
+            std::fs::write(&path, bytes).expect("the file is written");
+            let result = validate_image_message(&path, "");
+            assert_eq!(result.is_ok(), *accepted, "the bytes {bytes:?}");
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::remove_dir(&directory);
+    }
+
     fn indicator(name: &str, recording: bool, now: Instant) -> TypingIndicator {
         TypingIndicator {
             sender_name: name.to_owned(),
@@ -259,17 +315,126 @@ mod tests {
         // line reads like the header of the bubble.
         let label = format_typing_label(&indicators, true, now, |_, _| "Gatt".to_string());
         assert_eq!(label.as_deref(), Some("Gatt is typing…"));
+        // Without a name the line does not repeat the jid.
+        let label = format_typing_label(&indicators, true, now, |_, _| String::new());
+        assert_eq!(label.as_deref(), Some("Someone is typing…"));
     }
 
     #[test]
-    fn without_a_name_the_line_does_not_repeat_the_jid() {
-        let now = Instant::now();
-        let mut indicators = HashMap::new();
-        indicators.insert(
-            "193522787418362@lid".to_string(),
-            indicator("193522787418362@lid", false, now),
+    fn only_http_and_https_with_a_host_and_without_spaces_are_safe() {
+        assert!(is_safe_web_url("http://example.com"));
+        assert!(is_safe_web_url("https://example.com/ruta"));
+        assert!(is_safe_web_url("https://example.com:8080/ruta?x=1"));
+        assert!(is_safe_web_url("http://localhost"));
+        // A scheme without a host, or a path where the host should be, is not
+        // a link: the bubble would underline a token with nothing to open.
+        assert!(!is_safe_web_url("http://"));
+        assert!(!is_safe_web_url("https:///ruta"));
+        // A space breaks the token: the URL ends before it.
+        assert!(!is_safe_web_url("http://a b"));
+        assert!(!is_safe_web_url("https://example.com/a b"));
+        // Only HTTP(S) becomes a link: the other schemes never do.
+        assert!(!is_safe_web_url("javascript:alert(1)"));
+        assert!(!is_safe_web_url("data:text/html,<h1>hi</h1>"));
+        assert!(!is_safe_web_url("file:///C:/Windows/win.ini"));
+        assert!(!is_safe_web_url("ftp://example.com/file"));
+        assert!(!is_safe_web_url("mailto:a@example.com"));
+        assert!(!is_safe_web_url("example.com"));
+    }
+
+    /// One mention of the composer, as the picker keeps it.
+    fn mention(display_name: &str, jid: &str) -> MentionEntry {
+        MentionEntry {
+            display_name: display_name.to_string(),
+            jid: jid.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_visible_names_are_replaced_by_the_bare_jid_user() {
+        let (text, jids) = encode_mentions(
+            "hi @Alice and @Bob",
+            &[
+                mention("Alice", "111@s.whatsapp.net"),
+                mention("Bob", "222@s.whatsapp.net"),
+            ],
         );
-        let label = format_typing_label(&indicators, true, now, |_, _| String::new());
-        assert_eq!(label.as_deref(), Some("Someone is typing…"));
+        assert_eq!(text, "hi @111 and @222");
+        assert_eq!(
+            jids,
+            vec![
+                "111@s.whatsapp.net".to_string(),
+                "222@s.whatsapp.net".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mention_the_user_deleted_is_dropped() {
+        let (text, jids) = encode_mentions(
+            "hi @Alice",
+            &[
+                mention("Carol", "333@s.whatsapp.net"),
+                mention("Alice", "111@s.whatsapp.net"),
+            ],
+        );
+        assert_eq!(text, "hi @111");
+        assert_eq!(jids, vec!["111@s.whatsapp.net".to_string()]);
+    }
+
+    #[test]
+    fn every_occurrence_of_the_visible_name_is_replaced() {
+        let (text, jids) = encode_mentions(
+            "@Alice @Alice",
+            &[mention("Alice", "111@s.whatsapp.net")],
+        );
+        assert_eq!(text, "@111 @111");
+        assert_eq!(jids, vec!["111@s.whatsapp.net".to_string()]);
+    }
+
+    #[test]
+    fn the_longest_name_is_replaced_first_so_a_short_one_does_not_clobber_it() {
+        let (text, jids) = encode_mentions(
+            "hola @Anna Lee y @Ann",
+            &[
+                mention("Ann", "111@s.whatsapp.net"),
+                mention("Anna Lee", "222@s.whatsapp.net"),
+            ],
+        );
+        assert_eq!(text, "hola @222 y @111");
+        assert_eq!(
+            jids,
+            vec![
+                "222@s.whatsapp.net".to_string(),
+                "111@s.whatsapp.net".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mention_without_a_name_or_a_user_is_ignored() {
+        let (text, jids) = encode_mentions(
+            "hola @Alice",
+            &[
+                mention("", "111@s.whatsapp.net"),
+                mention("Alice", "@s.whatsapp.net"),
+                mention("Alice", "111@s.whatsapp.net"),
+            ],
+        );
+        assert_eq!(text, "hola @111");
+        assert_eq!(jids, vec!["111@s.whatsapp.net".to_string()]);
+    }
+
+    #[test]
+    fn the_jids_are_not_repeated() {
+        let (text, jids) = encode_mentions(
+            "@Alice @Alicia",
+            &[
+                mention("Alice", "111@s.whatsapp.net"),
+                mention("Alicia", "111@s.whatsapp.net"),
+            ],
+        );
+        assert_eq!(text, "@111 @111");
+        assert_eq!(jids, vec!["111@s.whatsapp.net".to_string()]);
     }
 }

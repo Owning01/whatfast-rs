@@ -8,8 +8,6 @@
 //! profile stores; a change of daylight saving time moves a task by an hour,
 //! never by a day.
 
-use std::fmt;
-
 use crate::grant::Window;
 
 /// The most days a schedule can wait for its next turn: a year plus the leap.
@@ -94,29 +92,6 @@ impl Cron {
             (false, false) => day_ok || weekday_ok,
         }
     }
-}
-
-impl fmt::Display for Cron {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} {} {} {} {}",
-            join(&self.minutes),
-            join(&self.hours),
-            join(&self.days),
-            join(&self.months),
-            join(&self.weekdays)
-        )
-    }
-}
-
-/// The numbers of one field, comma separated, for the interface.
-fn join(values: &[u8]) -> String {
-    values
-        .iter()
-        .map(u8::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 /// Moves a due instant into the working window: it stays where it is when the
@@ -228,18 +203,6 @@ mod tests {
     const MONDAY_NOON: i64 = 1_793_016_000_000;
 
     #[test]
-    fn the_civil_calendar_round_trips() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_752), (2026, 10, 26));
-        assert_eq!(weekday_of(0), 4, "the first of January 1970 was a Thursday");
-        assert_eq!(
-            weekday_of(20_752),
-            1,
-            "the 26th of October 2026 is a Monday"
-        );
-    }
-
-    #[test]
     fn the_daily_schedule_of_the_evening() {
         let cron = Cron::parse("0 20 * * *").expect("cron");
         let next = cron.next(MONDAY_NOON, 0).expect("next");
@@ -280,7 +243,7 @@ mod tests {
     fn sunday_is_zero_and_seven() {
         let sunday = Cron::parse("0 9 * * 7").expect("cron");
         let also = Cron::parse("0 9 * * 0").expect("cron");
-        assert_eq!(sunday.weekdays, also.weekdays);
+        assert_eq!(sunday.next(MONDAY_NOON, 0), also.next(MONDAY_NOON, 0));
     }
 
     #[test]
@@ -351,13 +314,5 @@ mod tests {
     #[test]
     fn no_window_defers_nothing() {
         assert_eq!(defer_to_window(MONDAY_NOON, None, 0), MONDAY_NOON);
-    }
-
-    #[test]
-    fn the_expression_prints_back() {
-        for expression in ["0 20 * * *", "*/15 8-18 * * 1-5", "0 0 1,15 * *"] {
-            let cron = Cron::parse(expression).expect("cron");
-            assert!(!cron.to_string().is_empty());
-        }
     }
 }

@@ -72,8 +72,8 @@ mod windows_tray {
         pub(crate) fn install(window: &Window, cx: &App) -> Option<Self> {
             if let Ok(mut labels) = LABELS.lock() {
                 *labels = Some(Labels {
-                    open: wide(&i18n::t("Open Whatfast")),
-                    quit: wide(&i18n::t("Quit")),
+                    open: wide(i18n::t("Open Whatfast")),
+                    quit: wide(i18n::t("Quit")),
                 });
             }
             // The thread registers its class and creates its window before
@@ -372,13 +372,289 @@ mod windows_tray {
 #[cfg(windows)]
 pub(crate) use windows_tray::Tray;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux_tray {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use gpui::{App, AppContext as _, Window};
+    use whatfast_i18n as i18n;
+    use zbus::blocking::Connection;
+    use zbus::interface;
+    use zbus::zvariant::{OwnedValue, Value};
+
+    enum TrayEvent {
+        Open,
+        Quit,
+    }
+
+    pub(crate) struct Tray {
+        _connection: Connection,
+        _quitting: Arc<AtomicBool>,
+    }
+
+    struct StatusNotifierItem {
+        events: async_channel::Sender<TrayEvent>,
+    }
+
+    #[interface(name = "org.kde.StatusNotifierItem")]
+    impl StatusNotifierItem {
+        #[zbus(property)]
+        fn category(&self) -> &str {
+            "Communications"
+        }
+
+        #[zbus(property)]
+        fn id(&self) -> &str {
+            "whatfast"
+        }
+
+        #[zbus(property)]
+        fn title(&self) -> &str {
+            "Whatfast"
+        }
+
+        #[zbus(property)]
+        fn status(&self) -> &str {
+            "Active"
+        }
+
+        #[zbus(property)]
+        fn icon_name(&self) -> &str {
+            "whatfast"
+        }
+
+        #[zbus(property)]
+        fn menu(&self) -> zbus::zvariant::ObjectPath<'_> {
+            zbus::zvariant::ObjectPath::from_static_str("/MenuBar").expect("valid path")
+        }
+
+        #[zbus(property)]
+        fn item_is_menu(&self) -> bool {
+            false
+        }
+
+        fn activate(&self, _x: i32, _y: i32) {
+            let _ = self.events.try_send(TrayEvent::Open);
+        }
+
+        fn secondary_activate(&self, _x: i32, _y: i32) {
+            let _ = self.events.try_send(TrayEvent::Open);
+        }
+    }
+
+    struct DbusMenu {
+        open_label: String,
+        quit_label: String,
+        events: async_channel::Sender<TrayEvent>,
+    }
+
+    #[interface(name = "com.canonical.dbusmenu")]
+    impl DbusMenu {
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            3
+        }
+
+        #[zbus(property)]
+        fn status(&self) -> &str {
+            "normal"
+        }
+
+        fn get_layout(
+            &self,
+            _parent_id: i32,
+            _recursion_depth: i32,
+            _property_names: Vec<String>,
+        ) -> (u32, (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>)) {
+            let open_item = make_menu_item(1, &self.open_label);
+            let quit_item = make_menu_item(2, &self.quit_label);
+            let mut root_props = HashMap::new();
+            root_props.insert(
+                "children-display".to_string(),
+                OwnedValue::from(Value::from("submenu")),
+            );
+            (1, (0, root_props, vec![open_item, quit_item]))
+        }
+
+        fn event(&self, id: i32, event_id: &str, _data: Value<'_>, _timestamp: u32) {
+            if event_id != "clicked" {
+                return;
+            }
+            match id {
+                1 => {
+                    let _ = self.events.try_send(TrayEvent::Open);
+                }
+                2 => {
+                    let _ = self.events.try_send(TrayEvent::Quit);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn make_menu_item(id: i32, label: &str) -> OwnedValue {
+        let mut props: HashMap<String, Value<'_>> = HashMap::new();
+        props.insert("label".to_string(), Value::from(label.to_string()));
+        props.insert("enabled".to_string(), Value::from(true));
+        props.insert("visible".to_string(), Value::from(true));
+        let children: Vec<Value<'_>> = Vec::new();
+        OwnedValue::try_from(Value::from((id, props, children))).expect("menu item")
+    }
+
+    impl Tray {
+        pub(crate) fn install(window: &Window, cx: &App) -> Option<Self> {
+            let (tx, rx) = async_channel::bounded::<TrayEvent>(8);
+            let sni = StatusNotifierItem { events: tx.clone() };
+            let menu = DbusMenu {
+                open_label: i18n::t("Open Whatfast").to_string(),
+                quit_label: i18n::t("Quit").to_string(),
+                events: tx,
+            };
+            let connection = Connection::session().ok()?;
+            connection
+                .object_server()
+                .at("/StatusNotifierItem", sni)
+                .ok()?;
+            connection.object_server().at("/MenuBar", menu).ok()?;
+            let service = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
+            connection.request_name(service.as_str()).ok()?;
+            connection
+                .call_method(
+                    Some("org.kde.StatusNotifierWatcher"),
+                    "/StatusNotifierWatcher",
+                    Some("org.kde.StatusNotifierWatcher"),
+                    "RegisterStatusNotifierItem",
+                    &(service.as_str(),),
+                )
+                .ok()?;
+
+            let quitting = Arc::new(AtomicBool::new(false));
+            let quitting_close = Arc::clone(&quitting);
+            window.on_window_should_close(cx, move |window, _cx| {
+                if quitting_close.load(Ordering::SeqCst) {
+                    return true;
+                }
+                window.minimize_window();
+                false
+            });
+
+            let handle = window.window_handle();
+            let quitting_task = Arc::clone(&quitting);
+            cx.spawn(async move |cx| {
+                while let Ok(event) = rx.recv().await {
+                    match event {
+                        TrayEvent::Open => {
+                            let _ = handle.update(cx, |_, window, _| {
+                                window.activate_window();
+                            });
+                        }
+                        TrayEvent::Quit => {
+                            quitting_task.store(true, Ordering::SeqCst);
+                            let _ = cx.update(|cx| cx.quit());
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+
+            Some(Self {
+                _connection: connection,
+                _quitting: quitting,
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_tray::Tray;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) struct Tray;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Tray {
-    /// There is no tray outside Windows: the window closes the app.
+    /// There is no tray on other targets: closing the window quits the app.
     pub(crate) fn install(_window: &gpui::Window, _cx: &gpui::App) -> Option<Self> {
         None
     }
+}
+
+/// Enables or disables starting Whatfast automatically on OS login.
+pub(crate) fn set_autostart(enabled: bool) {
+    #[cfg(windows)]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_str = exe.to_string_lossy().into_owned();
+            if enabled {
+                let _ = std::process::Command::new("reg")
+                    .args([
+                        "add",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                        "/v",
+                        "Whatfast",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        &format!("\"{exe_str}\""),
+                        "/f",
+                    ])
+                    .output();
+            } else {
+                let _ = std::process::Command::new("reg")
+                    .args([
+                        "delete",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                        "/v",
+                        "Whatfast",
+                        "/f",
+                    ])
+                    .output();
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let dir = std::path::PathBuf::from(home).join(".config/autostart");
+            let file = dir.join("whatfast.desktop");
+            if enabled {
+                if std::fs::create_dir_all(&dir).is_ok() {
+                    let exe = std::env::current_exe()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| "whatfast".to_string());
+                    let content = format!(
+                        "[Desktop Entry]\nType=Application\nName=Whatfast\nExec={exe}\nX-GNOME-Autostart-enabled=true\n"
+                    );
+                    let _ = std::fs::write(file, content);
+                }
+            } else {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+}
+
+/// Updates the taskbar/dock unread badge count where supported.
+#[allow(dead_code)]
+pub(crate) fn update_unread_badge(count: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        let visible = if count > 0 { "true" } else { "false" };
+        let _ = std::process::Command::new("dbus-send")
+            .args([
+                "--session",
+                "--type=signal",
+                "/com/whatfast/launcher",
+                "com.canonical.Unity.LauncherEntry.Update",
+                "string:application://whatfast.desktop",
+                &format!("dict:string:variant:count,int64:{count},count-visible,boolean:{visible}"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    let _ = count;
 }

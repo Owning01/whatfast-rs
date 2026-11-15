@@ -20,7 +20,6 @@ use gpui::{
     px, rgb, rgba,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
-use whatfast_i18n as i18n;
 
 use crate::app::Whatfast;
 use crate::icons::WhatfastIcon;
@@ -32,7 +31,7 @@ use crate::text::validate_image_message;
 /// port: the compose box of the reference accepts up to thirty pictures; the
 /// native client keeps a smaller number, because every picture holds a
 /// thumbnail in memory.
-pub(crate) const MAX_PENDING_IMAGES: usize = 8;
+pub(crate) const MAX_PENDING_IMAGES: usize = 32;
 
 /// The side of one thumbnail, before the scale.
 const THUMB: f32 = 62.;
@@ -85,11 +84,6 @@ impl PendingImages {
     /// One picture of the tray.
     pub(crate) fn get(&self, index: usize) -> Option<&PendingImage> {
         self.images.get(index)
-    }
-
-    /// How many pictures the tray holds.
-    pub(crate) fn len(&self) -> usize {
-        self.images.len()
     }
 
     /// Whether the tray is empty, which is when the composer sends its text.
@@ -225,15 +219,6 @@ fn load_thumbnail(path: &Path) -> Option<Arc<gpui::RenderImage>> {
         image::imageops::FilterType::Triangle,
     );
     Some(Arc::new(to_render_image(&reduced)))
-}
-
-/// The number of the pictures of a send, as the origin writes it on the
-/// button of the send: `Send`, `Send 2 photos`.
-pub(crate) fn send_label(count: usize) -> String {
-    match count {
-        0 | 1 => i18n::t("Send").to_string(),
-        count => i18n::t_args("Send {count} photos", &[("count", &count.to_string())]),
-    }
 }
 
 impl Whatfast {
@@ -396,62 +381,58 @@ impl Whatfast {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PENDING_IMAGES, PendingImage, PendingImages, send_label};
+    use super::{MAX_PENDING_IMAGES, PendingImages};
     use std::path::PathBuf;
 
-    /// One picture of the tray, without touching the disk.
-    fn picture(id: u64) -> PendingImage {
-        PendingImage {
-            id,
-            path: PathBuf::from(format!("photo-{id}.png")),
-            thumbnail: None,
-        }
+    /// One real picture in a folder of its own, as if the user had picked it:
+    /// the tray reads the file to make its thumbnail.
+    fn picture(id: u64) -> (tempfile::TempDir, PathBuf) {
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        let path = folder.path().join(format!("photo-{id}.png"));
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("the picture is written");
+        (folder, path)
     }
 
-    /// A tray with `count` pictures, as if the user had picked them.
-    fn tray(count: usize) -> PendingImages {
+    /// A tray with `count` pictures, as if the user had picked them. The
+    /// folders stay alive because the tray keeps the paths for the send.
+    fn tray(count: usize) -> (Vec<tempfile::TempDir>, PendingImages) {
+        let mut folders = Vec::new();
         let mut tray = PendingImages::default();
         for index in 0..count {
-            tray.stage_for_test(picture(index as u64));
+            let (folder, path) = picture(index as u64);
+            folders.push(folder);
+            tray.stage(path).expect("the picture fits");
         }
-        tray
-    }
-
-    impl PendingImages {
-        /// The bookkeeping of `stage`, without the file of the backend.
-        fn stage_for_test(&mut self, image: PendingImage) {
-            self.images.push(PendingImage {
-                id: self.next_id,
-                ..image
-            });
-            self.next_id += 1;
-            self.selected = self.images.len() - 1;
-        }
+        (folders, tray)
     }
 
     #[test]
     fn a_new_picture_is_the_one_with_the_options_in_front() {
         let mut tray = PendingImages::default();
-        tray.stage_for_test(picture(0));
+        let (_folder, path) = picture(0);
+        tray.stage(path).expect("the first picture");
         assert_eq!(tray.selected_index(), 0);
-        tray.stage_for_test(picture(1));
-        assert_eq!(tray.len(), 2);
+        let (_folder, path) = picture(1);
+        tray.stage(path).expect("the second picture");
+        assert_eq!(tray.images().len(), 2);
         assert_eq!(tray.selected_index(), 1);
     }
 
     #[test]
     fn the_options_follow_the_picture_that_is_dropped() {
-        let mut tray = tray(3);
+        let (_folders, mut tray) = tray(3);
         // The last one is in front, and dropping it leaves the one before.
         tray.remove(2);
-        assert_eq!(tray.len(), 2);
+        assert_eq!(tray.images().len(), 2);
         assert_eq!(tray.selected_index(), 1);
 
         // Dropping a picture before the one in front moves the options with
         // it: the same picture stays selected.
         tray.select(1);
         tray.remove(0);
-        assert_eq!(tray.len(), 1);
+        assert_eq!(tray.images().len(), 1);
         assert_eq!(tray.selected_index(), 0);
 
         // Dropping the last picture leaves no picture in front, and no
@@ -463,19 +444,22 @@ mod tests {
 
     #[test]
     fn the_tray_holds_no_more_than_its_limit() {
-        let full = tray(MAX_PENDING_IMAGES);
-        assert!(!full.can_add_more());
-        assert_eq!(full.len(), MAX_PENDING_IMAGES);
-        // The last picture keeps the options: the seventh is not stolen.
-        assert_eq!(full.selected_index(), MAX_PENDING_IMAGES - 1);
+        let (_folders, mut tray) = tray(MAX_PENDING_IMAGES);
+        assert!(!tray.can_add_more());
+        assert_eq!(tray.images().len(), MAX_PENDING_IMAGES);
+        // The last picture keeps the options: the eighth is not stolen.
+        assert_eq!(tray.selected_index(), MAX_PENDING_IMAGES - 1);
+        // The ninth picture does not fit.
+        let (_folder, path) = picture(MAX_PENDING_IMAGES as u64);
+        assert!(tray.stage(path).is_err());
     }
 
     #[test]
     fn the_edited_picture_takes_the_place_of_the_one_it_came_from() {
-        let mut tray = tray(2);
-        let source = PathBuf::from("photo-1.png");
+        let (_folders, mut tray) = tray(2);
+        let source = tray.images()[1].path.clone();
         assert!(tray.replace(&source, PathBuf::from("edited.png")));
-        assert_eq!(tray.len(), 2);
+        assert_eq!(tray.images().len(), 2);
         // The edited one keeps the number of the thumbnail and takes the
         // options, so the picture the user was working on stays in front.
         assert_eq!(tray.selected_index(), 1);
@@ -488,19 +472,10 @@ mod tests {
 
     #[test]
     fn the_send_empties_the_tray() {
-        let mut tray = tray(2);
+        let (_folders, mut tray) = tray(2);
         let taken = tray.take_all();
         assert_eq!(taken.len(), 2);
         assert!(tray.is_empty());
         assert_eq!(tray.selected_index(), 0);
-        assert!(tray.take_all().is_empty());
-    }
-
-    #[test]
-    fn the_button_of_the_send_counts_the_pictures() {
-        assert_eq!(send_label(0), "Send");
-        assert_eq!(send_label(1), "Send");
-        assert_eq!(send_label(2), "Send 2 photos");
-        assert_eq!(send_label(8), "Send 8 photos");
     }
 }

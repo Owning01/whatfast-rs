@@ -107,7 +107,205 @@ struct DirectWriteState {
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
+    emoji_ligatures: HashMap<FontId, GsubLigatures>,
     layout_line_scratch: Vec<u16>,
+}
+
+#[derive(Default)]
+struct GsubLigatures {
+    /// Maps first glyph ID -> list of `(remaining_glyph_ids, ligated_glyph_id)`, longest first.
+    by_first: HashMap<u16, Vec<(Vec<u16>, u16)>>,
+}
+
+impl GsubLigatures {
+    fn from_font_face(font_face: &IDWriteFontFace3) -> Self {
+        let mut out = Self::default();
+        unsafe {
+            let mut ptr: *mut c_void = std::ptr::null_mut();
+            let mut size: u32 = 0;
+            let mut ctx: *mut c_void = std::ptr::null_mut();
+            let mut exists = Default::default();
+            let tag = u32::from_le_bytes(*b"GSUB");
+            if font_face
+                .TryGetFontTable(tag, &mut ptr, &mut size, &mut ctx, &mut exists)
+                .is_err()
+                || !exists.as_bool()
+                || ptr.is_null()
+                || size < 10
+            {
+                return out;
+            }
+            let data = std::slice::from_raw_parts(ptr.cast::<u8>(), size as usize);
+            out.parse_gsub(data);
+            font_face.ReleaseFontTable(ctx);
+        }
+        for list in out.by_first.values_mut() {
+            list.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        }
+        out
+    }
+
+    fn parse_gsub(&mut self, data: &[u8]) {
+        let u16_at = |off: usize| -> Option<u16> {
+            data.get(off..off + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        };
+        let Some(lookup_list_off) = u16_at(8).map(usize::from) else {
+            return;
+        };
+        let Some(lookup_count) = u16_at(lookup_list_off).map(usize::from) else {
+            return;
+        };
+        for i in 0..lookup_count {
+            let Some(rel) = u16_at(lookup_list_off + 2 + i * 2).map(usize::from) else {
+                continue;
+            };
+            let lookup_off = lookup_list_off + rel;
+            let Some(lookup_type) = u16_at(lookup_off) else {
+                continue;
+            };
+            if lookup_type != 4 {
+                continue;
+            }
+            let Some(sub_count) = u16_at(lookup_off + 4).map(usize::from) else {
+                continue;
+            };
+            for j in 0..sub_count {
+                let Some(sub_rel) = u16_at(lookup_off + 6 + j * 2).map(usize::from) else {
+                    continue;
+                };
+                let sub_off = lookup_off + sub_rel;
+                if u16_at(sub_off) != Some(1) {
+                    continue;
+                }
+                let Some(cov_rel) = u16_at(sub_off + 2).map(usize::from) else {
+                    continue;
+                };
+                let Some(set_count) = u16_at(sub_off + 4).map(usize::from) else {
+                    continue;
+                };
+                let cov_glyphs = Self::parse_coverage(data, sub_off + cov_rel);
+                for (idx, first_glyph) in cov_glyphs.into_iter().take(set_count).enumerate() {
+                    let Some(set_rel) = u16_at(sub_off + 6 + idx * 2).map(usize::from) else {
+                        continue;
+                    };
+                    let set_off = sub_off + set_rel;
+                    let Some(lig_count) = u16_at(set_off).map(usize::from) else {
+                        continue;
+                    };
+                    for k in 0..lig_count {
+                        let Some(lig_rel) = u16_at(set_off + 2 + k * 2).map(usize::from) else {
+                            continue;
+                        };
+                        let lig_off = set_off + lig_rel;
+                        let Some(lig_glyph) = u16_at(lig_off) else {
+                            continue;
+                        };
+                        let Some(comp_count) = u16_at(lig_off + 2).map(usize::from) else {
+                            continue;
+                        };
+                        if comp_count < 2 {
+                            continue;
+                        }
+                        let mut rest = Vec::with_capacity(comp_count - 1);
+                        let mut valid = true;
+                        for c in 0..(comp_count - 1) {
+                            if let Some(g) = u16_at(lig_off + 4 + c * 2) {
+                                rest.push(g);
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if valid {
+                            self.by_first
+                                .entry(first_glyph)
+                                .or_default()
+                                .push((rest, lig_glyph));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_coverage(data: &[u8], off: usize) -> Vec<u16> {
+        let u16_at = |o: usize| -> Option<u16> {
+            data.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+        };
+        let mut glyphs = Vec::new();
+        match u16_at(off) {
+            Some(1) => {
+                if let Some(count) = u16_at(off + 2).map(usize::from) {
+                    for i in 0..count {
+                        if let Some(g) = u16_at(off + 4 + i * 2) {
+                            glyphs.push(g);
+                        }
+                    }
+                }
+            }
+            Some(2) => {
+                if let Some(count) = u16_at(off + 2).map(usize::from) {
+                    for i in 0..count {
+                        let base = off + 4 + i * 6;
+                        if let (Some(start), Some(end)) = (u16_at(base), u16_at(base + 2)) {
+                            for g in start..=end {
+                                glyphs.push(g);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        glyphs
+    }
+
+    fn collapse(&self, glyphs: &mut Vec<ShapedGlyph>, advances: &[f32], total_width: &mut f32) {
+        if self.by_first.is_empty() || glyphs.len() < 2 {
+            return;
+        }
+        let mut out = Vec::with_capacity(glyphs.len());
+        let mut i = 0usize;
+        let mut x_shift = 0.0f32;
+        while i < glyphs.len() {
+            let mut g = glyphs[i].clone();
+            g.position.x -= px(x_shift);
+            let first_id = g.id.0 as u16;
+            let mut matched = None;
+            if let Some(candidates) = self.by_first.get(&first_id) {
+                for (rest, lig_glyph) in candidates {
+                    if i + 1 + rest.len() <= glyphs.len()
+                        && rest
+                            .iter()
+                            .enumerate()
+                            .all(|(k, &expected)| glyphs[i + 1 + k].id.0 as u16 == expected)
+                    {
+                        matched = Some((rest.len(), *lig_glyph));
+                        break;
+                    }
+                }
+            }
+            if let Some((drop_count, lig_glyph)) = matched {
+                g.id = GlyphId(u32::from(lig_glyph));
+                g.is_emoji = true;
+                let mut dropped_adv = 0.0f32;
+                for k in 1..=drop_count {
+                    if let Some(&adv) = advances.get(i + k) {
+                        dropped_adv += adv;
+                    }
+                }
+                x_shift += dropped_adv;
+                *total_width = (*total_width - dropped_adv).max(0.0);
+                out.push(g);
+                i += 1 + drop_count;
+            } else {
+                out.push(g);
+                i += 1;
+            }
+        }
+        *glyphs = out;
+    }
 }
 
 impl GPUState {
@@ -244,6 +442,7 @@ impl DirectWriteTextSystem {
                 fonts: Vec::new(),
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
+                emoji_ligatures: HashMap::default(),
                 layout_line_scratch: Vec::new(),
             }),
         })
@@ -1709,6 +1908,14 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 context.width += glyph_advances[this_glyph_idx];
             }
             glyph_idx += cluster_glyph_count;
+        }
+        if color_font && glyphs.len() > 1 {
+            let ligatures = context
+                .text_system
+                .emoji_ligatures
+                .entry(font_id)
+                .or_insert_with(|| GsubLigatures::from_font_face(font_face));
+            ligatures.collapse(&mut glyphs, glyph_advances, &mut context.width);
         }
         context.runs.push(ShapedRun { font_id, glyphs });
         Ok(())

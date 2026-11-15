@@ -21,11 +21,7 @@
 //! the test `the_default_theme_matches_the_values_of_the_oracle` pins them
 //! against the literals of `lib/theme.ts`.
 
-// The module arrives before its callers: the shell, the composer and the
-// settings of the batches B-U2..B-U6 read the tokens from here.
-#![allow(dead_code)]
-
-use gpui::{BoxShadow, Pixels, Rgba, Window, px};
+use gpui::{Pixels, Rgba, Window, px};
 use gpui_component::theme::ThemeColor;
 use whatfast_core::theme::{Theme, ThemeAppearance, ThemeToken, ThemeVisualStyle};
 
@@ -46,16 +42,6 @@ pub(crate) const BASE_UI_FONT_SIZE: f32 = 16.0;
 
 /// The size of the monospace font, before the scale.
 pub(crate) const BASE_MONO_FONT_SIZE: f32 = 13.0;
-
-/// The green of WhatsApp.
-///
-/// It is a color of the brand: it does not change with the theme.
-pub(crate) const DARK_GREEN: u32 = 0x075e54;
-
-/// The color of the panel of the brand.
-///
-/// It is a color of the brand: it does not change with the theme.
-pub(crate) const PANEL: u32 = 0xf7faf9;
 
 /// The height of the title bar, before the scale.
 const TITLEBAR_HEIGHT: f32 = 38.0;
@@ -80,16 +66,6 @@ const CHAT_LIST_WIDTH: f32 = 300.0;
 ///
 /// port: the second column of the grid is `minmax(260px, 300px)`.
 const CHAT_LIST_MIN_WIDTH: f32 = 260.0;
-
-/// The green of WhatsApp, as GPUI paints it.
-pub(crate) fn dark_green() -> Rgba {
-    gpui::rgb(DARK_GREEN)
-}
-
-/// The color of the panel of the brand, as GPUI paints it.
-pub(crate) fn panel() -> Rgba {
-    gpui::rgb(PANEL)
-}
 
 /// Normalizes an interface scale.
 ///
@@ -251,19 +227,6 @@ pub(crate) struct ThemeShadow {
     pub(crate) color: Rgba,
     /// Whether the shadow is drawn inside the bounds of the element.
     pub(crate) inset: bool,
-}
-
-impl ThemeShadow {
-    /// The shadow, as GPUI paints it.
-    pub(crate) fn to_box_shadow(self) -> BoxShadow {
-        let mut shadow = BoxShadow::new(px(self.offset_x), px(self.offset_y), self.color.into());
-        shadow = shadow.blur_radius(px(self.blur_radius));
-        shadow = shadow.spread_radius(px(self.spread_radius));
-        if self.inset {
-            shadow = shadow.inset();
-        }
-        shadow
-    }
 }
 
 /// Converts a CSS color into an RGB color.
@@ -746,6 +709,28 @@ pub(crate) fn apply_theme(theme: &Theme, scale: f32, cx: &mut gpui::App) {
     global.mono_font_size = fonts.mono_font_size;
 }
 
+/// Applies high-contrast accessibility overrides to the active theme colors.
+pub(crate) fn apply_accessibility_colors(
+    high_contrast: bool,
+    dark: bool,
+    cx: &mut gpui::App,
+) {
+    if !high_contrast {
+        return;
+    }
+    let global = gpui_component::Theme::global_mut(cx);
+    let fg = global.colors.foreground;
+    global.colors.muted_foreground = fg.opacity(0.92);
+    global.colors.border = fg.opacity(if dark { 0.45 } else { 0.55 });
+    global.colors.ring = if dark {
+        gpui::rgb(0x38bdf8).into()
+    } else {
+        gpui::rgb(0x0052cc).into()
+    };
+    let values = global.colors;
+    global.tokens = gpui_component::theme::ThemeTokens::from(values);
+}
+
 /// The theme the app paints with.
 ///
 /// The app wears the palette of WhatsApp: the colors come from the
@@ -813,35 +798,6 @@ pub(crate) fn bubble_text_colors(theme: &Theme) -> (Rgba, Rgba) {
     (colors.bubble_in_fg, colors.bubble_out_fg)
 }
 
-/// The ratio of contrast between two colors of a theme, from 1 to 21.
-///
-/// It is the ratio of WCAG 2.1: the relative luminance of each color over the
-/// same of the other. The editor of the themes tells the user when the text
-/// of a pair falls under 4.5; it never stops the change, because the theme is
-/// the choice of the person who paints it.
-pub(crate) fn contrast_ratio(first: &str, second: &str) -> Option<f32> {
-    let first = luminance(parse_color(first)?);
-    let second = luminance(parse_color(second)?);
-    let (light, dark) = if first >= second {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    Some((light + 0.05) / (dark + 0.05))
-}
-
-/// The relative luminance of a color, as WCAG defines it.
-fn luminance(color: Rgba) -> f32 {
-    let channel = |value: f32| {
-        if value <= 0.039_28 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
 /// Applies an interface scale to the fonts of the application.
 ///
 /// port: `apply_theme_scale` of the origin: the base font size (16px) and the
@@ -865,10 +821,9 @@ mod tests {
     use whatfast_core::theme::{Theme, ThemeAppearance, ThemeToken, ThemeVisualStyle};
 
     use super::{
-        BASE_MONO_FONT_SIZE, BASE_UI_FONT_SIZE, DARK_GREEN, DEFAULT_UI_SCALE, MAX_UI_SCALE,
-        MIN_UI_SCALE, MODERN_RADII, Metrics, PANEL, SKEUOMORPHIC_RADII, ThemeColors, ThemeShadow,
-        UI_SCALE_STEP, bubble_colors, contrast_ratio, dark_green, font_sizes, normalized_ui_scale,
-        panel, parse_color, parse_shadow,
+        BASE_MONO_FONT_SIZE, BASE_UI_FONT_SIZE, DEFAULT_UI_SCALE, MAX_UI_SCALE, MIN_UI_SCALE,
+        MODERN_RADII, Metrics, SKEUOMORPHIC_RADII, ThemeColors, ThemeShadow, bubble_colors,
+        font_sizes, normalized_ui_scale, parse_color, parse_shadow,
     };
 
     /// The color of a hexadecimal literal, as the converter has to build it.
@@ -905,6 +860,7 @@ mod tests {
     #[test]
     fn the_scale_is_rounded_to_a_tenth() {
         assert_eq!(normalized_ui_scale(1.04), 1.0);
+        assert_eq!(normalized_ui_scale(1.05), 1.1);
         assert_eq!(normalized_ui_scale(1.06), 1.1);
         assert_eq!(normalized_ui_scale(1.24), 1.2);
         assert_eq!(normalized_ui_scale(1.44), 1.4);
@@ -916,13 +872,6 @@ mod tests {
         assert_eq!(normalized_ui_scale(f32::NAN), DEFAULT_UI_SCALE);
         assert_eq!(normalized_ui_scale(f32::INFINITY), MAX_UI_SCALE);
         assert_eq!(normalized_ui_scale(f32::NEG_INFINITY), MIN_UI_SCALE);
-    }
-
-    #[test]
-    fn the_step_of_the_scale_is_a_tenth() {
-        assert_eq!(UI_SCALE_STEP, 0.1);
-        assert_eq!(MIN_UI_SCALE, 1.0);
-        assert_eq!(MAX_UI_SCALE, 1.5);
     }
 
     #[test]
@@ -968,7 +917,6 @@ mod tests {
     #[test]
     fn the_measures_of_the_interface_follow_the_scale() {
         let plain = Metrics::new(1.0, ThemeVisualStyle::Modern);
-        assert_eq!(plain.scale, 1.0);
         assert_eq!(plain.titlebar_height, px(38.0));
         assert_eq!(plain.header_height, px(56.0));
         assert_eq!(plain.composer_height, px(60.0));
@@ -977,7 +925,6 @@ mod tests {
         assert_eq!(plain.chat_list_min_width, px(260.0));
 
         let big = Metrics::new(1.5, ThemeVisualStyle::Modern);
-        assert_eq!(big.scale, 1.5);
         assert_eq!(big.titlebar_height, px(57.0));
         assert_eq!(big.header_height, px(84.0));
         assert_eq!(big.composer_height, px(90.0));
@@ -988,21 +935,11 @@ mod tests {
         assert_eq!(big.radii.md, px(12.0));
         assert_eq!(big.radii.lg, px(18.0));
         assert_eq!(big.radii.full, px(999.0));
-    }
 
-    #[test]
-    fn the_measures_normalize_the_scale_first() {
-        let metrics = Metrics::new(2.4, ThemeVisualStyle::Modern);
-        assert_eq!(metrics.scale, MAX_UI_SCALE);
-        assert_eq!(metrics.titlebar_height, px(57.0));
-    }
-
-    #[test]
-    fn the_colors_of_the_brand_do_not_change_with_the_theme() {
-        assert_eq!(DARK_GREEN, 0x075e54);
-        assert_eq!(PANEL, 0xf7faf9);
-        assert_eq!(dark_green(), color(0x075e54));
-        assert_eq!(panel(), color(0xf7faf9));
+        // The scale is normalized first: a stored 2.4 is drawn as 1.5.
+        let clamped = Metrics::new(2.4, ThemeVisualStyle::Modern);
+        assert_eq!(clamped.scale, MAX_UI_SCALE);
+        assert_eq!(clamped.titlebar_height, px(57.0));
     }
 
     #[test]
@@ -1062,10 +999,7 @@ mod tests {
                 inset: false,
             })
         );
-    }
-
-    #[test]
-    fn a_shadow_without_a_blur_is_converted() {
+        // A shadow without a blur is a hard shadow: the blur is zero.
         let shadow = parse_shadow("0 4px #000000");
         assert_eq!(
             shadow,
@@ -1146,18 +1080,6 @@ mod tests {
     }
 
     #[test]
-    fn the_contrast_of_two_tokens_is_the_ratio_of_wcag() {
-        // White over black is the biggest ratio there is.
-        let ratio = contrast_ratio("#ffffff", "#000000").unwrap();
-        assert!((ratio - 21.0).abs() < 0.01, "{ratio}");
-        // A color over itself has no contrast at all.
-        let ratio = contrast_ratio("#808080", "#808080").unwrap();
-        assert!((ratio - 1.0).abs() < 0.01, "{ratio}");
-        // A token the converter does not understand has no ratio to show.
-        assert_eq!(contrast_ratio("no-es-un-color", "#000000"), None);
-    }
-
-    #[test]
     fn every_token_of_the_default_theme_becomes_a_color() {
         let colors = ThemeColors::resolve(&default_theme());
         assert_eq!(colors.bg_app, color(0x000000));
@@ -1187,6 +1109,18 @@ mod tests {
         assert_eq!(colors.warning, color(0xf7b955));
         assert_eq!(colors.danger, color(0xff6166));
         assert_eq!(colors.info, color(0x52a8ff));
+
+        // The light theme resolves its own translucent tokens too.
+        let light = whatfast_core::theme::builtin_themes()
+            .iter()
+            .find(|theme| theme.id == "vercel-light")
+            .unwrap();
+        let colors = ThemeColors::resolve(light);
+        assert_eq!(colors.bg_app, color(0xffffff));
+        assert_eq!(colors.bg_panel, color(0xfafafa));
+        assert_eq!(colors.bg_overlay, rgba(255, 255, 255, 0.75));
+        assert_eq!(colors.accent_soft, rgba(0, 114, 245, 0.1));
+        assert_eq!(colors.fg, color(0x171717));
     }
 
     #[test]
@@ -1233,19 +1167,5 @@ mod tests {
         theme.tokens.set(ThemeToken::BgApp, "#not-a-color");
         let colors = ThemeColors::resolve(&theme);
         assert_eq!(colors.bg_app, color(0x000000));
-    }
-
-    #[test]
-    fn the_light_theme_converts_its_translucent_tokens() {
-        let theme = whatfast_core::theme::builtin_themes()
-            .iter()
-            .find(|theme| theme.id == "vercel-light")
-            .unwrap();
-        let colors = ThemeColors::resolve(theme);
-        assert_eq!(colors.bg_app, color(0xffffff));
-        assert_eq!(colors.bg_panel, color(0xfafafa));
-        assert_eq!(colors.bg_overlay, rgba(255, 255, 255, 0.75));
-        assert_eq!(colors.accent_soft, rgba(0, 114, 245, 0.1));
-        assert_eq!(colors.fg, color(0x171717));
     }
 }

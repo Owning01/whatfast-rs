@@ -28,7 +28,7 @@
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-use gpui_component::{IconName, IconNamed};
+use gpui_component::IconNamed;
 
 /// The shapes of one glyph of the web client.
 struct Glyph {
@@ -204,11 +204,12 @@ const MESSAGES: Glyph = Glyph {
 };
 
 const MIC: Glyph = Glyph {
-    path: "M12 2.5a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z M5.5 11.5a6.5 6.5 0 0 0 13 0 M12 18v3.5",
+    path: "M12 2.5a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0v-6a3 3 0 0 1 3-3z M5 11.5a7 7 0 0 0 14 0h-1.4a5.6 5.6 0 0 1-11.2 0z M11.2 18h1.6v3.2h-1.6z M8.7 20.3h6.6v1.3H8.7z",
     main: &[
-        "M12 2.5a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z",
-        "M5.5 11.5a6.5 6.5 0 0 0 13 0",
-        "M12 18v3.5",
+        "M12 2.5a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0v-6a3 3 0 0 1 3-3z",
+        "M5 11.5a7 7 0 0 0 14 0h-1.4a5.6 5.6 0 0 1-11.2 0z",
+        "M11.2 18h1.6v3.2h-1.6z",
+        "M8.7 20.3h6.6v1.3H8.7z",
     ],
     cutout: &[],
     overlay: &[],
@@ -584,56 +585,6 @@ impl WhatfastIcon {
         WhatfastIcon::Warning,
     ];
 
-    /// The name of the icon in the web client.
-    pub fn name(self) -> &'static str {
-        match self {
-            WhatfastIcon::Archive => "archive",
-            WhatfastIcon::Attach => "attach",
-            WhatfastIcon::Bell => "bell",
-            WhatfastIcon::Bot => "bot",
-            WhatfastIcon::Channels => "channels",
-            WhatfastIcon::Chat => "chat",
-            WhatfastIcon::Check => "check",
-            WhatfastIcon::CheckDouble => "check-double",
-            WhatfastIcon::Clock => "clock",
-            WhatfastIcon::Close => "close",
-            WhatfastIcon::Copy => "copy",
-            WhatfastIcon::Download => "download",
-            WhatfastIcon::Edit => "edit",
-            WhatfastIcon::Forward => "forward",
-            WhatfastIcon::Globe => "globe",
-            WhatfastIcon::Maximize => "maximize",
-            WhatfastIcon::Messages => "messages",
-            WhatfastIcon::Mic => "mic",
-            WhatfastIcon::Minimize => "minimize",
-            WhatfastIcon::NewChat => "new-chat",
-            WhatfastIcon::Palette => "palette",
-            WhatfastIcon::Pause => "pause",
-            WhatfastIcon::Phone => "phone",
-            WhatfastIcon::Pin => "pin",
-            WhatfastIcon::Play => "play",
-            WhatfastIcon::Poll => "poll",
-            WhatfastIcon::Reply => "reply",
-            WhatfastIcon::ReplyPrivate => "reply-private",
-            WhatfastIcon::Search => "search",
-            WhatfastIcon::Send => "send",
-            WhatfastIcon::Settings => "settings",
-            WhatfastIcon::Shield => "shield",
-            WhatfastIcon::Sidebar => "sidebar",
-            WhatfastIcon::Smile => "smile",
-            WhatfastIcon::Split => "split",
-            WhatfastIcon::Status => "status",
-            WhatfastIcon::Sticker => "sticker",
-            WhatfastIcon::Storage => "storage",
-            WhatfastIcon::Trash => "trash",
-            WhatfastIcon::TrashOutline => "trash-outline",
-            WhatfastIcon::Video => "video",
-            WhatfastIcon::Volume => "volume",
-            WhatfastIcon::VolumeMute => "volume-mute",
-            WhatfastIcon::Warning => "warning",
-        }
-    }
-
     /// The path of the icon: the shapes of the glyph of the web client.
     pub fn path_data(self) -> &'static str {
         self.glyph().path
@@ -735,16 +686,6 @@ impl IconNamed for WhatfastIcon {
     fn path(self) -> SharedString {
         SharedString::new_static(self.path_data())
     }
-}
-
-/// The icon of the button that switches between the light and the dark theme.
-///
-/// port: the web client keeps the same rule in its panel of appearance: the
-/// sun is the way back to the light theme and the moon the way back to the
-/// dark one. The native client draws that button with the outline set of
-/// `gpui_component`, because the set of Whatfast has no sun.
-pub fn theme_toggle_icon(dark: bool) -> IconName {
-    if dark { IconName::Sun } else { IconName::Moon }
 }
 
 /// The source of the assets of the application: the icons of `gpui_component`
@@ -943,23 +884,11 @@ mod tests {
     }
 
     #[test]
-    fn every_icon_has_a_path() {
-        for icon in WhatfastIcon::ALL {
-            assert!(
-                !icon.path_data().is_empty(),
-                "the icon {} has no path",
-                icon.name()
-            );
-        }
-    }
-
-    #[test]
     fn every_icon_has_a_valid_path() {
         for icon in WhatfastIcon::ALL {
             assert!(
                 is_valid_path(icon.path_data()),
-                "the path of {} is not a valid path of SVG: {}",
-                icon.name(),
+                "the path of {icon:?} is not a valid path of SVG: {}",
                 icon.path_data()
             );
         }
@@ -972,20 +901,17 @@ mod tests {
             for shape in glyph.main.iter().chain(glyph.cutout.iter()) {
                 assert!(
                     is_valid_path(shape),
-                    "a shape of {} is not a valid path of SVG: {shape}",
-                    icon.name()
+                    "a shape of {icon:?} is not a valid path of SVG: {shape}"
                 );
             }
             for (shape, opacity) in glyph.overlay {
                 assert!(
                     is_valid_path(shape),
-                    "a shape of {} is not a valid path of SVG: {shape}",
-                    icon.name()
+                    "a shape of {icon:?} is not a valid path of SVG: {shape}"
                 );
                 assert!(
                     *opacity > 0.0 && *opacity <= 1.0,
-                    "the opacity of {} is out of range: {opacity}",
-                    icon.name()
+                    "the opacity of {icon:?} is out of range: {opacity}"
                 );
             }
         }
@@ -1002,76 +928,9 @@ mod tests {
             assert_eq!(
                 icon.path_data(),
                 joined,
-                "the path of {} is not the join of its shapes",
-                icon.name()
+                "the path of {icon:?} is not the join of its shapes"
             );
         }
-    }
-
-    #[test]
-    fn the_names_of_the_icons_are_the_ones_of_the_web_client() {
-        let names: Vec<&str> = WhatfastIcon::ALL.iter().map(|icon| icon.name()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "archive",
-                "attach",
-                "bell",
-                "bot",
-                "channels",
-                "chat",
-                "check",
-                "check-double",
-                "clock",
-                "close",
-                "copy",
-                "download",
-                "edit",
-                "forward",
-                "globe",
-                "maximize",
-                "messages",
-                "mic",
-                "minimize",
-                "new-chat",
-                "palette",
-                // These three are not in the web client: the reference of
-                // WhatsApp Desktop draws the calls in the header of the
-                // conversation, and the player of the voice note.
-                "pause",
-                "phone",
-                "pin",
-                "play",
-                "poll",
-                "reply",
-                "reply-private",
-                "search",
-                "send",
-                "settings",
-                "shield",
-                "sidebar",
-                "smile",
-                "split",
-                "status",
-                "sticker",
-                "storage",
-                "trash",
-                "trash-outline",
-                "video",
-                "volume",
-                "volume-mute",
-                "warning",
-            ]
-        );
-    }
-
-    #[test]
-    fn the_names_of_the_icons_are_different() {
-        let mut names: Vec<&str> = WhatfastIcon::ALL.iter().map(|icon| icon.name()).collect();
-        names.sort_unstable();
-        let count = names.len();
-        names.dedup();
-        assert_eq!(names.len(), count, "two icons share the same name");
     }
 
     #[test]
@@ -1092,24 +951,11 @@ mod tests {
             assert_eq!(
                 WhatfastIcon::from_path_data(icon.path_data()),
                 Some(icon),
-                "the path of {} does not find its own icon",
-                icon.name()
+                "the path of {icon:?} does not find its own icon"
             );
         }
         assert_eq!(WhatfastIcon::from_path_data("icons/close.svg"), None);
         assert_eq!(WhatfastIcon::from_path_data(""), None);
-    }
-
-    #[test]
-    fn the_trait_gives_the_path_of_the_icon() {
-        for icon in WhatfastIcon::ALL {
-            assert_eq!(
-                IconNamed::path(icon).as_str(),
-                icon.path_data(),
-                "the trait does not give the path of {}",
-                icon.name()
-            );
-        }
     }
 
     #[test]
@@ -1118,32 +964,27 @@ mod tests {
             let document = icon.svg_document();
             assert!(
                 document.starts_with("<svg "),
-                "the document of {} is not an SVG",
-                icon.name()
+                "the document of {icon:?} is not an SVG"
             );
             assert!(
                 document.ends_with("</svg>"),
-                "the document of {} is not closed",
-                icon.name()
+                "the document of {icon:?} is not closed"
             );
             assert!(
                 document.contains(r#"viewBox="0 0 24 24""#),
-                "the document of {} has no view box",
-                icon.name()
+                "the document of {icon:?} has no view box"
             );
             let glyph = icon.glyph();
             for shape in glyph.main {
                 assert!(
                     document.contains(&format!(r##"<path d="{shape}" fill="#fff"/>"##)),
-                    "the document of {} does not have the shape {shape}",
-                    icon.name()
+                    "the document of {icon:?} does not have the shape {shape}"
                 );
             }
             for shape in glyph.cutout {
                 assert!(
                     document.contains(&format!(r##"<path d="{shape}" fill="#000"/>"##)),
-                    "the document of {} does not have the hole {shape}",
-                    icon.name()
+                    "the document of {icon:?} does not have the hole {shape}"
                 );
             }
         }
@@ -1156,14 +997,14 @@ mod tests {
             let loaded = assets.load(icon.path_data());
             let loaded = match loaded {
                 Ok(loaded) => loaded,
-                Err(error) => panic!("the icon {} could not be loaded: {error}", icon.name()),
+                Err(error) => panic!("the icon {icon:?} could not be loaded: {error}"),
             };
             let bytes = match loaded {
                 Some(bytes) => bytes,
-                None => panic!("the icon {} was not served", icon.name()),
+                None => panic!("the icon {icon:?} was not served"),
             };
             let document = String::from_utf8(bytes.to_vec())
-                .unwrap_or_else(|_| panic!("the icon {} is not a document", icon.name()));
+                .unwrap_or_else(|_| panic!("the icon {icon:?} is not a document"));
             assert_eq!(document, icon.svg_document());
         }
     }
@@ -1177,11 +1018,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_icon_of_the_theme_follows_the_appearance() {
-        // The `IconName` of the component has no `PartialEq`, so the path of
-        // the icon is the thing that is compared.
-        assert_eq!(theme_toggle_icon(true).path().as_str(), "icons/sun.svg");
-        assert_eq!(theme_toggle_icon(false).path().as_str(), "icons/moon.svg");
-    }
 }

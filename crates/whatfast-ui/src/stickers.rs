@@ -16,8 +16,6 @@
 //! actions it needs already exist in `app.rs`: `load_stickers()`,
 //! `send_sticker_from_library()` and `choose_sticker()`.
 
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -51,9 +49,6 @@ pub(crate) const TAB_SIZE: f32 = 34.0;
 pub(crate) const CELL_GAP: f32 = 6.0;
 /// The padding inside one cell of the grid, in pixels, before the scale.
 const CELL_PADDING: f32 = 2.0;
-/// The height of the composer, in pixels, before the scale: the tray floats
-/// over it.
-const COMPOSER_HEIGHT: f32 = 56.0;
 /// The gap between the tray and the composer, in pixels, before the scale.
 const COMPOSER_GAP: f32 = 8.0;
 /// The text that the field of the search shows while it is empty.
@@ -145,16 +140,6 @@ pub(crate) struct StickerTray {
 }
 
 impl StickerTray {
-    /// The pack that is open in the tray.
-    pub(crate) fn active_pack_id(&self) -> String {
-        self.state.borrow().active_pack_id.clone()
-    }
-
-    /// The sticker that is being sent right now.
-    pub(crate) fn sending(&self) -> String {
-        self.state.borrow().sending.clone()
-    }
-
     /// Draws the tray of the stickers.
     ///
     /// The tray asks for the library the first time it is drawn and the
@@ -376,11 +361,11 @@ impl StickerTray {
                     .hover(|style| style.bg(cx.theme().muted))
                     .when(busy, |cell| cell.opacity(0.5))
                     .child(match path {
+                        // La rejilla pide el archivo como cuadro quieto: son
+                        // cientos de celdas y animarlas todas cuesta CPU y
+                        // memoria. El chat y el visor si animan.
                         Some(path) => div().child(
-                            img(path)
-                                // La rejilla se queda en el primer cuadro: son
-                                // cientos de celdas y animarlas todas cuesta
-                                // CPU y memoria. El chat y el visor si animan.
+                            img(crate::image_cache::still_image_source(&path))
                                 .size(px((CELL_SIZE - 2. * CELL_PADDING) * scale))
                                 .object_fit(ObjectFit::Contain),
                         ),
@@ -599,22 +584,12 @@ mod tests {
             active_pack(&packs, "recent").map(|pack| pack.id.as_str()),
             Some("recent")
         );
-    }
-
-    #[test]
-    fn the_active_pack_falls_back_to_the_first_one() {
-        let packs = vec![
-            pack("favorites", "Favourites", Vec::new()),
-            pack("recent", "Recently used", Vec::new()),
-        ];
+        // A pack that is not there anymore falls back to the first one.
         assert_eq!(
             active_pack(&packs, "gone").map(|pack| pack.id.as_str()),
             Some("favorites")
         );
-    }
-
-    #[test]
-    fn there_is_no_active_pack_without_packs() {
+        // Without packs there is no active pack.
         assert!(active_pack(&[], "favorites").is_none());
     }
 
@@ -637,23 +612,9 @@ mod tests {
             sticker_local_path(&packs[0], "fav-1"),
             Some("/tmp/fav-1.webp")
         );
-    }
-
-    #[test]
-    fn a_sticker_that_was_never_downloaded_has_no_path() {
-        let packs = [pack(
-            "favorites",
-            "Favourites",
-            vec![sticker("fav-1", "/tmp/fav-1.webp"), sticker("fav-2", "")],
-        )];
+        // A sticker that was never downloaded has no path.
         assert_eq!(sticker_local_path(&packs[0], "fav-2"), None);
         assert_eq!(sticker_local_path(&packs[0], "gone"), None);
-    }
-
-    #[test]
-    fn an_empty_search_lets_every_sticker_through() {
-        assert!(sticker_matches(&sticker("fav-1", ""), ""));
-        assert!(sticker_matches(&sticker("fav-1", ""), "   "));
     }
 
     #[test]
@@ -661,5 +622,8 @@ mod tests {
         assert!(sticker_matches(&sticker("fav-1", ""), "fav"));
         assert!(sticker_matches(&sticker("fav-1", ""), "FAV-1"));
         assert!(!sticker_matches(&sticker("fav-1", ""), "recent"));
+        // An empty search lets every sticker through.
+        assert!(sticker_matches(&sticker("fav-1", ""), ""));
+        assert!(sticker_matches(&sticker("fav-1", ""), "   "));
     }
 }

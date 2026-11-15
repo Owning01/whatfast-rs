@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use whatfast_protocol::{
-    AttachmentKind, Chat, ChatKind, GetChatInfoRequest, GetMessageAttachmentRequest, ListChatsRequest,
-    ListMessagesRequest, Message, MessageStatus, SearchLocalRequest, SendAttachmentRequest,
-    SendImageRequest, SendReactionRequest, SendTextRequest, message, rpc_request,
-    rpc_response::Result as RpcResult,
+    AttachmentKind, Chat, ChatKind, CreatePollRequest, EditMessageRequest, GetChatInfoRequest,
+    GetMessageAttachmentRequest, ListChatsRequest, ListMessagesAfterRequest, ListMessagesRequest,
+    ListStatusesRequest, Message, MessageStatus, SearchLocalRequest, SendAttachmentRequest,
+    SendImageRequest, SendReactionRequest, SendTextRequest, SetMessagePinRequest, message,
+    rpc_request, rpc_response::Result as RpcResult,
 };
 
 use crate::{
@@ -198,6 +199,55 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["chat_id", "message_id", "emoji"]
             }
         }),
+        json!({
+            "name": "statuses_list",
+            "title": "List statuses",
+            "description": "Lists current WhatsApp status updates grouped by sender.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
+            "name": "poll_create",
+            "title": "Create a poll",
+            "description": "Sends a poll message to a chat with 2 to 12 options.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 12},
+                    "selectable_options_count": {"type": "integer", "minimum": 1, "default": 1}
+                },
+                "required": ["chat_id", "question", "options"]
+            }
+        }),
+        json!({
+            "name": "edit_message",
+            "title": "Edit a message",
+            "description": "Edits a previously sent text message in a chat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["chat_id", "message_id", "text"]
+            }
+        }),
+        json!({
+            "name": "pin_message",
+            "title": "Pin or unpin a message",
+            "description": "Pins or unpins a message in a chat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "pinned": {"type": "boolean", "default": true}
+                },
+                "required": ["chat_id", "message_id"]
+            }
+        }),
     ]
 }
 
@@ -217,6 +267,10 @@ pub fn call(client: &mut Client, name: &str, arguments: &Value) -> Result<Value,
         "draft_decide" => draft_decide(client, arguments),
         "message_send_media" => message_send_media(client, arguments),
         "message_react" => message_react(client, arguments),
+        "statuses_list" => statuses_list(client),
+        "poll_create" => poll_create(client, arguments),
+        "edit_message" => edit_message(client, arguments),
+        "pin_message" => pin_message(client, arguments),
         other => return Err(format!("unknown tool {other}")),
     };
     match &result {
@@ -400,6 +454,7 @@ fn messages_wait(client: &mut Client, arguments: &Value) -> Result<Value, String
     };
     let deadline = started + Duration::from_millis(timeout_ms);
     loop {
+        client.drain_events();
         let fresh = fresh_messages(client, chat_id.as_deref(), cursor_at, &cursor_id)?;
         if let Some(last) = fresh.last() {
             cursor_at = last.timestamp_ms;
@@ -410,7 +465,8 @@ fn messages_wait(client: &mut Client, arguments: &Value) -> Result<Value, String
                 "cursor": {"at_ms": cursor_at, "message_id": cursor_id},
             }));
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Ok(json!({
                 "waited_ms": started.elapsed().as_millis(),
                 "messages": [],
@@ -418,7 +474,8 @@ fn messages_wait(client: &mut Client, arguments: &Value) -> Result<Value, String
                 "cursor": {"at_ms": cursor_at, "message_id": cursor_id},
             }));
         }
-        std::thread::sleep(jitter(1200, 1800));
+        let remaining = deadline.saturating_duration_since(now);
+        client.wait_event(remaining.min(Duration::from_millis(2_500)));
     }
 }
 
@@ -469,8 +526,10 @@ fn message_send(client: &mut Client, arguments: &Value) -> Result<Value, String>
         ) {
             Ok(answer) => answer,
             // Nothing went out yet and the chat is not enabled for a direct
-            // send: the message waits as a draft instead of being lost.
-            Err(Error::Remote { code, .. }) if code == "forbidden" && index == 0 => {
+            // send: the message waits as a draft instead of being lost. The
+            // reason the backend gave goes with it, so the user knows which
+            // permission to widen.
+            Err(Error::Remote { code, message, .. }) if code == "forbidden" && index == 0 => {
                 if parts > 1 {
                     typing(client, &chat_id, false);
                 }
@@ -480,7 +539,7 @@ fn message_send(client: &mut Client, arguments: &Value) -> Result<Value, String>
                         "chat_id": chat_id,
                         "text": body,
                         "reply_to_message_id": reply_to,
-                        "reason": "el chat no está habilitado para enviar: queda como borrador",
+                        "reason": format!("el chat no está habilitado para enviar: queda como borrador ({message})"),
                     }),
                 );
             }
@@ -678,24 +737,45 @@ fn fresh_messages(
     let mut fresh = Vec::new();
     match chat_id {
         Some(chat_id) => {
-            let answer = request(
-                client,
-                rpc_request::Request::ListMessages(ListMessagesRequest {
-                    chat_id: chat_id.to_owned(),
-                    before_timestamp_ms: 0,
-                    before_message_id: String::new(),
-                    limit: 30,
-                }),
-                READ_TIMEOUT,
-            )?;
-            let RpcResult::ListMessages(page) = answer else {
-                return Err("the backend answered with another result".into());
-            };
-            fresh.extend(
-                page.messages
-                    .into_iter()
-                    .filter(|message| after(message, cursor_at, cursor_id)),
-            );
+            if cursor_at > 0 && !cursor_id.is_empty() {
+                let answer = request(
+                    client,
+                    rpc_request::Request::ListMessagesAfter(ListMessagesAfterRequest {
+                        chat_id: chat_id.to_owned(),
+                        after_timestamp_ms: cursor_at,
+                        after_message_id: cursor_id.to_owned(),
+                        limit: 30,
+                    }),
+                    READ_TIMEOUT,
+                )?;
+                let RpcResult::ListMessagesAfter(page) = answer else {
+                    return Err("the backend answered with another result".into());
+                };
+                fresh.extend(
+                    page.messages
+                        .into_iter()
+                        .filter(|message| after(message, cursor_at, cursor_id)),
+                );
+            } else {
+                let answer = request(
+                    client,
+                    rpc_request::Request::ListMessages(ListMessagesRequest {
+                        chat_id: chat_id.to_owned(),
+                        before_timestamp_ms: 0,
+                        before_message_id: String::new(),
+                        limit: 30,
+                    }),
+                    READ_TIMEOUT,
+                )?;
+                let RpcResult::ListMessages(page) = answer else {
+                    return Err("the backend answered with another result".into());
+                };
+                fresh.extend(
+                    page.messages
+                        .into_iter()
+                        .filter(|message| after(message, cursor_at, cursor_id)),
+                );
+            }
         }
         None => {
             let answer = request(
@@ -987,6 +1067,112 @@ fn message_react(client: &mut Client, arguments: &Value) -> Result<Value, String
     }
 }
 
+fn statuses_list(client: &mut Client) -> Result<Value, String> {
+    match client.call(
+        rpc_request::Request::ListStatuses(ListStatusesRequest {}),
+        READ_TIMEOUT,
+    ) {
+        Ok(RpcResult::ListStatuses(resp)) => {
+            let groups: Vec<Value> = resp
+                .groups
+                .iter()
+                .map(|g| {
+                    json!({
+                        "sender_id": g.sender_id,
+                        "sender_name": g.sender_name,
+                        "count": g.messages.len(),
+                    })
+                })
+                .collect();
+            Ok(json!({ "groups": groups }))
+        }
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn poll_create(client: &mut Client, arguments: &Value) -> Result<Value, String> {
+    let chat_id = required(arguments, "chat_id")?;
+    let question = required(arguments, "question")?;
+    let options: Vec<String> = arguments
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if options.len() < 2 {
+        return Err("at least 2 poll options are required".to_string());
+    }
+    let selectable_options_count = count(arguments, "selectable_options_count", 1, 1, options.len() as i64);
+    let client_message_id = uuid4();
+    match client.call(
+        rpc_request::Request::CreatePoll(CreatePollRequest {
+            client_message_id,
+            chat_id: chat_id.clone(),
+            question,
+            options,
+            selectable_options_count,
+        }),
+        WRITE_TIMEOUT,
+    ) {
+        Ok(RpcResult::CreatePoll(resp)) => Ok(json!({
+            "status": "sent",
+            "chat_id": chat_id,
+            "message_id": resp.message.map(|m| m.id).unwrap_or_default(),
+        })),
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn edit_message(client: &mut Client, arguments: &Value) -> Result<Value, String> {
+    let chat_id = required(arguments, "chat_id")?;
+    let message_id = required(arguments, "message_id")?;
+    let text = required(arguments, "text")?;
+    match client.call(
+        rpc_request::Request::EditMessage(EditMessageRequest {
+            chat_id: chat_id.clone(),
+            message_id: message_id.clone(),
+            text,
+        }),
+        WRITE_TIMEOUT,
+    ) {
+        Ok(RpcResult::EditMessage(_)) => Ok(json!({
+            "status": "edited",
+            "chat_id": chat_id,
+            "message_id": message_id,
+        })),
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn pin_message(client: &mut Client, arguments: &Value) -> Result<Value, String> {
+    let chat_id = required(arguments, "chat_id")?;
+    let message_id = required(arguments, "message_id")?;
+    let pinned = flag(arguments, "pinned", true);
+    match client.call(
+        rpc_request::Request::SetMessagePin(SetMessagePinRequest {
+            chat_id: chat_id.clone(),
+            message_id: message_id.clone(),
+            pinned,
+        }),
+        WRITE_TIMEOUT,
+    ) {
+        Ok(RpcResult::SetMessagePin(_)) => Ok(json!({
+            "status": if pinned { "pinned" } else { "unpinned" },
+            "chat_id": chat_id,
+            "message_id": message_id,
+        })),
+        Ok(other) => Err(format!("unexpected response: {other:?}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 fn required(arguments: &Value, key: &str) -> Result<String, String> {
     text(arguments, key).ok_or_else(|| format!("{key} is required"))
 }
@@ -1008,17 +1194,6 @@ fn flag(arguments: &Value, key: &str, default: bool) -> bool {
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(default)
-}
-
-/// A pause that is never the same twice, so two waits do not line up.
-fn jitter(min: u64, max: u64) -> Duration {
-    let mut bytes = [0u8; 8];
-    let value = if getrandom::getrandom(&mut bytes).is_ok() {
-        u64::from_le_bytes(bytes)
-    } else {
-        min
-    };
-    Duration::from_millis(min + value % (max.saturating_sub(min) + 1))
 }
 
 /// A version 4 UUID, the id the desktop reuses across the retries of a send.
@@ -1080,13 +1255,5 @@ mod tests {
         assert!(after(&message, 9, "z"));
         assert!(!after(&message, 10, "b"));
         assert!(after(&message, 10, "a"));
-    }
-
-    #[test]
-    fn a_jitter_stays_inside_its_window() {
-        for _ in 0..64 {
-            let pause = jitter(1200, 1800).as_millis() as u64;
-            assert!((1200..=1800).contains(&pause), "{pause}");
-        }
     }
 }

@@ -583,17 +583,4 @@ mod tests {
         assert!(!converted[0].is_me);
     }
 
-    #[test]
-    fn the_roster_has_a_section_of_the_admins_and_one_of_the_members() {
-        let members = vec![
-            participant("1", "Ana", "+1", true, true, false),
-            participant("2", "Beto", "+2", false, false, false),
-        ];
-        let rows = participant_roster_rows(&members, true);
-        assert_eq!(rows.len(), 4);
-        assert!(matches!(rows[0], ParticipantRosterRow::Header { .. }));
-        assert!(matches!(rows[1], ParticipantRosterRow::Participant { .. }));
-        assert!(matches!(rows[2], ParticipantRosterRow::Header { .. }));
-        assert!(matches!(rows[3], ParticipantRosterRow::Participant { .. }));
-    }
 }

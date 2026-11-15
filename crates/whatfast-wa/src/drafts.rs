@@ -37,7 +37,12 @@ pub fn propose(
 ) -> Result<RpcResponse, Denied> {
     let agent_id = agent_of(who, &request.agent_id)?;
     let is_group = crate::guard::is_group(&request.chat_id, store);
-    let grant = grant_of(who);
+    // The row of this instant, not the snapshot of the handshake: the user may
+    // have widened the grant after this harness connected.
+    let grant = match who {
+        Who::Agent { id, .. } => Some(guard.current_grant(id)?),
+        _ => None,
+    };
     let allowed = match grant {
         Some(grant) => grant.allows(&request.chat_id, is_group, Scope::Draft),
         // The user writes drafts of their own with the full rights of the
@@ -258,14 +263,6 @@ fn agent_of(who: &Who, named: &str) -> Result<String, Denied> {
 fn agent_of_optional(who: &Who) -> Option<String> {
     match who {
         Who::Agent { id, .. } => Some(id.clone()),
-        _ => None,
-    }
-}
-
-/// The grant behind the connection, when an agent is the caller.
-fn grant_of(who: &Who) -> Option<whatfast_auto::Grant> {
-    match who {
-        Who::Agent { grant, .. } => Some(grant.clone()),
         _ => None,
     }
 }

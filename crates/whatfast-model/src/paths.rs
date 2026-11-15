@@ -67,7 +67,13 @@ fn resolve_app_dir(
             })
         }),
     };
-    base.unwrap_or(fallback).join("whatfast")
+    let root = base.unwrap_or(fallback).join("whatfast");
+    if let Some(profile) = variable("WHATFAST_PROFILE")
+        && !profile.is_empty()
+    {
+        return root.join("profiles").join(profile);
+    }
+    root
 }
 
 /// The directory of the configuration profile.

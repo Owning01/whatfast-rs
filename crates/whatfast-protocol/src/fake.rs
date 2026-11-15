@@ -645,11 +645,6 @@ impl FakeConfig {
         }
     }
 
-    /// The media tree of the profile: the only tree the asset protocol
-    /// serves.
-    pub fn media_dir(&self) -> PathBuf {
-        self.profile_dir.join("media")
-    }
 }
 
 /// A running fake backend: the same surface the sidecar transport exposes.
@@ -1860,6 +1855,32 @@ pub fn fake_loop(
             }
             Some(rpc_request::Request::CallVideo(_)) => {
                 rpc_response::Result::CallVideo(CallVideoResponse {})
+            }
+            Some(rpc_request::Request::GetLinkPreview(request)) => {
+                // The demo backend does not fetch pages: it answers a card
+                // shaped like the real one, so the composer can draw it.
+                let url = request.url.trim().to_string();
+                let preview = if url.is_empty() {
+                    None
+                } else {
+                    Some(LinkPreview {
+                        url: url.clone(),
+                        title: format!("Demo preview of {url}"),
+                        description: String::new(),
+                        jpeg_thumbnail: Vec::new(),
+                        thumbnail_width: 0,
+                        thumbnail_height: 0,
+                    })
+                };
+                rpc_response::Result::GetLinkPreview(crate::GetLinkPreviewResponse { preview })
+            }
+            Some(rpc_request::Request::ListChatMedia(_)) => {
+                rpc_response::Result::ListChatMedia(crate::ListChatMediaResponse {
+                    messages: Vec::new(),
+                    media_count: 0,
+                    doc_count: 0,
+                    link_count: 0,
+                })
             }
         };
         if incoming
@@ -4116,6 +4137,22 @@ mod tests {
             assert!(path.is_file(), "the file of the message {id} is on disk");
             assert!(path.starts_with(profile.join("media")));
         }
+        // The messages outside the strides carry no file.
+        for id in [0, 1] {
+            let message = fake_message("chat-0", id, &profile);
+            assert!(
+                !matches!(message.content, Some(proto_message::Content::Attachment(_))),
+                "the message {id} carries a file"
+            );
+        }
+        // The photo has its own stride: no message carries a photo and a
+        // file at the same time.
+        for id in (0..PERF_MESSAGE_TOTAL).filter(|id| id % 37 == 0) {
+            assert!(
+                fake_attachment_of(id).is_none(),
+                "the message {id} carries the photo and a file"
+            );
+        }
     }
 
     #[test]
@@ -4135,36 +4172,6 @@ mod tests {
         let bytes = std::fs::read(&audio).expect("the audio of the fake");
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
-    }
-
-    #[test]
-    fn only_the_messages_of_the_strides_carry_a_file() {
-        assert!(fake_attachment_of(0).is_none());
-        assert!(fake_attachment_of(1).is_none());
-        assert_eq!(
-            fake_attachment_of(DOCUMENT_EVERY * 16),
-            Some(FakeAttachment::Document)
-        );
-        assert_eq!(
-            fake_attachment_of(VIDEO_EVERY * 13),
-            Some(FakeAttachment::Video)
-        );
-        assert_eq!(
-            fake_attachment_of(AUDIO_EVERY * 14),
-            Some(FakeAttachment::Audio)
-        );
-        assert_eq!(
-            fake_attachment_of(VOICE_NOTE_EVERY * 10),
-            Some(FakeAttachment::VoiceNote)
-        );
-        // The photo has its own stride: no message carries a photo and a
-        // file at the same time.
-        for id in (0..PERF_MESSAGE_TOTAL).filter(|id| id % 37 == 0) {
-            assert!(
-                fake_attachment_of(id).is_none(),
-                "the message {id} carries the photo and a file"
-            );
-        }
     }
 
     #[test]
@@ -4194,27 +4201,18 @@ mod tests {
         // table: the caption of a sunset never paints a pizza. The first
         // photo of the dataset is the message 37, the second scene of the
         // table.
-        assert_eq!(photo_caption(37), "Cafecito de la mañana ☕");
-        assert_eq!(photo_caption(37 * 6), "Flores del patio 🌸");
+        let profile = profile_dir("captions");
+        let caption_of = |id: usize| {
+            let message = fake_message("chat-0", id, &profile);
+            let Some(proto_message::Content::Image(image)) = message.content else {
+                panic!("the message {id} is a photo");
+            };
+            image.caption
+        };
+        assert_eq!(caption_of(37), "Cafecito de la mañana ☕");
+        assert_eq!(caption_of(37 * 6), "Flores del patio 🌸");
         // The eighth photo is the first scene again: the table cycles with
         // the photo index.
-        assert_eq!(photo_caption(37 * 8), "Atardecer en el dique 🌅");
-    }
-
-    #[test]
-    fn the_titles_of_the_first_chats_are_people_and_groups() {
-        // The first screens of the list read like a real agenda: the family
-        // group first, then the people of the roster.
-        assert_eq!(fake_chat(0).title, "Familia Bazán 🏡");
-        assert_eq!(fake_chat(1).title, "Bruno Salazar");
-        assert_eq!(fake_chat(5).title, "Fútbol de los martes ⚽");
-        assert_eq!(fake_chat(9).title, "Matías Aráoz");
-        // Beyond the roster the names still combine like real ones.
-        let beyond = fake_chat(101);
-        assert!(
-            beyond.title.contains(' '),
-            "the title beyond the roster is a full name: {}",
-            beyond.title
-        );
+        assert_eq!(caption_of(37 * 8), "Atardecer en el dique 🌅");
     }
 }

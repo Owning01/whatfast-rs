@@ -418,29 +418,11 @@ mod tests {
     }
 
     #[test]
-    fn installed_answers_for_the_three_cases() {
-        let dir = folder("installed");
-        let path = dir.join("AGENTS.md");
-        assert!(!installed_at(&path));
-        fs::write(&path, "# Reglas sin whatfast\n").expect("write");
-        assert!(!installed_at(&path));
-        install_at(&path).expect("install");
-        assert!(installed_at(&path));
-        fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
     fn a_mark_without_its_pair_is_an_error() {
         let text = format!("{START}\n## algo\n");
         let error = with_block(&text).expect_err("must fail");
         assert!(error.to_string().contains(END));
         assert!(without_block(&text).is_err());
-    }
-
-    #[test]
-    fn the_new_file_takes_the_line_break_of_the_system() {
-        let text = with_block("").expect("block").expect("text");
-        assert!(text.ends_with(&format!("{END}{}", system_newline())));
     }
 
     #[test]

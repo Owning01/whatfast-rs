@@ -6,7 +6,7 @@
 
 use whatfast_core::whatsapp_formatting::{
     WhatsAppInlineSegment, WhatsAppInlineStyle, WhatsAppParseOptions, WhatsAppTextBlock,
-    WhatsAppTextBlockKind, parse_whatsapp_text,
+    parse_whatsapp_text,
 };
 
 const BOLD: WhatsAppInlineStyle = WhatsAppInlineStyle::Bold;
@@ -86,19 +86,16 @@ fn parses_whatsapp_inline_emphasis_and_nested_formatting() {
 fn parses_quotes_bullet_items_and_one_or_two_digit_numbered_items() {
     let blocks = parse("> *Important*\n- first\n1. one\n12. twelve\n123. not a list");
 
-    assert_eq!(
-        blocks
-            .iter()
-            .map(|block| block.kind())
-            .collect::<Vec<WhatsAppTextBlockKind>>(),
-        vec![
-            WhatsAppTextBlockKind::Quote,
-            WhatsAppTextBlockKind::BulletListItem,
-            WhatsAppTextBlockKind::NumberedListItem,
-            WhatsAppTextBlockKind::NumberedListItem,
-            WhatsAppTextBlockKind::Paragraph,
+    assert!(matches!(
+        blocks.as_slice(),
+        [
+            WhatsAppTextBlock::Quote { .. },
+            WhatsAppTextBlock::BulletListItem { .. },
+            WhatsAppTextBlock::NumberedListItem { number: 1, .. },
+            WhatsAppTextBlock::NumberedListItem { number: 12, .. },
+            WhatsAppTextBlock::Paragraph { .. },
         ]
-    );
+    ));
     assert_eq!(
         blocks[0],
         WhatsAppTextBlock::Quote {
@@ -270,16 +267,80 @@ fn keeps_malformed_spoilers_as_literal_text() {
 fn a_spoiler_does_not_leak_into_the_next_line() {
     let blocks = parse("||hidden||\nplain");
 
-    assert_eq!(
-        blocks
-            .iter()
-            .map(|block| block.kind())
-            .collect::<Vec<WhatsAppTextBlockKind>>(),
-        vec![
-            WhatsAppTextBlockKind::Paragraph,
-            WhatsAppTextBlockKind::Paragraph
-        ]
-    );
+    assert!(matches!(
+        blocks.as_slice(),
+        [WhatsAppTextBlock::Paragraph { .. }, WhatsAppTextBlock::Paragraph { .. }]
+    ));
     assert_eq!(blocks[0].segments(), vec![text("hidden", &[SPOILER])]);
     assert_eq!(blocks[1].segments(), vec![text("plain", &[])]);
+}
+
+/// The `href` of the first link segment of the first block. `parse_url` is
+/// private, so its contract is exercised through the public parser.
+fn link_href(source: &str) -> String {
+    let blocks = parse(source);
+    let segments = blocks.first().map(WhatsAppTextBlock::segments);
+    let Some(WhatsAppInlineSegment::Link { href, .. }) =
+        segments.and_then(|segments| segments.first())
+    else {
+        panic!("expected a link segment in {source:?}, got {blocks:?}");
+    };
+    href.clone()
+}
+
+#[test]
+fn serializes_the_urls_the_way_node_does() {
+    assert_eq!(
+        link_href("https://example.com/a_path?q=~raw~"),
+        "https://example.com/a_path?q=~raw~"
+    );
+    assert_eq!(link_href("https://example.com"), "https://example.com/");
+    // The public parser only recognizes a lower case scheme, so the mixed case
+    // lives in the host.
+    assert_eq!(
+        link_href("https://Example.COM/Path"),
+        "https://example.com/Path"
+    );
+    assert_eq!(
+        link_href("https://example.com:443/x"),
+        "https://example.com/x"
+    );
+    assert_eq!(link_href("http://example.com:80/x"), "http://example.com/x");
+    assert_eq!(
+        link_href("https://user:pass@example.com/x"),
+        "https://user:pass@example.com/x"
+    );
+    assert_eq!(
+        link_href("https://example.com/a?b=c#d"),
+        "https://example.com/a?b=c#d"
+    );
+    // The public parser stops the URL at the first whitespace, so the space is
+    // never part of the serialization.
+    assert_eq!(link_href("https://example.com/a b"), "https://example.com/a");
+    assert_eq!(
+        link_href("https://example.com/ä"),
+        "https://example.com/%C3%A4"
+    );
+    assert_eq!(
+        link_href("https://example.com/a_(b)"),
+        "https://example.com/a_(b)"
+    );
+    assert_eq!(
+        link_href("https://example.com/a%2zb"),
+        "https://example.com/a%2zb"
+    );
+    assert_eq!(link_href("http://example.com\\a"), "http://example.com/a");
+}
+
+#[test]
+fn drops_the_dot_segments_of_the_path() {
+    assert_eq!(
+        link_href("https://example.com/a/../b"),
+        "https://example.com/b"
+    );
+    assert_eq!(link_href("https://example.com/."), "https://example.com/");
+    assert_eq!(
+        link_href("https://example.com/a/./b"),
+        "https://example.com/a/b"
+    );
 }

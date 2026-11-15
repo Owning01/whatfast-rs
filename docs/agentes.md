@@ -46,7 +46,7 @@ síncrono serializa sus operaciones: una lectura pendiente bloquea la escritura
 siguiente (medido: el segundo pedido no salía del proceso). Por eso cada lado
 tiene una sola tarea dueña del stream y hace una operación por vez.
 
-## Las siete herramientas
+## Las herramientas
 
 | Herramienta | Argumentos | Devuelve |
 |---|---|---|
@@ -57,9 +57,15 @@ tiene una sola tarea dueña del stream y hace una operación por vez.
 | `attachment_get` | `chat_id`, `message_id` | Baja el archivo al caché y devuelve su ruta. |
 | `messages_wait` | `chat_id?`, `timeout_ms`, `after_*` | Espera un mensaje nuevo (o el tope) y devuelve lo que llegó con su cursor. |
 | `message_send` | `chat_id`, `text`, `reply_to_message_id?`, `client_message_id?` | Manda un texto a un chat, como el dispositivo vinculado. Si el chat no está habilitado para enviar, deja un borrador. |
+| `message_send_media` | `chat_id`, `file_path`, `kind?`, `caption?`, `reply_to_message_id?` | Manda cualquier archivo: imagen, video, audio o documento. El `kind` sale de la extensión cuando no se indica. |
+| `message_react` | `chat_id`, `message_id`, `emoji` | Reacciona a un mensaje; con `remove` saca la reacción. |
 | `draft_propose` | `chat_id`, `text`, `reply_to_message_id?`, `reason?`, `confidence?` | Deja un borrador para que el usuario lo apruebe. |
 | `drafts_list` | `state?`, `limit` | Los borradores en la bandeja, con su chat, motivo y confianza. |
 | `draft_decide` | `draft_id`, `send` | Aprueba (`send: true`) o descarta el borrador. Aprobar no envía: el envío es del usuario. |
+
+Un archivo y una imagen son envíos como un texto: el guard les pide el mismo
+scope `send` y el mismo chat habilitado, y cuentan para el techo de mensajes por
+hora.
 
 Los resultados son JSON compacto. Cada mensaje trae `at` en ISO-8601 UTC y
 `at_ms`; el cuerpo se corta a 4000 caracteres y avisa con `clipped`.
@@ -86,6 +92,13 @@ Un agente presenta su token en el saludo (`Hello.agent_id` y
 `Hello.agent_token`); el backend lo compara y, si no coincide, contesta
 `unauthorized` en todos los pedidos de esa conexión. La identidad se fija por
 conexión, no por proceso: el saludo de la ventana no habilita a un agente.
+
+El permiso, en cambio, se relee de `agents.db` en **cada pedido**: un harness
+mantiene la conexión abierta durante días y el usuario edita la escala o los
+chats cuando quiere. Acotar el permiso o desconectar el agente cierra la puerta
+en el acto, sin esperar a que el harness vuelva a saludar; ampliarlo también
+llega en el acto. Las listas se recortan con la fila del momento, no con la del
+saludo.
 
 Los pedidos que un agente no puede usar —los ajustes, la sesión, las llamadas,
 los borrados— responden `forbidden`: un agente habla con Whatfast, nunca con la
@@ -115,9 +128,13 @@ próximo turno **antes** de correr y lanza el harness en un hilo aparte.
 
 - Un harness sin modo headless (Cursor, Claude Desktop, VS Code, Hermes) no
   atiende tareas: el intento queda en `agent_calls` como fallo con el motivo.
-- La respuesta queda **siempre como borrador**, con el motivo `automatización:
-  <primera línea del prompt>`. El envío automático necesita la bandeja, y llega
-  después.
+- La salida decide qué pasa con la respuesta. `read` solo consulta y no deja
+  nada (la primera línea va al log). `draft` deja un borrador con el motivo
+  `automatización: <primera línea del prompt>`. `send` manda el texto por la
+  misma ruta que el compositor, con un `client_message_id` nuevo.
+- Un envío que no puede salir —la sesión no está conectada o WhatsApp lo
+  rechaza— deja la respuesta como borrador (`proposed` o `failed`) en vez de
+  perderla.
 - Fuera de la ventana horaria la tarea no dispara: el próximo turno se corre al
   momento en que la ventana abre.
 - El plazo de un harness es de 120 segundos; pasado eso se lo mata.
@@ -197,7 +214,7 @@ contexto).
 Solo el usuario edita automatizaciones: un agente del socket las recibe con
 `forbidden`. El cronómetro del backend mira las tareas vencidas cada 30 segundos
 (60 cuando lo arrancó un agente), escribe el turno siguiente **antes** de correr
-y deja la respuesta del harness como borrador.
+y entrega la respuesta del harness según la salida de la tarea.
 
 ## La ventana
 

@@ -58,19 +58,6 @@ pub fn write(agent: &str, token: &Token) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// The token of one agent, when it exists.
-pub fn read(agent: &str) -> io::Result<Option<Token>> {
-    let Some(folder) = paths::agents_dir() else {
-        return Ok(None);
-    };
-    let path = folder.join(format!("{agent}.token"));
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(Token(text.trim().to_string()))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 /// Deletes the token of one agent. A missing file is not an error.
 pub fn revoke(agent: &str) -> io::Result<()> {
     let Some(folder) = paths::agents_dir() else {
@@ -87,6 +74,32 @@ pub fn revoke(agent: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// One variable of the environment, put back when the test ends.
+    struct RestoreVar {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl RestoreVar {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let original = std::env::var_os(name);
+            // SAFETY: the test holds `ENV_LOCK` for its whole life, and no
+            // other test of this crate reads this variable.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for RestoreVar {
+        fn drop(&mut self) {
+            match self.original.take() {
+                // SAFETY: the same lock the setter took is still held here.
+                Some(value) => unsafe { std::env::set_var(self.name, value) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
     #[test]
     fn two_tokens_differ() {
         let first = Token::generate().expect("token");
@@ -94,5 +107,39 @@ mod tests {
         assert_eq!(first.as_str().len(), 64);
         assert_ne!(first, second);
         assert!(first.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_written_token_is_readable_and_revoke_erases_it() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("the lock of the environment");
+
+        // The data folder is what the environment names: the test points it
+        // at a folder of its own, so it never touches the tokens of the user.
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("the folder of the test");
+        let _localappdata = RestoreVar::set("LOCALAPPDATA", &dir);
+        #[cfg(not(windows))]
+        let _xdg_data_home = RestoreVar::set("XDG_DATA_HOME", &dir);
+        #[cfg(not(windows))]
+        let _home = RestoreVar::set("HOME", &dir);
+
+        let token = Token::generate().expect("the token");
+        let path = write("roundtrip", &token).expect("the write");
+        let text = std::fs::read_to_string(&path).expect("the token is readable");
+        assert_eq!(text.trim(), token.as_str());
+
+        revoke("roundtrip").expect("the revoke");
+        assert!(!path.exists(), "the revoke erased the token file");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

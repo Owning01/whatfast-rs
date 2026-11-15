@@ -13,12 +13,38 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 /// The time of the newest status that was opened, by sender.
 pub(crate) type Seen = HashMap<String, i64>;
 
 /// The file of the seen statuses in the folder of the profile.
 fn path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_PATH.with(|path| path.borrow().clone()) {
+        return path;
+    }
     whatfast_model::paths::data_dir().join("statuses-seen.json")
+}
+
+// The tests do not read or write the profile of the user who runs them: each
+// one points the module at a throwaway file.
+#[cfg(test)]
+thread_local! {
+    static TEST_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Points the module at a throwaway file and returns its path.
+#[cfg(test)]
+fn use_test_file(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "whatfast-status-seen-{label}-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    TEST_PATH.with(|current| *current.borrow_mut() = Some(path.clone()));
+    path
 }
 
 /// The statuses that were seen, as they were left the last time.
@@ -53,16 +79,19 @@ mod tests {
 
     #[test]
     fn the_marks_go_and_come_as_they_were() {
+        let file = use_test_file("round-trip");
         let mut seen = Seen::new();
         seen.insert("5491100000000@s.whatsapp.net".to_string(), 1_700_000_000_000);
-        let text = serde_json::to_string(&seen).expect("the marks are JSON");
-        let back: Seen = serde_json::from_str(&text).expect("the marks come back");
-        assert_eq!(back, seen);
+        save(&seen);
+        assert_eq!(load(), seen);
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]
     fn a_broken_file_leaves_no_marks() {
-        let back: Seen = serde_json::from_str("no es json").unwrap_or_default();
-        assert!(back.is_empty());
+        let file = use_test_file("broken");
+        std::fs::write(&file, "no es json").expect("the broken file is written");
+        assert!(load().is_empty());
+        let _ = std::fs::remove_file(file);
     }
 }

@@ -146,6 +146,79 @@ pub fn clear(media_dir: &Path) -> (u64, u32) {
     (bytes, files)
 }
 
+/// Deletes specific cached files referenced by expired records (such as
+/// statuses older than two days). Only deletes files located inside
+/// `media_dir` so arbitrary paths on disk are never touched.
+pub fn purge_paths(media_dir: &Path, paths: &[String]) -> u32 {
+    let Ok(canonical_dir) = std::fs::canonicalize(media_dir) else {
+        return 0;
+    };
+    let mut removed = 0u32;
+    for raw in paths {
+        if raw.is_empty() {
+            continue;
+        }
+        let path = Path::new(raw);
+        let Ok(canonical_file) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        if canonical_file.starts_with(&canonical_dir)
+            && canonical_file.is_file()
+            && std::fs::remove_file(&canonical_file).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Removes non-avatar, non-favorite-sticker cached media files whose last
+/// modification time is older than `max_age`, freeing disk space after a
+/// generous retention period without touching recent videos or photos.
+pub fn prune_expired_media(media_dir: &Path, max_age: std::time::Duration) -> (u64, u32) {
+    let Ok(entries) = std::fs::read_dir(media_dir) else {
+        return (0, 0);
+    };
+    let now = std::time::SystemTime::now();
+    let mut bytes = 0u64;
+    let mut files = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            let (b, f) = prune_expired_media(&path, max_age);
+            bytes += b;
+            files += f;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        // Avatars have their own byte-budgeted cache (`prune_avatar_cache`),
+        // and favorite stickers (`fav-`) are user-pinned assets.
+        if name.starts_with("avatar-") || name.starts_with("fav-") || name.starts_with('.') {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age > max_age && std::fs::remove_file(&path).is_ok() {
+            bytes += metadata.len();
+            files += 1;
+        }
+    }
+    (bytes, files)
+}
+
 /// Visits every file under the folder, the nested ones included.
 fn walk(root: &Path, visit: &mut impl FnMut(&Path, u64)) {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -265,5 +338,62 @@ mod tests {
         );
         assert_eq!(MediaKind::of("contrato.pdf"), MediaKind::Document);
         assert_eq!(MediaKind::of("sin-extension"), MediaKind::Other);
+    }
+
+    #[test]
+    fn purge_paths_only_removes_files_inside_media_dir() {
+        let dir = temp_dir("purge-paths");
+        let outside = temp_dir("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let inside_file = dir.join("status-video.mp4");
+        let outside_file = outside.join("keep-me.txt");
+        std::fs::write(&inside_file, b"video").unwrap();
+        std::fs::write(&outside_file, b"keep").unwrap();
+
+        let removed = super::purge_paths(
+            &dir,
+            &[
+                inside_file.to_string_lossy().into_owned(),
+                outside_file.to_string_lossy().into_owned(),
+                String::new(),
+            ],
+        );
+        assert_eq!(removed, 1);
+        assert!(!inside_file.exists());
+        assert!(outside_file.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn prune_expired_media_skips_avatars_and_favorite_stickers() {
+        let dir = temp_dir("prune-expired");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let avatar = dir.join("avatar-123.jpg");
+        let fav = dir.join("fav-1.webp");
+        let regular = dir.join("clip.mp4");
+        std::fs::write(&avatar, b"a").unwrap();
+        std::fs::write(&fav, b"f").unwrap();
+        std::fs::write(&regular, b"12345").unwrap();
+
+        // With a generous max age (30 days), nothing fresh is deleted.
+        let (freed, count) =
+            super::prune_expired_media(&dir, std::time::Duration::from_secs(30 * 24 * 60 * 60));
+        assert_eq!((freed, count), (0, 0));
+        assert!(avatar.exists() && fav.exists() && regular.exists());
+
+        // Even with 0-second max age, avatars and favorite stickers stay protected.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (freed, count) = super::prune_expired_media(&dir, std::time::Duration::ZERO);
+        assert_eq!((freed, count), (5, 1));
+        assert!(avatar.exists());
+        assert!(fav.exists());
+        assert!(!regular.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

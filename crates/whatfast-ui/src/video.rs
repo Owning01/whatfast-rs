@@ -81,6 +81,11 @@ enum Command {
     /// El volumen que tiene que sonar, de 0 a 1. Llega con el video en
     /// marcha: el reproductor lo aplica sin cortar el sonido.
     Volume(f32),
+    /// Seek to an absolute position in seconds.
+    #[allow(dead_code)]
+    Seek(f32),
+    /// Playback speed multiplier (e.g. 1.0, 1.5, 2.0).
+    Speed(f32),
 }
 
 /// Si el adjunto es un video que se puede reproducir en la burbuja.
@@ -98,9 +103,17 @@ pub(crate) fn video_box_size(width: u32, height: u32, scale: f32) -> (f32, f32) 
 }
 
 /// The box of the video of a status: the viewer fills the window, so the box
-/// grows past the width of a bubble.
-pub(crate) fn status_box_size(width: u32, height: u32, scale: f32) -> (f32, f32) {
-    fit_box(width, height, scale, STATUS_MAX_WIDTH, STATUS_MAX_HEIGHT)
+/// grows past the width of a bubble but never past the room the viewer has.
+pub(crate) fn status_box_size(
+    width: u32,
+    height: u32,
+    scale: f32,
+    max_width: f32,
+    max_height: f32,
+) -> (f32, f32) {
+    let max_width = (STATUS_MAX_WIDTH * scale).min(max_width).max(1.);
+    let max_height = (STATUS_MAX_HEIGHT * scale).min(max_height).max(1.);
+    fit_box_px(width, height, max_width, max_height)
 }
 
 /// The box of the video in the viewer that fills the window.
@@ -131,6 +144,10 @@ pub(crate) fn viewer_box_size(
 fn fit_box(width: u32, height: u32, scale: f32, max_width: f32, max_height: f32) -> (f32, f32) {
     let max_width = (max_width * scale).max(1.);
     let max_height = (max_height * scale).max(1.);
+    fit_box_px(width, height, max_width, max_height)
+}
+
+fn fit_box_px(width: u32, height: u32, max_width: f32, max_height: f32) -> (f32, f32) {
     let (source_width, source_height) = if width == 0 || height == 0 {
         (DEFAULT_ASPECT, 1.)
     } else {
@@ -276,6 +293,17 @@ impl VideoEngine {
         let _ = self.commands.send_blocking(Command::Volume(volume));
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn seek(&self, seconds: f32) {
+        let _ = self.commands.send_blocking(Command::Seek(seconds.max(0.0)));
+    }
+
+    pub(crate) fn set_speed(&self, speed: f32) {
+        let _ = self
+            .commands
+            .send_blocking(Command::Speed(speed.clamp(0.5, 2.5)));
+    }
+
     pub(crate) fn try_recv(&self) -> Option<VideoEvent> {
         self.events.try_recv().ok()
     }
@@ -335,6 +363,9 @@ fn play_session(
     let mut clock: Option<(i64, Instant)> = None;
     let mut paused_total = Duration::ZERO;
     let mut paused_at: Option<Instant> = None;
+    let mut speed: f32 = 1.0;
+    let mut seek_target_100ns: Option<i64> = None;
+    let mut last_ts_100ns: i64 = 0;
 
     loop {
         // El sonido que ya bajo del archivo espera en la cola mientras la
@@ -369,6 +400,24 @@ fn play_session(
                     level = value.clamp(0.0, 1.0);
                     audio.set_volume(level);
                 }
+                Command::Speed(value) => {
+                    speed = value.clamp(0.5, 2.5);
+                    clock = None;
+                    paused_total = Duration::ZERO;
+                }
+                Command::Seek(seconds) => {
+                    let target_100ns = (seconds.max(0.0) * 10_000_000.0) as i64;
+                    if target_100ns < last_ts_100ns {
+                        source = decoder::open(path)?;
+                        audio = AudioTrack::start(path, level);
+                        if paused {
+                            audio.pause();
+                        }
+                    }
+                    seek_target_100ns = Some(target_100ns);
+                    clock = None;
+                    paused_total = Duration::ZERO;
+                }
             }
         }
         if paused {
@@ -381,8 +430,16 @@ fn play_session(
             let _ = events.send_blocking(VideoEvent::Finished { key: key.clone() });
             return Ok(SessionEnd::Stop);
         };
+        last_ts_100ns = timestamp;
+        if let Some(target) = seek_target_100ns {
+            if timestamp < target {
+                continue;
+            }
+            seek_target_100ns = None;
+        }
         let (first, started) = *clock.get_or_insert((timestamp, Instant::now()));
-        let due = Duration::from_nanos((timestamp - first).max(0) as u64 * 100);
+        let due_nanos = ((timestamp - first).max(0) as f64 * 100.0 / f64::from(speed)) as u64;
+        let due = Duration::from_nanos(due_nanos);
         let elapsed = started.elapsed().saturating_sub(paused_total);
         if due > elapsed {
             // El cuadro todavia no es su turno: se espera lo que falta, en
@@ -418,6 +475,10 @@ const AUDIO_QUEUE: usize = 64;
 /// escribe WhatsApp. Por eso el sonido se decodifica en el hilo del video y
 /// aca solo se entrega a la salida del sistema.
 #[cfg(windows)]
+use windows_mf::AudioReader;
+#[cfg(not(windows))]
+use unix_ffmpeg::AudioReader;
+
 struct VideoAudio {
     chunks: async_channel::Receiver<Vec<f32>>,
     channels: rodio::ChannelCount,
@@ -426,7 +487,6 @@ struct VideoAudio {
     index: usize,
 }
 
-#[cfg(windows)]
 impl Iterator for VideoAudio {
     type Item = f32;
 
@@ -446,7 +506,6 @@ impl Iterator for VideoAudio {
     }
 }
 
-#[cfg(windows)]
 impl rodio::Source for VideoAudio {
     fn current_span_len(&self) -> Option<usize> {
         // El sonido termina cuando la cola se cierra: entre bloque y bloque
@@ -471,125 +530,107 @@ impl rodio::Source for VideoAudio {
 struct AudioTrack {
     device: Option<rodio::MixerDeviceSink>,
     player: Option<rodio::Player>,
-    #[cfg(windows)]
-    reader: Option<windows_mf::AudioReader>,
-    #[cfg(windows)]
+    reader: Option<AudioReader>,
     sender: Option<async_channel::Sender<Vec<f32>>>,
-    #[cfg(windows)]
     pending: Option<Vec<f32>>,
     /// El archivo no tiene mas sonido, o no tenia pista de audio.
-    #[cfg(windows)]
     finished: bool,
 }
 
 impl AudioTrack {
     fn start(path: &Path, volume: f32) -> Self {
-        #[cfg(windows)]
-        {
-            let mut track = Self {
-                device: None,
-                player: None,
-                reader: None,
-                sender: None,
-                pending: None,
-                finished: true,
-            };
-            // Sin pista de audio, o sin placa de sonido, el video se mira
-            // igual: el sonido es opcional.
-            let Ok(reader) = windows_mf::AudioReader::open(path) else {
-                return track;
-            };
-            let (sender, receiver) = async_channel::bounded(AUDIO_QUEUE);
-            let (Some(channels), Some(sample_rate)) = (
-                rodio::ChannelCount::new(reader.channels()),
-                rodio::SampleRate::new(reader.sample_rate()),
-            ) else {
-                return track;
-            };
-            let Ok(device) = rodio::DeviceSinkBuilder::open_default_sink() else {
-                return track;
-            };
-            let player = rodio::Player::connect_new(device.mixer());
-            // El volumen de la sesion se fija antes de que suene el primer
-            // bloque: el video arranca con el sonido que el usuario dejo.
-            player.set_volume(volume.clamp(0.0, 1.0));
-            player.append(VideoAudio {
-                chunks: receiver,
-                channels,
-                sample_rate,
-                current: Vec::new(),
-                index: 0,
-            });
-            track.device = Some(device);
-            track.player = Some(player);
-            track.reader = Some(reader);
-            track.sender = Some(sender);
-            track.finished = false;
-            // El primer cuadro tarda lo suyo: el sonido arranca con la cola
-            // ya llena.
-            track.pump();
-            track
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = path;
-            Self {
-                device: None,
-                player: None,
-            }
-        }
+        let mut track = Self {
+            device: None,
+            player: None,
+            reader: None,
+            sender: None,
+            pending: None,
+            finished: true,
+        };
+        // Sin pista de audio, o sin placa de sonido, el video se mira
+        // igual: el sonido es opcional.
+        let Ok(reader) = AudioReader::open(path) else {
+            return track;
+        };
+        let (sender, receiver) = async_channel::bounded(AUDIO_QUEUE);
+        let (Some(channels), Some(sample_rate)) = (
+            rodio::ChannelCount::new(reader.channels()),
+            rodio::SampleRate::new(reader.sample_rate()),
+        ) else {
+            return track;
+        };
+        let Ok(device) = rodio::DeviceSinkBuilder::open_default_sink() else {
+            return track;
+        };
+        let player = rodio::Player::connect_new(device.mixer());
+        // El volumen de la sesion se fija antes de que suene el primer
+        // bloque: el video arranca con el sonido que el usuario dejo.
+        player.set_volume(volume.clamp(0.0, 1.0));
+        player.append(VideoAudio {
+            chunks: receiver,
+            channels,
+            sample_rate,
+            current: Vec::new(),
+            index: 0,
+        });
+        track.device = Some(device);
+        track.player = Some(player);
+        track.reader = Some(reader);
+        track.sender = Some(sender);
+        track.finished = false;
+        // El primer cuadro tarda lo suyo: el sonido arranca con la cola
+        // ya llena.
+        track.pump();
+        track
     }
 
     /// Mueve el sonido del archivo a la cola del reproductor.
     ///
     /// Se llama desde el bucle del video, que ya espera entre cuadro y
-    /// cuadro: el lector de Media Foundation no toca el hilo del audio.
+    /// cuadro: el lector no toca el hilo del audio.
     fn pump(&mut self) {
-        #[cfg(windows)]
-        {
-            // Un tope por vuelta: el bucle del video no se queda leyendo el
-            // archivo entero si la cola tiene lugar.
-            for _ in 0..4 {
-                if self.finished {
-                    break;
-                }
-                if self.pending.is_none() {
-                    let Some(reader) = self.reader.as_mut() else {
-                        self.finished = true;
-                        break;
-                    };
-                    match reader.next_chunk() {
-                        Ok(Some(chunk)) => self.pending = Some(chunk),
-                        Ok(None) | Err(_) => {
-                            self.finished = true;
-                            break;
-                        }
-                    }
-                }
-                let Some(chunk) = self.pending.take() else {
-                    break;
-                };
-                let Some(sender) = self.sender.as_ref() else {
+        // Un tope por vuelta: el bucle del video no se queda leyendo el
+        // archivo entero si la cola tiene lugar.
+        for _ in 0..4 {
+            if self.finished {
+                break;
+            }
+            if self.pending.is_none() {
+                let Some(reader) = self.reader.as_mut() else {
                     self.finished = true;
                     break;
                 };
-                match sender.try_send(chunk) {
-                    Ok(()) => {}
-                    Err(async_channel::TrySendError::Full(chunk)) => {
-                        self.pending = Some(chunk);
-                        break;
-                    }
-                    Err(async_channel::TrySendError::Closed(_)) => {
+                match reader.next_chunk() {
+                    Ok(Some(chunk)) => self.pending = Some(chunk),
+                    Ok(None) | Err(_) => {
                         self.finished = true;
                         break;
                     }
                 }
             }
-            // Sin sonido que mandar, la cola se cierra y el reproductor
-            // termina: el video sigue su reloj.
-            if self.finished {
-                self.sender = None;
+            let Some(chunk) = self.pending.take() else {
+                break;
+            };
+            let Some(sender) = self.sender.as_ref() else {
+                self.finished = true;
+                break;
+            };
+            match sender.try_send(chunk) {
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Full(chunk)) => {
+                    self.pending = Some(chunk);
+                    break;
+                }
+                Err(async_channel::TrySendError::Closed(_)) => {
+                    self.finished = true;
+                    break;
+                }
             }
+        }
+        // Sin sonido que mandar, la cola se cierra y el reproductor
+        // termina: el video sigue su reloj.
+        if self.finished {
+            self.sender = None;
         }
     }
 
@@ -626,18 +667,13 @@ impl Drop for AudioTrack {
 struct DecoderSource {
     #[cfg(windows)]
     inner: windows_mf::Source,
+    #[cfg(not(windows))]
+    inner: unix_ffmpeg::Source,
 }
 
 impl DecoderSource {
     fn next_frame(&mut self) -> Result<Option<(VideoFrame, i64)>, String> {
-        #[cfg(windows)]
-        {
-            self.inner.next_frame()
-        }
-        #[cfg(not(windows))]
-        {
-            Err("The video player is only available on Windows".into())
-        }
+        self.inner.next_frame()
     }
 }
 
@@ -648,14 +684,248 @@ mod decoder {
 
     pub(super) fn open(path: &Path) -> Result<DecoderSource, String> {
         #[cfg(windows)]
-        {
-            let inner = super::windows_mf::Source::open(path)?;
-            Ok(DecoderSource { inner })
-        }
+        let inner = super::windows_mf::Source::open(path)?;
         #[cfg(not(windows))]
-        {
-            let _ = path;
-            Err("The video player is only available on Windows".into())
+        let inner = super::unix_ffmpeg::Source::open(path)?;
+        Ok(DecoderSource { inner })
+    }
+}
+
+/// Scales dimensions down to `MAX_WIDTH` while keeping both axes even and > 0.
+#[cfg_attr(windows, allow(dead_code))]
+fn scaled_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let w = width.max(2);
+    let h = height.max(2);
+    if w <= MAX_WIDTH {
+        return ((w / 2 * 2).max(2), (h / 2 * 2).max(2));
+    }
+    let out_w = (MAX_WIDTH / 2 * 2).max(2);
+    let out_h = (((h as f64) * (out_w as f64) / (w as f64)).round() as u32 / 2 * 2).max(2);
+    (out_w, out_h)
+}
+
+/// Parses `widthxheightxfps_num/fps_den` emitted by `ffprobe`.
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_ffprobe_csv(line: &str) -> Option<(u32, u32, f64)> {
+    let parts: Vec<&str> = line.trim().split(['x', ',']).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let width = parts[0].trim().parse::<u32>().ok()?;
+    let height = parts[1].trim().parse::<u32>().ok()?;
+    let fps = parts
+        .get(2)
+        .and_then(|rate| {
+            if let Some((n, d)) = rate.trim().split_once('/') {
+                let num = n.parse::<f64>().ok()?;
+                let den = d.parse::<f64>().ok()?;
+                (den > 0.0).then_some(num / den)
+            } else {
+                rate.trim().parse::<f64>().ok()
+            }
+        })
+        .filter(|fps| fps.is_finite() && *fps > 0.5 && *fps <= 240.0)
+        .unwrap_or(30.0);
+    Some((width, height, fps))
+}
+
+/// Decodificador portátil vía `ffmpeg` para Linux y otros sistemas Unix.
+#[cfg(not(windows))]
+mod unix_ffmpeg {
+    use std::io::Read as _;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+
+    use super::{VideoFrame, parse_ffprobe_csv, scaled_dimensions};
+
+    const AUDIO_RATE: u32 = 48_000;
+    const AUDIO_CHANNELS: u16 = 2;
+    const AUDIO_CHUNK_SAMPLES: usize = 4096 * AUDIO_CHANNELS as usize;
+
+    fn ffprobe_bin(ffmpeg: &Path) -> std::path::PathBuf {
+        if let Some(parent) = ffmpeg.parent() {
+            let candidate = parent.join("ffprobe");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        std::path::PathBuf::from("ffprobe")
+    }
+
+    fn probe_video(ffmpeg: &Path, path: &Path) -> Result<(u32, u32, f64), String> {
+        let output = Command::new(ffprobe_bin(ffmpeg))
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,r_frame_rate",
+                "-of",
+                "csv=p=0:s=x",
+            ])
+            .arg(path)
+            .output()
+            .map_err(|error| format!("ffprobe failed to start: {error}"))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(parsed) = parse_ffprobe_csv(line) {
+                return Ok(parsed);
+            }
+        }
+        Err("Could not read video stream metadata".to_string())
+    }
+
+    pub(super) struct Source {
+        child: Child,
+        stdout: std::process::ChildStdout,
+        width: u32,
+        height: u32,
+        frame_bytes: usize,
+        frame_index: u64,
+        step_100ns: f64,
+    }
+
+    impl Source {
+        pub(super) fn open(path: &Path) -> Result<Self, String> {
+            let ffmpeg = crate::call_video::ffmpeg()
+                .ok_or_else(|| "ffmpeg is required to play video on Linux".to_string())?;
+            let (raw_w, raw_h, fps) = probe_video(&ffmpeg, path)?;
+            let (width, height) = scaled_dimensions(raw_w, raw_h);
+            let scale = format!("scale={width}:{height}");
+            let mut child = Command::new(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+                .arg(path)
+                .args(["-vf", &scale, "-pix_fmt", "bgra", "-f", "rawvideo", "pipe:1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("ffmpeg video decoder failed: {error}"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "ffmpeg video stdout missing".to_string())?;
+            Ok(Self {
+                child,
+                stdout,
+                width,
+                height,
+                frame_bytes: width as usize * height as usize * 4,
+                frame_index: 0,
+                step_100ns: 10_000_000.0 / fps,
+            })
+        }
+
+        pub(super) fn next_frame(&mut self) -> Result<Option<(VideoFrame, i64)>, String> {
+            let mut bgra = vec![0u8; self.frame_bytes];
+            let mut read = 0usize;
+            while read < self.frame_bytes {
+                match self.stdout.read(&mut bgra[read..]) {
+                    Ok(0) => {
+                        if read == 0 {
+                            return Ok(None);
+                        }
+                        return Ok(None);
+                    }
+                    Ok(n) => read += n,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            let timestamp = (self.frame_index as f64 * self.step_100ns).round() as i64;
+            self.frame_index += 1;
+            Ok(Some((
+                VideoFrame {
+                    width: self.width,
+                    height: self.height,
+                    bgra,
+                },
+                timestamp,
+            )))
+        }
+    }
+
+    impl Drop for Source {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    pub(super) struct AudioReader {
+        child: Child,
+        stdout: std::process::ChildStdout,
+    }
+
+    impl AudioReader {
+        pub(super) fn open(path: &Path) -> Result<Self, String> {
+            let ffmpeg = crate::call_video::ffmpeg()
+                .ok_or_else(|| "ffmpeg is required for video audio on Linux".to_string())?;
+            let mut child = Command::new(ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+                .arg(path)
+                .args([
+                    "-vn",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "48000",
+                    "-f",
+                    "f32le",
+                    "pipe:1",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("ffmpeg audio decoder failed: {error}"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "ffmpeg audio stdout missing".to_string())?;
+            Ok(Self { child, stdout })
+        }
+
+        pub(super) fn sample_rate(&self) -> u32 {
+            AUDIO_RATE
+        }
+
+        pub(super) fn channels(&self) -> u16 {
+            AUDIO_CHANNELS
+        }
+
+        pub(super) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, String> {
+            let byte_len = AUDIO_CHUNK_SAMPLES * 4;
+            let mut raw = vec![0u8; byte_len];
+            let mut filled = 0usize;
+            while filled < byte_len {
+                match self.stdout.read(&mut raw[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            let sample_bytes = filled - (filled % 4);
+            if sample_bytes == 0 {
+                return Ok(None);
+            }
+            let samples = raw[..sample_bytes]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            Ok(Some(samples))
+        }
+    }
+
+    impl Drop for AudioReader {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 }
@@ -793,18 +1063,25 @@ mod windows_mf {
             match (self.float, self.bits) {
                 (true, 32) => out.extend(
                     bytes
-                        .chunks_exact(4)
-                        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| f32::from_le_bytes(*chunk)),
                 ),
                 (false, 16) => out.extend(
                     bytes
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32_768.0),
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|chunk| i16::from_le_bytes(*chunk) as f32 / 32_768.0),
                 ),
-                (false, 32) => out.extend(bytes.chunks_exact(4).map(|chunk| {
-                    i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32
-                        / 2_147_483_648.0
-                })),
+                (false, 32) => out.extend(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| i32::from_le_bytes(*chunk) as f32 / 2_147_483_648.0),
+                ),
                 (false, 8) => out.extend(bytes.iter().map(|byte| (*byte as f32 - 128.0) / 128.0)),
                 _ => {}
             }
@@ -1204,14 +1481,28 @@ mod tests {
         // The same landscape file: the bubble stops at 420 and the viewer at
         // 800, so the status is not a postage stamp on a full window.
         let (bubble_width, _) = video_box_size(1920, 1080, 1.0);
-        let (viewer_width, viewer_height) = status_box_size(1920, 1080, 1.0);
+        let (viewer_width, viewer_height) = status_box_size(1920, 1080, 1.0, 800.0, 640.0);
         assert!((bubble_width - 420.).abs() < 0.5, "ancho {bubble_width}");
         assert!((viewer_width - 800.).abs() < 0.5, "ancho {viewer_width}");
         assert!((viewer_height - 450.).abs() < 0.5, "alto {viewer_height}");
         // A portrait video keeps its shape and stays inside the box.
-        let (width, height) = status_box_size(576, 1024, 1.0);
+        let (width, height) = status_box_size(576, 1024, 1.0, 800.0, 640.0);
         assert!(height <= 640. && width <= 800., "{width}x{height}");
         assert!((height / width - 1024. / 576.).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_status_video_never_outgrows_the_window() {
+        // Un video 16:9 en una ventana de 480x560: el visor le deja 448 de
+        // ancho, asi que el cuadro baja hasta ese ancho y no se sale.
+        let (width, height) = status_box_size(1920, 1080, 1.0, 448.0, 390.0);
+        assert!((width - 448.).abs() < 0.5, "ancho {width}");
+        assert!((height - 252.).abs() < 0.5, "alto {height}");
+        // Un video chico tambien ocupa el ancho que le queda, como antes:
+        // el visor no lo deja en el tamano de un sello.
+        let (width, height) = status_box_size(320, 240, 1.0, 448.0, 390.0);
+        assert!((width - 448.).abs() < 0.5, "ancho {width}");
+        assert!((height - 336.).abs() < 0.5, "alto {height}");
     }
 
     #[test]
@@ -1349,5 +1640,19 @@ mod tests {
             }
         }
         assert!(frames > 0, "el video no dio ningun cuadro");
+    }
+
+    #[test]
+    fn scaled_dimensions_cap_width_and_keep_even_sizes() {
+        assert_eq!(super::scaled_dimensions(1920, 1080), (720, 404));
+        assert_eq!(super::scaled_dimensions(641, 361), (640, 360));
+    }
+
+    #[test]
+    fn ffprobe_csv_parses_resolution_and_fractional_fps() {
+        let (w, h, fps) = super::parse_ffprobe_csv("1280x720x30000/1001").expect("parsed");
+        assert_eq!((w, h), (1280, 720));
+        assert!((fps - 29.97).abs() < 0.05);
+        assert_eq!(super::parse_ffprobe_csv("invalid"), None);
     }
 }

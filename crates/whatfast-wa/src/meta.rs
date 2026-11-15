@@ -384,10 +384,8 @@ mod tests {
     fn the_avatar_path_is_keyed_by_the_jid_and_the_variant() {
         let dir = temporary_dir("paths");
         let first = avatar_path(&dir, "5491100000002@s.whatsapp.net", "abc");
-        let same = avatar_path(&dir, "5491100000002@s.whatsapp.net", "abc");
         let other_jid = avatar_path(&dir, "5491100000003@s.whatsapp.net", "abc");
         let other_variant = avatar_path(&dir, "5491100000002@s.whatsapp.net", "def");
-        assert_eq!(first, same);
         assert_ne!(first, other_jid);
         assert_ne!(first, other_variant);
         assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("jpg"));

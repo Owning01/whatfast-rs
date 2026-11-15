@@ -32,6 +32,8 @@ pub enum ChatFilter {
     Favorites,
     /// The group conversations.
     Groups,
+    /// Conversations containing @mentions.
+    Mentions,
     /// The archived conversations.
     ///
     /// The archived conversations have their own destination in the column of
@@ -45,7 +47,13 @@ impl ChatFilter {
     /// The archived conversations are not in this list: they have their own
     /// destination in the column of icons, the same way the reference draws
     /// them.
-    pub const ALL: [Self; 4] = [Self::All, Self::Unread, Self::Favorites, Self::Groups];
+    pub const ALL: [Self; 5] = [
+        Self::All,
+        Self::Unread,
+        Self::Favorites,
+        Self::Groups,
+        Self::Mentions,
+    ];
 
     /// The label of the filter, in the language of the client.
     pub fn label(self) -> &'static str {
@@ -54,6 +62,7 @@ impl ChatFilter {
             Self::Unread => "Unread",
             Self::Favorites => "Favorites",
             Self::Groups => "Groups",
+            Self::Mentions => "Mentions",
             Self::Archived => "Archived",
         }
     }
@@ -72,6 +81,7 @@ impl ChatFilter {
             Self::All => !chat.archived,
             Self::Unread => !chat.archived && chat.unread_count > 0,
             Self::Groups => !chat.archived && chat.kind() == whatfast_protocol::ChatKind::Group,
+            Self::Mentions => false,
             Self::Favorites => false,
         }
     }
@@ -263,8 +273,24 @@ impl Store {
     fn filter_keeps(&self, filter: ChatFilter, chat: &whatfast_protocol::Chat) -> bool {
         match filter {
             ChatFilter::Favorites => !chat.archived && self.favorite_chat_ids.contains(&chat.id),
+            ChatFilter::Mentions => !chat.archived && self.chat_has_mention(&chat.id),
             other => other.includes(chat),
         }
+    }
+
+    fn chat_has_mention(&self, chat_id: &str) -> bool {
+        self.messages.iter().any(|m| {
+            m.chat_id == chat_id
+                && !m.from_me
+                && matches!(
+                    &m.content,
+                    Some(whatfast_protocol::message::Content::Text(t)) if t.text.contains('@')
+                )
+        }) || self
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .is_some_and(|c| c.last_message_preview.contains('@'))
     }
 
     /// The filter of the column of chats.
@@ -513,8 +539,7 @@ impl Store {
         // its timestamp the window is sorted again, which is the rare case.
         if !self
             .messages
-            .windows(2)
-            .all(|pair| !compare_messages(&pair[0], &pair[1]).is_gt())
+            .is_sorted_by(|a, b| !compare_messages(a, b).is_gt())
         {
             self.messages.sort_by(compare_messages);
         }
@@ -620,14 +645,13 @@ impl Store {
         let mut updated = false;
         for group in &mut self.statuses {
             for message in &mut group.messages {
-                if message.id == message_id {
-                    if let Some(whatfast_protocol::message::Content::Image(image)) =
+                if message.id == message_id
+                    && let Some(whatfast_protocol::message::Content::Image(image)) =
                         message.content.as_mut()
-                    {
-                        image.local_path = image_path.clone();
-                        image.thumbnail_path = thumbnail_path.clone();
-                        updated = true;
-                    }
+                {
+                    image.local_path = image_path.clone();
+                    image.thumbnail_path = thumbnail_path.clone();
+                    updated = true;
                 }
             }
         }
@@ -976,14 +1000,6 @@ impl Store {
         &self.sticker_packs
     }
 
-    /// One sticker of the library, by its id.
-    pub fn find_sticker(&self, sticker_id: &str) -> Option<&whatfast_protocol::Sticker> {
-        self.sticker_packs
-            .iter()
-            .flat_map(|pack| pack.stickers.iter())
-            .find(|sticker| sticker.id == sticker_id)
-    }
-
     /// Keeps the statuses of the profile and the conversation that carries
     /// them.
     pub fn set_statuses(&mut self, chat_id: String, mut groups: Vec<whatfast_protocol::StatusGroup>) {
@@ -1022,6 +1038,15 @@ impl Store {
                 );
             }
         }
+        // Un estado eliminado no se muestra: se va de su anillo. Si el
+        // anillo tenia estados y se queda sin ninguno, se va de la tira, con
+        // su progreso y sus botones, en vez de dejar una pantalla que diga
+        // que se borro. Un anillo que ya llego vacio se queda como estaba.
+        groups.retain_mut(|group| {
+            let had_messages = !group.messages.is_empty();
+            group.messages.retain(|message| !message.revoked);
+            !had_messages || !group.messages.is_empty()
+        });
         for group in &mut groups {
             group
                 .messages
@@ -1101,13 +1126,12 @@ impl Store {
         let mut updated = false;
         for group in &mut self.statuses {
             for message in &mut group.messages {
-                if message.id == message_id {
-                    if let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+                if message.id == message_id
+                    && let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
                         message.content.as_mut()
-                    {
-                        attachment.local_path = path.clone();
-                        updated = true;
-                    }
+                {
+                    attachment.local_path = path.clone();
+                    updated = true;
                 }
             }
         }
@@ -1304,6 +1328,7 @@ impl Store {
         for chat in &self.chats {
             let keeps = match filter {
                 ChatFilter::Favorites => !chat.archived && favorites.contains(&chat.id),
+                ChatFilter::Mentions => !chat.archived && self.chat_has_mention(&chat.id),
                 other => other.includes(chat),
             };
             if keeps {
@@ -2174,6 +2199,7 @@ mod tests {
             selected_chat_id: Some("chat".into()),
             ..Default::default()
         };
+        store.upsert_message(message(1));
         store.apply_reaction(
             whatfast_protocol::Reaction {
                 chat_id: "chat".into(),
@@ -2184,7 +2210,8 @@ mod tests {
             },
             false,
         );
-        assert!(store.messages.is_empty());
+        assert_eq!(store.messages.len(), 1);
+        assert!(store.message("missing-message").is_none());
     }
 
     #[test]
@@ -2606,6 +2633,20 @@ mod tests {
             chats_processed: 10,
             ..Default::default()
         }));
+        // An equal revision is applied again (the `>=` branch).
+        assert!(store.apply_sync_status(whatfast_protocol::SyncStatus {
+            revision: 4,
+            chats_processed: 11,
+            ..Default::default()
+        }));
+        assert_eq!(
+            store
+                .sync_status
+                .as_ref()
+                .map(|status| status.chats_processed),
+            Some(11)
+        );
+        // An older revision is ignored.
         assert!(!store.apply_sync_status(whatfast_protocol::SyncStatus {
             revision: 3,
             chats_processed: 99,
@@ -2620,7 +2661,7 @@ mod tests {
                 .sync_status
                 .as_ref()
                 .map(|status| status.chats_processed),
-            Some(10)
+            Some(11)
         );
     }
 
@@ -2642,42 +2683,6 @@ mod tests {
             Some(7)
         );
         assert!(store.history_coverage("other").is_none());
-    }
-
-    #[test]
-    fn the_overview_and_the_integrity_status_keep_the_last_answer() {
-        let mut store = Store::default();
-        store.set_history_overview(whatfast_protocol::HistoryOverview {
-            local_message_count: 120,
-            chats_with_messages: 3,
-            ..Default::default()
-        });
-        store.set_integrity_status(whatfast_protocol::IntegrityStatus {
-            database_ok: false,
-            pending_inbound: 5,
-            ..Default::default()
-        });
-
-        assert_eq!(
-            store
-                .history_overview
-                .as_ref()
-                .map(|overview| overview.local_message_count),
-            Some(120)
-        );
-        assert_eq!(
-            store
-                .integrity_status
-                .as_ref()
-                .map(|status| status.pending_inbound),
-            Some(5)
-        );
-        assert!(
-            store
-                .integrity_status
-                .as_ref()
-                .is_some_and(|status| !status.database_ok)
-        );
     }
 
     #[test]
@@ -2712,27 +2717,6 @@ mod tests {
         assert!(!store.message_is_starred("chat", "m1"));
         // The conversation leaves the map when its last star goes away.
         assert!(!store.starred_messages().contains_key("chat"));
-    }
-
-    #[test]
-    fn the_sticker_library_is_searchable_by_id() {
-        let mut store = Store::default();
-        store.set_sticker_packs(vec![whatfast_protocol::StickerPack {
-            id: "favorites".into(),
-            name: "Favourites".into(),
-            stickers: vec![whatfast_protocol::Sticker {
-                id: "fav-1".into(),
-                favorite: true,
-                ..Default::default()
-            }],
-        }]);
-
-        assert_eq!(store.sticker_packs().len(), 1);
-        assert_eq!(
-            store.find_sticker("fav-1").map(|sticker| sticker.favorite),
-            Some(true)
-        );
-        assert!(store.find_sticker("missing").is_none());
     }
 
     #[test]
@@ -3015,6 +2999,15 @@ mod tests {
         assert_eq!(poll.options[0].vote_count, 0);
 
         store.restore_poll_content("chat", "poll", retracted);
+        let Some(whatfast_protocol::message::Content::Poll(restored)) =
+            store.messages[0].content.as_ref()
+        else {
+            panic!("poll content missing");
+        };
+        assert_eq!(restored.total_voters, 1);
+        assert!(restored.options[0].selected_by_me);
+        assert_eq!(restored.options[0].vote_count, 1);
+
         store.apply_poll_vote("chat", "poll", &["Pizza".to_string(), "Sushi".to_string()]);
         let Some(whatfast_protocol::message::Content::Poll(restored)) =
             store.messages[0].content.as_ref()
@@ -3071,6 +3064,54 @@ mod tests {
             .collect();
         assert!(ids.contains(&"remote-1"));
         assert!(ids.contains(&"local-status-42"));
+    }
+
+    #[test]
+    fn a_revoked_status_never_reaches_the_strip() {
+        let mut store = Store::default();
+        store.set_statuses(
+            "status@broadcast".into(),
+            vec![
+                whatfast_protocol::StatusGroup {
+                    sender_id: "ana@s.whatsapp.net".into(),
+                    sender_name: "Ana".into(),
+                    messages: vec![
+                        whatfast_protocol::Message {
+                            id: "borrado".into(),
+                            timestamp_ms: 10,
+                            revoked: true,
+                            ..Default::default()
+                        },
+                        whatfast_protocol::Message {
+                            id: "vivo".into(),
+                            timestamp_ms: 20,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                whatfast_protocol::StatusGroup {
+                    sender_id: "beto@s.whatsapp.net".into(),
+                    sender_name: "Beto".into(),
+                    messages: vec![whatfast_protocol::Message {
+                        id: "solo-borrado".into(),
+                        timestamp_ms: 30,
+                        revoked: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        );
+        let ids: Vec<&str> = store
+            .statuses()
+            .iter()
+            .flat_map(|group| group.messages.iter())
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["vivo"]);
+        // El anillo que solo tenia el estado borrado se va entero.
+        assert_eq!(store.statuses().len(), 1);
     }
 
     #[test]

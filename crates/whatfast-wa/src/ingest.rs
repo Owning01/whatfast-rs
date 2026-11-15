@@ -2061,7 +2061,7 @@ fn store_view_once(
     let sender_jid = jid_text(&info.source.sender.to_non_ad());
     if !info.push_name.is_empty() && !info.source.is_from_me {
         store
-            .learn_contact(&sender_jid, "", &info.push_name.to_string(), "")
+            .learn_contact(&sender_jid, "", info.push_name.as_ref(), "")
             .ok();
     }
     let mut message = MessageRow {

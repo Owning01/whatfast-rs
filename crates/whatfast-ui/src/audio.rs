@@ -13,6 +13,7 @@ use std::io::Cursor;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
@@ -31,6 +32,40 @@ const MIN_BAR: f32 = 0.12;
 
 /// The sample rate of every Opus stream, in hertz.
 const OPUS_RATE: u32 = 48_000;
+
+/// Transcribes a local voice-note file using `whisper` or `whisper-cli` if installed.
+#[allow(dead_code)]
+pub(crate) fn transcribe_voice_note(path: &Path) -> Result<String, String> {
+    if !path.is_file() {
+        return Err("Audio file not downloaded yet".to_string());
+    }
+    let out_dir = whatfast_model::paths::data_dir().join("cache");
+    let _ = std::fs::create_dir_all(&out_dir);
+    for bin in ["whisper", "whisper-cli", "whisper.cpp"] {
+        if let Ok(output) = std::process::Command::new(bin)
+            .arg(path)
+            .args(["--output_format", "txt", "--output_dir"])
+            .arg(&out_dir)
+            .output()
+            && output.status.success()
+        {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+            let txt_path = out_dir.join(format!("{stem}.txt"));
+            if let Ok(text) = std::fs::read_to_string(&txt_path) {
+                let _ = std::fs::remove_file(&txt_path);
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed);
+                }
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !stdout.is_empty() {
+                return Ok(stdout);
+            }
+        }
+    }
+    Err("Install `whisper` CLI in PATH for local voice-note transcription".to_string())
+}
 
 /// One audio file already decoded to samples.
 pub(crate) struct DecodedAudio {
@@ -59,23 +94,35 @@ impl DecodedAudio {
 /// One command for the thread of the sound.
 enum Command {
     /// Decode the file (the last one is kept) and play it from one second on.
+    ///
+    /// The session is the id of the request: the window ignores the answer
+    /// of a request that another click already replaced.
     Play {
         path: PathBuf,
         from_seconds: f32,
         speed: f32,
+        session: u64,
     },
     Pause,
-    /// Change the speed, keeping the second the bubble shows.
-    Speed { speed: f32, from_seconds: f32 },
+    /// Change the speed of the note that is playing or paused.
+    ///
+    /// The sound is not rebuilt: the source of the player reads the new
+    /// value on its next window, so the voice never jumps back.
+    Speed { speed: f32 },
     Stop,
 }
 
 /// What the thread of the sound says back to the window.
 pub(crate) enum AudioEvent {
-    /// The file is decoded and the sound is on its way.
-    Ready { duration: f32, peaks: Vec<f32> },
+    /// The file is decoded and the sound starts at this second.
+    Started {
+        session: u64,
+        position: f32,
+        duration: f32,
+        peaks: Vec<f32>,
+    },
     /// The device, or the file, could not be used.
-    Failed(String),
+    Failed { session: u64, message: String },
 }
 
 /// The voice note that the window follows: the position runs on a clock, so
@@ -83,6 +130,11 @@ pub(crate) enum AudioEvent {
 pub(crate) struct VoiceState {
     /// The chat and the message of the note that is playing or paused.
     pub(crate) key: Option<(String, String)>,
+    /// El id del pedido de reproduccion: una respuesta con otro id es vieja.
+    pub(crate) session: u64,
+    /// The file of the note that is playing or paused: seeking and the
+    /// arrow keys start the sound again from it.
+    pub(crate) path: String,
     /// The second where the clock of the bubble started.
     base: f32,
     clock: Instant,
@@ -102,6 +154,8 @@ impl Default for VoiceState {
     fn default() -> Self {
         Self {
             key: None,
+            session: 0,
+            path: String::new(),
             base: 0.0,
             clock: Instant::now(),
             paused: false,
@@ -129,14 +183,32 @@ impl VoiceState {
     }
 
     /// Starts one note from the given second.
-    pub(crate) fn start(&mut self, key: (String, String), from: f32, speed: f32) {
+    pub(crate) fn start(&mut self, key: (String, String), path: &str, from: f32, speed: f32) {
+        self.session = self.session.wrapping_add(1);
         self.key = Some(key);
+        self.path = path.to_string();
         self.base = from.max(0.0);
         self.clock = Instant::now();
         self.paused = false;
         self.speed = speed;
         self.duration = 0.0;
         self.waiting = true;
+    }
+
+    /// Moves the clock of the note to another second.
+    ///
+    /// The sound is not touched here: the window restarts the player when
+    /// the note is playing, and the play button takes the new second when
+    /// the note was paused.
+    pub(crate) fn seek(&mut self, seconds: f32) {
+        self.session = self.session.wrapping_add(1);
+        let limit = if self.duration > 0.0 {
+            self.duration
+        } else {
+            f32::MAX
+        };
+        self.base = seconds.clamp(0.0, limit);
+        self.clock = Instant::now();
     }
 
     /// Freezes the clock where the sound stops.
@@ -147,6 +219,7 @@ impl VoiceState {
 
     /// Goes on from the frozen second.
     pub(crate) fn resume(&mut self) {
+        self.session = self.session.wrapping_add(1);
         self.clock = Instant::now();
         self.paused = false;
     }
@@ -160,7 +233,9 @@ impl VoiceState {
 
     /// Drops the note: the bubble goes back to its first second.
     pub(crate) fn clear(&mut self) {
+        self.session = self.session.wrapping_add(1);
         self.key = None;
+        self.path.clear();
         self.base = 0.0;
         self.clock = Instant::now();
         self.paused = false;
@@ -189,11 +264,12 @@ impl VoiceAudio {
     }
 
     /// Plays one file from the given second.
-    pub(crate) fn play(&self, path: &Path, from_seconds: f32, speed: f32) {
+    pub(crate) fn play(&self, path: &Path, from_seconds: f32, speed: f32, session: u64) {
         let _ = self.commands.send_blocking(Command::Play {
             path: path.to_path_buf(),
             from_seconds,
             speed,
+            session,
         });
     }
 
@@ -204,13 +280,10 @@ impl VoiceAudio {
 
     /// Changes the speed of the sound that is already playing.
     ///
-    /// The second the bubble shows travels with the command: the stretched
-    /// sound is a new buffer, and it has to start where the old one was.
-    pub(crate) fn speed(&self, value: f32, from_seconds: f32) {
-        let _ = self.commands.send_blocking(Command::Speed {
-            speed: value,
-            from_seconds,
-        });
+    /// The source of the player reads the new value on its next window: the
+    /// note keeps sounding, without a gap and without going back.
+    pub(crate) fn speed(&self, value: f32) {
+        let _ = self.commands.send_blocking(Command::Speed { speed: value });
     }
 
     /// Drops the sound of the note.
@@ -235,20 +308,26 @@ fn run_audio(commands: Receiver<Command>, events: Sender<AudioEvent>) {
     // speed, or going back to the same note, does not decode it again.
     let mut library = Library::default();
 
+    // The speed of the source that the player is reading: changing the chip
+    // writes here, so the sound never stops to rebuild itself.
+    let mut speed: Option<Arc<AtomicU32>> = None;
+
     while let Ok(command) = commands.recv_blocking() {
         match command {
             Command::Play {
                 path,
                 from_seconds,
-                speed,
+                speed: value,
+                session,
             } => {
                 if device.is_none() {
                     match rodio::DeviceSinkBuilder::open_default_sink() {
                         Ok(sink) => device = Some(sink),
                         Err(error) => {
-                            let _ = events.send_blocking(AudioEvent::Failed(format!(
-                                "There is no audio device: {error}"
-                            )));
+                            let _ = events.send_blocking(AudioEvent::Failed {
+                                session,
+                                message: format!("There is no audio device: {error}"),
+                            });
                             continue;
                         }
                     }
@@ -256,17 +335,23 @@ fn run_audio(commands: Receiver<Command>, events: Sender<AudioEvent>) {
                 let Some(mixer) = device.as_ref().map(|sink| sink.mixer()) else {
                     continue;
                 };
-                match library.start(&path, mixer, from_seconds, speed) {
-                    Ok((next, decoded)) => {
+                // The device never plays two notes at once: the old player
+                // goes away before the new one takes its place.
+                player = None;
+                speed = None;
+                match library.start(&path, mixer, from_seconds, value) {
+                    Ok((next, control, decoded)) => {
                         player = Some(next);
-                        let _ = events.send_blocking(AudioEvent::Ready {
+                        speed = Some(control);
+                        let _ = events.send_blocking(AudioEvent::Started {
+                            session,
+                            position: from_seconds.max(0.0),
                             duration: decoded.duration_seconds(),
                             peaks: decoded.peaks().as_ref().clone(),
                         });
                     }
-                    Err(error) => {
-                        let _ = events.send_blocking(AudioEvent::Failed(error));
-                        continue;
+                    Err(message) => {
+                        let _ = events.send_blocking(AudioEvent::Failed { session, message });
                     }
                 }
             }
@@ -275,47 +360,27 @@ fn run_audio(commands: Receiver<Command>, events: Sender<AudioEvent>) {
                     player.pause();
                 }
             }
-            Command::Speed {
-                speed,
-                from_seconds,
-            } => {
-                // The sound of the note is rebuilt from the stretched copy:
-                // a resampled player would raise the pitch of the voice.
-                let Some(mixer) = device.as_ref().map(|sink| sink.mixer()) else {
-                    continue;
-                };
-                let path = library.path().map(Path::to_path_buf);
-                if let Some(path) = path {
-                    match library.start(&path, mixer, from_seconds, speed) {
-                        Ok((next, _)) => player = Some(next),
-                        Err(error) => {
-                            let _ = events.send_blocking(AudioEvent::Failed(error));
-                        }
-                    }
+            Command::Speed { speed: value } => {
+                if let Some(speed) = speed.as_ref() {
+                    speed.store(clamp_speed(value).to_bits(), Ordering::Relaxed);
                 }
             }
             Command::Stop => {
                 player = None;
+                speed = None;
             }
         }
     }
 }
 
-/// What the thread keeps of the note that is playing.
-///
-/// The stretched copy is the expensive one: a note of a minute holds a few
-/// million samples, so only the last speed is kept.
+/// What the thread keeps of the note that is playing: the decoded file, so
+/// going back to the same note does not read and decode it again.
 #[derive(Default)]
 struct Library {
     decoded: Option<(PathBuf, Arc<DecodedAudio>)>,
-    played: Option<(f32, Arc<Vec<f32>>)>,
 }
 
 impl Library {
-    fn path(&self) -> Option<&Path> {
-        self.decoded.as_ref().map(|(path, _)| path.as_path())
-    }
-
     /// The file of the note, decoded once.
     fn decoded(&mut self, path: &Path) -> Result<Arc<DecodedAudio>, String> {
         if let Some((cached_path, decoded)) = self.decoded.as_ref()
@@ -327,31 +392,10 @@ impl Library {
             Ok(decoded) => {
                 let decoded = Arc::new(decoded);
                 self.decoded = Some((path.to_path_buf(), decoded.clone()));
-                self.played = None;
                 Ok(decoded)
             }
             Err(error) => Err(format!("The note could not be decoded: {error:#}")),
         }
-    }
-
-    /// The samples of the note at one speed, stretched once per speed.
-    fn samples_at(&mut self, speed: f32) -> Arc<Vec<f32>> {
-        if let Some((cached_speed, samples)) = self.played.as_ref()
-            && (*cached_speed - speed).abs() < 0.01
-        {
-            return samples.clone();
-        }
-        let Some((_, decoded)) = self.decoded.as_ref() else {
-            return Arc::new(Vec::new());
-        };
-        let samples = Arc::new(stretch(
-            &decoded.samples,
-            decoded.channels.max(1) as usize,
-            decoded.sample_rate,
-            speed,
-        ));
-        self.played = Some((speed, samples.clone()));
-        samples
     }
 
     /// A player for the note, ready to play from one second on.
@@ -361,23 +405,22 @@ impl Library {
         mixer: &rodio::mixer::Mixer,
         from_seconds: f32,
         speed: f32,
-    ) -> Result<(rodio::Player, Arc<DecodedAudio>), String> {
+    ) -> Result<(rodio::Player, Arc<AtomicU32>, Arc<DecodedAudio>), String> {
         let decoded = self.decoded(path)?;
-        let speed = clamp_speed(speed);
-        let samples = self.samples_at(speed);
+        let control = Arc::new(AtomicU32::new(clamp_speed(speed).to_bits()));
         let next = rodio::Player::connect_new(mixer);
-        // The samples already carry the speed: the player never resamples,
-        // because that is what used to turn the voice into a chipmunk.
-        if let Some(source) = SamplesFrom::new(
-            samples,
+        // The source stretches the file while it reads it: the player never
+        // resamples, because that is what used to turn the voice into a
+        // chipmunk, and the chip can change the rhythm without stopping the
+        // sound.
+        next.append(WsolaSource::new(
+            decoded.samples.clone(),
             decoded.sample_rate,
             decoded.channels,
             from_seconds,
-            speed,
-        ) {
-            next.append(source);
-        }
-        Ok((next, decoded))
+            control.clone(),
+        ));
+        Ok((next, control, decoded))
     }
 }
 
@@ -390,7 +433,8 @@ fn clamp_speed(speed: f32) -> f32 {
     }
 }
 
-/// The samples of one note played at another speed, with the pitch kept.
+/// The samples of one note that the player reads, stretched in time while
+/// the note plays.
 ///
 /// port note: the origin played the note with the `<audio>` tag and its
 /// `playbackRate`, which the browser stretches in time without touching the
@@ -398,141 +442,182 @@ fn clamp_speed(speed: f32) -> f32 {
 /// a chipmunk, so the note is stretched here: overlapping windows of the
 /// sound are laid down at the new rhythm, and every window is aligned with
 /// the sound that the ear expects to hear next (WSOLA).
-pub(crate) fn stretch(samples: &[f32], channels: usize, sample_rate: u32, speed: f32) -> Vec<f32> {
-    let channels = channels.max(1);
-    let frames = samples.len() / channels;
-    let speed = clamp_speed(speed);
-    if frames == 0 || (speed - 1.0).abs() < 0.01 {
-        return samples.to_vec();
-    }
-    // A window of 40 ms, half of it shared with the next one: a periodic
-    // Hann window at that step sums to one and never pumps the volume.
-    let rate = sample_rate.max(1) as usize;
-    let window = ((rate as f32 * 0.040) as usize).max(2);
-    let hop = window / 2;
-    // The window may move this far to find the sound that continues the
-    // last one: 6 ms is enough for a voice and keeps the search cheap.
-    let search = ((rate as f32 * 0.006) as usize).max(1);
-    let hann: Vec<f32> = (0..window)
-        .map(|index| 0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / window as f32).cos())
-        .collect();
-    let out_frames = (frames as f32 / speed).ceil() as usize + window;
-    let mut out = vec![0f32; out_frames * channels];
-    let mut written = 0usize;
-    // The position of the source runs in frames, not in samples, so the
-    // speed does not have to be divided by the channels.
-    let mut ideal = 0f64;
-    let mut previous: Option<usize> = None;
-    loop {
-        let start = ideal.round() as usize;
-        if start + window + search >= frames || written + window > out_frames {
-            break;
-        }
-        // The first window starts where the sound is; the rest start near
-        // the new second, moved to where they continue the last one.
-        let start = match previous {
-            Some(previous) => best_start(samples, channels, previous + hop, start, search, hop),
-            None => start,
-        };
-        for (index, gain) in hann.iter().enumerate() {
-            let target = (written + index) * channels;
-            let source = (start + index) * channels;
-            for channel in 0..channels {
-                out[target + channel] += samples[source + channel] * gain;
-            }
-        }
-        previous = Some(start);
-        written += hop;
-        ideal += hop as f64 * f64::from(speed);
-    }
-    out.truncate((written + window).min(out_frames) * channels);
-    out
-}
-
-/// The start of a window, near `ideal`, whose sound continues the one that
-/// follows `continuation` the best.
 ///
-/// The score is the cross-correlation of the two windows, sampled every four
-/// frames: the alignment does not need every sample, and the search runs on
-/// the thread of the sound.
-fn best_start(
-    samples: &[f32],
-    channels: usize,
-    continuation: usize,
-    ideal: usize,
-    search: usize,
-    span: usize,
-) -> usize {
-    let lowest = ideal.saturating_sub(search);
-    let mut best = ideal;
-    let mut best_score = f32::NEG_INFINITY;
-    for candidate in lowest..=ideal + search {
-        let mut score = 0f32;
-        let mut index = 0;
-        while index < span {
-            score += samples[(candidate + index) * channels]
-                * samples[(continuation + index) * channels];
-            index += 4;
-        }
-        if score > best_score {
-            best_score = score;
-            best = candidate;
-        }
-    }
-    best
-}
-
-/// The samples of one file that the player reads until the end.
-///
-/// The data is already stretched to the speed of the chip, so the player
-/// runs at its natural rate: a resampled player would raise the pitch.
-struct SamplesFrom {
-    data: Arc<Vec<f32>>,
-    position: usize,
+/// The stretch happens while the file is read, not in one big pass: the
+/// speed lives in an atomic, so the chip changes the rhythm on the next
+/// window without stopping the sound, without a gap and without going back.
+struct WsolaSource {
+    samples: Arc<Vec<f32>>,
     channels: NonZero<u16>,
     sample_rate: NonZero<u32>,
+    /// The length of one window, in frames.
+    window: usize,
+    /// The frames that every window adds to the output.
+    hop: usize,
+    /// How far a window may move to follow the last one.
+    search: usize,
+    hann: Vec<f32>,
+    /// The window being mixed: the next [`Self::window`] frames of output.
+    accumulator: Vec<f32>,
+    /// The frames that are ready to go to the device.
+    ready: Vec<f32>,
+    /// The next sample of [`Self::ready`] to hand out.
+    ready_index: usize,
+    /// The frame of the file where the next window should start.
+    ideal: f64,
+    /// The frame where the last window started.
+    previous: Option<usize>,
+    /// The speed of the chip, shared with the thread of the sound.
+    speed: Arc<AtomicU32>,
+    /// Whether no more windows fit in the file.
+    finished: bool,
+    /// Whether the last tail of the file was already handed out.
+    tail_taken: bool,
 }
 
-impl SamplesFrom {
+impl WsolaSource {
     fn new(
-        data: Arc<Vec<f32>>,
+        samples: Arc<Vec<f32>>,
         sample_rate: u32,
         channels: u16,
         from_seconds: f32,
-        speed: f32,
-    ) -> Option<Self> {
-        let channels = NonZero::new(channels)?;
-        let sample_rate = NonZero::new(sample_rate)?;
-        // The buffer already carries the speed: the second of the bubble is
-        // the second of the stretched sound.
-        let frame =
-            (from_seconds.max(0.0) * sample_rate.get() as f32 * speed).round() as usize;
-        let position = (frame * usize::from(channels.get())).min(data.len());
-        Some(Self {
-            data,
-            position,
+        speed: Arc<AtomicU32>,
+    ) -> Self {
+        let rate = sample_rate.max(1) as usize;
+        // A window of 40 ms, half of it shared with the next one: a periodic
+        // Hann window at that step sums to one and never pumps the volume.
+        let window = ((rate as f32 * 0.040) as usize).max(2);
+        let hop = window / 2;
+        // The window may move this far to find the sound that continues the
+        // last one: 6 ms is enough for a voice and keeps the search cheap.
+        let search = ((rate as f32 * 0.006) as usize).max(1);
+        let hann: Vec<f32> = (0..window)
+            .map(|index| 0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / window as f32).cos())
+            .collect();
+        let channels = NonZero::new(channels.max(1)).expect("one channel at least");
+        let sample_rate = NonZero::new(sample_rate.max(1)).expect("one hertz at least");
+        let frames = samples.len() / usize::from(channels.get());
+        let frame = ((from_seconds.max(0.0) * rate as f32).round() as usize).min(frames);
+        Self {
+            samples,
             channels,
             sample_rate,
+            window,
+            hop,
+            search,
+            hann,
+            accumulator: vec![0.0; window * usize::from(channels.get())],
+            ready: vec![0.0; hop * usize::from(channels.get())],
+            ready_index: hop * usize::from(channels.get()),
+            ideal: frame as f64,
+            previous: None,
+            speed,
+            finished: false,
+            tail_taken: false,
+        }
+    }
+
+    /// The frame where the next window starts, if the file has room for it.
+    fn next_start(&self) -> Option<usize> {
+        let channels = usize::from(self.channels.get());
+        let frames = self.samples.len() / channels;
+        if frames < self.window {
+            return None;
+        }
+        let ideal = self.ideal.max(0.0).round() as usize;
+        let highest = ideal
+            .saturating_add(self.search)
+            .min(frames - self.window);
+        if ideal > highest {
+            return None;
+        }
+        let lowest = ideal.saturating_sub(self.search).min(highest);
+        let speed = clamp_speed(f32::from_bits(self.speed.load(Ordering::Relaxed)));
+        Some(match self.previous {
+            // The voice is not stretched: the window that follows the last
+            // one is the same sound, one hop later.
+            Some(previous) if (speed - 1.0).abs() < 0.01 => {
+                (previous + self.hop).clamp(lowest, highest)
+            }
+            Some(previous) => best_start(
+                &self.samples,
+                channels,
+                previous + self.hop,
+                ideal,
+                self.hop,
+                lowest,
+                highest,
+            ),
+            None => ideal.clamp(lowest, highest),
         })
+    }
+
+    /// Mixes the next window and leaves one hop of sound ready.
+    fn produce(&mut self) {
+        let channels = usize::from(self.channels.get());
+        let start = if self.finished { None } else { self.next_start() };
+        match start {
+            Some(start) => {
+                for index in 0..self.window {
+                    let target = index * channels;
+                    let source = (start + index) * channels;
+                    let gain = self.hann[index];
+                    for channel in 0..channels {
+                        self.accumulator[target + channel] +=
+                            self.samples[source + channel] * gain;
+                    }
+                }
+                // The head of the window is what the device hears now.
+                let hop = self.hop * channels;
+                self.ready.copy_from_slice(&self.accumulator[..hop]);
+                // The tail of the window is the sound that the next one has
+                // to continue: it stays at the front of the accumulator.
+                self.accumulator
+                    .copy_within(hop..self.window * channels, 0);
+                self.accumulator[(self.window - self.hop) * channels..].fill(0.0);
+                self.ready_index = 0;
+                self.previous = Some(start);
+                let speed = clamp_speed(f32::from_bits(self.speed.load(Ordering::Relaxed)));
+                self.ideal += self.hop as f64 * f64::from(speed);
+            }
+            None => {
+                self.finished = true;
+                let hop = self.hop * channels;
+                if self.tail_taken {
+                    self.ready_index = self.ready.len();
+                } else {
+                    // The tail of the last window is the last sound of the
+                    // file: hand it out before the note ends.
+                    self.ready.copy_from_slice(&self.accumulator[..hop]);
+                    self.accumulator[..hop].fill(0.0);
+                    self.ready_index = 0;
+                    self.tail_taken = true;
+                }
+            }
+        }
     }
 }
 
-impl Iterator for SamplesFrom {
+impl Iterator for WsolaSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        let sample = self.data.get(self.position).copied();
-        self.position += 1;
-        sample
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.data.len().saturating_sub(self.position);
-        (remaining, Some(remaining))
+        if self.ready_index >= self.ready.len() {
+            if self.finished && self.tail_taken {
+                return None;
+            }
+            self.produce();
+            if self.ready_index >= self.ready.len() {
+                return None;
+            }
+        }
+        let sample = self.ready[self.ready_index];
+        self.ready_index += 1;
+        Some(sample)
     }
 }
 
-impl rodio::Source for SamplesFrom {
+impl rodio::Source for WsolaSource {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
@@ -546,13 +631,46 @@ impl rodio::Source for SamplesFrom {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        let remaining = self.data.len().saturating_sub(self.position);
-        let channels = self.channels.get() as usize;
-        let rate = self.sample_rate.get() as usize;
-        Some(Duration::from_secs_f32(
-            remaining as f32 / (rate.max(1) * channels.max(1)) as f32,
-        ))
+        // The length depends on the speed of the chip, which may change
+        // while the note plays: the source ends when the file ends.
+        None
     }
+}
+
+/// The start of a window, near `ideal`, whose sound continues the one that
+/// follows `continuation` the best.
+///
+/// The score is the cross-correlation of the two windows, sampled every four
+/// frames: the alignment does not need every sample, and the search runs on
+/// the thread of the sound.
+fn best_start(
+    samples: &[f32],
+    channels: usize,
+    continuation: usize,
+    ideal: usize,
+    span: usize,
+    lowest: usize,
+    highest: usize,
+) -> usize {
+    let mut best = ideal.clamp(lowest, highest);
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_distance = usize::MAX;
+    for candidate in lowest..=highest {
+        let mut score = 0f32;
+        let mut index = 0;
+        while index < span {
+            score += samples[(candidate + index) * channels]
+                * samples[(continuation + index) * channels];
+            index += 4;
+        }
+        let distance = candidate.abs_diff(ideal);
+        if score > best_score || (score == best_score && distance < best_distance) {
+            best_score = score;
+            best = candidate;
+            best_distance = distance;
+        }
+    }
+    best
 }
 
 /// Decodes one file to samples, whatever the container is.
@@ -697,13 +815,14 @@ impl crate::app::Whatfast {
         let key = (chat_id.to_string(), message_id.to_string());
         if self.voice.is_on(&key) {
             if self.voice.paused {
-                self.voice.resume();
                 // The sound is rebuilt where the bubble is: the note may
                 // have changed speed while it was paused, and a resumed
                 // player would keep the old one.
+                self.voice.resume();
                 let at = self.voice.position();
                 let speed = self.voice.speed;
-                self.voice_audio.play(Path::new(path), at, speed);
+                let session = self.voice.session;
+                self.voice_audio.play(Path::new(path), at, speed, session);
             } else {
                 self.voice.pause();
                 self.voice_audio.pause();
@@ -714,9 +833,67 @@ impl crate::app::Whatfast {
         // The note of another message stops where it is.
         self.voice_audio.stop();
         let speed = self.voice.speed;
-        self.voice.start(key, 0.0, speed);
-        self.voice_audio.play(Path::new(path), 0.0, speed);
+        self.voice.start(key, path, 0.0, speed);
+        let session = self.voice.session;
+        self.voice_audio.play(Path::new(path), 0.0, speed, session);
         self.start_voice_tick(window, cx);
+        cx.notify();
+    }
+
+    /// Moves one note to another second: the wave, the click on its bars and
+    /// the arrows of the keyboard land here.
+    ///
+    /// A note that was not playing starts from that second; a paused note
+    /// only moves its needle and waits for the play button.
+    pub(crate) fn seek_voice_note(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        path: &str,
+        seconds: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (chat_id.to_string(), message_id.to_string());
+        if !self.voice.is_on(&key) {
+            self.voice_audio.stop();
+            let speed = self.voice.speed;
+            self.voice.start(key, path, seconds, speed);
+            let session = self.voice.session;
+            self.voice_audio.play(Path::new(path), seconds, speed, session);
+            self.start_voice_tick(window, cx);
+            cx.notify();
+            return;
+        }
+        self.voice.seek(seconds);
+        // Paused, the needle moves without sound: the play button restarts
+        // the file from the second the bubble shows.
+        if !self.voice.paused {
+            let speed = self.voice.speed;
+            let session = self.voice.session;
+            self.voice_audio
+                .play(Path::new(path), self.voice.position(), speed, session);
+        }
+        cx.notify();
+    }
+
+    /// Moves the note that is playing or paused by the given seconds.
+    ///
+    /// The arrows of the keyboard walk the note with this: five seconds
+    /// back or forward, without leaving the file.
+    pub(crate) fn seek_active_voice_note(&mut self, delta: f32, cx: &mut Context<Self>) {
+        if self.voice.key.is_none() {
+            return;
+        }
+        let target = self.voice.position() + delta;
+        self.voice.seek(target);
+        if !self.voice.paused && !self.voice.path.is_empty() {
+            let speed = self.voice.speed;
+            let path = self.voice.path.clone();
+            let session = self.voice.session;
+            self.voice_audio
+                .play(Path::new(&path), self.voice.position(), speed, session);
+        }
         cx.notify();
     }
 
@@ -728,13 +905,12 @@ impl crate::app::Whatfast {
             .copied()
             .find(|speed| *speed > current + 0.01)
             .unwrap_or(SPEEDS[0]);
-        let playing = self.voice.key.is_some() && !self.voice.paused;
-        let at = self.voice.position();
         self.voice.rebase(next);
-        if playing {
-            // The stretched sound starts where the bubble shows: the note is
-            // rebuilt at the new speed, never resampled.
-            self.voice_audio.speed(next, at);
+        // The source of the player reads the new speed on its next window:
+        // the note keeps sounding, without a gap and without going back. A
+        // paused note takes it when the play button goes on.
+        if self.voice.key.is_some() {
+            self.voice_audio.speed(next);
         }
         cx.notify();
     }
@@ -744,15 +920,30 @@ impl crate::app::Whatfast {
     pub(crate) fn tick_voice(&mut self, cx: &mut Context<Self>) {
         while let Some(event) = self.voice_audio.try_recv() {
             match event {
-                AudioEvent::Ready { duration, peaks } => {
+                AudioEvent::Started {
+                    session,
+                    position,
+                    duration,
+                    peaks,
+                } => {
+                    // The answer of a note that another click replaced says
+                    // nothing about the note of the bubble.
+                    if session != self.voice.session {
+                        continue;
+                    }
                     if let Some(key) = self.voice.key.clone() {
                         self.voice.waves.insert(key, Arc::new(peaks));
                     }
                     self.voice.duration = duration;
-                    self.voice.waiting = false;
+                    // The sound starts now, not when the click happened.
+                    self.voice.base = position;
                     self.voice.clock = Instant::now();
+                    self.voice.waiting = false;
                 }
-                AudioEvent::Failed(message) => {
+                AudioEvent::Failed { session, message } => {
+                    if session != self.voice.session {
+                        continue;
+                    }
                     self.store.toast_error = Some(message);
                     self.voice.clear();
                     self.voice_audio.stop();
@@ -766,7 +957,10 @@ impl crate::app::Whatfast {
                 self.voice_audio.stop();
             }
         }
-        cx.notify();
+        // While the note is paused nothing moves on the bubble.
+        if !self.voice.paused {
+            cx.notify();
+        }
     }
 
     /// Starts the tick that moves the wave of the note, once per window.
@@ -801,7 +995,12 @@ impl crate::app::Whatfast {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BAR, SPEEDS, WAVE_BARS, clamp_speed, peaks, stretch};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::{
+        MIN_BAR, SPEEDS, WAVE_BARS, VoiceState, WsolaSource, clamp_speed, peaks,
+    };
 
     /// The frequency of a tone, from the zero crossings of its middle part:
     /// the edges of the stretch are windows, not the tone.
@@ -825,14 +1024,62 @@ mod tests {
             .collect()
     }
 
+    fn source(
+        samples: &[f32],
+        rate: u32,
+        channels: u16,
+        from: f32,
+        speed: f32,
+    ) -> (WsolaSource, Arc<AtomicU32>) {
+        let control = Arc::new(AtomicU32::new(speed.to_bits()));
+        let source = WsolaSource::new(
+            Arc::new(samples.to_vec()),
+            rate,
+            channels,
+            from,
+            control.clone(),
+        );
+        (source, control)
+    }
+
     #[test]
-    fn a_stretched_note_keeps_the_pitch_of_the_voice() {
+    fn a_note_at_one_speed_keeps_the_samples_of_the_file() {
+        let rate = 48_000;
+        let file = tone(440.0, rate, 1.0);
+        let (mut source, _) = source(&file, rate, 1, 0.0, 1.0);
+        let played: Vec<f32> = source.by_ref().collect();
+        let window = (rate as f32 * 0.040) as usize;
+        assert!(
+            (played.len() as f32 - file.len() as f32).abs() <= 1.0,
+            "the note has {} frames and the file {}",
+            played.len(),
+            file.len()
+        );
+        // The first window fades in and the last one fades out, so the note
+        // neither starts nor ends with a click.
+        let end = played.len() - window;
+        for (index, (heard, expected)) in played[window..end]
+            .iter()
+            .zip(&file[window..end])
+            .enumerate()
+        {
+            assert!(
+                (heard - expected).abs() < 1e-4,
+                "frame {}: {heard} != {expected}",
+                index + window
+            );
+        }
+    }
+
+    #[test]
+    fn a_fast_note_keeps_the_pitch_of_the_voice() {
         // The bug: the player resampled the note, and at 1.5x and 2x the
         // voice sounded like a chipmunk.
         let rate = 48_000;
-        let source = tone(440.0, rate, 1.0);
+        let file = tone(440.0, rate, 1.0);
         for speed in [1.5f32, 2.0] {
-            let fast = stretch(&source, 1, rate, speed);
+            let (mut source, _) = source(&file, rate, 1, 0.0, speed);
+            let fast: Vec<f32> = source.by_ref().collect();
             let frequency = tone_frequency(&fast, rate);
             assert!(
                 (frequency - 440.0).abs() < 15.0,
@@ -842,31 +1089,47 @@ mod tests {
     }
 
     #[test]
-    fn a_stretched_note_lasts_the_time_the_speed_says() {
+    fn a_fast_note_lasts_the_time_the_speed_says() {
         let rate = 48_000;
-        let source = tone(300.0, rate, 2.0);
-        let half = stretch(&source, 1, rate, 2.0);
+        let file = tone(300.0, rate, 2.0);
+        for speed in [1.5f32, 2.0] {
+            let (mut source, _) = source(&file, rate, 1, 0.0, speed);
+            let fast: Vec<f32> = source.by_ref().collect();
+            let expected = file.len() as f32 / speed;
+            assert!(
+                (fast.len() as f32 - expected).abs() < rate as f32 * 0.1,
+                "at {speed}x the note has {} frames and it needs {expected}",
+                fast.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_speed_can_change_while_the_note_plays() {
+        // The bug: every change of the chip rebuilt the whole note, and the
+        // sound went back to the second of the click.
+        let rate = 48_000;
+        let file = tone(440.0, rate, 2.0);
+        let (mut source, control) = source(&file, rate, 1, 0.0, 1.0);
+        let first: Vec<f32> = source.by_ref().take(rate as usize / 2).collect();
+        control.store(2.0f32.to_bits(), Ordering::Relaxed);
+        let rest: Vec<f32> = source.by_ref().collect();
+        assert_eq!(first.len(), rate as usize / 2);
+        // What is left of a two second file: 1.5 s at 1x, 0.75 s at 2x.
         assert!(
-            (half.len() as f32 - source.len() as f32 / 2.0).abs() < rate as f32 * 0.1,
-            "2x leaves half of the frames, and it left {} of {}",
-            half.len(),
-            source.len()
+            rest.len() < rate as usize,
+            "the new speed has to shorten the rest, and it left {} frames",
+            rest.len()
         );
-        let slower = stretch(&source, 1, rate, 1.5);
+        let frequency = tone_frequency(&rest, rate);
         assert!(
-            (slower.len() as f32 - source.len() as f32 / 1.5).abs() < rate as f32 * 0.1,
-            "1.5x leaves two thirds of the frames"
+            (frequency - 440.0).abs() < 20.0,
+            "the change of speed must not touch the pitch, and it is {frequency} Hz"
         );
     }
 
     #[test]
-    fn the_speed_of_one_leaves_the_note_as_it_is() {
-        let source = tone(440.0, 48_000, 0.5);
-        assert_eq!(stretch(&source, 1, 48_000, 1.0), source);
-    }
-
-    #[test]
-    fn the_stretch_keeps_both_channels() {
+    fn a_stretched_note_keeps_both_channels() {
         let rate = 48_000;
         let left = tone(440.0, rate, 0.5);
         let right = tone(660.0, rate, 0.5);
@@ -875,12 +1138,60 @@ mod tests {
             stereo.push(*a);
             stereo.push(*b);
         }
-        let fast = stretch(&stereo, 2, rate, 2.0);
+        let (mut source, _) = source(&stereo, rate, 2, 0.0, 2.0);
+        let fast: Vec<f32> = source.by_ref().collect();
         assert_eq!(fast.len() % 2, 0);
         let left: Vec<f32> = fast.iter().step_by(2).copied().collect();
         let right: Vec<f32> = fast.iter().skip(1).step_by(2).copied().collect();
         assert!((tone_frequency(&left, rate) - 440.0).abs() < 15.0);
         assert!((tone_frequency(&right, rate) - 660.0).abs() < 20.0);
+    }
+
+    /// The default test profile checks the arithmetic of `opus-decoder`, and
+    /// that crate overflows on the collapse mask of a transient packet (it
+    /// holds the mask in eight bits where libopus uses thirty two). The app
+    /// ships in release, where the check is off, so the test runs there:
+    /// `cargo test -p whatfast-ui --release audio::`.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_recorded_note_plays_at_every_speed() {
+        // The whole road of a voice note: the encoder of the app writes the
+        // Ogg Opus, the decoder of the note reads it, and the source plays
+        // it at every speed of the chip.
+        let rate = 48_000;
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("nota.ogg");
+        let file = tone(440.0, rate, 2.0);
+        crate::recording::encode_voice_note(&file, rate, 1, &path).expect("the note is encoded");
+        let decoded = super::decode(&path).expect("the note is decoded");
+        assert!(
+            (decoded.duration_seconds() - 2.0).abs() < 0.1,
+            "the note lasts {} seconds",
+            decoded.duration_seconds()
+        );
+        for speed in SPEEDS {
+            let control = Arc::new(AtomicU32::new(speed.to_bits()));
+            let mut source = WsolaSource::new(
+                decoded.samples.clone(),
+                decoded.sample_rate,
+                decoded.channels,
+                0.0,
+                control,
+            );
+            let played: Vec<f32> = source.by_ref().collect();
+            let channels = decoded.channels.max(1) as usize;
+            let frames = played.len() / channels;
+            let expected = decoded.duration_seconds() / speed * decoded.sample_rate as f32;
+            assert!(
+                (frames as f32 - expected).abs() < decoded.sample_rate as f32 * 0.2,
+                "at {speed}x the note has {frames} frames and it needs {expected}"
+            );
+            let frequency = tone_frequency(&played, decoded.sample_rate);
+            assert!(
+                (frequency - 440.0).abs() < 25.0,
+                "at {speed}x the voice has to stay at 440 Hz, and it is {frequency} Hz"
+            );
+        }
     }
 
     #[test]
@@ -915,5 +1226,22 @@ mod tests {
         assert_eq!(clamp_speed(10.0), SPEEDS[SPEEDS.len() - 1]);
         assert_eq!(clamp_speed(f32::NAN), SPEEDS[0]);
         assert_eq!(clamp_speed(1.5), 1.5);
+    }
+
+    /// El clic en las barras y las flechas mueven el reloj de la nota, y no
+    /// se pasa del principio ni del final del archivo.
+    #[test]
+    fn the_clock_of_the_note_moves_with_the_seek() {
+        let mut voice = VoiceState::default();
+        voice.start(("chat".into(), "message".into()), "nota.ogg", 0.0, 1.0);
+        voice.duration = 20.0;
+        // Mientras el archivo se decodifica, el reloj espera en la base.
+        voice.waiting = true;
+        voice.seek(12.5);
+        assert!((voice.position() - 12.5).abs() < 0.01);
+        voice.seek(-4.0);
+        assert!(voice.position() < 0.01);
+        voice.seek(99.0);
+        assert!((voice.position() - 20.0).abs() < 0.01);
     }
 }

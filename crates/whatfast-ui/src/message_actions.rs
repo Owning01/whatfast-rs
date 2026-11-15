@@ -73,11 +73,6 @@ const MENU_MIN_WIDTH: f32 = 210.0;
 /// width of the window it is drawn in.
 const MENU_WIDTH: f32 = 230.0;
 
-/// The tallest height of the menu, before the scale: the rows, the divider and
-/// the padding. It keeps the panel inside the window when the pointer is near
-/// the bottom edge.
-const MENU_MAX_HEIGHT: f32 = 340.0;
-
 /// The padding of the menu, before the scale.
 ///
 /// port: `.chat-context-menu { padding: 4px }`.
@@ -85,8 +80,8 @@ const MENU_PADDING: f32 = 4.0;
 
 /// The padding of a row of the menu, before the scale.
 ///
-/// port: `.chat-context-item { padding: 8px 12px }`.
-const MENU_ITEM_PADDING_Y: f32 = 8.0;
+/// port: `.chat-context-item { padding: 6px 12px }`.
+const MENU_ITEM_PADDING_Y: f32 = 6.0;
 
 /// The padding of a row of the menu, before the scale.
 ///
@@ -100,8 +95,8 @@ const MENU_ITEM_FONT_SIZE: f32 = 13.0;
 
 /// The margin of the divider of the menu, before the scale.
 ///
-/// port: `.chat-context-divider { margin: 4px 0 }`.
-const MENU_DIVIDER_MARGIN: f32 = 4.0;
+/// port: `.chat-context-divider { margin: 3px 0 }`.
+const MENU_DIVIDER_MARGIN: f32 = 3.0;
 
 /// What the menu of a message asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +113,8 @@ pub(crate) enum MessageAction {
     DeleteForEveryone,
     /// Copy the text of the message to the clipboard.
     Copy,
+    /// Translate the text of the message.
+    Translate,
     /// Pin the message in the conversation.
     Pin,
     /// Take the message out of the pinned ones.
@@ -126,6 +123,9 @@ pub(crate) enum MessageAction {
     Star,
     /// Take the star off the message.
     Unstar,
+    /// Start the multiple selection with this message marked, so the user can
+    /// delete, copy or forward several messages in one step.
+    SelectMessages,
 }
 
 /// One row of the menu of a message.
@@ -171,6 +171,9 @@ pub(crate) struct MessageMenu {
     text: String,
     /// The message has a text to copy.
     has_text: bool,
+    /// The message carries a picture that can be copied: a downloaded image,
+    /// its thumbnail, or the preview that came with the message.
+    copy_image: bool,
     /// The message can still be edited.
     editable: bool,
     /// The message is pinned in the conversation.
@@ -183,6 +186,8 @@ pub(crate) struct MessageMenu {
     scale: f32,
     /// Where the pointer was when the menu opened, in pixels of the window.
     position: Point<Pixels>,
+    /// Index of the keyboard-highlighted item in `self.items()`.
+    highlighted: Option<usize>,
     /// The handler the rows report to.
     on_action: MessageActionHandler,
 }
@@ -196,13 +201,24 @@ fn floating_origin(
     height: Pixels,
     margin: Pixels,
 ) -> Point<Pixels> {
-    point(
-        position.x.min(viewport.width - width - margin).max(margin),
-        position
-            .y
-            .min(viewport.height - height - margin)
-            .max(margin),
-    )
+    let max_x = (viewport.width - width - margin).max(margin);
+    let x = position.x.min(max_x).max(margin);
+
+    let max_y = (viewport.height - height - margin).max(margin);
+    // Si el menú entra hacia abajo desde la posición del puntero, se abre hacia abajo.
+    // Si no entra hacia abajo pero sí cabe hacia arriba (por encima del clic), se abre
+    // hacia arriba para que la base del menú coincida con el puntero: esto deja visible
+    // el mensaje de abajo y sitúa las acciones finales ("Eliminar para mí") al alcance directo.
+    // Si no entra completo ni arriba ni abajo, se ajusta al alto visible.
+    let y = if position.y + height <= viewport.height - margin {
+        position.y.max(margin)
+    } else if position.y - height >= margin {
+        position.y - height
+    } else {
+        position.y.min(max_y).max(margin)
+    };
+
+    point(x, y)
 }
 
 impl std::fmt::Debug for MessageMenu {
@@ -215,6 +231,7 @@ impl std::fmt::Debug for MessageMenu {
             .field("revoked", &self.revoked)
             .field("has_content", &self.has_content)
             .field("has_text", &self.has_text)
+            .field("copy_image", &self.copy_image)
             .field("editable", &self.editable)
             .field("pinned", &self.pinned)
             .field("starred", &self.starred)
@@ -247,6 +264,14 @@ impl MessageMenu {
             )
             && message.timestamp_ms + EDIT_WINDOW_MS > now_ms;
         let text = message_text(message).to_string();
+        let copy_image = !message.revoked
+            && matches!(
+                &message.content,
+                Some(whatfast_protocol::message::Content::Image(image))
+                    if !image.local_path.is_empty()
+                        || !image.thumbnail_path.is_empty()
+                        || !image.jpeg_thumbnail.is_empty()
+            );
         Self {
             chat_id: chat_id.into(),
             message_id: message.id.clone(),
@@ -257,6 +282,7 @@ impl MessageMenu {
             // port: the oracle copies `messageText(message)`, which is the
             // caption of a picture and the name of a file too.
             has_text: !text.is_empty(),
+            copy_image,
             text,
             editable,
             pinned,
@@ -264,8 +290,50 @@ impl MessageMenu {
             edit_deadline_ms: message.timestamp_ms + EDIT_WINDOW_MS,
             scale: normalized_ui_scale(scale),
             position: point(px(0.), px(0.)),
+            highlighted: None,
             on_action: None,
         }
+    }
+
+    /// Moves keyboard highlight to the next/previous enabled menu item.
+    pub(crate) fn move_highlight(&mut self, forward: bool) {
+        let items = self.items();
+        if items.is_empty() {
+            self.highlighted = None;
+            return;
+        }
+        let len = items.len();
+        let start = self.highlighted.unwrap_or(if forward { len - 1 } else { 0 });
+        for offset in 1..=len {
+            let idx = if forward {
+                (start + offset) % len
+            } else {
+                (start + len - (offset % len)) % len
+            };
+            if items[idx].enabled {
+                self.highlighted = Some(idx);
+                return;
+            }
+        }
+    }
+
+    /// Invokes the currently keyboard-highlighted action, if enabled.
+    pub(crate) fn activate_highlighted(&self, window: &mut Window, cx: &mut App) -> bool {
+        let items = self.items();
+        let Some(idx) = self.highlighted else {
+            return false;
+        };
+        let Some(item) = items.get(idx) else {
+            return false;
+        };
+        if !item.enabled {
+            return false;
+        }
+        if let Some(handler) = self.on_action.clone() {
+            handler(item.action, window, cx);
+            return true;
+        }
+        false
     }
 
     /// The place of the window the menu opens at: the pointer of the right
@@ -294,11 +362,6 @@ impl MessageMenu {
         &self.message_id
     }
 
-    /// The message is one of the user.
-    pub(crate) fn is_from_me(&self) -> bool {
-        self.from_me
-    }
-
     /// The text that the copy of the message puts in the clipboard.
     ///
     /// port: the oracle copies `messageText(message)`.
@@ -306,34 +369,22 @@ impl MessageMenu {
         &self.text
     }
 
-    /// The message is pinned in the conversation.
-    pub(crate) fn pinned(&self) -> bool {
-        self.pinned
-    }
-
-    /// The message is pinned, or it is not.
-    pub(crate) fn set_pinned(&mut self, pinned: bool) {
-        self.pinned = pinned;
-    }
-
-    /// The message is starred, or it is not.
-    pub(crate) fn starred(&self) -> bool {
-        self.starred
-    }
-
     /// The message can still be edited.
     pub(crate) fn editable(&self) -> bool {
         self.editable
     }
 
-    /// The instant in which the window of the edit closes.
-    pub(crate) fn edit_deadline_ms(&self) -> i64 {
-        self.edit_deadline_ms
-    }
-
-    /// The scale of the interface.
-    pub(crate) fn scale(&self) -> f32 {
-        self.scale
+    /// The estimated height of the menu, taking into account its items,
+    /// potential divider, padding and UI scale.
+    pub(crate) fn estimated_height(&self) -> Pixels {
+        let items = self.items();
+        let count = items.len() as f32;
+        let has_divider = items.iter().any(|item| item.danger);
+        // Each item: font size 13px + py(6px * 2) = ~28px per item
+        let item_height = 28.0 * self.scale;
+        let divider_height = if has_divider { (1.0 + MENU_DIVIDER_MARGIN * 2.0) * self.scale } else { 0.0 };
+        let padding_height = (MENU_PADDING * 2.0 + 2.0) * self.scale;
+        px(count * item_height + divider_height + padding_height)
     }
 
     /// The rows of the menu, in the order the oracle draws them.
@@ -346,6 +397,12 @@ impl MessageMenu {
         // menu hace lo mismo.
         if self.view_once {
             return vec![
+                MessageMenuItem {
+                    action: MessageAction::SelectMessages,
+                    label: "Select messages",
+                    enabled: !self.revoked,
+                    danger: false,
+                },
                 MessageMenuItem {
                     action: MessageAction::Delete,
                     label: "Delete for me",
@@ -383,6 +440,12 @@ impl MessageMenu {
             MessageMenuItem {
                 action: MessageAction::Copy,
                 label: "Copy",
+                enabled: self.has_text || self.copy_image,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::Translate,
+                label: "Translate",
                 enabled: self.has_text,
                 danger: false,
             },
@@ -408,6 +471,12 @@ impl MessageMenu {
                 action: MessageAction::Unstar,
                 label: "Unstar message",
                 enabled: self.starred,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::SelectMessages,
+                label: "Select messages",
+                enabled: !self.revoked,
                 danger: false,
             },
             MessageMenuItem {
@@ -440,25 +509,33 @@ impl MessageMenu {
         let danger = theme.danger;
         let radius = theme.radius;
 
-        // El menu no sale de la ventana: se corre para adentro cuando el puntero
-        // esta cerca del borde.
+        // El menu no sale de la ventana: se calcula la altura real de sus opciones
+        // para que no quede cortado por abajo y se invierte hacia arriba si el
+        // mensaje está abajo en la pantalla, dejando el mensaje visible y las
+        // opciones críticas ("Eliminar para mí") al alcance del puntero.
         let width = px(MENU_WIDTH * self.scale);
+        let margin = px(8.);
+        let available_height = (window.viewport_size().height - margin * 2.).max(px(120.));
+        let menu_height = self.estimated_height().min(available_height);
         let origin = floating_origin(
             self.position,
             window.viewport_size(),
             width,
-            px(MENU_MAX_HEIGHT * self.scale),
-            px(8.),
+            menu_height,
+            margin,
         );
         let left = origin.x;
         let top = origin.y;
 
         let mut menu = v_flex()
+            .id("message-context-menu")
             .absolute()
             .left(left)
             .top(top)
             .w(width)
             .min_w(px(MENU_MIN_WIDTH * self.scale))
+            .max_h(available_height)
+            .overflow_y_scroll()
             .p(px(MENU_PADDING))
             .rounded(radius)
             .border_1()
@@ -468,7 +545,7 @@ impl MessageMenu {
             .text_color(theme.popover_foreground);
 
         let mut divider = false;
-        for item in self.items() {
+        for (idx, item) in self.items().into_iter().enumerate() {
             // port: the oracle draws a divider before the deletion.
             if item.danger && !divider {
                 menu = menu.child(div().h(px(1.)).my(px(MENU_DIVIDER_MARGIN)).bg(theme.border));
@@ -476,6 +553,7 @@ impl MessageMenu {
             }
             let action = item.action;
             let enabled = item.enabled;
+            let is_highlighted = enabled && self.highlighted == Some(idx);
             let handler = self.on_action.clone();
             let color = if item.danger { danger } else { foreground };
             menu = menu.child(
@@ -487,6 +565,13 @@ impl MessageMenu {
                     .px(px(MENU_ITEM_PADDING_X))
                     .py(px(MENU_ITEM_PADDING_Y))
                     .rounded(radius)
+                    .border_1()
+                    .border_color(if is_highlighted {
+                        theme.ring
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(is_highlighted, |row| row.bg(hover))
                     .text_size(px(MENU_ITEM_FONT_SIZE))
                     .cursor_pointer()
                     .text_color(if enabled { color } else { muted })
@@ -638,10 +723,11 @@ pub(crate) fn toggle_selection(selected: &mut Vec<String>, chat_id: &str) {
 
 /// The dialog that chooses the conversations a message is sent to.
 pub(crate) struct ForwardPicker {
-    /// The conversation the message comes from.
+    /// The conversation the messages come from.
     source_chat_id: String,
-    /// The message that is forwarded.
-    message_id: String,
+    /// The messages that are forwarded: one from the menu of a bubble, many
+    /// from the multiple selection.
+    message_ids: Vec<String>,
     /// The conversations the user can choose.
     chats: Vec<Chat>,
     /// The needle of the search.
@@ -663,7 +749,7 @@ impl std::fmt::Debug for ForwardPicker {
         formatter
             .debug_struct("ForwardPicker")
             .field("source_chat_id", &self.source_chat_id)
-            .field("message_id", &self.message_id)
+            .field("message_ids", &self.message_ids)
             .field("chats", &self.chats.len())
             .field("query", &self.query)
             .field("selected", &self.selected)
@@ -680,6 +766,16 @@ impl ForwardPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_many(source_chat_id, vec![message_id.into()], window, cx)
+    }
+
+    /// The dialog of the forward of several messages at once.
+    pub(crate) fn new_many(
+        source_chat_id: impl Into<String>,
+        message_ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Search chats")));
         let field = search_input.clone();
@@ -691,7 +787,7 @@ impl ForwardPicker {
         });
         Self {
             source_chat_id: source_chat_id.into(),
-            message_id: message_id.into(),
+            message_ids,
             chats: Vec::new(),
             query: String::new(),
             selected: Vec::new(),
@@ -722,9 +818,9 @@ impl ForwardPicker {
         &self.source_chat_id
     }
 
-    /// The message that is forwarded.
-    pub(crate) fn message_id(&self) -> &str {
-        &self.message_id
+    /// The messages that are forwarded.
+    pub(crate) fn message_ids(&self) -> &[String] {
+        &self.message_ids
     }
 
     /// The conversations the user can choose.
@@ -880,6 +976,12 @@ impl ForwardPicker {
         } else {
             "Forward".to_string()
         };
+        let title = if self.message_ids.len() > 1 {
+            let count = self.message_ids.len().to_string();
+            i18n::t_args("Forward {count} messages", &[("count", &count)])
+        } else {
+            i18n::t("Forward message").to_string()
+        };
 
         div()
             .absolute()
@@ -903,7 +1005,7 @@ impl ForwardPicker {
                     .child(
                         div()
                             .font_weight(FontWeight::BOLD)
-                            .child(i18n::t("Forward message")),
+                            .child(title),
                     )
                     .child(
                         div()
@@ -1470,6 +1572,11 @@ pub(crate) enum AttachmentAction {
         /// Why the file could not be saved.
         message: String,
     },
+    /// The selector of files of the system did not open.
+    Failed {
+        /// Why the selector did not open, with the reason the system gave.
+        message: String,
+    },
     /// The user asked for a picture of the device.
     Photo,
     /// The user asked for a poll.
@@ -1530,8 +1637,6 @@ pub(crate) fn attachment_kinds() -> Vec<AttachmentKindItem> {
 pub(crate) struct AttachmentBar {
     /// The menu of the kinds is open.
     open: bool,
-    /// The button can be pressed.
-    enabled: bool,
     /// The scale of the interface.
     scale: f32,
     /// The handler the button reports to.
@@ -1543,7 +1648,6 @@ impl std::fmt::Debug for AttachmentBar {
         formatter
             .debug_struct("AttachmentBar")
             .field("open", &self.open)
-            .field("enabled", &self.enabled)
             .field("scale", &self.scale)
             .finish_non_exhaustive()
     }
@@ -1554,7 +1658,6 @@ impl AttachmentBar {
     pub(crate) fn new(scale: f32) -> Self {
         Self {
             open: false,
-            enabled: true,
             scale: normalized_ui_scale(scale),
             on_action: None,
         }
@@ -1569,16 +1672,6 @@ impl AttachmentBar {
         self
     }
 
-    /// The button can be pressed.
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// The button can be pressed, or it cannot.
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
     /// The menu of the kinds is open.
     pub(crate) fn open(&self) -> bool {
         self.open
@@ -1587,11 +1680,6 @@ impl AttachmentBar {
     /// The menu of the kinds is open, or it is closed.
     pub(crate) fn set_open(&mut self, open: bool) {
         self.open = open;
-    }
-
-    /// The scale of the interface.
-    pub(crate) fn scale(&self) -> f32 {
-        self.scale
     }
 
     /// Opens the selector of files of the system and sends the file the user
@@ -1604,9 +1692,6 @@ impl AttachmentBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.enabled {
-            return;
-        }
         let prompt = attachment_kinds()
             .into_iter()
             .find(|item| item.kind == kind)
@@ -1619,11 +1704,32 @@ impl AttachmentBar {
             prompt: Some(prompt.into()),
         });
         cx.spawn_in(window, async move |weak, window| {
-            let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            // The selector can fail: COM without a thread, a dialog the system
+            // refuses, a window that is gone. Before this match the `?` ate the
+            // reason and the click looked like it did nothing.
+            let action = match selected.await {
+                Ok(Ok(Some(paths))) => paths
+                    .into_iter()
+                    .next()
+                    .map(|path| AttachmentAction::Send { path, kind }),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    Some(AttachmentAction::Failed {
+                        message: i18n::t_args(
+                            "The file selector could not be opened: {error}",
+                            &[("error", reason.as_str())],
+                        ),
+                    })
+                }
+                // The interface is going away: there is nobody to tell.
+                Err(_) => None,
+            };
+            let action = action?;
             window
                 .update(|window, cx| {
                     weak.update(cx, |this, cx| {
-                        this.report(AttachmentAction::Send { path, kind }, window, cx);
+                        this.report(action, window, cx);
                         cx.notify();
                     })
                 })
@@ -1692,7 +1798,6 @@ impl AttachmentBar {
             Button::new("attachment-button")
                 .ghost()
                 .icon(WhatfastIcon::Attach)
-                .disabled(!self.enabled)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_open(!this.open);
                     cx.notify();
@@ -1790,11 +1895,11 @@ impl Render for AttachmentBar {
 mod tests {
     use gpui::{point, px};
     use whatfast_protocol::message::Content;
-    use whatfast_protocol::{Chat, ChatKind, Message, TextContent, UnsupportedContent};
+    use whatfast_protocol::{Chat, ChatKind, ImageContent, Message, TextContent, UnsupportedContent};
 
     use super::{
-        AttachmentBar, EDIT_WINDOW_MS, MessageAction, MessageMenu, MessageMenuItem, PollForm,
-        attachment_kinds, chat_matches, filter_chats, floating_origin, toggle_selection,
+        EDIT_WINDOW_MS, MessageAction, MessageMenu, MessageMenuItem, PollForm, attachment_kinds,
+        chat_matches, filter_chats, floating_origin, toggle_selection,
     };
 
     /// A message of the user, with a text.
@@ -1847,35 +1952,29 @@ mod tests {
     #[test]
     fn the_menu_has_the_rows_of_the_oracle() {
         let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        let actions: Vec<MessageAction> = menu.items().iter().map(action_of).collect();
+        // The rows of the oracle, in order, with the ones that can be pressed.
+        let rows: Vec<(MessageAction, bool)> = menu
+            .items()
+            .iter()
+            .map(|item| (action_of(item), item.enabled))
+            .collect();
         assert_eq!(
-            actions,
+            rows,
             vec![
-                MessageAction::Reply,
-                MessageAction::Forward,
-                MessageAction::Edit,
-                MessageAction::Copy,
-                MessageAction::Pin,
-                MessageAction::Unpin,
-                MessageAction::Star,
-                MessageAction::Unstar,
-                MessageAction::Delete,
-                MessageAction::DeleteForEveryone,
+                (MessageAction::Reply, true),
+                (MessageAction::Forward, true),
+                (MessageAction::Edit, true),
+                (MessageAction::Copy, true),
+                (MessageAction::Translate, true),
+                (MessageAction::Pin, true),
+                (MessageAction::Unpin, false),
+                (MessageAction::Star, true),
+                (MessageAction::Unstar, false),
+                (MessageAction::SelectMessages, true),
+                (MessageAction::Delete, true),
+                (MessageAction::DeleteForEveryone, true),
             ]
         );
-    }
-
-    #[test]
-    fn the_menu_is_the_same_for_a_message_of_the_user_and_for_one_of_another() {
-        let mine = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        let other = MessageMenu::new("chat-1", &other_message(0), false, false, 0, 1.0);
-        let labels = |menu: &MessageMenu| {
-            menu.items()
-                .into_iter()
-                .map(|item| item.label)
-                .collect::<Vec<&str>>()
-        };
-        assert_eq!(labels(&mine), labels(&other));
     }
 
     #[test]
@@ -1889,6 +1988,11 @@ mod tests {
         assert!(!enabled(&menu, MessageAction::Edit));
         assert!(!enabled(&menu, MessageAction::DeleteForEveryone));
         assert!(enabled(&menu, MessageAction::Delete));
+
+        // The same rows of a message of the user can be pressed.
+        let own = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
+        assert!(enabled(&own, MessageAction::Edit));
+        assert!(enabled(&own, MessageAction::DeleteForEveryone));
     }
 
     #[test]
@@ -1902,18 +2006,10 @@ mod tests {
     }
 
     #[test]
-    fn the_rows_of_a_message_of_the_user_can_be_pressed() {
-        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        assert!(enabled(&menu, MessageAction::Edit));
-        assert!(enabled(&menu, MessageAction::DeleteForEveryone));
-    }
-
-    #[test]
     fn the_edit_is_closed_after_the_window_of_twenty_minutes() {
         let now = 1_000_000i64;
         let fresh = MessageMenu::new("chat-1", &own_message(now), false, false, now, 1.0);
         assert!(fresh.editable());
-        assert_eq!(fresh.edit_deadline_ms(), now + EDIT_WINDOW_MS);
 
         let late = MessageMenu::new(
             "chat-1",
@@ -1935,6 +2031,19 @@ mod tests {
         assert!(!menu.editable());
     }
 
+    /// Una foto se copia aunque no tenga texto: el menu no puede mirar solo
+    /// la leyenda de la imagen.
+    #[test]
+    fn a_picture_can_be_copied_without_a_caption() {
+        let mut message = other_message(0);
+        message.content = Some(Content::Image(ImageContent {
+            local_path: "C:\\pictures\\photo.jpg".to_string(),
+            ..ImageContent::default()
+        }));
+        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
+        assert!(enabled(&menu, MessageAction::Copy));
+    }
+
     /// El aviso de visualizacion unica no trae contenido al dispositivo
     /// vinculado: el menu solo ofrece la eliminacion.
     #[test]
@@ -1947,6 +2056,7 @@ mod tests {
         let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
         let actions: Vec<MessageAction> = menu.items().into_iter().map(|item| item.action).collect();
         assert!(actions.contains(&MessageAction::Delete));
+        assert!(actions.contains(&MessageAction::SelectMessages));
         assert!(!actions.contains(&MessageAction::Forward));
         assert!(!actions.contains(&MessageAction::Star));
         assert!(!actions.contains(&MessageAction::Copy));
@@ -1986,22 +2096,6 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_keeps_the_message_it_is_of() {
-        let menu = MessageMenu::new("chat-7", &own_message(0), false, false, 0, 1.0);
-        assert_eq!(menu.chat_id(), "chat-7");
-        assert_eq!(menu.message_id(), "message-1");
-        assert!(menu.is_from_me());
-        assert!(!menu.pinned());
-        // port: the copy of the message puts the text of the message in the
-        // clipboard.
-        assert_eq!(menu.text(), "hello");
-
-        let mut pinned = MessageMenu::new("chat-7", &own_message(0), false, false, 0, 1.0);
-        pinned.set_pinned(true);
-        assert!(pinned.pinned());
-    }
-
-    #[test]
     fn the_search_of_the_forward_finds_the_title_and_the_phone() {
         let chats = vec![
             chat("chat-1", "Fast friend", "5493800000001"),
@@ -2013,13 +2107,8 @@ mod tests {
         assert_eq!(filter_chats(&chats, "").len(), 2);
         assert_eq!(filter_chats(&chats, "  ").len(), 2);
         assert_eq!(filter_chats(&chats, "nobody").len(), 0);
-    }
-
-    #[test]
-    fn the_search_of_the_forward_ignores_the_case_and_the_spaces_around() {
-        let chats = [chat("chat-1", "Fast friend", "5493800000001")];
+        // The search ignores the case and the spaces around the needle.
         assert!(chat_matches(&chats[0], "fast friend"));
-        assert!(chat_matches(&chats[0], ""));
         assert!(!chat_matches(&chats[0], "family"));
     }
 
@@ -2094,32 +2183,6 @@ mod tests {
         assert_eq!(form.options(), &["Yes".to_string(), "No".to_string()]);
     }
 
-    #[test]
-    fn the_menu_of_the_clip_has_the_three_kinds_of_the_oracle() {
-        let kinds = attachment_kinds();
-        assert_eq!(kinds.len(), 3);
-        assert_eq!(kinds[0].label, "Document");
-        assert_eq!(kinds[1].label, "Video");
-        assert_eq!(kinds[2].label, "Audio");
-        assert_eq!(
-            kinds.iter().map(|item| item.prompt).collect::<Vec<&str>>(),
-            vec!["Choose documents", "Choose videos", "Choose audio files"]
-        );
-    }
-
-    #[test]
-    fn the_button_of_the_clip_opens_and_closes_its_menu() {
-        let mut bar = AttachmentBar::new(1.0);
-        assert!(!bar.open());
-        bar.set_open(true);
-        assert!(bar.open());
-        bar.set_open(false);
-        assert!(!bar.open());
-        assert!(bar.enabled());
-        bar.set_enabled(false);
-        assert!(!bar.enabled());
-    }
-
     /// The panel of the menu is drawn where the pointer is: the bug was that it
     /// landed below the app, as wide as the window.
     #[test]
@@ -2143,7 +2206,23 @@ mod tests {
             px(340.),
             px(8.),
         );
-        assert_eq!(origin, point(px(762.), px(352.)));
+        assert_eq!(origin, point(px(762.), px(350.)));
+    }
+
+    #[test]
+    fn the_menu_opens_upward_when_near_the_bottom_so_bottom_actions_and_message_stay_visible() {
+        let origin = floating_origin(
+            point(px(900.), px(720.)),
+            gpui::size(px(1200.), px(800.)),
+            px(230.),
+            px(300.),
+            px(8.),
+        );
+        // Abre hacia arriba desde la posición del clic (720 - 300 = 420):
+        assert_eq!(origin, point(px(900.), px(420.)));
+        // La parte inferior del menú queda a la altura del clic (420 + 300 = 720):
+        // Las acciones peligrosas ("Eliminar para mí") quedan junto al puntero y
+        // el mensaje de abajo no queda tapado por el menú que se alza.
     }
 
     #[test]
@@ -2156,5 +2235,18 @@ mod tests {
             px(8.),
         );
         assert_eq!(origin, point(px(8.), px(8.)));
+    }
+
+    #[test]
+    fn the_menu_of_the_clip_has_the_three_kinds_of_the_oracle() {
+        let kinds = attachment_kinds();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds[0].label, "Document");
+        assert_eq!(kinds[1].label, "Video");
+        assert_eq!(kinds[2].label, "Audio");
+        assert_eq!(
+            kinds.iter().map(|item| item.prompt).collect::<Vec<&str>>(),
+            vec!["Choose documents", "Choose videos", "Choose audio files"]
+        );
     }
 }

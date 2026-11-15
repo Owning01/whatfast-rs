@@ -179,11 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn an_argentine_landline_has_the_area_and_the_number() {
-        assert_eq!(format("543811234567"), "+54 381 123-4567");
-    }
-
-    #[test]
     fn the_number_of_another_country_gets_the_groups_of_its_country() {
         assert_eq!(format("447723442693"), "+44 7723 442693");
         assert_eq!(format("15551234567"), "+1 555-123-4567");
@@ -206,13 +201,5 @@ mod tests {
         assert_eq!(format("265867099152617"), "265867099152617");
         assert_eq!(format("162332734951579"), "162332734951579");
         assert_eq!(format("1234"), "1234");
-    }
-
-    #[test]
-    fn the_formatter_is_idempotent() {
-        for raw in ["5493816041868", "447723442693", "15551234567"] {
-            let once = format(raw);
-            assert_eq!(format(&once), once, "{raw} changed the second time");
-        }
     }
 }

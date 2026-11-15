@@ -14,6 +14,7 @@
 //!
 //! The modules:
 //! - `app`: the state of the application and the actions that change it
+//! - `clipboard_image`: the picture of the viewer copied as a DIB of Windows
 //! - `rpc`: the lifecycle of the requests towards the sidecar
 //! - `render`: the drawing of every panel
 //! - `attachments`: the card of a file that comes with a message
@@ -61,15 +62,16 @@ mod automations_panel;
 mod call_audio;
 mod call_video;
 mod chat_drafts;
+mod clipboard_image;
 mod composer_drafts;
 mod composer_attachments;
-// The document engine (markdown blocks and diagrams) is implemented but not
-// wired into the bubble yet. The feature keeps it compiling and tested when
-// someone asks for it, without 18 dead-code warnings on every build.
-#[cfg(feature = "documents")]
 mod document;
+mod command_palette;
+mod dev_stats;
 mod emoji_font;
 mod emoji_recent;
+mod export;
+mod gif_tray;
 mod harness_logos;
 mod helpers;
 mod icons;
@@ -80,19 +82,24 @@ mod media_editor;
 mod media_overlays;
 mod members;
 mod message_actions;
+mod mini_player;
 mod navrail;
 mod newsletters;
 mod notifications;
 mod quick_ask;
 mod recording;
 mod render;
+mod shortcuts_help;
 mod rpc;
+mod sounds;
+mod spellcheck;
 mod statuses;
 mod status_seen;
 mod stickers;
 mod tabs;
 mod text;
 mod tokens;
+mod translate;
 mod tray;
 mod ubicaciones;
 mod update;
@@ -101,6 +108,7 @@ mod video;
 use app::Whatfast;
 
 fn main() {
+    dev_stats::record_boot_start();
     // The same executable is the MCP server of the agents: `whatfast mcp
     // --agent <id>` runs before any window exists and before the instance
     // lock, because an agent works while the application is open.
@@ -129,6 +137,7 @@ fn main() {
             // la aplicacion y entra en el sistema de texto antes de la
             // primera ventana.
             emoji_font::install(cx);
+            dev_stats::record_emoji_font_ready();
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-tab", app::CycleRecentChat, None),
@@ -156,6 +165,25 @@ fn main() {
                 KeyBinding::new("alt-down", app::SelectNextChat, None),
                 KeyBinding::new("ctrl-,", app::OpenSettingsAction, None),
                 KeyBinding::new("cmd-,", app::OpenSettingsAction, None),
+                KeyBinding::new("ctrl-shift-d", app::OpenDevStats, None),
+                KeyBinding::new("ctrl-k", app::OpenCommandPalette, None),
+                KeyBinding::new("cmd-k", app::OpenCommandPalette, None),
+                KeyBinding::new("ctrl-l", app::LockAppAction, None),
+                KeyBinding::new("cmd-l", app::LockAppAction, None),
+                KeyBinding::new("f6", app::CyclePaneFocus, None),
+                KeyBinding::new("shift-f6", app::CyclePaneFocusReverse, None),
+                KeyBinding::new("ctrl-e", app::FocusComposerAction, None),
+                KeyBinding::new("cmd-e", app::FocusComposerAction, None),
+                KeyBinding::new("ctrl-=", app::ZoomInAction, None),
+                KeyBinding::new("ctrl-+", app::ZoomInAction, None),
+                KeyBinding::new("cmd-=", app::ZoomInAction, None),
+                KeyBinding::new("ctrl--", app::ZoomOutAction, None),
+                KeyBinding::new("cmd--", app::ZoomOutAction, None),
+                KeyBinding::new("ctrl-0", app::ZoomResetAction, None),
+                KeyBinding::new("cmd-0", app::ZoomResetAction, None),
+                KeyBinding::new("ctrl-/", app::ToggleShortcutsHelp, None),
+                KeyBinding::new("cmd-/", app::ToggleShortcutsHelp, None),
+                KeyBinding::new("f1", app::ToggleShortcutsHelp, None),
             ]);
             // The theme of Whatfast goes over the one of `gpui_component`: the
             // mode comes first, because `Theme::change` rewrites every color from
@@ -180,6 +208,11 @@ fn main() {
                 cx,
             );
             tokens::apply_theme(&theme, scale, cx);
+            tokens::apply_accessibility_colors(
+                settings.high_contrast,
+                theme.appearance != whatfast_core::theme::ThemeAppearance::Light,
+                cx,
+            );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
                 window_min_size: Some(size(px(480.), px(560.))),
@@ -191,6 +224,7 @@ fn main() {
                     // it the window of the app has no name in the system.
                     window.set_window_title("Whatfast");
                     let app = cx.new(|cx| Whatfast::new(window, cx));
+                    dev_stats::record_window_ready();
                     // Fallback for when focus is lost or points at an unmounted
                     // element: in that state the root div is off the dispatch path
                     // and its on_action handlers never run, so also handle the

@@ -592,11 +592,16 @@ impl Db {
 
     /// How many messages the agent sent since the instant, which is what the
     /// ceiling of messages per hour counts.
+    ///
+    /// The names are the ones the serve loop logs for an agent: a text, a
+    /// picture and a file are all one message of the ceiling.
     pub fn sends_since(&self, agent_id: &str, since_ms: i64) -> rusqlite::Result<u32> {
         self.read(|conn| {
             conn.query_row(
                 "SELECT COUNT(*) FROM agent_calls
-                 WHERE agent_id=?1 AND tool='message_send' AND ok=1 AND at_ms>=?2",
+                 WHERE agent_id=?1
+                   AND tool IN ('send_text','send_image','send_attachment')
+                   AND ok=1 AND at_ms>=?2",
                 params![agent_id, since_ms],
                 |row| row.get(0),
             )
@@ -921,12 +926,10 @@ mod tests {
         let stored: String = db
             .read(|conn| conn.query_row("SELECT token_hash FROM agents", [], |row| row.get(0)))
             .expect("hash");
-        assert_ne!(stored, "secreto");
-        assert_eq!(stored.len(), 64);
-        assert!(
-            stored
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
+        // The SHA-256 of "secreto", computed outside the crate.
+        assert_eq!(
+            stored,
+            "df733656293a19c54f69093ba916f0a1a2a3c151fc95c13f3a794c2631eeb3a6"
         );
     }
 
@@ -1004,14 +1007,33 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0], call);
         assert!(db.calls("cursor", 10).expect("read").is_empty());
+
+        // Fill the log past the cap: the first call is the oldest and must go.
+        for index in 0..CALLS_KEPT {
+            db.record_call(&call, 2_000 + index).expect("record");
+        }
+        let kept = db.calls("codex", CALLS_KEPT as u32).expect("read");
+        assert_eq!(kept.len() as i64, CALLS_KEPT);
+        let oldest: i64 = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT MIN(at_ms) FROM agent_calls WHERE agent_id='codex'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("oldest");
+        assert_eq!(oldest, 2_000, "the oldest call was dropped");
     }
 
     #[test]
     fn only_a_successful_send_counts_for_the_ceiling() {
         let db = Db::in_memory().expect("db");
+        // The names are the ones the serve loop logs: `send_text`,
+        // `send_image` and `send_attachment`.
         let ok = Call {
             agent_id: "codex".into(),
-            tool: "message_send".into(),
+            tool: "send_text".into(),
             chat_id: None,
             ok: true,
             ms: 5,
@@ -1023,15 +1045,20 @@ mod tests {
             ..ok.clone()
         };
         let read = Call {
-            tool: "messages_read".into(),
+            tool: "list_messages".into(),
+            ..ok.clone()
+        };
+        let file = Call {
+            tool: "send_attachment".into(),
             ..ok.clone()
         };
         db.record_call(&ok, 1_000).expect("record");
         db.record_call(&ok, 2_000).expect("record");
+        db.record_call(&file, 2_100).expect("record");
         db.record_call(&failed, 2_500).expect("record");
         db.record_call(&read, 2_600).expect("record");
-        assert_eq!(db.sends_since("codex", 0).expect("count"), 2);
-        assert_eq!(db.sends_since("codex", 1_500).expect("count"), 1);
+        assert_eq!(db.sends_since("codex", 0).expect("count"), 3);
+        assert_eq!(db.sends_since("codex", 1_500).expect("count"), 2);
     }
 
     #[test]

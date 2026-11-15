@@ -144,8 +144,10 @@ fn family_name(bytes: &[u8]) -> Option<String> {
             let text = bytes.get(storage + offset..storage + offset + length)?;
             let name = if platform == 3 || platform == 0 {
                 let units: Vec<u16> = text
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_be_bytes(*pair))
                     .collect();
                 String::from_utf16(&units).ok()?
             } else {

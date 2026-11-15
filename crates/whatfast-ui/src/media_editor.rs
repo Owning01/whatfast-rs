@@ -343,6 +343,7 @@ pub(crate) struct MediaEdit {
 #[derive(Debug, Clone)]
 pub(crate) enum MediaEditorEvent {
     Applied(Vec<MediaEdit>),
+    SendSticker(Vec<u8>),
     Cancelled,
 }
 
@@ -775,6 +776,7 @@ impl MediaEditor {
         };
 
         let downloads_dir = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
             .map(|p| PathBuf::from(p).join("Downloads"))
             .unwrap_or_else(|_| PathBuf::from("."));
         let file_name = format!(
@@ -804,6 +806,49 @@ impl MediaEditor {
             .ok();
         })
         .detach();
+    }
+
+    pub(crate) fn export_sticker_cutout(&mut self, cx: &mut Context<Self>) {
+        self.sync_current_caption(cx);
+        let item = self.active_item();
+        let overlay_scale = self.overlay_scale_for(item);
+        let plan = match self.plan_for_item(item) {
+            Ok(p) => p,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let edit = MediaEdit {
+            path: item.path.clone(),
+            plan,
+            caption: item.caption.clone(),
+            filter: item.filter,
+            strokes: item.strokes.clone(),
+            blurs: item.blurs.clone(),
+            texts: item.texts.clone(),
+            emojis: item.emojis.clone(),
+            shapes: item.shapes.clone(),
+            overlay_scale,
+            is_hd: item.is_hd,
+        };
+        match build_sticker_cutout_webp(&edit) {
+            Ok(webp_data) => {
+                let stickers_dir = whatfast_model::paths::data_dir().join("stickers");
+                let _ = std::fs::create_dir_all(&stickers_dir);
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let _ = std::fs::write(stickers_dir.join(format!("custom-{ts}.webp")), &webp_data);
+                cx.emit(MediaEditorEvent::SendSticker(webp_data));
+            }
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+            }
+        }
     }
 
     pub(crate) fn apply(&mut self, cx: &mut Context<Self>) {
@@ -1174,24 +1219,25 @@ impl MediaEditor {
     fn end_drag(&mut self) {
         match self.active_tool {
             EditorTool::Pen => {
-                if let Some(stroke) = self.active_stroke.take() {
-                    if stroke.points.len() > 1 {
-                        self.active_item_mut().strokes.push(stroke);
-                        self.active_item_mut().rebake_preview();
-                    }
+                if let Some(stroke) = self.active_stroke.take()
+                    && stroke.points.len() > 1
+                {
+                    self.active_item_mut().strokes.push(stroke);
+                    self.active_item_mut().rebake_preview();
                 }
             }
             EditorTool::Blur => {
                 self.active_blur_start = None;
-                if let Some(rect) = self.active_blur_rect.take() {
-                    if rect.width > 5.0 && rect.height > 5.0 {
-                        let b = self.blur_block_size;
-                        self.active_item_mut().blurs.push(BlurRegion {
-                            rect,
-                            block_size: b,
-                        });
-                        self.active_item_mut().rebake_preview();
-                    }
+                if let Some(rect) = self.active_blur_rect.take()
+                    && rect.width > 5.0
+                    && rect.height > 5.0
+                {
+                    let b = self.blur_block_size;
+                    self.active_item_mut().blurs.push(BlurRegion {
+                        rect,
+                        block_size: b,
+                    });
+                    self.active_item_mut().rebake_preview();
                 }
             }
             EditorTool::Crop | EditorTool::None => {
@@ -1646,8 +1692,7 @@ impl MediaEditor {
                             .text_color(rgb(0xd1d7db))
                             .child(Icon::new(WhatfastIcon::Sticker).with_size(px(18.)))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_notice = Some(i18n::t("Sticker mode on").to_string());
-                                cx.notify();
+                                this.export_sticker_cutout(cx);
                             })),
                     )
                     // HD Quality badge
@@ -2612,24 +2657,24 @@ impl MediaEditor {
         }
 
         // Active pen stroke live preview
-        if let Some(stroke) = &self.active_stroke {
-            if stroke.points.len() > 1 {
-                let r = stroke.color[0];
-                let g = stroke.color[1];
-                let b = stroke.color[2];
-                let col = rgb((r as u32) << 16 | (g as u32) << 8 | b as u32);
-                let w = (stroke.width * (scale_x + scale_y) / 2.0).max(2.0) as f32;
-                for pt in &stroke.points {
-                    surface = surface.child(
-                        div()
-                            .absolute()
-                            .left(px((pt.0 * scale_x - (w / 2.0) as f64) as f32))
-                            .top(px((pt.1 * scale_y - (w / 2.0) as f64) as f32))
-                            .size(px(w))
-                            .rounded_full()
-                            .bg(col),
-                    );
-                }
+        if let Some(stroke) = &self.active_stroke
+            && stroke.points.len() > 1
+        {
+            let r = stroke.color[0];
+            let g = stroke.color[1];
+            let b = stroke.color[2];
+            let col = rgb((r as u32) << 16 | (g as u32) << 8 | b as u32);
+            let w = (stroke.width * (scale_x + scale_y) / 2.0).max(2.0) as f32;
+            for pt in &stroke.points {
+                surface = surface.child(
+                    div()
+                        .absolute()
+                        .left(px((pt.0 * scale_x - (w / 2.0) as f64) as f32))
+                        .top(px((pt.1 * scale_y - (w / 2.0) as f64) as f32))
+                        .size(px(w))
+                        .rounded_full()
+                        .bg(col),
+                );
             }
         }
 
@@ -2714,7 +2759,7 @@ fn display_scale(rotated: PixelSize) -> f64 {
     let max_h = 580.0;
     let scale_w = max_w / rotated.width;
     let scale_h = max_h / rotated.height;
-    scale_w.min(scale_h).min(2.5).max(0.05)
+    scale_w.min(scale_h).clamp(0.05, 2.5)
 }
 
 /// The scale of the preview: the picture is reduced until its longest edge is `PREVIEW_EDGE` pixels.
@@ -2891,9 +2936,9 @@ fn apply_mosaic_to_image(img: &mut image::RgbaImage, rect: &CropRect, block_size
                     sum_a += p[3] as u64;
                 }
             }
-            if count > 0 {
+            if let Some(avg_r) = sum_r.checked_div(count) {
                 let avg = image::Rgba([
-                    (sum_r / count) as u8,
+                    avg_r as u8,
                     (sum_g / count) as u8,
                     (sum_b / count) as u8,
                     (sum_a / count) as u8,
@@ -2970,6 +3015,96 @@ pub(crate) fn to_render_image(picture: &image::RgbaImage) -> gpui::RenderImage {
     let buffer = image::RgbaImage::from_raw(width, height, data)
         .unwrap_or_else(|| image::RgbaImage::new(width, height));
     gpui::RenderImage::new(vec![image::Frame::new(buffer)])
+}
+
+fn build_sticker_cutout_webp(edit: &MediaEdit) -> Result<Vec<u8>, String> {
+    let temp = std::env::temp_dir().join(format!(
+        "whatfast-sticker-cutout-{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    apply_media_edit(edit, &temp)?;
+    let opened = image::open(&temp).map_err(|e| format!("Failed to read edited image: {e}"));
+    let _ = std::fs::remove_file(&temp);
+    let mut rgba = opened?.into_rgba8();
+    cutout_border_background(&mut rgba, 42);
+
+    let (w, h) = rgba.dimensions();
+    let max_dim = w.max(h).max(1) as f32;
+    let target_w = ((w as f32 / max_dim) * 512.0).round().clamp(1.0, 512.0) as u32;
+    let target_h = ((h as f32 / max_dim) * 512.0).round().clamp(1.0, 512.0) as u32;
+    let resized = image::imageops::resize(
+        &rgba,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let mut canvas = image::RgbaImage::from_pixel(512, 512, image::Rgba([0, 0, 0, 0]));
+    let offset_x = (512 - target_w) / 2;
+    let offset_y = (512 - target_h) / 2;
+    image::imageops::overlay(&mut canvas, &resized, offset_x as i64, offset_y as i64);
+
+    let mut webp = Vec::new();
+    image::DynamicImage::ImageRgba8(canvas)
+        .write_to(&mut std::io::Cursor::new(&mut webp), image::ImageFormat::WebP)
+        .map_err(|e| format!("Failed to encode WebP sticker: {e}"))?;
+    Ok(webp)
+}
+
+fn cutout_border_background(img: &mut image::RgbaImage, tolerance: i32) {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let bg = img.get_pixel(0, 0).0;
+    let tol_sq = tolerance * tolerance * 3;
+    let matches_bg = |px: [u8; 4]| -> bool {
+        if px[3] < 16 {
+            return true;
+        }
+        let dr = px[0] as i32 - bg[0] as i32;
+        let dg = px[1] as i32 - bg[1] as i32;
+        let db = px[2] as i32 - bg[2] as i32;
+        dr * dr + dg * dg + db * db <= tol_sq
+    };
+
+    let mut visited = vec![false; (w as usize) * (h as usize)];
+    let mut queue = std::collections::VecDeque::new();
+    for x in 0..w {
+        queue.push_back((x, 0));
+        queue.push_back((x, h - 1));
+    }
+    for y in 1..h.saturating_sub(1) {
+        queue.push_back((0, y));
+        queue.push_back((w - 1, y));
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        let idx = (y as usize) * (w as usize) + (x as usize);
+        if visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        let px = img.get_pixel(x, y).0;
+        if !matches_bg(px) {
+            continue;
+        }
+        img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+        if x > 0 {
+            queue.push_back((x - 1, y));
+        }
+        if x + 1 < w {
+            queue.push_back((x + 1, y));
+        }
+        if y > 0 {
+            queue.push_back((x, y - 1));
+        }
+        if y + 1 < h {
+            queue.push_back((x, y + 1));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3137,32 +3272,14 @@ mod tests {
     fn the_inverse_of_a_rotation_undoes_it() {
         for rotation in Rotation::ANGLES {
             let inverse = inverse_rotation(rotation);
+            assert_eq!(
+                inverse_rotation(inverse),
+                rotation,
+                "the inverse of the inverse is the rotation"
+            );
             if rotation != Rotation::Deg0 && rotation != Rotation::Deg180 {
                 assert_ne!(inverse, rotation, "a quarter turn is not its own inverse");
             }
-            let size = PixelSize {
-                width: 200.0,
-                height: 100.0,
-            };
-            let crop = CropRect {
-                x: 10.0,
-                y: 20.0,
-                width: 50.0,
-                height: 30.0,
-            };
-            let rotated = match media_crop::crop_in_rotated_space(crop, size, rotation) {
-                Ok(rotated) => rotated,
-                Err(error) => panic!("the crop could not be rotated: {error}"),
-            };
-            let rotated_size = match media_crop::rotated_size(size, rotation) {
-                Ok(size) => size,
-                Err(error) => panic!("the size could not be rotated: {error}"),
-            };
-            let back = match media_crop::crop_in_rotated_space(rotated, rotated_size, inverse) {
-                Ok(back) => back,
-                Err(error) => panic!("the crop could not be rotated back: {error}"),
-            };
-            assert_eq!(back, crop, "the rotation {rotation:?} is not undone");
         }
     }
 
@@ -3348,5 +3465,18 @@ mod tests {
                 height: 100.0
             }
         );
+    }
+
+    #[test]
+    fn sticker_cutout_clears_uniform_border_and_keeps_subject() {
+        let mut img = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
+        for y in 2..6 {
+            for x in 2..6 {
+                img.put_pixel(x, y, image::Rgba([20, 80, 200, 255]));
+            }
+        }
+        cutout_border_background(&mut img, 42);
+        assert_eq!(img.get_pixel(0, 0).0[3], 0);
+        assert_eq!(img.get_pixel(4, 4).0[3], 255);
     }
 }

@@ -24,7 +24,9 @@ use crate::db::Store;
 pub enum Who {
     /// The desktop, or a local client the profile has not registered yet.
     User,
-    /// One connected harness, with the grant read at the handshake.
+    /// One connected harness. The grant is the one of the handshake: it is a
+    /// snapshot, and [`Guard::check`] reads the row again because the user
+    /// edits it while the connection stays open.
     Agent { id: String, grant: Grant },
     /// A client that named an agent and could not prove it.
     Denied(String),
@@ -95,11 +97,6 @@ impl Guard {
         &self.db
     }
 
-    /// The local offset of the profile.
-    pub fn offset_minutes(&self) -> i32 {
-        self.offset_minutes
-    }
-
     /// Who is on the other side of a handshake.
     ///
     /// A client that names no agent is the user. A client that names one needs
@@ -146,9 +143,33 @@ impl Guard {
         }
     }
 
+    /// The grant that is in force right now for one agent.
+    ///
+    /// The row is read for every request: a harness holds its connection for
+    /// days, and the user widens or narrows its grant from the interface
+    /// whenever they want. A row that cannot be read, a missing row and a
+    /// revoked agent all close the door, never open it.
+    pub(crate) fn current_grant(&self, id: &str) -> Result<Grant, Denied> {
+        match self.db.agent(id) {
+            Ok(Some(agent)) if agent.live() => Ok(agent.grant),
+            Ok(Some(_)) => Err(Denied {
+                code: "unauthorized",
+                message: format!("the agent {id} was disconnected"),
+            }),
+            Ok(None) => Err(Denied {
+                code: "unauthorized",
+                message: format!("the agent {id} is not connected: connect it from Whatfast"),
+            }),
+            Err(error) => Err(Denied {
+                code: "unauthorized",
+                message: format!("agents.db: {error}"),
+            }),
+        }
+    }
+
     /// Whether the request may be answered, given who asked.
     pub fn check(&self, who: &Who, request: &Request, store: &Store) -> Result<(), Denied> {
-        let Who::Agent { id, grant } = who else {
+        let Who::Agent { id, .. } = who else {
             return match who {
                 Who::User => Ok(()),
                 Who::Denied(reason) => Err(Denied {
@@ -158,6 +179,13 @@ impl Guard {
                 Who::Agent { .. } => Ok(()),
             };
         };
+        // The identity of a connection is fixed at its `Hello`, and a harness
+        // keeps that connection for days. The grant the user edits in the
+        // interface has to reach it without a reconnect: `agents.db` is the
+        // truth of every request, not the snapshot of the handshake. The same
+        // read closes the door the moment the user disconnects the agent.
+        let current = self.current_grant(id)?;
+        let grant = &current;
         match request {
             // Reading a chat: the grant has to cover it.
             Request::ListMessages(request) => {
@@ -197,6 +225,23 @@ impl Guard {
                 self.readable(id, grant, &request.chat_id, store, Scope::Send)?;
                 self.within_limits(id, grant)
             }
+            // A file and a picture are messages too: the same chat, the same
+            // scope and the same ceiling as a text. The MCP server has a tool
+            // for each one, so leaving them out closed the door on every file
+            // an agent tried to send.
+            Request::SendImage(request) => {
+                self.readable(id, grant, &request.chat_id, store, Scope::Send)?;
+                self.within_limits(id, grant)
+            }
+            Request::SendAttachment(request) => {
+                self.readable(id, grant, &request.chat_id, store, Scope::Send)?;
+                self.within_limits(id, grant)
+            }
+            // A reaction touches a message that is already there: it needs the
+            // send scope, but it is not one more message of the hour.
+            Request::SendReaction(request) => {
+                self.readable(id, grant, &request.chat_id, store, Scope::Send)
+            }
             // A draft is the safe way to say something in a chat the agent may
             // not send to, so the scope it needs is the lowest of the three.
             Request::DraftPropose(request) => {
@@ -234,9 +279,13 @@ impl Guard {
     /// for the desktop and return all of them, so the answer of an agent is
     /// trimmed before it leaves the process.
     pub fn filter(&self, who: &Who, response: &mut RpcResponse) {
-        let Who::Agent { grant, .. } = who else {
+        let Who::Agent { id, .. } = who else {
             return;
         };
+        // The lists follow the same rule as `check`: the row of the moment, not
+        // the snapshot of the handshake. A grant that cannot be read covers
+        // nothing, which is the empty default.
+        let grant = self.current_grant(id).unwrap_or_default();
         let Some(allow) = &grant.chats.allow else {
             return;
         };
@@ -246,21 +295,21 @@ impl Guard {
         match result {
             Response::ListChats(list) => {
                 list.chats
-                    .retain(|chat| allowed(grant, allow, &chat.transport_jid, &chat.id));
+                    .retain(|chat| allowed(&grant, allow, &chat.transport_jid, &chat.id));
                 list.total_count = list.chats.len() as u64;
             }
             Response::SearchLocal(found) => {
                 found
                     .messages
-                    .retain(|message| allowed(grant, allow, &message.chat_id, &message.chat_id));
+                    .retain(|message| allowed(&grant, allow, &message.chat_id, &message.chat_id));
                 found
                     .groups
-                    .retain(|chat| allowed(grant, allow, &chat.transport_jid, &chat.id));
+                    .retain(|chat| allowed(&grant, allow, &chat.transport_jid, &chat.id));
                 // A contact without a known conversation cannot be checked
                 // against the list, so it is not offered either.
                 found.contacts.retain(|contact| {
                     !contact.chat_id.is_empty()
-                        && allowed(grant, allow, &contact.chat_id, &contact.chat_id)
+                        && allowed(&grant, allow, &contact.chat_id, &contact.chat_id)
                 });
             }
             _ => {}
@@ -446,14 +495,6 @@ mod tests {
         assert!(is_group_jid("status@broadcast"));
         assert!(is_group_jid("120363169271016023@newsletter"));
         assert!(!is_group_jid("5491100000000@s.whatsapp.net"));
-    }
-
-    #[test]
-    fn the_local_minute_follows_the_offset() {
-        // 2026-10-26 12:00 UTC is 09:00 in UTC-3.
-        let noon = 1_793_016_000_000;
-        assert_eq!(local_minute(noon, 0), 12 * 60);
-        assert_eq!(local_minute(noon, -180), 9 * 60);
     }
 
     #[test]

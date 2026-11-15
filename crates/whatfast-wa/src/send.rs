@@ -57,6 +57,35 @@ pub(crate) fn own_sender_jid(session: &Session) -> String {
         .unwrap_or_default()
 }
 
+/// A new UUID for the `client_message_id` of a send that has no window behind
+/// it: an automation fires with nobody in front of the desk to generate one.
+pub fn uuid4() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        // A machine without entropy still needs an id: the clock keeps two
+        // sends of the same task apart.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or_default();
+        bytes[..8].copy_from_slice(&now.to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 /// The stored row of a retried `client_message_id`, or nothing when the id is
 /// new. A retry that names another chat or another payload is refused with the
 /// Go store's error instead of answering the old row.

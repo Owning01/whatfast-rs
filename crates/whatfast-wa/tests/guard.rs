@@ -107,6 +107,27 @@ fn send_text(chat_id: &str) -> whatfast_protocol::rpc_request::Request {
     })
 }
 
+fn send_attachment(chat_id: &str) -> whatfast_protocol::rpc_request::Request {
+    whatfast_protocol::rpc_request::Request::SendAttachment(
+        whatfast_protocol::SendAttachmentRequest {
+            client_message_id: "3f0f7f0e-0000-4000-8000-000000000001".into(),
+            chat_id: chat_id.to_owned(),
+            file_path: "C:\\archivos\\informe.pdf".into(),
+            kind: whatfast_protocol::AttachmentKind::Document as i32,
+            ..Default::default()
+        },
+    )
+}
+
+fn send_image(chat_id: &str) -> whatfast_protocol::rpc_request::Request {
+    whatfast_protocol::rpc_request::Request::SendImage(whatfast_protocol::SendImageRequest {
+        client_message_id: "3f0f7f0e-0000-4000-8000-000000000002".into(),
+        chat_id: chat_id.to_owned(),
+        image_path: "C:\\archivos\\foto.jpg".into(),
+        ..Default::default()
+    })
+}
+
 #[test]
 fn a_client_without_an_agent_is_the_user() {
     let (_profile, store, guard) = profile("user");
@@ -194,6 +215,124 @@ fn a_read_grant_cannot_send() {
     assert_eq!(denied.code, "forbidden");
 }
 
+/// The file tools of the MCP server are sends: the grant of the agent has to
+/// cover them, and a file goes out through the same door as a text.
+#[test]
+fn a_send_grant_sends_files_to_its_chats() {
+    let (_profile, store, guard) = profile("files");
+    connect(
+        &guard,
+        "codex",
+        Scope::Send,
+        ChatFilter::only(vec!["5491100000000@s.whatsapp.net".into()]),
+        0,
+        None,
+    );
+    let who = guard.identify("codex", "token-de-prueba");
+    assert!(
+        guard
+            .check(
+                &who,
+                &send_attachment("5491100000000@s.whatsapp.net"),
+                &store
+            )
+            .is_ok()
+    );
+    assert!(
+        guard
+            .check(&who, &send_image("5491100000000@s.whatsapp.net"), &store)
+            .is_ok()
+    );
+    // The chat outside the grant stays closed for a file too.
+    let denied = guard
+        .check(&who, &send_attachment("120363169271016023@g.us"), &store)
+        .expect_err("the group is not in the grant");
+    assert_eq!(denied.code, "forbidden");
+}
+
+/// The user widens the grant of an agent that is still connected: the next
+/// request of the open connection has to see the new permission. This is the
+/// case of the interface: the harness process lives for days and never repeats
+/// its handshake.
+#[test]
+fn a_widened_grant_reaches_a_connection_that_is_already_open() {
+    let (_profile, store, guard) = profile("live-grant");
+    connect(
+        &guard,
+        "codex",
+        Scope::Draft,
+        ChatFilter::all(),
+        0,
+        None,
+    );
+    let who = guard.identify("codex", "token-de-prueba");
+    assert_eq!(
+        guard
+            .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
+            .expect_err("a draft grant does not send")
+            .code,
+        "forbidden"
+    );
+    let widened = Grant {
+        scope: Scope::Send,
+        chats: ChatFilter::all(),
+        per_hour: 0,
+        window: None,
+        humanize: true,
+    };
+    guard.db().set_grant("codex", &widened).expect("widen");
+    assert!(
+        guard
+            .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
+            .is_ok(),
+        "the widening did not reach the open connection"
+    );
+}
+
+/// The user disconnects an agent: the open connection loses the door at once,
+/// without waiting for a new handshake.
+#[test]
+fn a_revoked_connection_is_refused_without_a_new_handshake() {
+    let (_profile, store, guard) = profile("live-revoke");
+    connect(&guard, "codex", Scope::Send, ChatFilter::all(), 0, None);
+    let who = guard.identify("codex", "token-de-prueba");
+    assert!(
+        guard
+            .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
+            .is_ok()
+    );
+    guard.db().revoke("codex", 2_000).expect("revoke");
+    let denied = guard
+        .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
+        .expect_err("a revoked agent keeps no door");
+    assert_eq!(denied.code, "unauthorized");
+}
+
+#[test]
+fn a_draft_grant_cannot_send_files() {
+    let (_profile, store, guard) = profile("files-draft");
+    connect(&guard, "codex", Scope::Draft, ChatFilter::all(), 0, None);
+    let who = guard.identify("codex", "token-de-prueba");
+    assert_eq!(
+        guard
+            .check(
+                &who,
+                &send_attachment("5491100000000@s.whatsapp.net"),
+                &store
+            )
+            .expect_err("draft does not send a file")
+            .code,
+        "forbidden"
+    );
+    assert_eq!(
+        guard
+            .check(&who, &send_image("5491100000000@s.whatsapp.net"), &store)
+            .expect_err("draft does not send a picture")
+            .code,
+        "forbidden"
+    );
+}
+
 #[test]
 fn a_send_grant_sends_inside_its_hours() {
     let (_profile, store, guard) = profile("send");
@@ -206,11 +345,14 @@ fn a_send_grant_sends_inside_its_hours() {
         Some(Window::PRUDENT),
     );
     let who = guard.identify("codex", "token-de-prueba");
-    // The window is 08:00-23:00: a message at the current minute may be inside
-    // or outside, so the test asks the clock and expects accordingly.
-    let minute = ((now_ms() - 180 * 60_000).rem_euclid(86_400_000) / 60_000) as u16;
+    // The window is 08:00-23:00 local (UTC-3). Read one fixed instant and
+    // compare its minute with the literal bounds: the expectation must not
+    // call the helper under test.
+    let now = now_ms();
+    let minute = ((now - 180 * 60_000).rem_euclid(86_400_000) / 60_000) as u16;
+    let inside = (8 * 60..23 * 60).contains(&minute);
     let verdict = guard.check(&who, &send_text("5491100000000@s.whatsapp.net"), &store);
-    if Window::PRUDENT.contains(minute) {
+    if inside {
         assert!(verdict.is_ok(), "inside the window: {verdict:?}");
     } else {
         assert_eq!(
@@ -236,9 +378,14 @@ fn a_closed_window_holds_the_message() {
         Some(night),
     );
     let who = guard.identify("codex", "token-de-prueba");
+    // The window is 03:00-04:00 local (UTC-3). Read one fixed instant and
+    // compare its minute with the literal bounds: the expectation must not
+    // call the helper under test.
+    let now = now_ms();
+    let minute = ((now - 180 * 60_000).rem_euclid(86_400_000) / 60_000) as u16;
+    let inside = (3 * 60..4 * 60).contains(&minute);
     let verdict = guard.check(&who, &send_text("5491100000000@s.whatsapp.net"), &store);
-    let minute = ((now_ms() - 180 * 60_000).rem_euclid(86_400_000) / 60_000) as u16;
-    if night.contains(minute) {
+    if inside {
         assert!(verdict.is_ok());
     } else {
         assert_eq!(
@@ -264,7 +411,7 @@ fn the_ceiling_of_the_hour_is_counted() {
         .record_call(
             &whatfast_auto::Call {
                 agent_id: "codex".into(),
-                tool: "message_send".into(),
+                tool: "send_text".into(),
                 chat_id: Some("5491100000000@s.whatsapp.net".into()),
                 ok: true,
                 ms: 10,
@@ -465,36 +612,6 @@ fn the_calls_of_an_agent_are_logged() {
         guard
             .check(&who, &list_messages("5491100000000@s.whatsapp.net"), &store)
             .is_ok()
-    );
-}
-
-#[test]
-fn the_next_turn_of_a_schedule_waits_for_the_window() {
-    let (_profile, _store, guard) = profile("next");
-    // 20:00 in UTC-3 is 23:00 UTC of the same day.
-    let noon = 1_793_016_000_000;
-    let next = guard
-        .next_turn("0 20 * * *", noon, Some(Window::PRUDENT))
-        .expect("a turn");
-    assert_eq!(next, noon + 11 * 3_600_000);
-    // A turn of 03:00 moves to the opening, 08:00 local: 11:00 UTC.
-    let night = guard
-        .next_turn("0 3 * * *", noon, Some(Window::PRUDENT))
-        .expect("a turn");
-    assert_eq!(night, noon + 23 * 3_600_000);
-}
-
-#[test]
-fn a_draft_grant_does_not_send() {
-    let (_profile, store, guard) = profile("draft");
-    connect(&guard, "codex", Scope::Draft, ChatFilter::all(), 0, None);
-    let who = guard.identify("codex", "token-de-prueba");
-    assert_eq!(
-        guard
-            .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
-            .expect_err("no send")
-            .code,
-        "forbidden"
     );
 }
 

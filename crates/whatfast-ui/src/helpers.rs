@@ -69,6 +69,19 @@ pub(crate) fn viewer_picture_size(
     )
 }
 
+/// Returns the non-empty `WHATFAST_PROFILE` environment variable cached once per process.
+pub(crate) fn active_profile_badge() -> Option<&'static str> {
+    static PROFILE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            std::env::var("WHATFAST_PROFILE")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .as_deref()
+}
+
 /// Percent-encodes a text for the query of a search engine: the spaces go as
 /// `+` and the rest of the bytes outside the unreserved set go as `%XX`.
 pub(crate) fn percent_encode(text: &str) -> String {
@@ -83,24 +96,6 @@ pub(crate) fn percent_encode(text: &str) -> String {
         }
     }
     encoded
-}
-
-/// The format of a picture file, read from its magic bytes: the clipboard of
-/// the viewer needs it to hand the bytes to the system.
-pub(crate) fn image_file_format(bytes: &[u8]) -> Option<gpui::ImageFormat> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some(gpui::ImageFormat::Png);
-    }
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some(gpui::ImageFormat::Jpeg);
-    }
-    if bytes.starts_with(b"GIF8") {
-        return Some(gpui::ImageFormat::Gif);
-    }
-    if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return Some(gpui::ImageFormat::Webp);
-    }
-    None
 }
 
 /// The pixel size of a picture, read from its header: PNG, JPEG or WebP.
@@ -507,9 +502,9 @@ mod tests {
     use whatfast_protocol::{ImageContent, MessageStatus};
 
     use super::{
-        StatusGlyph, image_file_format, image_needs_download, image_source_candidates,
-        jpeg_dimensions, message_status_glyph, percent_encode, png_dimensions,
-        viewer_picture_size, webp_dimensions,
+        StatusGlyph, image_needs_download, image_source_candidates, jpeg_dimensions,
+        message_status_glyph, percent_encode, png_dimensions, viewer_picture_size,
+        webp_dimensions,
     };
 
     /// La busqueda en la web lleva la epigrafe como consulta: los espacios y
@@ -519,29 +514,6 @@ mod tests {
         assert_eq!(percent_encode("hola mundo"), "hola+mundo");
         assert_eq!(percent_encode("añil & oro"), "a%C3%B1il+%26+oro");
         assert_eq!(percent_encode("A-Z_0.9~"), "A-Z_0.9~");
-    }
-
-    /// La foto del visor se copia al portapapeles con el formato que dice su
-    /// cabecera: el sistema no adivina el tipo de los bytes.
-    #[test]
-    fn a_picture_is_recognised_by_its_magic_bytes() {
-        assert_eq!(
-            image_file_format(b"\x89PNG\r\n\x1a\nrest"),
-            Some(gpui::ImageFormat::Png)
-        );
-        assert_eq!(
-            image_file_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
-            Some(gpui::ImageFormat::Jpeg)
-        );
-        assert_eq!(
-            image_file_format(b"RIFF\0\0\0\0WEBPVP8 "),
-            Some(gpui::ImageFormat::Webp)
-        );
-        assert_eq!(
-            image_file_format(b"GIF89a"),
-            Some(gpui::ImageFormat::Gif)
-        );
-        assert_eq!(image_file_format(b"not a picture"), None);
     }
 
     /// Un visor con el tamaño que trae el mensaje.
@@ -568,17 +540,13 @@ mod tests {
         let (width, height) = viewer_picture_size(&viewer(360, 1080), px(431.), px(222.));
         assert_eq!(height, px(222.));
         assert!((f32::from(width) - 74.).abs() < 0.5, "ancho {width:?}");
-    }
 
-    #[test]
-    fn a_wide_picture_fits_the_box_by_its_width() {
+        // A wide picture fits the box by its width.
         let (width, height) = viewer_picture_size(&viewer(1920, 1080), px(400.), px(400.));
         assert_eq!(width, px(400.));
         assert!((f32::from(height) - 225.).abs() < 0.5, "alto {height:?}");
-    }
 
-    #[test]
-    fn a_picture_never_paints_past_its_box() {
+        // No picture paints past its box.
         for (width, height) in [(360u32, 1080u32), (1080, 360), (900, 900), (1, 4000)] {
             let (drawn_width, drawn_height) =
                 viewer_picture_size(&viewer(width, height), px(500.), px(300.));
@@ -710,10 +678,7 @@ mod tests {
             message_status_glyph(MessageStatus::Failed),
             Some(StatusGlyph::Failed)
         );
-    }
-
-    #[test]
-    fn a_state_without_a_glyph_draws_nothing() {
+        // A state without a glyph draws nothing.
         assert_eq!(message_status_glyph(MessageStatus::Unspecified), None);
     }
 }

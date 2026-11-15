@@ -12,7 +12,15 @@
 //! a couple of decodes in flight, so the peak of a list of stickers stays
 //! bounded.
 
-use std::{collections::HashMap, io::Cursor, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
 use futures::FutureExt as _;
 use gpui::{
@@ -30,11 +38,14 @@ const MAX_BYTES: usize = 384 * 1024 * 1024;
 
 /// The images the cache may keep. A sticker of 244 frames already takes tens
 /// of megabytes; this bound keeps a long conversation from holding thousands.
-const MAX_ENTRIES: usize = 64;
+/// La biblioteca de stickers junta hasta tres packs de 300 celdas: con 64
+/// entradas el cache echaba las primeras para cargar las ultimas y el
+/// siguiente cuadro volvia a pedirlas, en un parpadeo sin fin.
+const MAX_ENTRIES: usize = 1024;
 
 /// How many images may be decoding at the same time. Each one holds every
 /// frame in memory before the cache can count it.
-const MAX_IN_FLIGHT: usize = 2;
+const MAX_IN_FLIGHT: usize = 4;
 
 /// El lado mayor de un sticker animado en pantalla. El archivo trae 512×512 y
 /// la burbuja lo pinta a la mitad: decodificar el doble es memoria tirada.
@@ -43,25 +54,100 @@ const ANIMATED_STICKER_EDGE: u32 = 256;
 /// El lado mayor de las fotos y de los stickers quietos.
 const PHOTO_EDGE: u32 = 2048;
 
+/// El lado mayor del cuadro quieto de la rejilla de stickers. La celda mide
+/// 76 puntos: 256 alcanza para una pantalla de doble densidad.
+const STILL_EDGE: u32 = 256;
+
+/// El prefijo de los recursos que la rejilla pide como cuadro quieto.
+///
+/// GPUI anima toda imagen con mas de un cuadro y no tiene una opcion para
+/// apagarlo. El pedido viaja en el nombre del recurso, y este cache lo
+/// reconoce: el mismo archivo entra con otra clave y se decodifica una sola
+/// vez, sin cientos de stickers animandose a la vez en una rejilla.
+pub(crate) const STILL_PREFIX: &str = "__whatfast_still__";
+
+/// El nombre con el que la rejilla de stickers pide una imagen quieta.
+pub(crate) fn still_image_source(path: &Path) -> String {
+    format!("{STILL_PREFIX}{}", path.display())
+}
+
+/// El archivo que lleva un pedido de imagen quieta, si lo es.
+fn still_path(name: &str) -> Option<PathBuf> {
+    name.strip_prefix(STILL_PREFIX).map(PathBuf::from)
+}
+
+const BATTERY_SAVER_MAX_BYTES: usize = 96 * 1024 * 1024;
+const BATTERY_SAVER_MAX_ENTRIES: usize = 256;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ImageCacheStats {
+    pub entries: usize,
+    pub max_entries: usize,
+    pub bytes: usize,
+    pub max_bytes: usize,
+    pub in_flight: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub battery_saver: bool,
+}
+
+static STAT_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static STAT_MAX_ENTRIES: AtomicUsize = AtomicUsize::new(1024);
+static STAT_BYTES: AtomicUsize = AtomicUsize::new(0);
+static STAT_MAX_BYTES: AtomicUsize = AtomicUsize::new(384 * 1024 * 1024);
+static STAT_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static STAT_HITS: AtomicU64 = AtomicU64::new(0);
+static STAT_MISSES: AtomicU64 = AtomicU64::new(0);
+static STAT_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static STAT_BATTERY_SAVER: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn stats_snapshot() -> ImageCacheStats {
+    ImageCacheStats {
+        entries: STAT_ENTRIES.load(Ordering::Relaxed),
+        max_entries: STAT_MAX_ENTRIES.load(Ordering::Relaxed),
+        bytes: STAT_BYTES.load(Ordering::Relaxed),
+        max_bytes: STAT_MAX_BYTES.load(Ordering::Relaxed),
+        in_flight: STAT_IN_FLIGHT.load(Ordering::Relaxed),
+        hits: STAT_HITS.load(Ordering::Relaxed),
+        misses: STAT_MISSES.load(Ordering::Relaxed),
+        evictions: STAT_EVICTIONS.load(Ordering::Relaxed),
+        battery_saver: STAT_BATTERY_SAVER.load(Ordering::Relaxed),
+    }
+}
+
 struct Entry {
     item: ImageCacheItem,
     /// The decoded bytes this image takes, once it finished loading.
     bytes: usize,
+    /// Monotonic access tick for O(log n) LRU eviction.
+    last_used: u64,
 }
 
 pub(crate) struct BoundedImageCache {
     entries: HashMap<u64, Entry>,
-    /// The hashes, most recently used first.
-    usage: Vec<u64>,
+    /// Monotonic LRU index: `last_used -> hash`.
+    lru: BTreeMap<u64, u64>,
+    /// Keys whose future has not resolved yet, keeping `in_flight()` O(1) and `settle()` O(in_flight).
+    loading: HashSet<u64>,
+    clock: u64,
     bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+    battery_saver: bool,
 }
 
 impl BoundedImageCache {
     pub(crate) fn new(cx: &mut App) -> Entity<Self> {
         let cache = cx.new(|_| Self {
             entries: HashMap::new(),
-            usage: Vec::new(),
+            lru: BTreeMap::new(),
+            loading: HashSet::new(),
+            clock: 0,
             bytes: 0,
+            max_bytes: MAX_BYTES,
+            max_entries: MAX_ENTRIES,
+            battery_saver: false,
         });
         // The textures live in the windows: they have to be dropped with the
         // cache or the GPU keeps them until the process ends.
@@ -71,67 +157,105 @@ impl BoundedImageCache {
                     cx.drop_image(image, None);
                 }
             }
-            cache.usage.clear();
+            cache.lru.clear();
+            cache.loading.clear();
             cache.bytes = 0;
+            cache.sync_stats();
         })
         .detach();
         cache
     }
 
-    fn touch(&mut self, hash: u64) {
-        if let Some(position) = self.usage.iter().position(|item| *item == hash) {
-            self.usage.remove(position);
+    pub(crate) fn set_battery_saver(&mut self, enabled: bool) {
+        self.battery_saver = enabled;
+        if enabled {
+            self.max_bytes = BATTERY_SAVER_MAX_BYTES;
+            self.max_entries = BATTERY_SAVER_MAX_ENTRIES;
+        } else {
+            self.max_bytes = MAX_BYTES;
+            self.max_entries = MAX_ENTRIES;
         }
-        self.usage.insert(0, hash);
+        self.sync_stats();
+    }
+
+    fn sync_stats(&self) {
+        STAT_ENTRIES.store(self.entries.len(), Ordering::Relaxed);
+        STAT_MAX_ENTRIES.store(self.max_entries, Ordering::Relaxed);
+        STAT_BYTES.store(self.bytes, Ordering::Relaxed);
+        STAT_MAX_BYTES.store(self.max_bytes, Ordering::Relaxed);
+        STAT_IN_FLIGHT.store(self.loading.len(), Ordering::Relaxed);
+        STAT_BATTERY_SAVER.store(self.battery_saver, Ordering::Relaxed);
+    }
+
+    fn touch(&mut self, hash: u64) {
+        self.clock = self.clock.wrapping_add(1);
+        let tick = self.clock;
+        if let Some(entry) = self.entries.get_mut(&hash) {
+            if entry.last_used != 0 {
+                self.lru.remove(&entry.last_used);
+            }
+            entry.last_used = tick;
+            self.lru.insert(tick, hash);
+        }
     }
 
     fn in_flight(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|entry| matches!(entry.item, ImageCacheItem::Loading(_)))
-            .count()
+        self.loading.len()
     }
 
     /// Moves the decodes that finished to their final size, even when the
-    /// image was not drawn again. Without this an image that scrolled away
-    /// stays counted as in flight forever, and two of those would stop every
-    /// later load.
+    /// image was not drawn again. Only inspects keys still in `loading`.
     fn settle(&mut self) {
+        if self.loading.is_empty() {
+            return;
+        }
+        let mut finished = Vec::new();
         let mut decoded = 0usize;
-        for entry in self.entries.values_mut() {
-            if entry.bytes == 0
-                && matches!(entry.item, ImageCacheItem::Loading(_))
-                && let Some(Ok(image)) = entry.item.get()
-            {
-                entry.bytes = decoded_bytes(&image);
-                decoded = decoded.saturating_add(entry.bytes);
+        for &key in &self.loading {
+            let Some(entry) = self.entries.get_mut(&key) else {
+                finished.push(key);
+                continue;
+            };
+            if let Some(result) = entry.item.get() {
+                if let Ok(image) = result
+                    && entry.bytes == 0
+                {
+                    entry.bytes = decoded_bytes(&image);
+                    decoded = decoded.saturating_add(entry.bytes);
+                }
+                finished.push(key);
             }
+        }
+        for key in finished {
+            self.loading.remove(&key);
         }
         self.bytes = self.bytes.saturating_add(decoded);
     }
 
     /// Drops the least recently used images until the budget is met again.
-    ///
-    /// `keep` is the image of this draw: it is never dropped, even when it is
-    /// alone over the budget, because the frame about to paint needs it.
-    ///
-    /// The textures leave on a deferred callback: `load` runs inside the
-    /// paint, and taking a texture out of the sprite atlas in the middle of
-    /// it is not safe.
     fn evict(&mut self, keep: u64, _window: &mut Window, cx: &mut App) {
         let mut dropped: Vec<Arc<RenderImage>> = Vec::new();
-        while self.bytes > MAX_BYTES || self.entries.len() > MAX_ENTRIES {
-            let Some(position) = self.usage.iter().rposition(|hash| *hash != keep) else {
+        let mut kept_tick: Option<u64> = None;
+        while self.bytes > self.max_bytes || self.entries.len() > self.max_entries {
+            let Some((tick, hash)) = self.lru.pop_first() else {
                 break;
             };
-            let hash = self.usage.remove(position);
+            if hash == keep {
+                kept_tick = Some(tick);
+                continue;
+            }
+            self.loading.remove(&hash);
             let Some(mut entry) = self.entries.remove(&hash) else {
                 continue;
             };
             self.bytes = self.bytes.saturating_sub(entry.bytes);
+            STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
             if let Some(Ok(image)) = entry.item.get() {
                 dropped.push(image);
             }
+        }
+        if let Some(tick) = kept_tick {
+            self.lru.insert(tick, keep);
         }
         if dropped.is_empty() {
             return;
@@ -154,15 +278,24 @@ impl ImageCache for BoundedImageCache {
         let key = hash(resource);
         self.settle();
         let loaded = if let Some(entry) = self.entries.get_mut(&key) {
+            STAT_HITS.fetch_add(1, Ordering::Relaxed);
             entry.item.get()
         } else {
+            STAT_MISSES.fetch_add(1, Ordering::Relaxed);
             // A decode of every visible sticker at once is what made the
             // process reach gigabytes: the skipped ones are retried on the
             // next draw, when one of these two finished.
             if self.in_flight() >= MAX_IN_FLIGHT {
+                self.sync_stats();
                 return None;
             }
             let task = match resource {
+                Resource::Embedded(name) if name.starts_with(STILL_PREFIX) => {
+                    let path = still_path(name).expect("the prefix was just checked");
+                    cx.background_executor()
+                        .spawn(async move { decode_still_path(&path) })
+                        .shared()
+                }
                 Resource::Path(path) if is_not_svg(path) => {
                     let path = path.clone();
                     cx.background_executor()
@@ -179,8 +312,10 @@ impl ImageCache for BoundedImageCache {
                 Entry {
                     item: ImageCacheItem::Loading(task.clone()),
                     bytes: 0,
+                    last_used: 0,
                 },
             );
+            self.loading.insert(key);
             // A load that finished after the draw has to ask for the next
             // frame, or the image stays blank until something else repaints.
             let view = window.current_view();
@@ -194,6 +329,7 @@ impl ImageCache for BoundedImageCache {
         };
         self.touch(key);
         self.evict(key, window, cx);
+        self.sync_stats();
         loaded
     }
 }
@@ -212,7 +348,7 @@ fn decode_path(path: &Path) -> Result<Arc<RenderImage>, ImageCacheError> {
     let frames = match format {
         ImageFormat::Gif => decode_gif(&bytes)?,
         ImageFormat::WebP => decode_webp(&bytes)?,
-        _ => vec![still_frame(&bytes, format)?],
+        _ => vec![still_frame(&bytes, format, PHOTO_EDGE)?],
     };
     if frames.is_empty() {
         return Err(other("the image could not be decoded: no frames"));
@@ -229,7 +365,11 @@ fn decode_webp(bytes: &[u8]) -> Result<Vec<Frame>, ImageCacheError> {
     let mut decoder =
         WebPDecoder::new(Cursor::new(bytes)).map_err(image_error)?;
     if !decoder.has_animation() {
-        return Ok(vec![still_frame(bytes, ImageFormat::WebP)?]);
+        return Ok(vec![still_frame(
+            bytes,
+            ImageFormat::WebP,
+            ANIMATED_STICKER_EDGE * 2,
+        )?]);
     }
     let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
     animated_frames(decoder)
@@ -248,16 +388,50 @@ fn animated_frames<'a>(
     Ok(frames)
 }
 
-fn still_frame(bytes: &[u8], format: ImageFormat) -> Result<Frame, ImageCacheError> {
+/// Decodes one file as a single frame, the shape the sticker grid asks for.
+fn decode_still_path(path: &Path) -> Result<Arc<RenderImage>, ImageCacheError> {
+    let bytes = std::fs::read(path).map_err(|error| ImageCacheError::Io(Arc::new(error)))?;
+    let format = image::guess_format(&bytes).map_err(image_error)?;
+    let frame = match format {
+        ImageFormat::Gif => first_gif_frame(&bytes)?,
+        ImageFormat::WebP => first_webp_frame(&bytes)?,
+        _ => still_frame(&bytes, format, STILL_EDGE)?,
+    };
+    Ok(Arc::new(RenderImage::new(vec![frame])))
+}
+
+fn first_gif_frame(bytes: &[u8]) -> Result<Frame, ImageCacheError> {
+    let decoder = GifDecoder::new(Cursor::new(bytes)).map_err(image_error)?;
+    first_animated_frame(decoder)
+}
+
+fn first_webp_frame(bytes: &[u8]) -> Result<Frame, ImageCacheError> {
+    let mut decoder = WebPDecoder::new(Cursor::new(bytes)).map_err(image_error)?;
+    if !decoder.has_animation() {
+        return still_frame(bytes, ImageFormat::WebP, STILL_EDGE);
+    }
+    let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
+    first_animated_frame(decoder)
+}
+
+/// Decodes only the first frame of an animated file.
+fn first_animated_frame<'a>(
+    decoder: impl AnimationDecoder<'a>,
+) -> Result<Frame, ImageCacheError> {
+    let frame = decoder
+        .into_frames()
+        .next()
+        .ok_or_else(|| other("the image could not be decoded: no frames"))?
+        .map_err(image_error)?;
+    let delay = frame.delay();
+    let buffer = downscale(frame.into_buffer(), STILL_EDGE);
+    Ok(Frame::from_parts(bgra(buffer), 0, 0, delay))
+}
+
+fn still_frame(bytes: &[u8], format: ImageFormat, edge: u32) -> Result<Frame, ImageCacheError> {
     let image = image::load_from_memory_with_format(bytes, format)
         .map_err(image_error)?
         .into_rgba8();
-    // Un sticker quieto tambien es 512×512; una foto se queda con su detalle.
-    let edge = if format == ImageFormat::WebP {
-        ANIMATED_STICKER_EDGE * 2
-    } else {
-        PHOTO_EDGE
-    };
     Ok(Frame::from_parts(
         bgra(downscale(image, edge)),
         0,
@@ -327,16 +501,53 @@ mod tests {
     #[test]
     fn one_frame_counts_its_whole_rgba_bitmap() {
         assert_eq!(decoded_bytes(&image(512, 512, 1)), 512 * 512 * 4);
-    }
-
-    #[test]
-    fn every_frame_of_an_animated_sticker_counts() {
+        // Every frame of an animated sticker counts.
         assert_eq!(decoded_bytes(&image(512, 512, 244)), 244 * 512 * 512 * 4);
+        // An image without frames takes nothing.
+        assert_eq!(decoded_bytes(&RenderImage::new(Vec::new())), 0);
     }
 
     #[test]
-    fn an_image_without_frames_takes_nothing() {
-        assert_eq!(decoded_bytes(&RenderImage::new(Vec::new())), 0);
+    fn a_still_request_keeps_the_file_and_its_own_key() {
+        let path = Path::new("C:/media/fav-1.webp");
+        let name = still_image_source(path);
+        assert!(name.starts_with(STILL_PREFIX));
+        assert_eq!(still_path(&name), Some(PathBuf::from(path)));
+        // Un recurso que no es nuestro no se toca.
+        assert_eq!(still_path("fav-1.webp"), None);
+    }
+
+    #[test]
+    fn a_still_request_decodes_only_the_first_frame() {
+        use image::codecs::gif::GifEncoder;
+
+        let frame = || {
+            let buffer: Buffer = ImageBuffer::from_pixel(4, 4, Rgba([10, 20, 30, 255]));
+            Frame::new(buffer)
+        };
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder
+                .encode_frames([frame(), frame()])
+                .expect("the gif encodes");
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "whatfast-still-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after the epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("the folder is created");
+        let path = dir.join("two-frames.gif");
+        std::fs::write(&path, &bytes).expect("the gif is written");
+
+        let image = decode_still_path(&path).expect("the gif decodes");
+        assert_eq!(image.frame_count(), 1);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
@@ -344,10 +555,7 @@ mod tests {
         let source: Buffer = ImageBuffer::from_pixel(1024, 512, Rgba([1, 2, 3, 255]));
         let scaled = downscale(source, 256);
         assert_eq!(scaled.dimensions(), (256, 128));
-    }
-
-    #[test]
-    fn a_small_frame_keeps_its_size() {
+        // A small frame keeps its size.
         let source: Buffer = ImageBuffer::from_pixel(128, 128, Rgba([1, 2, 3, 255]));
         let scaled = downscale(source, 256);
         assert_eq!(scaled.dimensions(), (128, 128));
@@ -358,5 +566,13 @@ mod tests {
         let source: Buffer = ImageBuffer::from_pixel(1, 1, Rgba([10, 20, 30, 255]));
         let converted = bgra(source);
         assert_eq!(converted.get_pixel(0, 0).0, [30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn battery_saver_reduces_budget_constants() {
+        const {
+            assert!(BATTERY_SAVER_MAX_BYTES < MAX_BYTES);
+            assert!(BATTERY_SAVER_MAX_ENTRIES < MAX_ENTRIES);
+        }
     }
 }

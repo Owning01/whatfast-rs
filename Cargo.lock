@@ -9727,6 +9727,7 @@ dependencies = [
  "whatfast-protocol",
  "windows 0.62.2",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
@@ -9736,6 +9737,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "fs4",
+ "getrandom 0.2.17",
  "image",
  "mimalloc",
  "prost",

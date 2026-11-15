@@ -326,10 +326,13 @@ mod tests {
     #[test]
     fn the_server_argv_is_the_same_for_every_client() {
         let cmd = McpCommand::new("C:/Whatfast/whatfast.exe", "codex");
-        let argv = all()[0].server_argv(&cmd);
-        assert_eq!(
-            argv,
-            vec!["C:/Whatfast/whatfast.exe", "mcp", "--agent", "codex"]
-        );
+        for spec in all() {
+            assert_eq!(
+                spec.server_argv(&cmd),
+                vec!["C:/Whatfast/whatfast.exe", "mcp", "--agent", "codex"],
+                "{} has a different argv",
+                spec.id
+            );
+        }
     }
 }

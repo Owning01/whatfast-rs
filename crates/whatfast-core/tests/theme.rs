@@ -1,12 +1,12 @@
 //! Port of the frozen suite `tauri/tests/theme.test.ts`.
 //!
-//! The oracle applies the theme on a fake DOM element; the port decides the
-//! values of that application ([`theme_root_declaration`]) and the UI crate
-//! writes them, so the case checks the same values.
+//! The oracle applies the theme on a fake DOM element; the GPUI app writes the
+//! tokens itself, so the port covers the catalog, the normalization and the
+//! clone/export contract.
 
 use whatfast_core::theme::{
     ThemeAppearance, ThemeVisualStyle, builtin_themes, clone_theme, default_theme, export_theme,
-    normalize_theme, theme_root_declaration,
+    normalize_theme,
 };
 
 #[test]
@@ -76,26 +76,5 @@ fn clone_and_export_retain_the_trusted_structural_style() {
             .get("visualStyle")
             .and_then(serde_json::Value::as_str),
         Some("skeuomorphic")
-    );
-}
-
-#[test]
-fn theme_application_exposes_appearance_and_structural_style_on_the_root() {
-    let source = builtin_themes()
-        .first()
-        .cloned()
-        .unwrap_or_else(default_theme);
-    let declaration = theme_root_declaration(&source);
-
-    assert_eq!(declaration.appearance, "dark");
-    assert_eq!(declaration.theme_style, "skeuomorphic");
-    assert_eq!(declaration.color_scheme, "dark");
-    assert_eq!(
-        declaration
-            .properties
-            .iter()
-            .find(|(name, _)| name == "--accent")
-            .map(|(_, value)| value.as_str()),
-        Some("#a2d422")
     );
 }

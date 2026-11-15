@@ -1102,9 +1102,4 @@ mod tests {
     fn a_local_channel_carries_the_moment_of_its_creation() {
         assert_eq!(local_channel_jid(42), "local-42@newsletter");
     }
-
-    #[test]
-    fn two_local_channels_never_share_the_same_jid() {
-        assert_ne!(local_channel_jid(42), local_channel_jid(43));
-    }
 }

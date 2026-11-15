@@ -27,18 +27,18 @@ use whatfast_protocol::transport::{BridgeMessage, PROTOCOL_VERSION};
 use whatfast_protocol::{
     AttachmentKind, ConnectionChanged, CreatePollRequest, DeleteMessageRequest, EditMessageRequest,
     Envelope, ForwardMessageRequest, GetAuthStateRequest, GetChatAvatarRequest, GetChatInfoRequest,
-    GetHistoryOverviewRequest, GetIntegrityStatusRequest, GetMessageAttachmentRequest,
-    GetMessageImageRequest, GetParticipantAvatarRequest, GetSyncStatusRequest, HelloRequest,
-    ListChatsRequest, ListMessagesAfterRequest, ListMessagesAroundRequest, ListMessagesRequest,
-    ListNewsletterMessagesRequest, ListNewslettersRequest, ListPinnedMessagesRequest,
-    ListStatusesRequest, ListStickersRequest, LogoutRequest, MarkReadRequest, OpenContactRequest,
-    OpenMessageWindowRequest, RepairLocalCacheRequest, RepairRecentReactionsRequest,
-    RequestOlderHistoryRequest, RpcRequest, SearchLocalRequest, SendAttachmentRequest,
-    SendImageRequest, SendReactionRequest, SendStickerFromLibraryRequest, SendStickerRequest,
-    SendTextRequest, SetChatArchiveRequest, SetChatBlockRequest, SetChatMuteRequest,
-    SetChatPinRequest, SetMessagePinRequest, SetTypingRequest, ShutdownRequest,
-    SubscribeNewsletterRequest, UnsubscribeNewsletterRequest, VotePollRequest, backend_event,
-    envelope, rpc_request, rpc_response,
+    GetHistoryOverviewRequest, GetIntegrityStatusRequest, GetLinkPreviewRequest,
+    GetMessageAttachmentRequest, GetMessageImageRequest, GetParticipantAvatarRequest,
+    GetSyncStatusRequest, HelloRequest, ListChatsRequest, ListMessagesAfterRequest,
+    ListMessagesAroundRequest, ListMessagesRequest, ListNewsletterMessagesRequest,
+    ListNewslettersRequest, ListPinnedMessagesRequest, ListStatusesRequest, ListStickersRequest,
+    LogoutRequest, MarkReadRequest, OpenContactRequest, OpenMessageWindowRequest,
+    RepairLocalCacheRequest, RepairRecentReactionsRequest, RequestOlderHistoryRequest, RpcRequest,
+    SearchLocalRequest, SendAttachmentRequest, SendImageRequest, SendReactionRequest,
+    SendStickerFromLibraryRequest, SendStickerRequest, SendTextRequest, SetChatArchiveRequest,
+    SetChatBlockRequest, SetChatMuteRequest, SetChatPinRequest, SetMessagePinRequest,
+    SetTypingRequest, ShutdownRequest, SubscribeNewsletterRequest, UnsubscribeNewsletterRequest,
+    VotePollRequest, backend_event, envelope, rpc_request, rpc_response,
 };
 
 /// A fake backend running in a thread of the test.
@@ -273,6 +273,9 @@ fn every_request() -> Vec<rpc_request::Request> {
         rpc_request::Request::RepairLocalCache(RepairLocalCacheRequest::default()),
         rpc_request::Request::StorageUsage(Default::default()),
         rpc_request::Request::ClearMediaCache(Default::default()),
+        rpc_request::Request::GetLinkPreview(GetLinkPreviewRequest {
+            url: "https://example.com/nota".into(),
+        }),
         rpc_request::Request::DeleteMessage(DeleteMessageRequest {
             chat_id: "chat-0".into(),
             message_id: "message-1".into(),
@@ -307,6 +310,145 @@ fn every_request() -> Vec<rpc_request::Request> {
             blocked: true,
         }),
     ]
+}
+
+/// The response variant each request of `every_request` must produce, in the
+/// same order.
+const EVERY_RESPONSE: [&str; 53] = [
+    "Hello",
+    "AuthState",
+    "StartPairing",
+    "ListChats",
+    "ListMessages",
+    "SendText",
+    "MarkRead",
+    "Logout",
+    "Shutdown",
+    "GetChatAvatar",
+    "SendReaction",
+    "GetParticipantAvatar",
+    "RepairRecentReactions",
+    "SendImage",
+    "GetMessageImage",
+    "SearchLocal",
+    "OpenContact",
+    "ListMessagesAround",
+    "SendSticker",
+    "OpenMessageWindow",
+    "ListMessagesAfter",
+    "GetChatInfo",
+    "SetTyping",
+    "GetMessageAttachment",
+    "SendAttachment",
+    "ListStickers",
+    "SendStickerFromLibrary",
+    "CreatePoll",
+    "VotePoll",
+    "SetMessagePin",
+    "ListPinnedMessages",
+    "ForwardMessage",
+    "EditMessage",
+    "SyncStatus",
+    "RequestOlderHistory",
+    "GetChatHistoryCoverage",
+    "GetHistoryOverview",
+    "Reconnect",
+    "GetIntegrityStatus",
+    "RepairLocalCache",
+    "StorageUsage",
+    "ClearMediaCache",
+    "GetLinkPreview",
+    "DeleteMessage",
+    "ListStatuses",
+    "SubscribeNewsletter",
+    "ListNewsletters",
+    "ListNewsletterMessages",
+    "UnsubscribeNewsletter",
+    "SetChatPin",
+    "SetChatArchive",
+    "SetChatMute",
+    "SetChatBlock",
+];
+
+/// The name of the variant a response carries.
+fn response_variant(result: &rpc_response::Result) -> &'static str {
+    match result {
+        rpc_response::Result::Error(_) => "Error",
+        rpc_response::Result::Hello(_) => "Hello",
+        rpc_response::Result::AuthState(_) => "AuthState",
+        rpc_response::Result::StartPairing(_) => "StartPairing",
+        rpc_response::Result::ListChats(_) => "ListChats",
+        rpc_response::Result::ListMessages(_) => "ListMessages",
+        rpc_response::Result::SendText(_) => "SendText",
+        rpc_response::Result::MarkRead(_) => "MarkRead",
+        rpc_response::Result::Logout(_) => "Logout",
+        rpc_response::Result::Shutdown(_) => "Shutdown",
+        rpc_response::Result::GetChatAvatar(_) => "GetChatAvatar",
+        rpc_response::Result::SendReaction(_) => "SendReaction",
+        rpc_response::Result::GetParticipantAvatar(_) => "GetParticipantAvatar",
+        rpc_response::Result::RepairRecentReactions(_) => "RepairRecentReactions",
+        rpc_response::Result::SendImage(_) => "SendImage",
+        rpc_response::Result::GetMessageImage(_) => "GetMessageImage",
+        rpc_response::Result::SearchLocal(_) => "SearchLocal",
+        rpc_response::Result::OpenContact(_) => "OpenContact",
+        rpc_response::Result::ListMessagesAround(_) => "ListMessagesAround",
+        rpc_response::Result::SendSticker(_) => "SendSticker",
+        rpc_response::Result::OpenMessageWindow(_) => "OpenMessageWindow",
+        rpc_response::Result::ListMessagesAfter(_) => "ListMessagesAfter",
+        rpc_response::Result::GetChatInfo(_) => "GetChatInfo",
+        rpc_response::Result::SetTyping(_) => "SetTyping",
+        rpc_response::Result::GetMessageAttachment(_) => "GetMessageAttachment",
+        rpc_response::Result::SendAttachment(_) => "SendAttachment",
+        rpc_response::Result::ListStickers(_) => "ListStickers",
+        rpc_response::Result::SendStickerFromLibrary(_) => "SendStickerFromLibrary",
+        rpc_response::Result::CreatePoll(_) => "CreatePoll",
+        rpc_response::Result::VotePoll(_) => "VotePoll",
+        rpc_response::Result::SetMessagePin(_) => "SetMessagePin",
+        rpc_response::Result::ListPinnedMessages(_) => "ListPinnedMessages",
+        rpc_response::Result::ForwardMessage(_) => "ForwardMessage",
+        rpc_response::Result::EditMessage(_) => "EditMessage",
+        rpc_response::Result::SyncStatus(_) => "SyncStatus",
+        rpc_response::Result::RequestOlderHistory(_) => "RequestOlderHistory",
+        rpc_response::Result::GetChatHistoryCoverage(_) => "GetChatHistoryCoverage",
+        rpc_response::Result::GetHistoryOverview(_) => "GetHistoryOverview",
+        rpc_response::Result::Reconnect(_) => "Reconnect",
+        rpc_response::Result::GetIntegrityStatus(_) => "GetIntegrityStatus",
+        rpc_response::Result::RepairLocalCache(_) => "RepairLocalCache",
+        rpc_response::Result::DeleteMessage(_) => "DeleteMessage",
+        rpc_response::Result::ListStatuses(_) => "ListStatuses",
+        rpc_response::Result::SubscribeNewsletter(_) => "SubscribeNewsletter",
+        rpc_response::Result::ListNewsletters(_) => "ListNewsletters",
+        rpc_response::Result::ListNewsletterMessages(_) => "ListNewsletterMessages",
+        rpc_response::Result::UnsubscribeNewsletter(_) => "UnsubscribeNewsletter",
+        rpc_response::Result::SetChatPin(_) => "SetChatPin",
+        rpc_response::Result::SetChatArchive(_) => "SetChatArchive",
+        rpc_response::Result::SetChatMute(_) => "SetChatMute",
+        rpc_response::Result::SetChatBlock(_) => "SetChatBlock",
+        rpc_response::Result::CallPlace(_) => "CallPlace",
+        rpc_response::Result::CallAccept(_) => "CallAccept",
+        rpc_response::Result::CallReject(_) => "CallReject",
+        rpc_response::Result::CallHangup(_) => "CallHangup",
+        rpc_response::Result::CallMute(_) => "CallMute",
+        rpc_response::Result::CallAudio(_) => "CallAudio",
+        rpc_response::Result::CallVideo(_) => "CallVideo",
+        rpc_response::Result::DraftPropose(_) => "DraftPropose",
+        rpc_response::Result::DraftList(_) => "DraftList",
+        rpc_response::Result::DraftDecide(_) => "DraftDecide",
+        rpc_response::Result::DraftFinish(_) => "DraftFinish",
+        rpc_response::Result::GuideInstall(_) => "GuideInstall",
+        rpc_response::Result::GuideRemove(_) => "GuideRemove",
+        rpc_response::Result::GuideStatus(_) => "GuideStatus",
+        rpc_response::Result::AgentAsk(_) => "AgentAsk",
+        rpc_response::Result::ScheduleList(_) => "ScheduleList",
+        rpc_response::Result::SchedulePut(_) => "SchedulePut",
+        rpc_response::Result::SchedulePause(_) => "SchedulePause",
+        rpc_response::Result::ScheduleRemove(_) => "ScheduleRemove",
+        rpc_response::Result::CreateGroup(_) => "CreateGroup",
+        rpc_response::Result::StorageUsage(_) => "StorageUsage",
+        rpc_response::Result::ClearMediaCache(_) => "ClearMediaCache",
+        rpc_response::Result::GetLinkPreview(_) => "GetLinkPreview",
+        rpc_response::Result::ListChatMedia(_) => "ListChatMedia",
+    }
 }
 
 #[test]
@@ -511,7 +653,11 @@ fn fake_answers_every_request_of_the_protocol() {
     let profile = profile_dir("every-request");
     let harness = Harness::start(&profile);
     let requests = every_request();
-    assert_eq!(requests.len(), 52);
+    assert_eq!(
+        requests.len(),
+        EVERY_RESPONSE.len(),
+        "every request of the protocol needs its expected response"
+    );
     for (index, request) in requests.iter().enumerate() {
         harness
             .outgoing
@@ -542,11 +688,15 @@ fn fake_answers_every_request_of_the_protocol() {
             BridgeMessage::Exited(_) => panic!("the fake backend exited"),
         }
     }
-    assert_eq!(answers.len(), 52);
-    for (request_id, result) in &answers {
-        assert!(
-            !matches!(result, rpc_response::Result::Error(_)),
-            "the request {request_id} was answered with an error"
+    for (index, _) in requests.iter().enumerate() {
+        let request_id = index as u64 + 1;
+        let result = answers
+            .get(&request_id)
+            .unwrap_or_else(|| panic!("the request {request_id} was not answered"));
+        assert_eq!(
+            response_variant(result),
+            EVERY_RESPONSE[index],
+            "the request {request_id} was answered with the wrong variant"
         );
     }
 }
@@ -590,6 +740,16 @@ fn fake_dataset_is_deterministic() {
     let unread = fake_chat(7);
     assert_eq!(unread.unread_count, 4);
     assert_eq!(unread.title, "Santiago Maldonado");
+
+    let roster = fake_chat(9);
+    assert_eq!(roster.title, "Matías Aráoz");
+    // Beyond the roster the names still combine like real ones.
+    let beyond = fake_chat(101);
+    assert!(
+        beyond.title.contains(' '),
+        "the title beyond the roster is a full name: {}",
+        beyond.title
+    );
 
     let message = fake_message("chat-0", 1, Path::new("unused"));
     assert_eq!(message.id, "message-1");
@@ -914,17 +1074,12 @@ fn fake_backend_answers_through_its_public_surface() {
         performance_fixture: false,
         live_events: false,
     });
-    let mut tracker = whatfast_protocol::transport::RequestTracker::new();
-    let request_id = backend
-        .send_request(
-            &mut tracker,
-            whatfast_protocol::transport::RequestClass::Control,
+    backend
+        .send(
+            1,
             rpc_request::Request::GetAuthState(GetAuthStateRequest::default()),
-            Duration::from_secs(0),
         )
         .expect("the request was queued");
-    assert_eq!(request_id, 1);
-    assert_eq!(tracker.pending_count(), 1);
     // The answer arrives on the same stream the sidecar uses.
     loop {
         match backend
@@ -934,7 +1089,7 @@ fn fake_backend_answers_through_its_public_surface() {
         {
             BridgeMessage::Envelope(envelope) => {
                 if let Some(envelope::Body::Response(response)) = envelope.body {
-                    assert_eq!(envelope.request_id, request_id);
+                    assert_eq!(envelope.request_id, 1);
                     let rpc_response::Result::AuthState(state) =
                         response.result.expect("the answer has a result")
                     else {

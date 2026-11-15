@@ -164,18 +164,20 @@ fn build(guard: &Guard, request: &SchedulePutRequest, now_ms: i64) -> Result<Sch
             message: "a task needs an agent".into(),
         });
     }
-    let spec = whatfast_agents::by_id(agent_id).ok_or_else(|| Denied {
-        code: "invalid_argument",
-        message: format!("`{agent_id}` is not a harness this build knows"),
-    })?;
-    if spec.run.is_none() {
-        return Err(Denied {
-            code: "failed_precondition",
-            message: format!(
-                "{} has no headless mode, so it cannot run a task",
-                spec.name
-            ),
-        });
+    if agent_id != "__direct__" {
+        let spec = whatfast_agents::by_id(agent_id).ok_or_else(|| Denied {
+            code: "invalid_argument",
+            message: format!("`{agent_id}` is not a harness this build knows"),
+        })?;
+        if spec.run.is_none() {
+            return Err(Denied {
+                code: "failed_precondition",
+                message: format!(
+                    "{} has no headless mode, so it cannot run a task",
+                    spec.name
+                ),
+            });
+        }
     }
     let chat_id = request.chat_id.trim();
     if chat_id.is_empty() {
@@ -402,12 +404,20 @@ mod tests {
     fn a_task_that_runs_once_keeps_its_instant() {
         let (_profile, store, guard) = profile("once");
         let now = 1_793_016_000_000;
-        let mut request = task("once", now + 3_600_000, "");
+        let offset = whatfast_auto::offset_now();
+        let minute_of_day = |ms: i64| ((ms / 60_000 + i64::from(offset)).rem_euclid(1_440)) as u16;
+        // The next local one in the afternoon, which falls inside the window
+        // of the prudent default.
+        let mut at = now + 60_000;
+        while minute_of_day(at) != 13 * 60 {
+            at += 60_000;
+        }
+        let mut request = task("once", at, "");
         request.window = "08:00-23:00".into();
         let (schedule, error) = put(&guard, &store, &request, now);
         assert_eq!(error, "");
         assert_eq!(schedule.id, 1);
-        assert_eq!(schedule.next_at_ms, request.at_ms);
+        assert_eq!(schedule.next_at_ms, at);
         assert_eq!(schedule.window, "08:00-23:00");
         assert_eq!(schedule.kind, "once");
     }

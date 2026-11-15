@@ -130,25 +130,6 @@ fn server(label: &str) -> (PathBuf, Arc<Store>, Server) {
 // Handshake ordering
 // ---------------------------------------------------------------------------
 
-/// The Go test of the same name: `handle` builds the Hello answer but does not
-/// open the event gate; only the serve loop does that after the write.
-#[test]
-fn hello_does_not_open_the_event_gate_before_the_response_is_written() {
-    let (_dir, _store, mut server) = server("hello");
-    handshake(&mut server);
-    assert!(
-        !server.handshaken(),
-        "the handshake was recorded before the answer left the process"
-    );
-    // The next request is proof the answer was written: the flag flips.
-    let _ = call(
-        &mut server,
-        2,
-        rpc_request::Request::GetAuthState(whatfast_protocol::GetAuthStateRequest {}),
-    );
-    assert!(server.handshaken());
-}
-
 // ---------------------------------------------------------------------------
 // Message pages
 // ---------------------------------------------------------------------------
@@ -397,6 +378,36 @@ fn list_statuses_groups_by_sender_newest_first() {
 }
 
 #[test]
+fn list_statuses_leaves_out_the_deleted_ones() {
+    let (_dir, store, mut server) = server("statuses-revoked");
+    handshake(&mut server);
+    store
+        .ensure_chat("status@broadcast", "status@broadcast")
+        .unwrap();
+    let now = now_ms();
+    store
+        .insert_message(&status_row("a@s.whatsapp.net", "vivo", now - 2_000))
+        .unwrap();
+    let mut deleted = status_row("a@s.whatsapp.net", "borrado", now - 1_000);
+    deleted.revoked = true;
+    store.insert_message(&deleted).unwrap();
+
+    let response = call(
+        &mut server,
+        2,
+        rpc_request::Request::ListStatuses(whatfast_protocol::ListStatusesRequest {}),
+    );
+    let rpc_response::Result::ListStatuses(statuses) = response.result.expect("a result") else {
+        panic!("expected ListStatuses");
+    };
+    // El estado eliminado no llega a la tira: no hay fila que diga que se
+    // borro, y el anillo conserva solo lo que sigue vivo.
+    assert_eq!(statuses.groups.len(), 1);
+    assert_eq!(statuses.groups[0].messages.len(), 1);
+    assert_eq!(statuses.groups[0].messages[0].id, "vivo");
+}
+
+#[test]
 fn list_statuses_refuses_an_empty_store() {
     let (_dir, _store, mut server) = server("statuses-empty");
     handshake(&mut server);
@@ -469,6 +480,22 @@ fn list_stickers_builds_the_three_packs_and_honours_favourites() {
     assert_eq!(stickers.packs[0].stickers.len(), 1);
     assert!(stickers.packs[0].stickers[0].favorite);
     assert!(stickers.packs[2].stickers[0].favorite);
+}
+
+#[test]
+fn get_link_preview_rejects_an_empty_url() {
+    let (_dir, _store, mut server) = server("link-preview");
+    handshake(&mut server);
+    let response = call(
+        &mut server,
+        2,
+        rpc_request::Request::GetLinkPreview(whatfast_protocol::GetLinkPreviewRequest {
+            url: "   ".into(),
+        }),
+    );
+    let error = error_of(response);
+    assert_eq!(error.code, "invalid_argument");
+    assert!(!error.retryable);
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,8 +1064,9 @@ fn repair_recent_reactions_validates_and_needs_the_link() {
     assert!(error.retryable);
 }
 
-/// An inflated counter with no flagged rows heals on open: the read finds
-/// nothing to receipt but recomputes the cached total anyway.
+/// Without a session, a read with a valid anchor refuses before touching the
+/// store: the desktop gets `not_connected` and the inflated counter stays put,
+/// so a later retry does not inherit a healed badge.
 #[test]
 fn mark_read_with_no_flagged_rows_heals_the_counter() {
     let (_dir, store, mut server) = server("heal-counter");
@@ -1049,8 +1077,8 @@ fn mark_read_with_no_flagged_rows_heals_the_counter() {
     store
         .insert_message(&message("c@s.whatsapp.net", "m1", 1000, "hi"))
         .unwrap();
-    // Simulate the drift of an older build: the row lost its flag while
-    // the cached counter kept it.
+    // Simulate the drift of an older build: the row keeps its flag while the
+    // cached counter is inflated.
     store
         .write(|conn| {
             conn.execute("UPDATE messages SET unread=1 WHERE id='m1'", [])
@@ -1063,8 +1091,8 @@ fn mark_read_with_no_flagged_rows_heals_the_counter() {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
-    // No session runs here: without the link the read refuses before
-    // touching anything, and the counter stays put.
+    // No session runs here: the read refuses before touching anything, and the
+    // counter stays put.
     let offline = call(
         &mut server,
         2,

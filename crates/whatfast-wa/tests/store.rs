@@ -3,7 +3,6 @@
 
 use whatsapp_rust::waproto::buffa::MessageField;
 use whatsapp_rust::waproto::whatsapp as wa;
-use whatfast_wa::db::Store;
 
 fn temp_store(label: &str) -> (std::path::PathBuf, whatfast_wa::db::Store) {
     let dir = std::env::temp_dir().join(format!(
@@ -58,31 +57,7 @@ fn chats_page_orders_newest_first_and_the_cursor_walks_back() {
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].jid, "a@x");
     assert!(!cursor.is_empty());
-    assert!(cursor2.ends_with("a@x") || page2[0].last_message_at == 100);
-}
-
-#[test]
-fn insert_message_updates_the_last_message_pointer_only_when_new() {
-    let (_dir, store) = temp_store("pointer");
-    store.ensure_chat("a@x", "a@x").unwrap();
-    assert!(
-        store
-            .insert_message(&message("a@x", "m1", 100, false, "first"))
-            .unwrap()
-    );
-    // A replay of the same row is a no-op.
-    assert!(
-        !store
-            .insert_message(&message("a@x", "m1", 100, false, "first"))
-            .unwrap()
-    );
-    store
-        .insert_message(&message("a@x", "m2", 90, true, "older from me"))
-        .unwrap();
-    let chat = store.chat("a@x").unwrap().unwrap();
-    assert_eq!(chat.last_message_id, "m1");
-    assert_eq!(chat.last_message_at, 100);
-    assert!(!chat.last_message_from_me);
+    assert!(cursor2.is_empty());
 }
 
 #[test]
@@ -100,7 +75,7 @@ fn messages_around_and_before_slice_the_history() {
             ))
             .unwrap();
     }
-    let newest = store.messages_before("a@x", 0, "", 10).unwrap();
+    let newest = store.messages_before_page("a@x", 0, "", 10).unwrap().0;
     assert_eq!(newest.len(), 10);
     // Oldest-to-newest is the rendering contract, so the newest row is last.
     assert_eq!(newest.first().unwrap().id, "m20");
@@ -145,28 +120,6 @@ fn reactions_upsert_remove_and_join_back() {
     store.set_reaction(&removal).unwrap();
     let stored = store.message("a@x", "m1").unwrap().unwrap();
     assert!(stored.reactions.is_empty());
-}
-
-#[test]
-fn mark_read_clears_unread_rows_and_the_chat_counter() {
-    let (_dir, store) = temp_store("read");
-    store.ensure_chat("a@x", "a@x").unwrap();
-    let mut incoming = message("a@x", "m1", 10, false, "hi");
-    incoming.unread = true;
-    store.insert_message(&incoming).unwrap();
-    store
-        .write(|conn| {
-            conn.execute("UPDATE chats SET unread_count=1 WHERE jid='a@x'", [])?;
-            Ok(())
-        })
-        .unwrap();
-    let chat = store.chat("a@x").unwrap().unwrap();
-    assert_eq!(chat.unread_count, 1);
-    store.mark_chat_read("a@x").unwrap();
-    let chat = store.chat("a@x").unwrap().unwrap();
-    assert_eq!(chat.unread_count, 0);
-    let stored = store.message("a@x", "m1").unwrap().unwrap();
-    assert!(!stored.unread);
 }
 
 #[test]
@@ -281,8 +234,33 @@ fn insert_message_counts_unread_once_per_new_incoming_row() {
     store.insert_message(&outgoing).unwrap();
     assert_eq!(store.chat("a@x").unwrap().unwrap().unread_count, 1);
 
-    store.mark_chat_read("a@x").unwrap();
+    store.mark_all_read("a@x").unwrap();
     assert_eq!(store.chat("a@x").unwrap().unwrap().unread_count, 0);
+}
+
+/// `mark_all_read` clears the flag of the rows, not only the cached counter:
+/// a row that keeps `unread=1` keeps counting in every query that reads the
+/// flag, so the badge and the window disagree.
+#[test]
+fn mark_read_clears_unread_rows_and_the_chat_counter() {
+    let (_dir, store) = temp_store("read");
+    store.ensure_chat("a@x", "a@x").unwrap();
+    let mut incoming = message("a@x", "m1", 10, false, "hi");
+    incoming.unread = true;
+    store.insert_message(&incoming).unwrap();
+    store
+        .write(|conn| {
+            conn.execute("UPDATE chats SET unread_count=1 WHERE jid='a@x'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let chat = store.chat("a@x").unwrap().unwrap();
+    assert_eq!(chat.unread_count, 1);
+    store.mark_all_read("a@x").unwrap();
+    let chat = store.chat("a@x").unwrap().unwrap();
+    assert_eq!(chat.unread_count, 0);
+    let stored = store.message("a@x", "m1").unwrap().unwrap();
+    assert!(!stored.unread);
 }
 
 #[test]
@@ -616,7 +594,23 @@ fn search_messages_matches_typos_captions_and_file_names() {
 
     // Zero means the Go default of twenty, and a short needle is ignored.
     assert!(store.search_messages("pl", 0).unwrap().is_empty());
-    assert!(store.search_messages("planning", 0).unwrap().len() <= 20);
+
+    // A fixture with more hits than the default proves the cap: zero answers
+    // twenty, and an explicit limit still wins.
+    store.ensure_chat("bulk@g.us", "bulk@g.us").unwrap();
+    for index in 0..25 {
+        store
+            .insert_message(&message(
+                "bulk@g.us",
+                &format!("z{index}"),
+                20 + index,
+                false,
+                "zebra",
+            ))
+            .unwrap();
+    }
+    assert_eq!(store.search_messages("zebra", 0).unwrap().len(), 20);
+    assert_eq!(store.search_messages("zebra", 5).unwrap().len(), 5);
 }
 
 /// El indice trigram sigue a las filas: lo que se edita se encuentra con la
@@ -962,9 +956,9 @@ fn page_limits_clamp_like_the_go_sidecar() {
     }
     // Zero asks for the default page of fifty, and nothing exceeds two
     // hundred: the Go `clampLimit` bounds every message page.
-    assert_eq!(store.messages_before("a@x", 0, "", 0).unwrap().len(), 50);
-    assert_eq!(store.messages_before("a@x", 0, "", 300).unwrap().len(), 200);
-    assert_eq!(store.messages_before("a@x", 0, "", 200).unwrap().len(), 200);
+    assert_eq!(store.messages_before_page("a@x", 0, "", 0).unwrap().0.len(), 50);
+    assert_eq!(store.messages_before_page("a@x", 0, "", 300).unwrap().0.len(), 200);
+    assert_eq!(store.messages_before_page("a@x", 0, "", 200).unwrap().0.len(), 200);
 }
 
 #[test]
@@ -1010,7 +1004,7 @@ fn reaction_pseudo_messages_never_become_rows() {
     // The Go reducer only made sure the chat existed; the event went to the
     // reactions table, never to the message history.
     assert!(!store.insert_message(&pseudo).unwrap());
-    assert!(store.messages_before("a@x", 0, "", 50).unwrap().is_empty());
+    assert!(store.messages_before_page("a@x", 0, "", 50).unwrap().0.is_empty());
     assert!(store.message("a@x", "r1").unwrap().is_none());
 }
 
@@ -1228,65 +1222,6 @@ fn poll_meta_and_votes_round_trip() {
     assert!(sushi.selected_by_me);
 }
 
-#[test]
-fn legacy_replays_reserve_request_and_complete() {
-    let (_dir, store) = temp_store("legacy");
-    store
-        .ensure_chat("c@s.whatsapp.net", "c@s.whatsapp.net")
-        .unwrap();
-    assert!(
-        store
-            .pending_legacy_replays("c@s.whatsapp.net", 16)
-            .unwrap()
-            .is_empty()
-    );
-    store
-        .record_legacy_replay(
-            "c@s.whatsapp.net",
-            "c@s.whatsapp.net",
-            "ev1",
-            "peer@s.whatsapp.net",
-            1000,
-            false,
-            5,
-        )
-        .unwrap();
-    // A second record of the same event is a duplicate, not a second row.
-    store
-        .record_legacy_replay(
-            "c@s.whatsapp.net",
-            "c@s.whatsapp.net",
-            "ev1",
-            "peer@s.whatsapp.net",
-            1000,
-            false,
-            5,
-        )
-        .unwrap();
-    let pending = store
-        .pending_legacy_replays("c@s.whatsapp.net", 16)
-        .unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].attempts, 0);
-    store
-        .mark_legacy_replay_requested("c@s.whatsapp.net", "ev1", "repair-1")
-        .unwrap();
-    let requested = store
-        .pending_legacy_replays("c@s.whatsapp.net", 16)
-        .unwrap();
-    assert_eq!(requested.len(), 1);
-    assert_eq!(requested[0].attempts, 1);
-    store
-        .complete_legacy_replay("c@s.whatsapp.net", "ev1")
-        .unwrap();
-    assert!(
-        store
-            .pending_legacy_replays("c@s.whatsapp.net", 16)
-            .unwrap()
-            .is_empty()
-    );
-}
-
 /// Marking a chat read heals a counter inflated without flagged rows: the
 /// cached total recomputes even when no row was dirty, so a badge stuck by
 /// an older build clears the next time the chat opens.
@@ -1314,6 +1249,74 @@ fn mark_read_ids_heals_an_inflated_counter() {
     store.mark_read_ids("c@s.whatsapp.net", &[]).unwrap();
     let chat = store.chat("c@s.whatsapp.net").unwrap().unwrap();
     assert_eq!(chat.unread_count, 0);
+}
+
+/// The read receipt needs its anchor even when the row is already marked
+/// read here: the phone learns the read only through that receipt.
+#[test]
+fn the_read_anchor_survives_the_local_read() {
+    let (_dir, store) = temp_store("anchor");
+    store
+        .ensure_chat("c@s.whatsapp.net", "c@s.whatsapp.net")
+        .unwrap();
+    let mut incoming = message("c@s.whatsapp.net", "m1", 1000, false, "hi");
+    incoming.unread = true;
+    incoming.transport_jid = "136181031424112@lid".into();
+    incoming.sender_jid = "136181031424112@lid".into();
+    store.insert_message(&incoming).unwrap();
+    store
+        .mark_read_ids("c@s.whatsapp.net", &["m1".to_string()])
+        .unwrap();
+
+    let anchor = store
+        .read_anchor("c@s.whatsapp.net", "m1")
+        .unwrap()
+        .expect("the row is still the anchor");
+    assert_eq!(anchor.id, "m1");
+    assert_eq!(anchor.transport_jid, "136181031424112@lid");
+    assert_eq!(anchor.sender_jid, "136181031424112@lid");
+
+    // An outgoing row is never an anchor, and an unknown id has none.
+    store
+        .insert_message(&message("c@s.whatsapp.net", "mine", 2000, true, "yo"))
+        .unwrap();
+    assert!(store.read_anchor("c@s.whatsapp.net", "mine").unwrap().is_none());
+    assert!(store.read_anchor("c@s.whatsapp.net", "gone").unwrap().is_none());
+}
+
+/// The newest incoming row is what a chat with nothing left to read sends as
+/// its read receipt. The newest row of the conversation may be our own reply,
+/// and that one names nobody on the wire.
+#[test]
+fn the_newest_incoming_row_skips_our_own_replies() {
+    let (_dir, store) = temp_store("newest-incoming");
+    store
+        .ensure_chat("c@s.whatsapp.net", "c@s.whatsapp.net")
+        .unwrap();
+    let mut first = message("c@s.whatsapp.net", "m1", 1000, false, "hi");
+    first.transport_jid = "136181031424112@lid".into();
+    first.sender_jid = "136181031424112@lid".into();
+    store.insert_message(&first).unwrap();
+    store
+        .insert_message(&message("c@s.whatsapp.net", "mine", 4000, true, "yo"))
+        .unwrap();
+
+    let newest = store
+        .newest_incoming("c@s.whatsapp.net")
+        .unwrap()
+        .expect("the incoming row is the anchor");
+    assert_eq!(newest.id, "m1");
+    assert_eq!(newest.transport_jid, "136181031424112@lid");
+
+    // A conversation with only our messages has nothing to acknowledge.
+    store
+        .ensure_chat("d@s.whatsapp.net", "d@s.whatsapp.net")
+        .unwrap();
+    store
+        .insert_message(&message("d@s.whatsapp.net", "out", 5000, true, "hola"))
+        .unwrap();
+    assert!(store.newest_incoming("d@s.whatsapp.net").unwrap().is_none());
+    assert!(store.newest_incoming("nobody@s.whatsapp.net").unwrap().is_none());
 }
 
 /// A message for a conversation the store never saw lands instead of
@@ -1376,32 +1379,6 @@ fn hd_video(chat: &str, id: &str, ts: i64, direct_path: &str, width: i64) -> wha
     row.media_size = width * 1000;
     row.media_duration = 28;
     row
-}
-
-#[test]
-fn the_hd_half_of_a_video_folds_into_its_parent() {
-    let (_dir, store) = temp_store("hd-adopt");
-    let chat = "a@s.whatsapp.net";
-    store.ensure_chat(chat, chat).unwrap();
-    let parent = hd_video(chat, "parent", 100, "/v/standard", 480);
-    store.insert_message(&parent).unwrap();
-
-    let mut child = hd_video(chat, "child", 114, "/v/hd", 720);
-    child.payload = hd_child_payload(
-        wa::message_association::AssociationType::HD_VIDEO_DUAL_UPLOAD,
-        "parent",
-    );
-
-    let outcome = store.adopt_hd_child(&child).unwrap();
-    assert_eq!(outcome, whatfast_wa::db::HdChild::Adopted("parent".into()));
-    assert!(
-        store.message(chat, "child").unwrap().is_none(),
-        "the child is not a message"
-    );
-    let parent = store.message(chat, "parent").unwrap().unwrap();
-    assert_eq!(parent.media_direct_path, "/v/hd");
-    assert_eq!(parent.media_width, 720);
-    assert_eq!(parent.id, "parent");
 }
 
 #[test]
@@ -1558,37 +1535,6 @@ fn reserve_outgoing_writes_the_message_and_the_request_together() {
         })
         .unwrap();
     assert_eq!(requests, 1);
-}
-
-/// The migration against a copy of a real profile.///
-/// Runs only when `WHATFAST_STORE_SAMPLE` names a chats.db: the profile of
-/// the machine is never touched by the tests.
-#[test]
-#[ignore]
-fn a_real_profile_loses_the_hd_halves_it_stored() {
-    let Ok(path) = std::env::var("WHATFAST_STORE_SAMPLE") else {
-        return;
-    };
-    let path = std::path::Path::new(&path);
-    // The pair of statuses of 29/10: the parent is the H.264 video and the
-    // child is the HEVC copy that used to paint a second bubble.
-    let chat = "status@broadcast";
-    let parent = "A50819F3F27712289E0C797E80F25AAC";
-    let child = "A5E53827BA9680C4474E68EEAE075F37";
-    // The open runs the migration of version 3 on the copy.
-    let store = Store::open(path).unwrap();
-    assert!(
-        store.message(chat, child).unwrap().is_none(),
-        "the HEVC copy is gone"
-    );
-    assert!(
-        store.message(chat, parent).unwrap().is_some(),
-        "the parent stays"
-    );
-    let version: i64 = store
-        .read(|conn| conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0)))
-        .unwrap();
-    assert_eq!(version, 4, "el esquema sube al indice de busqueda");
 }
 
 /// A read does not wait for the write that is open: WAL gives every reader

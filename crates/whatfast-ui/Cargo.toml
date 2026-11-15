@@ -84,9 +84,6 @@ serde = { version = "1", features = ["derive"] }
 # The self-update reads the manifest of the release and downloads the two
 # executables over TLS: the same client the sidecar uses.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
-# The toasts of the system when a message arrives in the background: the
-# same call paints on the notification center of each platform.
-notify-rust = "4.18"
 
 # The dialog of the system for the messages that happen before there is a
 # window, and the check of the process that holds the lock of the instance:
@@ -107,11 +104,19 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 # El video de los mensajes se decodifica con Media Foundation, que viene con
-# Windows: no hay decodificador externo ni librerias que instalar.
+# Windows: no hay decodificador externo ni librerias que instalar. El toast
+# nativo de las notificaciones y el id de la app en el acceso directo usan el
+# mismo crate.
 windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 # The lock of the single instance asks the system whether the process that
@@ -119,6 +124,15 @@ windows = { version = "0.62", features = [
 # directory, so the question goes through `kill(pid, 0)`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Bandeja del sistema en Linux via D-Bus StatusNotifierItem (misma version
+# de zbus que ya resuelve notify-rust en Cargo.lock).
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.18", default-features = false, features = ["blocking-api"] }
+# The toasts of the system when a message arrives in the background: the
+# daemon of the desktop draws them through D-Bus. Windows has its own toast,
+# with the id of the app and without sound.
+notify-rust = "4.18"
 
 [dev-dependencies]
 tempfile = "3.23"

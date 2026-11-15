@@ -12,18 +12,19 @@
 //! itself, but it does keep its own copy of the tabs of its pane up to date,
 //! the way a browser keeps the tabs of its window.
 
-// The module arrives before its caller: the shell of the batch B-U6 adds the
-// strip to the layout.
-#![allow(dead_code)]
-
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, DragMoveEvent, FocusHandle, FontWeight,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels,
-    Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    transparent_black,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context,
+    DragMoveEvent, ElementId, FocusHandle, FontWeight, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, transparent_black,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 
@@ -99,6 +100,12 @@ const STRIP_PADDING: f32 = 5.0;
 ///
 /// port: `Math.min(chat()!.unreadCount, 99)`.
 const BADGE_MAX: u32 = 99;
+
+/// Cuanto tarda una pestaña cerrada en encogerse hasta desaparecer.
+///
+/// Es una salida: corre mas rapido que una apertura y no se hace esperar, para
+/// que cerrar dos pestañas seguidas no se sienta lento.
+const TAB_CLOSE_DURATION: Duration = Duration::from_millis(180);
 
 /// One open chat of the strip.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,8 +184,6 @@ pub(crate) struct TabDrag {
 pub(crate) enum TabAction {
     /// The key is not a gesture of the strip: the app lets it through.
     Unhandled,
-    /// The key was a gesture of the strip, but there was nothing to do.
-    Handled,
     /// The app has to show another chat of the pane.
     Select { chat_id: String },
     /// The app has to close a tab.
@@ -224,6 +229,27 @@ struct TabDragPayload {
 /// The handler the gestures report to.
 pub(crate) type TabActionHandler = Option<Rc<dyn Fn(TabAction, &mut Window, &mut App)>>;
 
+/// Una pestaña que se esta cerrando.
+///
+/// Sale del riel en el acto, pero se dibuja un instante mas: se encoge hasta el
+/// ancho cero para que las vecinas ocupen su lugar sin saltar.
+struct ClosingTab {
+    /// La pestaña, con los datos que tenia al cerrarse.
+    entry: TabEntry,
+    /// El lugar que ocupaba en el riel.
+    index: usize,
+    /// Si era la pestaña que se estaba mirando: el fantasma conserva su
+    /// aspecto para que el cierre no cambie de color al empezar.
+    active: bool,
+    /// El ancho que tenia, en pixeles ya escalados.
+    width: f32,
+    /// Cuando empezo a encogerse.
+    started_at: Instant,
+    /// Numero de la animacion: dos cierres de la misma pestaña no comparten
+    /// el estado del elemento animado.
+    serial: usize,
+}
+
 /// The strip of tabs of a pane.
 pub(crate) struct TabStrip {
     /// The id of the pane the strip belongs to.
@@ -246,6 +272,15 @@ pub(crate) struct TabStrip {
     scroll_handle: ScrollHandle,
     /// The scale of the interface.
     scale: f32,
+    /// Las pestañas que se estan cerrando.
+    closing: Vec<ClosingTab>,
+    /// El ancho medido de cada pestaña abierta, en pixeles ya escalados.
+    ///
+    /// Lo escribe la medicion del riel en cada cuadro: el cierre arranca desde
+    /// el ancho real y no desde el minimo, que daria un salto al empezar.
+    widths: Rc<RefCell<HashMap<String, f32>>>,
+    /// El numero de la proxima animacion de cierre.
+    closing_serial: usize,
     /// The handler the gestures report to.
     on_action: TabActionHandler,
 }
@@ -259,6 +294,7 @@ impl std::fmt::Debug for TabStrip {
             .field("active_chat_id", &self.active_chat_id)
             .field("dragging", &self.dragging)
             .field("drop_index", &self.drop_index)
+            .field("closing", &self.closing.len())
             .field("scale", &self.scale)
             .finish_non_exhaustive()
     }
@@ -288,6 +324,9 @@ impl TabStrip {
             focus_handle: None,
             scroll_handle: ScrollHandle::new(),
             scale: normalized_ui_scale(scale),
+            closing: Vec::new(),
+            widths: Rc::new(RefCell::new(HashMap::new())),
+            closing_serial: 0,
             on_action: None,
         }
     }
@@ -301,26 +340,16 @@ impl TabStrip {
         self
     }
 
-    /// The id of the pane the strip belongs to.
-    pub(crate) fn pane_id(&self) -> &str {
-        &self.pane_id
-    }
-
     /// The open chats, in order.
+    #[cfg(test)]
     pub(crate) fn tabs(&self) -> &[TabEntry] {
         &self.tabs
     }
 
     /// The chat that is showing.
+    #[cfg(test)]
     pub(crate) fn active_chat_id(&self) -> &str {
         &self.active_chat_id
-    }
-
-    /// The tab that is showing.
-    pub(crate) fn active_tab(&self) -> Option<&TabEntry> {
-        self.tabs
-            .iter()
-            .find(|tab| tab.chat_id == self.active_chat_id)
     }
 
     /// The place of a chat in the strip.
@@ -328,59 +357,29 @@ impl TabStrip {
         self.tabs.iter().position(|tab| tab.chat_id == chat_id)
     }
 
-    /// The scale of the interface.
-    pub(crate) fn scale(&self) -> f32 {
-        self.scale
-    }
-
-    /// The workspace the strip lives in.
-    pub(crate) fn panes(&self) -> &[Pane] {
-        &self.panes
-    }
-
-    /// Replaces the workspace the strip lives in.
-    ///
-    /// The strip keeps a copy of the panes because the keyboard needs to know
-    /// the other panes to move a tab to them.
-    pub(crate) fn set_panes(&mut self, panes: &[Pane]) {
-        self.panes = panes.to_vec();
-    }
-
     /// Replaces the tabs of the strip.
+    ///
+    /// La lista de la app manda: una pestaña que ya no esta se cierra con la
+    /// misma animacion que la de la X, aunque el cierre no haya pasado por
+    /// [`TabStrip::close`] (un chat que se borra, por ejemplo).
     pub(crate) fn set_tabs(&mut self, tabs: Vec<TabEntry>, active_chat_id: impl Into<String>) {
+        let gone = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, old)| !tabs.iter().any(|tab| tab.chat_id == old.chat_id))
+            .map(|(index, old)| (index, old.chat_id.clone()))
+            .collect::<Vec<_>>();
+        for (index, chat_id) in gone {
+            self.start_closing(&chat_id, index);
+        }
+        // Una pestaña que vuelve antes de terminar la animacion no deja
+        // fantasma: se dibuja la pestaña nueva y nada mas.
+        self.closing
+            .retain(|closing| !tabs.iter().any(|tab| tab.chat_id == closing.entry.chat_id));
         self.tabs = tabs;
         self.active_chat_id = active_chat_id.into();
-    }
-
-    /// Updates the data of a chat that is already open.
-    pub(crate) fn upsert(&mut self, entry: TabEntry) -> bool {
-        match self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.chat_id == entry.chat_id)
-        {
-            Some(tab) => {
-                *tab = entry;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Opens a chat as a tab of the pane.
-    ///
-    /// port: `openTab` of the oracle: a chat that is already open is only
-    /// focused, and a new one is appended to the strip.
-    pub(crate) fn open(&mut self, entry: TabEntry) -> bool {
-        let already_open = self.index_of(&entry.chat_id).is_some();
-        if already_open {
-            self.upsert(entry.clone());
-        } else {
-            self.tabs.push(entry.clone());
-        }
-        let pane = workspace::open_tab(&self.to_pane(), &entry.chat_id);
-        self.apply_pane(&pane);
-        !already_open
+        self.prune_closing();
     }
 
     /// Focuses a tab that is already open.
@@ -397,7 +396,9 @@ impl TabStrip {
     /// closed tab takes the focus, and the one to the left when there is no
     /// neighbour on the right.
     pub(crate) fn close(&mut self, chat_id: &str) -> Option<TabClose> {
-        self.index_of(chat_id)?;
+        let index = self.index_of(chat_id)?;
+        // El fantasma ocupa el lugar que la pestaña deja, mientras se encoge.
+        self.start_closing(chat_id, index);
         let pane = workspace::close_tab(&self.to_pane(), chat_id);
         let next_chat_id = if pane.active_chat_id.is_empty() {
             None
@@ -437,11 +438,6 @@ impl TabStrip {
     /// The chat that is being dragged.
     pub(crate) fn dragging(&self) -> Option<&str> {
         self.dragging.as_ref().map(|drag| drag.chat_id.as_str())
-    }
-
-    /// The place the dragged chat would land on.
-    pub(crate) fn drop_index(&self) -> Option<usize> {
-        self.drop_index
     }
 
     /// The pointer drags a chat over a place of the strip.
@@ -615,7 +611,9 @@ impl TabStrip {
     }
 
     /// The strip of tabs.
-    pub(crate) fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Un fantasma que ya termino su animacion no se dibuja mas.
+        self.prune_closing();
         let scale = self.scale;
         let mut strip = div()
             .id("tab-strip")
@@ -631,8 +629,11 @@ impl TabStrip {
                 let input = keyboard_input(event);
                 match this.handle_key(&input, &chat_id) {
                     TabAction::Unhandled => cx.propagate(),
-                    TabAction::Handled => {}
-                    action => this.report(action, window, cx),
+                    action => {
+                        this.report(action, window, cx);
+                        // Un cierre con el teclado deja el mismo fantasma.
+                        cx.notify();
+                    }
                 }
             }))
             .on_drag_move::<TabDragPayload>(cx.listener(
@@ -691,8 +692,19 @@ impl TabStrip {
             strip = strip.track_focus(focus).focusable();
         }
 
+        // Las pestañas y los fantasmas de las que se cierran van en el orden
+        // del riel. El fantasma de un lugar va antes que la pestaña que hoy
+        // ocupa ese lugar, porque era la que estaba a su izquierda.
+        let mut slots = Vec::with_capacity(self.tabs.len() + self.closing.len());
         for (index, entry) in self.tabs.iter().enumerate() {
-            strip = strip.child(self.render_tab(index, entry, cx));
+            slots.push((index, 1, self.render_tab(index, entry, cx).into_any_element()));
+        }
+        for closing in &self.closing {
+            slots.push((closing.index, 0, self.render_closing_tab(closing, cx)));
+        }
+        slots.sort_by_key(|(index, rank, _)| (*index, *rank));
+        for (_, _, slot) in slots {
+            strip = strip.child(slot);
         }
 
         strip.child(self.render_add_button(cx))
@@ -727,7 +739,19 @@ impl TabStrip {
             title: title.clone(),
         };
 
+        // El ancho real de la pestaña, guardado para que el cierre arranque
+        // justo desde ahi y no desde el minimo.
+        let widths = self.widths.clone();
+        let measured_id = chat_id.clone();
+
         div()
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(bounds) = bounds.first() {
+                    widths
+                        .borrow_mut()
+                        .insert(measured_id.clone(), f32::from(bounds.size.width));
+                }
+            })
             .id(format!("tab-slot-{chat_id}"))
             .relative()
             .flex_1()
@@ -780,6 +804,8 @@ impl TabStrip {
                             return;
                         }
                         this.close_and_report(&aux_chat_id, window, cx);
+                        // El fantasma del cierre empieza en el proximo cuadro.
+                        cx.notify();
                     }))
                     .on_drag(payload, |payload, _offset, _window, cx| {
                         cx.new(|_| TabDragPreview {
@@ -840,6 +866,125 @@ impl TabStrip {
             .child(self.render_close_button(entry, cx))
     }
 
+    /// El fantasma de una pestaña que se cierra.
+    ///
+    /// Se dibuja con el ancho que tenia y se encoge hasta cero: la vecina de
+    /// la derecha ocupa ese lugar cuadro a cuadro, sin saltar. La animacion
+    /// respeta el movimiento reducido del sistema.
+    fn render_closing_tab(&self, closing: &ClosingTab, cx: &mut Context<Self>) -> AnyElement {
+        let scale = self.scale;
+        let theme = cx.theme();
+        let entry = &closing.entry;
+        let width = closing.width;
+        // El fantasma conserva el aspecto que la pestaña tenia: si era la que
+        // se estaba mirando, no cambia de color justo al desaparecer.
+        let background = if closing.active {
+            theme.tab_active
+        } else {
+            theme.tab
+        };
+        let foreground = if closing.active {
+            theme.tab_active_foreground
+        } else {
+            theme.tab_foreground
+        };
+        let border = if closing.active {
+            theme.border
+        } else {
+            transparent_black()
+        };
+        // El contenido conserva su ancho mientras la caja se encoge: asi el
+        // texto no se reacomoda y el cierre se ve como un recorte.
+        let content = div()
+            .flex()
+            .flex_shrink_0()
+            .w(px(width))
+            .h_full()
+            .items_center()
+            .gap(px(7. * scale))
+            .pl(px(9. * scale))
+            .pr(px(30. * scale))
+            .rounded_t(px(6. * scale))
+            .border(px(1.))
+            .border_b(px(0.))
+            .border_color(border)
+            .bg(background)
+            .text_color(foreground)
+            .child(tab_avatar(entry, px(AVATAR_SIZE * scale), cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TITLE_SIZE * scale))
+                    .child(entry.title.clone()),
+            )
+            .when(entry.unread_count > 0, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .min_w(px(BADGE_SIZE * scale))
+                        .h(px(BADGE_SIZE * scale))
+                        .px(px(4. * scale))
+                        .rounded_full()
+                        .bg(theme.accent)
+                        .text_color(theme.accent_foreground)
+                        .text_size(px(BADGE_FONT_SIZE * scale))
+                        .font_weight(FontWeight::BOLD)
+                        .child(entry.unread_count.min(BADGE_MAX).to_string()),
+                )
+            });
+        // Salida: arranca rapido y frena suave, la misma curva que el resto de
+        // las transiciones de la app. La opacidad baja con el mismo reloj que
+        // el ancho, asi la pestaña no queda translucida de mas.
+        let animation =
+            Animation::new(TAB_CLOSE_DURATION).with_easing(|t: f32| 1.0 - (1.0 - t).powi(2));
+        div()
+            .flex_none()
+            .h_full()
+            .overflow_hidden()
+            .child(content)
+            .with_animation(
+                ElementId::named_usize("tab-closing", closing.serial),
+                animation,
+                move |slot, progress| {
+                    let left = 1.0 - progress;
+                    slot.w(px(width * left)).opacity(left)
+                },
+            )
+            .into_any_element()
+    }
+
+    /// Aparta una pestaña del riel y la deja como fantasma mientras se cierra.
+    fn start_closing(&mut self, chat_id: &str, index: usize) {
+        let Some(entry) = self.tabs.get(index).cloned() else {
+            return;
+        };
+        let width = self
+            .widths
+            .borrow()
+            .get(chat_id)
+            .copied()
+            .unwrap_or(TAB_MIN_WIDTH * self.scale);
+        self.closing_serial += 1;
+        self.closing.push(ClosingTab {
+            entry,
+            index,
+            active: self.active_chat_id == chat_id,
+            width,
+            started_at: Instant::now(),
+            serial: self.closing_serial,
+        });
+    }
+
+    /// Saca los fantasmas cuya animacion ya termino.
+    fn prune_closing(&mut self) {
+        self.closing
+            .retain(|closing| closing.started_at.elapsed() < TAB_CLOSE_DURATION);
+    }
+
     /// The button that closes a tab.
     fn render_close_button(&self, entry: &TabEntry, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.scale;
@@ -868,6 +1013,8 @@ impl TabStrip {
                 // la pestaña, que volvia a abrir el chat y deshacia el cierre.
                 cx.stop_propagation();
                 this.close_and_report(&chat_id, window, cx);
+                // El fantasma del cierre empieza en el proximo cuadro.
+                cx.notify();
             }))
             .child(Icon::new(IconName::Close).with_size(px(CLOSE_ICON_SIZE * scale)))
     }
@@ -1020,7 +1167,9 @@ fn direction_name(direction: TabDirection) -> &'static str {
 mod tests {
     use whatfast_core::tab_keyboard::{TabDirection, TabKeyboardInput};
 
-    use super::{TabAction, TabEntry, TabStrip, chat_title, web_key};
+    use std::time::{Duration, Instant};
+
+    use super::{TAB_CLOSE_DURATION, TabAction, TabEntry, TabStrip, chat_title, web_key};
 
     /// An entry of a chat.
     fn entry(chat_id: &str) -> TabEntry {
@@ -1037,11 +1186,13 @@ mod tests {
     fn strip() -> TabStrip {
         let mut strip = TabStrip::state("pane-1", 1.0);
         strip.set_tabs(vec![entry("a"), entry("b"), entry("c")], "b");
-        strip.set_panes(&[whatfast_core::workspace::Pane {
+        // The keyboard commands need the pane of the strip: the test module
+        // is a child of the module, so it can write the field.
+        strip.panes = vec![whatfast_core::workspace::Pane {
             id: "pane-1".to_string(),
             tab_chat_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
             active_chat_id: "b".to_string(),
-        }]);
+        }];
         strip
     }
 
@@ -1053,35 +1204,6 @@ mod tests {
             shift_key: false,
             platform_modifier: false,
         }
-    }
-
-    #[test]
-    fn a_tab_that_is_opened_twice_is_not_duplicated() {
-        let mut strip = strip();
-        assert!(!strip.open(entry("b")), "the chat was already open");
-        assert_eq!(strip.tabs().len(), 3);
-        assert_eq!(strip.active_chat_id(), "b");
-    }
-
-    #[test]
-    fn a_tab_that_is_opened_takes_the_focus_and_goes_to_the_end() {
-        let mut strip = strip();
-        assert!(strip.open(entry("d")));
-        assert_eq!(strip.tabs().len(), 4);
-        assert_eq!(strip.active_chat_id(), "d");
-        assert_eq!(strip.index_of("d"), Some(3));
-    }
-
-    #[test]
-    fn the_data_of_a_tab_can_be_updated() {
-        let mut strip = strip();
-        let mut updated = entry("a");
-        updated.unread_count = 3;
-        updated.title = "Ana".to_string();
-        assert!(strip.upsert(updated));
-        assert_eq!(strip.tabs()[0].title, "Ana");
-        assert_eq!(strip.tabs()[0].unread_count, 3);
-        assert!(!strip.upsert(entry("z")), "the chat is not open");
     }
 
     #[test]
@@ -1168,7 +1290,6 @@ mod tests {
         // the place 1 of the list without it.
         assert!(strip.drag_over("a", 2));
         assert_eq!(strip.dragging(), Some("a"));
-        assert_eq!(strip.drop_index(), Some(2));
         let moved = strip.commit_drag();
         assert_eq!(moved.map(|moved| moved.to_index), Some(1));
         assert_eq!(strip.index_of("a"), Some(1));
@@ -1202,7 +1323,6 @@ mod tests {
         strip.drag_over("a", 2);
         strip.cancel_drag();
         assert_eq!(strip.dragging(), None);
-        assert_eq!(strip.drop_index(), None);
         assert_eq!(strip.index_of("a"), Some(0));
     }
 
@@ -1316,55 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn the_control_and_the_shift_with_an_arrow_moves_the_tab_to_the_other_pane() {
-        let mut strip = strip();
-        strip.set_panes(&[
-            whatfast_core::workspace::Pane {
-                id: "pane-1".to_string(),
-                tab_chat_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-                active_chat_id: "b".to_string(),
-            },
-            whatfast_core::workspace::Pane {
-                id: "pane-2".to_string(),
-                tab_chat_ids: vec![],
-                active_chat_id: String::new(),
-            },
-        ]);
-        let mut input = key("ArrowRight");
-        input.shift_key = true;
-        input.platform_modifier = true;
-        let action = strip.handle_key(&input, "b");
-        assert_eq!(
-            action,
-            TabAction::MoveToPane {
-                chat_id: "b".to_string(),
-                title: "b".to_string(),
-                pane_id: "pane-2".to_string(),
-                index: 0,
-                direction: TabDirection::Right,
-                message: "b moved to the right pane, position 1".to_string(),
-            }
-        );
-        assert_eq!(strip.tabs().len(), 2, "the tab left the pane");
-    }
-
-    #[test]
-    fn the_move_to_a_pane_that_does_not_exist_says_it() {
-        let mut strip = strip();
-        let mut input = key("ArrowRight");
-        input.shift_key = true;
-        input.platform_modifier = true;
-        let action = strip.handle_key(&input, "b");
-        assert_eq!(
-            action,
-            TabAction::Boundary {
-                message: "There is no pane to the right".to_string()
-            }
-        );
-        assert_eq!(strip.tabs().len(), 3, "the tab stays in the pane");
-    }
-
-    #[test]
     fn the_keys_of_gpu_have_the_names_of_the_web() {
         assert_eq!(web_key("delete"), "Delete");
         assert_eq!(web_key("left"), "ArrowLeft");
@@ -1385,5 +1456,59 @@ mod tests {
         assert_eq!(chat_title(&chat), "+1 555");
         chat.title = "Ana".to_string();
         assert_eq!(chat_title(&chat), "Ana");
+    }
+
+    #[test]
+    fn a_closed_tab_stays_as_a_ghost_while_it_collapses() {
+        let mut strip = strip();
+        strip.close("b");
+        // La pestaña ya no esta en el riel, pero su fantasma ocupa el lugar
+        // que dejo hasta que termina la animacion.
+        assert_eq!(strip.tabs().len(), 2);
+        assert_eq!(strip.closing.len(), 1);
+        assert_eq!(strip.closing[0].entry.chat_id, "b");
+        assert_eq!(strip.closing[0].index, 1);
+    }
+
+    #[test]
+    fn the_ghost_of_a_closed_tab_leaves_after_the_animation() {
+        let mut strip = strip();
+        strip.close("b");
+        // El reloj no se puede mover en una prueba: el fantasma se vence a
+        // mano para ejercitar la limpieza.
+        strip.closing[0].started_at =
+            Instant::now() - TAB_CLOSE_DURATION - Duration::from_millis(1);
+        strip.prune_closing();
+        assert!(strip.closing.is_empty());
+    }
+
+    #[test]
+    fn a_tab_that_comes_back_does_not_keep_its_ghost() {
+        let mut strip = strip();
+        strip.close("b");
+        // The app syncs the strip with the chat that comes back: the ghost
+        // goes away and the tab takes its place.
+        strip.set_tabs(vec![entry("a"), entry("b"), entry("c")], "b");
+        assert!(strip.closing.is_empty());
+        assert_eq!(strip.index_of("b"), Some(1));
+    }
+
+    #[test]
+    fn a_tab_that_the_app_drops_closes_with_the_same_animation() {
+        let mut strip = strip();
+        strip.set_tabs(vec![entry("a"), entry("c")], "a");
+        assert_eq!(strip.closing.len(), 1);
+        assert_eq!(strip.closing[0].entry.chat_id, "b");
+        assert_eq!(strip.closing[0].index, 1);
+    }
+
+    #[test]
+    fn a_ghost_does_not_add_a_tab_to_the_strip() {
+        let mut strip = strip();
+        strip.close("b");
+        // Las teclas y los gestos siguen viendo dos pestañas: el fantasma no
+        // se puede seleccionar ni cerrar otra vez.
+        assert_eq!(strip.tabs().len(), 2);
+        assert_eq!(strip.close("b"), None);
     }
 }

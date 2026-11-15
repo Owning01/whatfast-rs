@@ -117,6 +117,18 @@ mod tests {
     #[test]
     fn expands_the_home() {
         let home = home().expect("home");
+        // The home is the folder the environment names: this comparison is
+        // what catches a `home()` that stops reading it.
+        let expected = std::env::var("HOME")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("USERPROFILE")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+            })
+            .expect("home");
+        assert_eq!(home, expected);
         let path = expand("~/.codex/config.toml").expect("path");
         assert_eq!(path, PathBuf::from(format!("{home}/.codex/config.toml")));
     }

@@ -87,17 +87,75 @@ impl Capture {
         })
     }
 
-    /// The next engine-clock frames, or none when the microphone closed.
-    pub fn try_take(&self) -> Option<Vec<i16>> {
-        self.frames
-            .try_recv()
-            .ok()
-            .map(|frame| frame.as_slice().to_vec())
+    /// Drains the next engine-clock frame into a caller-reused buffer without allocating.
+    pub fn try_take_into(&self, out: &mut Vec<i16>) -> bool {
+        let Ok(frame) = self.frames.try_recv() else {
+            return false;
+        };
+        out.clear();
+        out.extend_from_slice(frame.as_slice());
+        true
     }
 
     /// Silences the outgoing frames without closing the microphone.
     pub fn set_muted(&self, muted: bool) {
         MUTE.store(muted, Ordering::SeqCst);
+    }
+}
+
+/// Pure-Rust NLMS Acoustic Echo Canceller + simple RMS noise gate for call audio.
+pub struct EchoCanceller {
+    taps: usize,
+    weights: Vec<f32>,
+    far_history: Vec<f32>,
+    cursor: usize,
+    step_size: f32,
+    gate_threshold: f32,
+}
+
+impl EchoCanceller {
+    pub fn new(taps: usize) -> Self {
+        Self {
+            taps: taps.max(32),
+            weights: vec![0.0; taps.max(32)],
+            far_history: vec![0.0; taps.max(32)],
+            cursor: 0,
+            step_size: 0.15,
+            gate_threshold: 0.008,
+        }
+    }
+
+    /// Cancels echo from `near` using the `far` reference frame in-place.
+    pub fn process(&mut self, near: &mut [i16], far: &[i16]) {
+        let len = near.len().min(far.len());
+        let mut energy = 0.0f32;
+        for i in 0..len {
+            let x = f32::from(far[i]) / 32768.0;
+            let d = f32::from(near[i]) / 32768.0;
+            self.far_history[self.cursor] = x;
+            let mut y = 0.0f32;
+            let mut norm = 1e-6f32;
+            for k in 0..self.taps {
+                let idx = (self.cursor + self.taps - k) % self.taps;
+                let h = self.far_history[idx];
+                y += self.weights[k] * h;
+                norm += h * h;
+            }
+            let err = d - y;
+            let mu = self.step_size / norm;
+            for k in 0..self.taps {
+                let idx = (self.cursor + self.taps - k) % self.taps;
+                self.weights[k] += mu * err * self.far_history[idx];
+            }
+            self.cursor = (self.cursor + 1) % self.taps;
+            energy += err * err;
+            near[i] = (err.clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
+        if len > 0 && (energy / len as f32).sqrt() < self.gate_threshold {
+            for s in &mut near[..len] {
+                *s = (*s as f32 * 0.25) as i16;
+            }
+        }
     }
 }
 

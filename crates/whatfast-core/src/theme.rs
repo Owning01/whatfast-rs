@@ -3,9 +3,7 @@
 //! The theme model, the normalization of an untrusted theme file, the clone,
 //! the export and the catalog of the builtin themes are pure, so they live
 //! here. The effect of the original — `applyTheme` writes the tokens as CSS
-//! custom properties on `document.documentElement` — belongs to the UI crate:
-//! this module decides *what* to write ([`theme_root_declaration`]) and the
-//! UI writes it.
+//! custom properties on `document.documentElement` — belongs to the UI crate.
 //!
 //! Fidelity notes (the odd bits are deliberate, they are the oracle's):
 //! - `isSafeTokenValue` is a hand-written matcher: the crate takes no new
@@ -458,43 +456,6 @@ pub fn default_theme() -> Theme {
             builtin: Some(true),
             tokens: vercel_dark(),
         },
-    }
-}
-
-/// What a theme writes on the document root.
-///
-/// port: `applyTheme` sets the thirty custom properties, the `data-appearance`
-/// and the `data-theme-style` attributes and the `color-scheme` style of
-/// `document.documentElement`. The DOM is an effect of the UI crate, so this
-/// module only decides the values.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThemeRootDeclaration {
-    /// The CSS custom properties, in [`THEME_TOKENS`] order.
-    pub properties: Vec<(String, String)>,
-    /// The value of the `data-appearance` attribute of the root.
-    pub appearance: &'static str,
-    /// The value of the `data-theme-style` attribute of the root.
-    pub theme_style: &'static str,
-    /// The value of the `color-scheme` style of the root.
-    pub color_scheme: &'static str,
-}
-
-/// The values `applyTheme` writes on the document root.
-pub fn theme_root_declaration(theme: &Theme) -> ThemeRootDeclaration {
-    let properties = THEME_TOKENS
-        .iter()
-        .map(|token| {
-            (
-                format!("--{}", token.as_str()),
-                theme.tokens.get(*token).to_string(),
-            )
-        })
-        .collect();
-    ThemeRootDeclaration {
-        properties,
-        appearance: theme.appearance.as_str(),
-        theme_style: theme.visual_style.as_str(),
-        color_scheme: theme.appearance.as_str(),
     }
 }
 

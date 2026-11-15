@@ -329,10 +329,10 @@ fn parse_page(html: &str, page_url: &str) -> PageMeta {
                     fill(&mut meta.description, &content);
                 }
                 "og:image" | "og:image:url" | "og:image:secure_url" | "twitter:image"
-                | "twitter:image:src" => {
-                    if meta.image.is_empty() {
-                        meta.image = resolve_url(page_url, &content);
-                    }
+                | "twitter:image:src"
+                    if meta.image.is_empty() =>
+                {
+                    meta.image = resolve_url(page_url, &content);
                 }
                 _ => {}
             }
@@ -664,28 +664,6 @@ mod tests {
         "#;
         let meta = parse_page(html, "https://example.com");
         assert_eq!(meta.image, "https://cdn.example/primera.png");
-    }
-
-    /// Manual check of the whole path against the real network: it is
-    /// ignored because the suite must pass offline.
-    #[test]
-    #[ignore]
-    fn manual_preview_of_a_real_page() {
-        for url in ["https://www.rust-lang.org/", "https://example.com/"] {
-            let preview = preview_of(&format!("mira {url}"));
-            match preview {
-                Some(preview) => println!(
-                    "{url} -> title={:?} description={:?} thumb={} bytes {}x{} matched={:?}",
-                    preview.title,
-                    preview.description,
-                    preview.thumbnail.len(),
-                    preview.width,
-                    preview.height,
-                    preview.matched_text
-                ),
-                None => println!("{url} -> sin tarjeta"),
-            }
-        }
     }
 
     #[test]

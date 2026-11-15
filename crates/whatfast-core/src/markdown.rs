@@ -144,35 +144,13 @@ pub fn has_blocks(text: &str) -> bool {
 /// window has no line of its own, and a rule that is text is always visible.
 const RULE: &str = "────────────────────────";
 
-/// The HTML of a message, for the view of text of the window.
-///
-/// This is the only place that knows both parsers: the blocks of this module
-/// and the inline marks of [`crate::whatsapp_formatting`]. Every string is
-/// escaped, so a message can never inject markup.
-///
-/// It returns `None` when the message carries no block of a document, so the
-/// caller keeps the plain bubble of a message with only text and marks.
-pub fn to_html(
-    text: &str,
-    options: &crate::whatsapp_formatting::WhatsAppParseOptions,
-) -> Option<String> {
-    if !has_blocks(text) {
-        return None;
-    }
-    let mut html = String::new();
-    for block in parse(text) {
-        push_block(&mut html, block, options);
-    }
-    Some(html)
-}
-
 /// One piece of the drawing of a message.
 ///
 /// The window draws the blocks of text with its view of text, but a diagram
 /// is boxes and arrows: the message is cut where a diagram starts.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Part {
-    /// Blocks of text, as the HTML of [`to_html`].
+    /// Blocks of text, as HTML.
     Html(String),
     /// A diagram of [`crate::diagrams`].
     Diagram(crate::diagrams::Diagram),
@@ -621,6 +599,10 @@ mod tests {
             vec![Block::Paragraph(vec!["hola, ¿cómo va?".into()])]
         );
         assert!(!has_blocks("hola, ¿cómo va?"));
+        assert!(has_blocks("# t\n\ntexto"));
+        assert!(has_blocks("- uno\n- dos"));
+        assert!(has_blocks("| a |\n|---|\n| 1 |"));
+        assert!(!has_blocks("solo *negrita* y un link https://ejemplo.com"));
     }
 
     #[test]
@@ -764,56 +746,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_document_has_blocks() {
-        assert!(has_blocks("# t\n\ntexto"));
-        assert!(has_blocks("- uno\n- dos"));
-        assert!(has_blocks("| a |\n|---|\n| 1 |"));
-        assert!(!has_blocks("solo *negrita* y un link https://ejemplo.com"));
-    }
-
     use crate::whatsapp_formatting::WhatsAppParseOptions;
     use crate::{diagrams::Diagram, markdown::Part, markdown::parts};
 
-    fn html(text: &str) -> String {
-        to_html(text, &WhatsAppParseOptions::default()).unwrap_or_default()
-    }
-
-    #[test]
-    fn a_plain_message_has_no_html_of_blocks() {
-        assert_eq!(to_html("hola", &WhatsAppParseOptions::default()), None);
-    }
-
-    #[test]
-    fn every_block_becomes_its_tag() {
-        assert!(html("# Título").starts_with("<h1>Título</h1>"));
-        assert_eq!(html("## Dos"), "<h2>Dos</h2>");
-        assert_eq!(html("- uno\n- dos"), "<ul><li>uno</li><li>dos</li></ul>");
-        assert_eq!(html("3. tres"), "<ol start=\"3\"><li>tres</li></ol>");
-        assert_eq!(html("> cita"), "<blockquote>cita</blockquote>");
-        assert_eq!(html("```\nfn main() {}\n```"), "<pre>fn main() {}</pre>");
-        assert!(html("---").starts_with("<p>──"));
-    }
-
-    #[test]
-    fn the_inline_marks_of_whatsapp_are_html_now() {
-        let rendered = html("# *negrita* y _itálica_");
-        assert!(rendered.contains("<strong>negrita</strong>"), "{rendered}");
-        assert!(rendered.contains("<em>itálica</em>"), "{rendered}");
-    }
-
-    #[test]
-    fn a_table_keeps_its_columns_when_a_row_is_short() {
-        let rendered = html("| a | b |\n|---|---|\n| 1 |\n| 2 | 3 |");
-        assert!(rendered.starts_with("<table><thead><tr><th>a</th><th>b</th></tr></thead>"));
-        // The empty cell of the second row is a zero width space, not a gap.
-        assert!(rendered.contains("<tr><td>1</td><td>&#8203;</td></tr>"), "{rendered}");
-        assert!(rendered.contains("<tr><td>2</td><td>3</td></tr>"), "{rendered}");
-    }
-
     #[test]
     fn a_message_cannot_inject_markup() {
-        let rendered = html("# <script>alert('x')</script>");
+        let parts = parts(
+            "# <script>alert('x')</script>",
+            &WhatsAppParseOptions::default(),
+        )
+        .unwrap();
+        let rendered = parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Html(html) => Some(html.as_str()),
+                Part::Diagram(_) => None,
+            })
+            .collect::<String>();
         assert!(!rendered.contains("<script>"), "{rendered}");
         assert!(rendered.contains("&lt;script&gt;"), "{rendered}");
     }
@@ -840,14 +789,5 @@ mod tests {
         .unwrap();
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0], Part::Html(html) if html.contains("<pre>not a diagram</pre>")));
-    }
-
-    #[test]
-    fn a_link_inside_a_block_stays_a_link() {
-        let rendered = html("- https://ejemplo.com/x");
-        assert!(
-            rendered.contains("<a href=\"https://ejemplo.com/x\">"),
-            "{rendered}"
-        );
     }
 }

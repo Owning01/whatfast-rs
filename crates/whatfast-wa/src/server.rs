@@ -15,7 +15,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -40,6 +40,14 @@ const AVATAR_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 *
 /// WhatsApp expires a status after 24 hours; the list only shows that window.
 const STATUS_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// Statuses older than 2 days are permanently deleted from the local database
+/// and their cached media files are removed from disk.
+const STATUS_RETENTION_MS: i64 = 2 * 24 * 60 * 60 * 1000;
+
+/// Regular cached media (chat videos, photos, documents, audio) stays on disk
+/// for 30 days before automatic age-based cleanup.
+const MEDIA_RETENTION_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
 /// The sticker packs the library answers with, the Go `stickerPackLimit`.
 const STICKER_PACK_LIMIT: usize = 300;
 
@@ -61,12 +69,9 @@ struct Handled {
 
 /// The conversation state of one served process.
 pub struct Server {
+    /// Whether the handshake completed: `Hello` records it, so the next
+    /// request is served and its envelope version is enforced.
     handshaken: bool,
-    /// Set when the Hello answer is built; the next request flips the
-    /// handshake, which is the point at which the serve loop already wrote
-    /// that answer. Keeping the two apart is the Go's ordering: `handle`
-    /// never enables the event tap, `Run` does after the write.
-    hello_answered: bool,
     /// Monotonic event sequence for the lifetime of the process; resets with
     /// the process, as the contract states.
     sequence: AtomicU64,
@@ -88,6 +93,22 @@ pub struct Server {
     /// second request for the same jid answers at once instead of starting
     /// another lookup and waiting again.
     avatar_fetches: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Whether the background download of the sticker library is running.
+    /// The desktop asks for the library again after every change it hears,
+    /// and every answer used to start another prefetch: one guard keeps a
+    /// single walk of the missing files.
+    sticker_prefetch: Arc<AtomicBool>,
+    /// Ensures the periodic SQLite maintenance task is spawned at most once.
+    maintenance_started: bool,
+}
+
+/// Clears the prefetch flag when the task ends, including an early return.
+struct PrefetchGuard(Arc<AtomicBool>);
+
+impl Drop for PrefetchGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Server {
@@ -98,7 +119,6 @@ impl Server {
     ) -> Self {
         Self {
             handshaken: false,
-            hello_answered: false,
             sequence: AtomicU64::new(0),
             media_dir: data_dir.join("media"),
             data_dir,
@@ -107,25 +127,14 @@ impl Server {
             session: None,
             older_history: Arc::new(Mutex::new(None)),
             avatar_fetches: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            sticker_prefetch: Arc::new(AtomicBool::new(false)),
+            maintenance_started: false,
         }
-    }
-
-    /// Whether the handshake completed. The Go test of the same name reads
-    /// its flag right after `handle` and expects it still off.
-    pub fn handshaken(&self) -> bool {
-        self.handshaken
     }
 
     /// Handles one request envelope end to end and produces the exact
     /// envelope to write back.
     pub async fn handle(&mut self, incoming: Envelope) -> Outcome {
-        // The Hello answer left this process before the next request could
-        // arrive: the serve loop writes one response at a time. That write is
-        // the gate the Go's `Run` used to enable events, so the handshake is
-        // recorded here rather than inside `handle`.
-        if self.hello_answered {
-            self.handshaken = true;
-        }
         let request_id = incoming.request_id;
         let Some(envelope::Body::Request(request)) = incoming.body else {
             // `bridge::read_frame` rejects non-request frames before they get
@@ -193,7 +202,35 @@ impl Server {
                         format!("protocol v{PROTOCOL_VERSION} is not supported by desktop"),
                     ));
                 }
-                self.hello_answered = true;
+                self.handshaken = true;
+                let store = self.store.clone();
+                let media_dir = self.media_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    let cutoff = crate::db::now_ms() - STATUS_RETENTION_MS;
+                    let purged = match store.purge_expired_statuses(cutoff) {
+                        Ok((count, paths)) => {
+                            crate::storage::purge_paths(&media_dir, &paths);
+                            count
+                        }
+                        Err(_) => 0,
+                    };
+                    crate::storage::prune_expired_media(&media_dir, MEDIA_RETENTION_AGE);
+                    let _ = store.maintain(purged > 0);
+                });
+                if !self.maintenance_started {
+                    self.maintenance_started = true;
+                    let bg_store = self.store.clone();
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+                        interval.tick().await;
+                        loop {
+                            interval.tick().await;
+                            let s = bg_store.clone();
+                            let _ = tokio::task::spawn_blocking(move || s.maintain(false)).await;
+                        }
+                    });
+                }
                 Ok(Handled {
                     result: rpc_response::Result::Hello(HelloResponse {
                         backend_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -737,8 +774,21 @@ impl Server {
                 // the unread rows at or before it, refusing an outgoing
                 // anchor by name. When through_message_id is empty, all unread
                 // rows are marked read.
-                let rows = if request.through_message_id.is_empty() {
-                    self.store.all_unread_rows(&request.chat_id)?
+                let mut rows = if request.through_message_id.is_empty() {
+                    let unread = self.store.all_unread_rows(&request.chat_id)?;
+                    if unread.is_empty() {
+                        // La ventana abrio la conversacion y su base ya la
+                        // tenia leida: el telefono puede seguir con el badge,
+                        // porque la marca local solo dice lo que vio esta
+                        // ventana. El ancla es el ultimo mensaje entrante y el
+                        // recibo lo alcanza.
+                        self.store
+                            .newest_incoming(&request.chat_id)?
+                            .into_iter()
+                            .collect()
+                    } else {
+                        unread
+                    }
                 } else {
                     let unread = self
                         .store
@@ -753,10 +803,31 @@ impl Server {
                         crate::db::UnreadThrough::Rows(rows) => rows,
                     }
                 };
+                // A row can already be marked read here and still be unread
+                // on the phone: the local flag only records what this device
+                // saw. The anchor goes as a receipt anyway, so the read state
+                // reaches the other devices and the sender.
+                if rows.is_empty()
+                    && !request.through_message_id.is_empty()
+                    && let Some(anchor) = self
+                        .store
+                        .read_anchor(&request.chat_id, &request.through_message_id)?
+                {
+                    rows.push(anchor);
+                }
                 let session = self.session.clone().ok_or_else(|| {
                     Failure::retryable("not_connected", "WhatsApp is not connected")
                 })?;
+                // La direccion de la conversacion en el cable: la de la
+                // ultima fila que se confirma. Un chat directo puede estar
+                // guardado por numero de telefono y hablar por LID, y la
+                // mutacion tiene que ir a la direccion que conoce el telefono.
+                let app_chat = rows
+                    .last()
+                    .map(|row| row.transport_jid.clone())
+                    .unwrap_or_else(|| request.chat_id.clone());
                 let receipt = self.mark_read_rows(&session, &request.chat_id, rows).await;
+                self.sync_chat_read(&session, &app_chat);
                 if request.through_message_id.is_empty() {
                     let _ = self.store.mark_all_read(&request.chat_id);
                 }
@@ -1130,6 +1201,33 @@ impl Server {
                 let info = self.chat_info(&request.chat_id).await?;
                 Ok(Handled {
                     result: rpc_response::Result::GetChatInfo(info),
+                    exit_after: false,
+                })
+            }
+            Some(rpc_request::Request::ListChatMedia(request)) => {
+                if request.chat_id.is_empty() {
+                    return Err(Failure::fatal("invalid_argument", "chat_id is required"));
+                }
+                let (rows, media_count, doc_count, link_count) = self
+                    .store
+                    .list_chat_media(
+                        &request.chat_id,
+                        &request.category,
+                        request.limit as usize,
+                    )?;
+                let messages = rows
+                    .iter()
+                    .map(crate::wire::wire_message)
+                    .collect::<Vec<_>>();
+                Ok(Handled {
+                    result: rpc_response::Result::ListChatMedia(
+                        whatfast_protocol::ListChatMediaResponse {
+                            messages,
+                            media_count,
+                            doc_count,
+                            link_count,
+                        },
+                    ),
                     exit_after: false,
                 })
             }
@@ -1660,6 +1758,12 @@ impl Server {
                 })
             }
             Some(rpc_request::Request::ListStatuses(_)) => {
+                // Purge statuses older than 2 days (rows + cached media on disk).
+                let retention_cutoff = crate::db::now_ms() - STATUS_RETENTION_MS;
+                if let Ok((_, expired_paths)) = self.store.purge_expired_statuses(retention_cutoff)
+                {
+                    crate::storage::purge_paths(&self.media_dir, &expired_paths);
+                }
                 // The Go resolved the special conversation first: without a
                 // stored status chat there is nothing to list.
                 let chat_id = self.store.resolve_chat_id("status@broadcast")?;
@@ -1915,6 +2019,33 @@ impl Server {
                     exit_after: false,
                 })
             }
+            Some(rpc_request::Request::GetLinkPreview(request)) => {
+                // The card the composer draws while the user types. It needs
+                // no WhatsApp connection: the page is public, and a page that
+                // does not answer in time leaves the text without a card.
+                let url = request.url.trim().to_string();
+                if url.is_empty() {
+                    return Err(Failure::fatal("invalid_argument", "url is required"));
+                }
+                let preview = crate::link_preview::for_text(&url).await;
+                Ok(Handled {
+                    result: rpc_response::Result::GetLinkPreview(
+                        whatfast_protocol::GetLinkPreviewResponse {
+                            preview: preview
+                                .as_ref()
+                                .map(|found| whatfast_protocol::LinkPreview {
+                                    url: found.matched_text.clone(),
+                                    title: found.title.clone(),
+                                    description: found.description.clone(),
+                                    jpeg_thumbnail: found.thumbnail.clone(),
+                                    thumbnail_width: found.width,
+                                    thumbnail_height: found.height,
+                                }),
+                        },
+                    ),
+                    exit_after: false,
+                })
+            }
             Some(rpc_request::Request::RequestOlderHistory(request)) => {
                 let coverage = self.request_older_history(&request.chat_id).await?;
                 Ok(Handled {
@@ -1999,6 +2130,18 @@ impl Server {
     /// The sequence number is assigned by the serve loop, the single writer.
     fn push_event(&self, event: BackendEvent) {
         let _ = self.events.send_blocking(event);
+    }
+
+    /// The live session, when the profile is paired and the client is up. The
+    /// scheduler delivers the answer of a task through it.
+    pub fn session(&self) -> Option<Arc<Session>> {
+        self.session.clone()
+    }
+
+    /// A handle to the pipe of the events the desktop listens to, for a worker
+    /// that answers without a request in front of it: a scheduled send.
+    pub fn events(&self) -> async_channel::Sender<BackendEvent> {
+        self.events.clone()
     }
 
     /// The next event sequence number, starting at one.
@@ -2310,6 +2453,32 @@ impl Server {
     /// Sends the read receipts for the unread rows the desktop acknowledged,
     /// grouped by transport chat and author like the Go `MarkRead`, and marks
     /// exactly those rows read.
+    /// Apaga el contador de la conversacion en los otros dispositivos.
+    ///
+    /// El recibo de leido avisa al autor del mensaje; esta mutacion de app
+    /// state es la que sincroniza el estado de la conversacion entre los
+    /// dispositivos vinculados. Sin ella la ventana marcaba leido y el
+    /// telefono seguia mostrando el chat sin leer.
+    ///
+    /// El rango de mensajes queda vacio a proposito: la API lo admite cuando
+    /// el cliente no tiene la base completa, y el contador es lo unico que
+    /// esta llamada mueve.
+    fn sync_chat_read(&self, session: &Session, transport: &str) {
+        let Ok(chat) = transport.parse::<whatsapp_rust::Jid>() else {
+            return;
+        };
+        let client = session.client.clone();
+        tokio::spawn(async move {
+            if let Err(error) = client
+                .chat_actions()
+                .mark_chat_as_read(&chat, true, None)
+                .await
+            {
+                tracing::warn!("WhatsApp mark_chat_as_read failed: {error}");
+            }
+        });
+    }
+
     async fn mark_read_rows(
         &self,
         session: &Session,
@@ -2343,7 +2512,7 @@ impl Server {
                     format!("not a WhatsApp JID: {transport}"),
                 ));
             };
-            let sender_jid = sender.parse::<whatsapp_rust::Jid>().ok();
+            let sender_jid = receipt_participant(&transport, &sender);
             let raw: Vec<String> = rows
                 .iter()
                 .filter(|row| row.transport_jid == transport && row.sender_jid == sender)
@@ -2564,13 +2733,14 @@ impl Server {
                 };
                 let mut source_chat_id = String::new();
                 let mut source_message_id = String::new();
-                if local_path.is_empty() {
-                    if let Ok(Some((chat, msg, path))) = self.store.sticker_source_and_path(&favorite.id) {
-                        source_chat_id = chat;
-                        source_message_id = msg;
-                        if !path.is_empty() && std::path::Path::new(&path).exists() {
-                            local_path = path;
-                        }
+                if local_path.is_empty()
+                    && let Ok(Some((chat, msg, path))) =
+                        self.store.sticker_source_and_path(&favorite.id)
+                {
+                    source_chat_id = chat;
+                    source_message_id = msg;
+                    if !path.is_empty() && std::path::Path::new(&path).exists() {
+                        local_path = path;
                     }
                 }
                 whatfast_protocol::Sticker {
@@ -2689,11 +2859,16 @@ impl Server {
         let Some(session) = self.session.clone() else {
             return;
         };
+        if self.sticker_prefetch.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let store = self.store.clone();
         let media_dir = self.media_dir.clone();
         let events = self.events.clone();
+        let guard = PrefetchGuard(self.sticker_prefetch.clone());
 
         tokio::spawn(async move {
+            let _guard = guard;
             let favorites = match store.favorite_stickers(0) {
                 Ok(favs) => favs,
                 Err(_) => return,
@@ -2742,8 +2917,8 @@ impl Server {
                         &candidate.mime,
                         "",
                     );
-                    if !cached.exists() {
-                        if crate::media::fetch_message_media(
+                    if !cached.exists()
+                        && crate::media::fetch_message_media(
                             &session,
                             &store,
                             &media_dir,
@@ -2752,20 +2927,19 @@ impl Server {
                         )
                         .await
                         .is_ok()
-                        {
-                            count += 1;
-                            if count % 6 == 0 {
-                                let _ = events
-                                    .send(whatfast_protocol::BackendEvent {
-                                        sequence: 0,
-                                        event: Some(
-                                            whatfast_protocol::backend_event::Event::StickersChanged(
-                                                whatfast_protocol::StickersChanged {},
-                                            ),
+                    {
+                        count += 1;
+                        if count % 6 == 0 {
+                            let _ = events
+                                .send(whatfast_protocol::BackendEvent {
+                                    sequence: 0,
+                                    event: Some(
+                                        whatfast_protocol::backend_event::Event::StickersChanged(
+                                            whatfast_protocol::StickersChanged {},
                                         ),
-                                    })
-                                    .await;
-                            }
+                                    ),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -3554,6 +3728,7 @@ fn normalize_chat_id(request: &mut rpc_request::Request, store: &Store) {
         rpc_request::Request::GetMessageImage(r) => &mut r.chat_id,
         rpc_request::Request::GetMessageAttachment(r) => &mut r.chat_id,
         rpc_request::Request::GetChatInfo(r) => &mut r.chat_id,
+        rpc_request::Request::ListChatMedia(r) => &mut r.chat_id,
         rpc_request::Request::GetChatAvatar(r) => &mut r.chat_id,
         rpc_request::Request::SetChatPin(r) => &mut r.chat_id,
         rpc_request::Request::SetChatArchive(r) => &mut r.chat_id,
@@ -3984,9 +4159,29 @@ fn poll_creation(
         .or_else(|| content.poll_creation_message_v6.as_option())
 }
 
+/// The `participant` of a read receipt: the author of a group message and
+/// nothing for a direct chat, where the chat itself is the author on the
+/// wire. A group row whose author is unknown falls back to no participant
+/// instead of naming the group.
+///
+/// The rule is the chat, not the stored sender: a direct chat addressed by
+/// phone number can store its contact under the LID, and naming that LID was
+/// what made the receipt of a direct chat look like a group one. WhatsApp
+/// then had no author to credit and the phone kept the message unread.
+fn receipt_participant(transport: &str, sender: &str) -> Option<whatsapp_rust::Jid> {
+    let chat = transport.parse::<whatsapp_rust::Jid>().ok()?;
+    if !(chat.is_group() || chat.is_broadcast_list() || chat.is_status_broadcast()) {
+        return None;
+    }
+    if sender == transport {
+        return None;
+    }
+    sender.parse::<whatsapp_rust::Jid>().ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_uuid, newsletter_invite_key, valid_reaction_emoji};
+    use super::{is_uuid, newsletter_invite_key, receipt_participant, valid_reaction_emoji};
     use std::sync::Arc;
 
     /// A server on a throwaway profile. The directory stays behind: Windows
@@ -4004,6 +4199,23 @@ mod tests {
         let store = crate::db::Store::open(&dir.join("chats.db")).expect("the store opens");
         let (events, _) = async_channel::unbounded();
         (dir.clone(), super::Server::new(dir, Arc::new(store), events))
+    }
+
+    /// A direct chat names no participant: the chat is the author on the
+    /// wire. A group names the member whose messages are acknowledged, and
+    /// never the group itself when the author is unknown.
+    #[test]
+    fn the_participant_of_a_read_receipt_is_the_group_author() {
+        let direct = "136181031424112@lid";
+        assert!(receipt_participant(direct, direct).is_none());
+        // Un chat directo guardado por numero de telefono apunta el autor con
+        // su LID: sigue sin participante, o el recibo se lee como de grupo.
+        assert!(receipt_participant("5493813632656@s.whatsapp.net", direct).is_none());
+        let author = receipt_participant("120363041930554780@g.us", direct)
+            .expect("the author of a group message");
+        assert_eq!(author.to_string(), direct);
+        let group = "120363041930554780@g.us";
+        assert!(receipt_participant(group, group).is_none());
     }
 
     /// The favourites synced from the phone have a descriptor and a cached
@@ -4053,6 +4265,8 @@ mod tests {
         );
     }
 
+    /// The Go parsed the id with `uuid.Parse`: the canonical 8-4-4-4-12 shape,
+    /// hex digits and the exact length, nothing else.
     #[test]
     fn only_canonical_uuids_pass() {
         assert!(is_uuid("b0bca7f5-a85f-4a8c-8956-1722cf35ffbc"));

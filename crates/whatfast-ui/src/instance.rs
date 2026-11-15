@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 
 /// The name of the lock file inside the profile of the user.
 const LOCK_FILE: &str = "whatfast.lock";
+/// The Unix domain socket used to wake a running instance on Linux/macOS.
+#[cfg(unix)]
+const WAKE_SOCKET: &str = "instance.sock";
 
 /// The lock of the single instance.
 ///
@@ -59,19 +62,55 @@ impl InstanceLock {
         let _ = file.sync_all();
         Some(Self { path })
     }
-
-    /// The path of the lock file.
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for InstanceLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::remove_file(parent.join(WAKE_SOCKET));
+        }
     }
 }
+
+/// Starts listening for wake requests from second launches on Unix (Linux X11/Wayland).
+#[cfg(unix)]
+pub(crate) fn start_wake_listener(window: &gpui::Window, cx: &gpui::App) {
+    use std::io::Read as _;
+    use std::os::unix::net::UnixListener;
+
+    let socket_path = whatfast_model::paths::data_dir().join(WAKE_SOCKET);
+    let _ = fs::remove_file(&socket_path);
+    let Ok(listener) = UnixListener::bind(&socket_path) else {
+        return;
+    };
+    let (tx, rx) = async_channel::bounded::<()>(4);
+    std::thread::Builder::new()
+        .name("whatfast-wake".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 8];
+                let _ = stream.read(&mut buf);
+                let _ = tx.try_send(());
+            }
+        })
+        .ok();
+
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        while rx.recv().await.is_ok() {
+            let _ = handle.update(cx, |_, window, _| {
+                window.activate_window();
+            });
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(unix))]
+pub(crate) fn start_wake_listener(_window: &gpui::Window, _cx: &gpui::App) {}
 
 /// Brings the window of the instance that holds the lock to the front.
 ///
@@ -107,9 +146,20 @@ pub(crate) fn show_running_instance() {
     }
 }
 
-/// There is no second instance to show outside Windows.
+/// Wakes the running instance over the profile's Unix socket.
 #[cfg(not(windows))]
-pub(crate) fn show_running_instance() {}
+pub(crate) fn show_running_instance() {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let socket_path = whatfast_model::paths::data_dir().join(WAKE_SOCKET);
+        if let Ok(mut stream) = UnixStream::connect(socket_path) {
+            let _ = stream.write_all(b"SHOW\n");
+        }
+    }
+}
 
 /// Releases the lock of this process before the app restarts itself with an
 /// update.
@@ -247,8 +297,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let profile = directory.path().join("profile");
         {
-            let lock = InstanceLock::acquire(&profile).expect("the lock is free");
-            assert!(lock.path().exists());
+            let _lock = InstanceLock::acquire(&profile).expect("the lock is free");
+            assert!(profile.join(LOCK_FILE).exists());
         }
         assert!(!profile.join(LOCK_FILE).exists(), "the lock is released");
     }

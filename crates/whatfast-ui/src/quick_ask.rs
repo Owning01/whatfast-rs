@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -297,6 +297,7 @@ impl QuickAsk {
             .top(px(120. * scale))
             .right(px(20. * scale))
             .w(px(CARD_WIDTH * scale))
+            .max_w(relative(0.9))
             .gap_2()
             .p(px(12. * scale))
             .rounded_lg()
@@ -374,6 +375,19 @@ impl QuickAsk {
                             .flex_1()
                             .min_w_0()
                             .child(Input::new(&self.input).small()),
+                    )
+                    .child(
+                        Button::new("quick-ask-summarize-unread")
+                            .secondary()
+                            .small()
+                            .disabled(waiting)
+                            .label(i18n::t("Summarize unread"))
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.quick_ask.input.update(cx, |input, cx| {
+                                    input.set_value("Summarize the unread messages concisely and suggest a reply.", window, cx);
+                                });
+                                app.submit_quick_ask(cx);
+                            })),
                     )
                     .child(
                         Button::new("quick-ask-send")
