@@ -228,21 +228,17 @@ fn the_chat_info_of_a_trimmed_chat_still_answers() {
     client.shutdown();
 }
 
-/// A profile with no agents registered still serves the user: nothing to add
-/// here, the guard treats the harness as the user who started it.
+/// A profile with no agents registered does not lend the user's permissions to
+/// a harness that names an agent: the row is missing, so the door stays shut.
 #[test]
-fn a_profile_without_agents_still_serves_the_user() {
+fn a_profile_without_agents_denies_the_agent() {
     let profile = Profile::new("bootstrap");
-    // No `agents.db` row at all: the harness is the user who started it, which
-    // is what a fresh install does before the screen of agents exists.
+    // No `agents.db` row at all: naming an agent is not the way in.
     let mut client = client(&profile, "probar");
-    let chats = client
+    let error = client
         .call(chats_list(), Duration::from_secs(30))
-        .expect("the user reads");
-    let whatfast_protocol::rpc_response::Result::ListChats(chats) = chats else {
-        panic!("expected the list of chats");
-    };
-    assert_eq!(chats.chats.len(), 2);
+        .expect_err("an unregistered agent does not read");
+    assert_eq!(error.code(), "unauthorized");
     client.shutdown();
     profile.drop_token("probar");
 }

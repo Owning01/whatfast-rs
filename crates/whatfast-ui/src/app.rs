@@ -69,7 +69,7 @@ use crate::message_actions::{
     AttachmentAction, AttachmentBar, ForwardAction, ForwardPicker, MessageAction, MessageMenu,
     PollAction, PollComposer,
 };
-use crate::navrail::{LinkState, NavAction, NavRail};
+use crate::navrail::{LinkState, NavAction, NavRail, SidebarView};
 use crate::newsletters::NewsletterPanel;
 use crate::notifications::{Note, Notifier};
 use crate::sounds::{Builtin as BuiltinSound, Choice as SoundChoice, Incoming as IncomingSound, SoundEvent, Sounds};
@@ -502,6 +502,9 @@ pub(crate) struct ChatDraft {
     #[serde(default)]
     pub(crate) pending_attachment_paths: Vec<PathBuf>,
 }
+
+/// Chat, text, reply and @ mentions of a text written while offline.
+pub(crate) type QueuedText = (String, String, Option<String>, Vec<(String, String)>);
 
 /// One participant the user tagged with the @ picker.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1000,7 +1003,8 @@ pub(crate) struct Whatfast {
     pub(crate) typing_indicators: HashMap<String, HashMap<String, TypingIndicator>>,
     pub(crate) typing_signal: Option<(String, Instant)>,
     pub(crate) focus_handle: FocusHandle,
-    pub(crate) settings_open: bool,
+    /// The one view that occupies the column next to the rail.
+    pub(crate) sidebar_view: SidebarView,
     pub(crate) dev_stats_open: bool,
     pub(crate) dev_stats_snapshot: Option<crate::dev_stats::DevStatsSnapshot>,
     pub(crate) command_palette: crate::command_palette::CommandPaletteState,
@@ -1012,7 +1016,9 @@ pub(crate) struct Whatfast {
     pub(crate) do_not_disturb: bool,
     pub(crate) active_chat_folder: Option<String>,
     pub(crate) last_activity: Instant,
-    pub(crate) offline_outbox: Vec<(String, String, Option<String>)>,
+    /// The mentions travel with the text: without them a queued `@Name` is
+    /// sent as plain text when the connection comes back.
+    pub(crate) offline_outbox: Vec<QueuedText>,
     pub(crate) ui_scale: f32,
     /// The settings of the profile, as the file keeps them.
     pub(crate) settings: Settings,
@@ -1196,21 +1202,6 @@ pub(crate) struct Whatfast {
     pub(crate) newsletters_loading: bool,
     /// The newsletter whose posts are open.
     pub(crate) selected_newsletter: Option<String>,
-    /// Whether the view of the states is in front of the column of chats.
-    ///
-    /// The states are not conversations: they have their own view, the same
-    /// way the reference draws them.
-    pub(crate) states_open: bool,
-    /// Whether the view of the channels is in front of the column of chats.
-    ///
-    /// The channels are not conversations either: they have their own view.
-    pub(crate) channels_open: bool,
-    /// Whether the view of the archived conversations is in front.
-    pub(crate) archived_open: bool,
-    /// Whether the view of the agents is in front of the column of chats.
-    ///
-    /// The screen of the harnesses is a view of its own, like the states.
-    pub(crate) agents_open: bool,
     /// When the statuses of the profile were read the last time.
     pub(crate) last_status_refresh: Instant,
     /// The column of icons at the left of the window.
@@ -1584,6 +1575,7 @@ impl Whatfast {
                     .update(|window, cx| {
                         timeout_view.update(cx, |this, cx| {
                             this.expire_stalled_requests(window, cx);
+                            this.check_auto_lock(cx);
                             cx.notify();
                         })
                     })
@@ -1655,7 +1647,7 @@ impl Whatfast {
             typing_indicators: HashMap::new(),
             typing_signal: None,
             focus_handle,
-            settings_open: false,
+            sidebar_view: SidebarView::Chats,
             dev_stats_open: false,
             dev_stats_snapshot: None,
             command_palette: crate::command_palette::CommandPaletteState::default(),
@@ -1765,10 +1757,6 @@ impl Whatfast {
             sticker_refresh_pending: false,
             newsletters_loading: false,
             selected_newsletter: None,
-            states_open: false,
-            channels_open: false,
-            archived_open: false,
-            agents_open: false,
             last_status_refresh: Instant::now(),
             nav_rail,
             tab_strip,
@@ -1799,7 +1787,7 @@ impl Whatfast {
         };
         // El icono de la bandeja: cerrar la ventana la esconde y la
         // aplicacion sigue con la sesion del telefono.
-        this.tray = crate::tray::Tray::install(window, &*cx);
+        this.tray = crate::tray::Tray::install(window, &*cx, cx.entity().downgrade());
         crate::instance::start_wake_listener(window, &*cx);
         // La barra del volumen del video es la que manda: cada vez que el
         // usuario la mueve, el sonido del reproductor la sigue.
@@ -2074,11 +2062,15 @@ impl Whatfast {
                     draft_text,
                     reply_to_message_id,
                     mentions,
+                    draft_id,
                 } => {
                     // A row of the tray that timed out is marked failed, and
                     // its text does not come back to the field of the message:
                     // the row of the tray is where the user tries again.
-                    if self.agents_panel.fail_send(&chat_id, &draft_text) {
+                    if self
+                        .agents_panel
+                        .fail_send(draft_id, &chat_id, &draft_text)
+                    {
                         self.store.toast_error =
                             Some(i18n::t("Sending timed out. Try again.").into());
                         continue;
@@ -2295,8 +2287,12 @@ impl Whatfast {
                     // download that never arrived must not save a later one.
                     forget_attachment_request(&mut self.attachment_save_requested, &key);
                     self.attachment_failures.insert(
-                        key,
+                        key.clone(),
                         i18n::t("Downloading the file timed out · Click to retry").into(),
+                    );
+                    self.fail_waiting_video(
+                        &key,
+                        i18n::t("Downloading the file timed out · Click to retry"),
                     );
                 }
                 PendingRequest::AgentAsk { .. } => {
@@ -2436,7 +2432,7 @@ impl Whatfast {
             cx.notify();
             return;
         }
-        self.settings_open = false;
+        self.sidebar_view = SidebarView::Chats;
         self.chat_switcher = None;
         self.reaction_details = None;
         self.image_viewer = None;
@@ -2642,6 +2638,7 @@ impl Whatfast {
                     draft_text,
                     reply_to_message_id,
                     mentions,
+                    draft_id: _,
                 } => {
                     self.restore_failed_draft(
                         chat_id,
@@ -2987,11 +2984,19 @@ impl Whatfast {
                 // file is forgotten, so a later download does not save it.
                 forget_attachment_request(&mut self.attachment_save_requested, &key);
                 self.attachment_failures.insert(
-                    key,
+                    key.clone(),
                     if error.retryable {
                         i18n::t("Couldn't download the file · Click to retry").into()
                     } else {
                         i18n::t("That file is no longer available").into()
+                    },
+                );
+                self.fail_waiting_video(
+                    &key,
+                    if error.retryable {
+                        i18n::t("Couldn't download the file · Click to retry")
+                    } else {
+                        i18n::t("That file is no longer available")
                     },
                 );
                 return;
@@ -3877,9 +3882,11 @@ impl Whatfast {
     /// profile enables the toasts, the chat is not muted, the message is not
     /// one of the user and neither the window nor the conversation is in
     /// front. The history that the first sync brings is not news: only
-    /// recent messages are announced.
-    fn notify_message(&self, message: &Message, window: &Window) {
-        if !self.settings.notifications_enabled
+    /// recent messages are announced. `is_new` keeps an edit or a repeat from
+    /// raising the toast of a message that the store already had.
+    fn notify_message(&self, message: &Message, is_new: bool, window: &Window) {
+        if !is_new
+            || !self.settings.notifications_enabled
             || !self.store.sync_complete
             || message.from_me
             || message.revoked
@@ -4439,26 +4446,43 @@ impl Whatfast {
                     }
                 } else if state == ConnectionState::Connected {
                     if !self.offline_outbox.is_empty() {
-                        let queued = std::mem::take(&mut self.offline_outbox);
-                        for (chat_id, text, reply_to) in queued {
-                            let client_message_id = Uuid::new_v4().to_string();
-                            self.request(
+                        let queued = self.offline_outbox.clone();
+                        let mut sent = 0;
+                        for (chat_id, text, reply_to, mentions) in queued {
+                            let entries = mentions
+                                .iter()
+                                .map(|(display_name, jid)| MentionEntry {
+                                    display_name: display_name.clone(),
+                                    jid: jid.clone(),
+                                })
+                                .collect::<Vec<_>>();
+                            let (wire_text, mentioned_jids) = encode_mentions(&text, &entries);
+                            let accepted = self.request(
                                 rpc_request::Request::SendText(whatfast_protocol::SendTextRequest {
-                                    client_message_id,
+                                    client_message_id: Uuid::new_v4().to_string(),
                                     chat_id: chat_id.clone(),
-                                    text: text.clone(),
+                                    text: wire_text,
                                     reply_to_message_id: reply_to.clone().unwrap_or_default(),
-                                    mentioned_jids: Vec::new(),
+                                    mentioned_jids,
                                     reply_to_chat_id: String::new(),
                                 }),
                                 PendingRequest::SendText {
                                     chat_id,
                                     draft_text: text,
                                     reply_to_message_id: reply_to,
-                                    mentions: Vec::new(),
+                                    mentions,
+                                    draft_id: None,
                                 },
                             );
+                            if !accepted {
+                                // The connection can drop again midway. Keep
+                                // this text and the ones behind it for the
+                                // next `Connected` event.
+                                break;
+                            }
+                            sent += 1;
                         }
+                        self.offline_outbox.drain(..sent);
                     }
                     // La cuenta quedo conectada: si la ventana todavia no
                     // sabe que hay sesion, se le pregunta ahora. Es el caso
@@ -4502,8 +4526,14 @@ impl Whatfast {
                 // Do not lock the user behind a modal syncing screen while
                 // already-persisted chats are usable. Refresh the newest chat
                 // page after each chunk and let the remaining import continue
-                // in the local backend.
-                self.store.screen = Screen::Chats;
+                // in the local backend. A late chunk does not take the user
+                // out of a fatal screen, nor out of the QR before the account
+                // says it is paired.
+                if self.store.screen != Screen::Fatal
+                    && (self.store.screen != Screen::Pairing || self.account_ready)
+                {
+                    self.store.screen = Screen::Chats;
+                }
                 if sync.complete {
                     self.store.connection_detail.clear();
                     if !self.sync_complete_reloaded {
@@ -4582,7 +4612,7 @@ impl Whatfast {
                     // The sound follows the same silences, and a message the
                     // store already had does not sound again.
                     let is_new = self.store.message(&message.id).is_none();
-                    self.notify_message(&message, window);
+                    self.notify_message(&message, is_new, window);
                     self.play_received_sound(&message, is_new);
                     // The typed-out message arrived; drop the indicator now
                     // rather than waiting for the paused update or the TTL.
@@ -5812,13 +5842,25 @@ impl Whatfast {
         }
     }
 
+    /// Locks the window when the profile asks for it and the user has been
+    /// idle long enough. Activity is stamped by the keystrokes and the pointer.
+    pub(crate) fn check_auto_lock(&mut self, cx: &mut Context<Self>) {
+        if self.locked
+            || self.settings.app_lock_hash.is_empty()
+            || !crate::app_lock::should_auto_lock(self.last_activity, self.settings.auto_lock_minutes)
+        {
+            return;
+        }
+        self.lock_now(cx);
+    }
+
     pub(crate) fn lock_now(&mut self, cx: &mut Context<Self>) {
         if !self.settings.app_lock_hash.is_empty() {
             self.locked = true;
             self.pin_buffer.clear();
             self.lock_error = None;
         } else {
-            self.settings_open = true;
+            self.sidebar_view = SidebarView::Settings;
             self.store.toast_info = Some(i18n::t("Set an App Lock PIN in Settings first").into());
         }
         cx.notify();
@@ -6203,15 +6245,9 @@ impl Whatfast {
         if self.update_phase != UpdatePhase::Ready {
             return;
         }
-        // A click that began on the Download button can end on the button
-        // that replaces it when the download is fast. The install asks for a
-        // deliberate second click.
-        if self
-            .update_ready_at
-            .is_some_and(|ready| ready.elapsed() < Duration::from_millis(1500))
-        {
-            return;
-        }
+        // `update_phase` already rejects a second click: it becomes
+        // `Installing` below. The old 1500 ms sleep only hid the click and
+        // left no message when the user tried again.
         let (Some(manifest), Some(staging)) =
             (self.update_manifest.clone(), self.update_staging.clone())
         else {
@@ -6240,7 +6276,21 @@ impl Whatfast {
             }
             Err(error) => {
                 self.update_phase = UpdatePhase::Failed;
-                self.update_error = error;
+                // The sidecar was stopped to move its executable. A failed
+                // swap must bring it back, or the window stays without a
+                // backend until the app is closed and opened again.
+                match self.rpc.restart_backend() {
+                    Ok(()) => {
+                        self.update_error = error;
+                        report_failed_request(&mut self.store, self.rpc.request_reconnect());
+                    }
+                    Err(restart) => {
+                        self.update_error = format!("{error} · {restart}");
+                        self.store.toast_error = Some(
+                            i18n::t_args("The update failed: {error}", &[("error", &self.update_error)]),
+                        );
+                    }
+                }
                 cx.notify();
             }
         }
@@ -7119,9 +7169,16 @@ impl Whatfast {
         }
         // An archived conversation only shows in the view of the archived: the
         // column moves there so the user sees where the chat is.
-        self.archived_open = filter == ChatFilter::Archived;
-        self.states_open = false;
-        self.channels_open = false;
+        if matches!(
+            self.sidebar_view,
+            SidebarView::States | SidebarView::Channels | SidebarView::Archived
+        ) {
+            self.sidebar_view = if filter == ChatFilter::Archived {
+                SidebarView::Archived
+            } else {
+                SidebarView::Chats
+            };
+        }
     }
 
     pub(crate) fn recent_chat_candidates(&self) -> Vec<String> {
@@ -7244,7 +7301,7 @@ impl Whatfast {
     }
 
     pub(crate) fn open_chat_info(&mut self, chat_id: String) {
-        self.settings_open = false;
+        self.sidebar_view = SidebarView::Chats;
         self.emoji_target = None;
         self.reaction_details = None;
         self.image_viewer = None;
@@ -7329,7 +7386,7 @@ impl Whatfast {
         self.reaction_details = None;
         self.image_viewer = None;
         self.chat_info = None;
-        self.settings_open = false;
+        self.sidebar_view = SidebarView::Chats;
         self.chat_switcher = Some(switcher);
         // The commit-on-ctrl-release and escape handlers live on the root div,
         // which only sees events while focus is somewhere inside it. Opening
@@ -7575,6 +7632,9 @@ impl Whatfast {
         self.search_target_message_id = None;
         self.pending_search_scroll_id = None;
         self.pending_top_scroll_id = None;
+        // An older page still on its way must not move the scroll of the new
+        // chat: the anchor belongs to the conversation we just left.
+        self.pending_prepend_anchor = None;
         self.newer_load_failed = false;
         self.image_download_attempted.clear();
         self.image_failures.clear();
@@ -7834,8 +7894,8 @@ impl Whatfast {
             cx.notify();
             return;
         }
-        if self.settings_open {
-            self.settings_open = false;
+        if self.sidebar_view == SidebarView::Settings {
+            self.sidebar_view = SidebarView::Chats;
             self.sync_shell(cx);
             cx.notify();
             return;
@@ -8013,8 +8073,19 @@ impl Whatfast {
         }
         if self.store.connection != ConnectionState::Connected {
             let reply_to_message_id = self.replying_to_message_id.clone();
+            let mentions = self
+                .chat_drafts
+                .get(&chat_id)
+                .map(|draft| {
+                    draft
+                        .mentions
+                        .iter()
+                        .map(|entry| (entry.display_name.clone(), entry.jid.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
             self.offline_outbox
-                .push((chat_id, text, reply_to_message_id));
+                .push((chat_id, text, reply_to_message_id, mentions));
             self.mention_picker = None;
             self.typing_signal = None;
             self.clear_active_draft();
@@ -8079,6 +8150,7 @@ impl Whatfast {
                     .iter()
                     .map(|entry| (entry.display_name.clone(), entry.jid.clone()))
                     .collect(),
+                draft_id: None,
             },
         );
     }
@@ -8124,6 +8196,7 @@ impl Whatfast {
                 draft_text: text,
                 reply_to_message_id: None,
                 mentions: Vec::new(),
+                draft_id: Some(draft_id),
             },
         );
     }
@@ -8141,11 +8214,7 @@ impl Whatfast {
         };
         // The card belongs to the conversation: the other views of the window
         // are not a chat and have nothing to ask about.
-        self.agents_open = false;
-        self.states_open = false;
-        self.channels_open = false;
-        self.archived_open = false;
-        self.settings_open = false;
+        self.sidebar_view = SidebarView::Chats;
         self.quick_ask.open(chat_id, window, cx);
         cx.notify();
     }
@@ -8928,10 +8997,18 @@ impl Whatfast {
 
     /// Reads what the thread of the microphone says and counts the clock.
     pub(crate) fn tick_recording(&mut self, cx: &mut Context<Self>) {
+        let generation = self.recorder.generation();
         while let Some(event) = self.recorder.try_recv() {
+            // A cancelled or failed note can land after the next one started;
+            // its events must not clear the state of the new note.
+            if event.generation() != generation {
+                continue;
+            }
             match event {
-                RecorderEvent::Started => {}
-                RecorderEvent::Finished { path, duration } => {
+                RecorderEvent::Started { .. } => {}
+                RecorderEvent::Finished {
+                    path, duration, ..
+                } => {
                     let state = self.recording.take();
                     let target = note_target(state.as_ref()).map(str::to_owned);
                     match target {
@@ -8950,14 +9027,14 @@ impl Whatfast {
                         }
                     }
                 }
-                RecorderEvent::Failed(message) => {
+                RecorderEvent::Failed(message, _) => {
                     let discarded = self.recording.as_ref().is_some_and(|state| state.discarded);
                     self.recording = None;
                     if !discarded {
                         self.store.toast_error = Some(message);
                     }
                 }
-                RecorderEvent::Cancelled => {
+                RecorderEvent::Cancelled { .. } => {
                     self.recording = None;
                 }
             }
@@ -9313,6 +9390,15 @@ impl Whatfast {
     pub(crate) fn close_video_fullscreen(&mut self, cx: &mut Context<Self>) {
         self.video_fullscreen = false;
         cx.notify();
+    }
+
+    /// Unblocks a video that waited for an attachment that never arrived.
+    fn fail_waiting_video(&mut self, key: &(String, String), message: impl Into<gpui::SharedString>) {
+        if self.attachment_play_requested.as_ref() == Some(key) {
+            self.attachment_play_requested = None;
+            self.video.waiting = false;
+            self.video.error = Some(message.into());
+        }
     }
 
     /// Corta el video que se esta mirando.
@@ -10335,62 +10421,38 @@ impl Whatfast {
                 // El boton de los chats enciende y apaga la columna cuando la
                 // lista ya esta en frente; si otra vista ocupa el lugar, la
                 // cambia por los chats sin cerrar el panel.
-                let in_front = visible
-                    && !self.states_open
-                    && !self.channels_open
-                    && !self.agents_open
-                    && !self.archived_open;
+                let in_front = visible && self.sidebar_view == SidebarView::Chats;
                 self.sidebar_hidden = in_front;
                 self.store.set_chat_filter(ChatFilter::All);
-                self.states_open = false;
-                self.channels_open = false;
-                self.archived_open = false;
-                self.agents_open = false;
-                self.settings_open = false;
+                self.sidebar_view = SidebarView::Chats;
             }
             NavAction::Search => {
                 // La busqueda vive en la columna: el boton la trae de vuelta
                 // antes de pedir el foco.
                 self.sidebar_hidden = false;
-                self.states_open = false;
-                self.channels_open = false;
-                self.archived_open = false;
-                self.agents_open = false;
-                self.settings_open = false;
+                self.sidebar_view = SidebarView::Chats;
                 self.focus_search(window, cx);
             }
             NavAction::States => {
                 // The states are their own view: they are not conversations.
                 // El boton de la vista que ya esta en frente esconde la
                 // columna, y el mismo boton la vuelve a mostrar.
-                self.sidebar_hidden = visible && self.states_open;
-                self.states_open = true;
-                self.channels_open = false;
-                self.archived_open = false;
-                self.agents_open = false;
-                self.settings_open = false;
+                self.sidebar_hidden = visible && self.sidebar_view == SidebarView::States;
+                self.sidebar_view = SidebarView::States;
                 self.load_statuses();
             }
             NavAction::Channels => {
                 // The channels are their own view too.
-                self.sidebar_hidden = visible && self.channels_open;
-                self.states_open = false;
-                self.channels_open = true;
-                self.archived_open = false;
-                self.agents_open = false;
-                self.settings_open = false;
+                self.sidebar_hidden = visible && self.sidebar_view == SidebarView::Channels;
+                self.sidebar_view = SidebarView::Channels;
                 self.load_newsletters();
             }
             NavAction::Agents => {
                 // The screen of the harnesses is its own view: the catalog of
                 // the machine and the drafts of the profile, with its own
                 // reader of `agents.db`.
-                self.sidebar_hidden = visible && self.agents_open;
-                self.states_open = false;
-                self.channels_open = false;
-                self.archived_open = false;
-                self.agents_open = true;
-                self.settings_open = false;
+                self.sidebar_hidden = visible && self.sidebar_view == SidebarView::Agents;
+                self.sidebar_view = SidebarView::Agents;
                 self.agents_panel.reload(window, cx);
                 // The screen of the agents carries the automations: the list of
                 // the tasks and the agents that can run one are read with the
@@ -10399,16 +10461,12 @@ impl Whatfast {
             }
             NavAction::Archived => {
                 // The archived conversations are their own view.
-                self.sidebar_hidden = visible && self.archived_open;
-                self.states_open = false;
-                self.channels_open = false;
-                self.archived_open = true;
-                self.agents_open = false;
-                self.settings_open = false;
+                self.sidebar_hidden = visible && self.sidebar_view == SidebarView::Archived;
+                self.sidebar_view = SidebarView::Archived;
                 self.store.set_chat_filter(ChatFilter::Archived);
             }
             NavAction::Privacy | NavAction::Settings => {
-                self.settings_open = true;
+                self.sidebar_view = SidebarView::Settings;
                 // The panel shows the space of the media cache: it reads the
                 // folder of this computer when it opens, not on the boot,
                 // because a profile may never open it.
@@ -10446,8 +10504,8 @@ impl Whatfast {
 
     /// Toggles the settings panel.
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open {
-            self.settings_open = false;
+        if self.sidebar_view == SidebarView::Settings {
+            self.sidebar_view = SidebarView::Chats;
             self.sync_shell(cx);
             cx.notify();
         } else {
@@ -10513,11 +10571,7 @@ impl Whatfast {
             Screen::Pairing => LinkState::Pairing,
             _ => LinkState::Linked,
         };
-        let settings_open = self.settings_open;
-        let states_open = self.states_open;
-        let channels_open = self.channels_open;
-        let archived_open = self.archived_open;
-        let agents_open = self.agents_open;
+        let view = self.sidebar_view;
         // Los no leidos de la lista y los estados sin ver: los dos datos que
         // la referencia pinta como el circulo del numero y el punto verde.
         let unread: u32 = self
@@ -10541,11 +10595,7 @@ impl Whatfast {
         self.nav_rail.update(cx, |rail, _| {
             rail.set_link(link);
             rail.set_sidebar_open(sidebar_open);
-            rail.set_settings_open(settings_open);
-            rail.set_states_open(states_open);
-            rail.set_channels_open(channels_open);
-            rail.set_archived_open(archived_open);
-            rail.set_agents_open(agents_open);
+            rail.set_view(view);
             rail.set_unread(unread);
             rail.set_states_unseen(states_unseen);
         });

@@ -151,6 +151,21 @@ impl NavAction {
     }
 }
 
+/// The view that occupies the column next to the rail.
+///
+/// One value only: five independent booleans let a command open the settings
+/// while the states were still in front, and the rail then lit two buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SidebarView {
+    #[default]
+    Chats,
+    States,
+    Channels,
+    Agents,
+    Archived,
+    Settings,
+}
+
 /// A button of the column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NavButton {
@@ -175,16 +190,8 @@ pub(crate) struct NavRail {
     link: LinkState,
     /// The list of chats is open.
     sidebar_open: bool,
-    /// The view of the states is open.
-    states_open: bool,
-    /// The view of the channels is open.
-    channels_open: bool,
-    /// The view of the agents is open.
-    agents_open: bool,
-    /// The view of the archived conversations is open.
-    archived_open: bool,
-    /// The settings panel is open.
-    settings_open: bool,
+    /// The view in front of the column.
+    view: SidebarView,
     /// The unread messages of the list of chats.
     unread: u32,
     /// Whether there are states that were not seen.
@@ -201,11 +208,7 @@ impl std::fmt::Debug for NavRail {
             .debug_struct("NavRail")
             .field("link", &self.link)
             .field("sidebar_open", &self.sidebar_open)
-            .field("states_open", &self.states_open)
-            .field("channels_open", &self.channels_open)
-            .field("agents_open", &self.agents_open)
-            .field("archived_open", &self.archived_open)
-            .field("settings_open", &self.settings_open)
+            .field("view", &self.view)
             .field("scale", &self.scale)
             .finish_non_exhaustive()
     }
@@ -217,11 +220,7 @@ impl NavRail {
         Self {
             link: LinkState::Pairing,
             sidebar_open: true,
-            states_open: false,
-            channels_open: false,
-            agents_open: false,
-            archived_open: false,
-            settings_open: false,
+            view: SidebarView::Chats,
             unread: 0,
             states_unseen: false,
             scale: normalized_ui_scale(scale),
@@ -260,59 +259,75 @@ impl NavRail {
         self.sidebar_open = open;
     }
 
+    /// The view in front of the column.
+    #[cfg(test)]
+    pub(crate) fn view(&self) -> SidebarView {
+        self.view
+    }
+
+    /// Opens one view; the other views are closed by construction.
+    pub(crate) fn set_view(&mut self, view: SidebarView) {
+        self.view = view;
+    }
+
     /// Whether the view of the states is open.
     #[cfg(test)]
     pub(crate) fn states_open(&self) -> bool {
-        self.states_open
+        self.view == SidebarView::States
     }
 
     /// The view of the states is open, or it is closed.
+    #[cfg(test)]
     pub(crate) fn set_states_open(&mut self, open: bool) {
-        self.states_open = open;
+        self.set_view(if open { SidebarView::States } else { SidebarView::Chats });
     }
 
     /// Whether the view of the channels is open.
     #[cfg(test)]
     pub(crate) fn channels_open(&self) -> bool {
-        self.channels_open
+        self.view == SidebarView::Channels
     }
 
     /// The view of the channels is open, or it is closed.
+    #[cfg(test)]
     pub(crate) fn set_channels_open(&mut self, open: bool) {
-        self.channels_open = open;
+        self.set_view(if open { SidebarView::Channels } else { SidebarView::Chats });
     }
 
     /// Whether the view of the agents is open.
     #[cfg(test)]
     pub(crate) fn agents_open(&self) -> bool {
-        self.agents_open
+        self.view == SidebarView::Agents
     }
 
     /// The view of the agents is open, or it is closed.
+    #[cfg(test)]
     pub(crate) fn set_agents_open(&mut self, open: bool) {
-        self.agents_open = open;
+        self.set_view(if open { SidebarView::Agents } else { SidebarView::Chats });
     }
 
     /// Whether the view of the archived conversations is open.
     #[cfg(test)]
     pub(crate) fn archived_open(&self) -> bool {
-        self.archived_open
+        self.view == SidebarView::Archived
     }
 
     /// The view of the archived conversations is open, or it is closed.
+    #[cfg(test)]
     pub(crate) fn set_archived_open(&mut self, open: bool) {
-        self.archived_open = open;
+        self.set_view(if open { SidebarView::Archived } else { SidebarView::Chats });
     }
 
     /// Whether the settings panel is open.
     #[cfg(test)]
     pub(crate) fn settings_open(&self) -> bool {
-        self.settings_open
+        self.view == SidebarView::Settings
     }
 
     /// The settings panel is open, or it is closed.
+    #[cfg(test)]
     pub(crate) fn set_settings_open(&mut self, open: bool) {
-        self.settings_open = open;
+        self.set_view(if open { SidebarView::Settings } else { SidebarView::Chats });
     }
 
     /// The unread messages of the list of chats.
@@ -346,11 +361,7 @@ impl NavRail {
                 // is not collapsed. Los estados, los canales y los archivados
                 // son vistas propias: el boton de los chats no queda activo
                 // mientras cualquiera de ellas esta en frente.
-                active: self.sidebar_open
-                    && !self.states_open
-                    && !self.channels_open
-                    && !self.agents_open
-                    && !self.archived_open,
+                active: self.sidebar_open && self.view == SidebarView::Chats,
                 enabled: self.link == LinkState::Linked,
                 badge: self.unread,
                 dot: false,
@@ -367,7 +378,7 @@ impl NavRail {
                 // The states are their own view: the button is active when it
                 // is the one in front and the column is showing. Un panel
                 // cerrado no deja ningun boton encendido.
-                active: self.states_open && self.sidebar_open,
+                active: self.view == SidebarView::States && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 // El punto verde de la referencia: hay estados sin ver.
@@ -376,7 +387,7 @@ impl NavRail {
             NavButton {
                 action: NavAction::Channels,
                 // The channels are their own view too.
-                active: self.channels_open && self.sidebar_open,
+                active: self.view == SidebarView::Channels && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 dot: false,
@@ -385,7 +396,7 @@ impl NavRail {
                 action: NavAction::Agents,
                 // The agents are their own view: the screen of the harnesses
                 // and the tray of their drafts.
-                active: self.agents_open && self.sidebar_open,
+                active: self.view == SidebarView::Agents && self.sidebar_open,
                 enabled: true,
                 badge: 0,
                 dot: false,
@@ -399,7 +410,7 @@ impl NavRail {
             NavButton {
                 action: NavAction::Archived,
                 // The archived conversations are their own view.
-                active: self.archived_open && self.sidebar_open,
+                active: self.view == SidebarView::Archived && self.sidebar_open,
                 enabled: self.link == LinkState::Linked,
                 badge: 0,
                 dot: false,
@@ -415,7 +426,7 @@ impl NavRail {
                 action: NavAction::Settings,
                 // port: the button of the oracle is active when the settings
                 // are open.
-                active: self.settings_open,
+                active: self.view == SidebarView::Settings,
                 enabled: true,
                 badge: 0,
                 dot: false,
@@ -559,7 +570,7 @@ pub(crate) fn column_width(scale: f32) -> Pixels {
 mod tests {
     use gpui::px;
 
-    use super::{LinkState, NavRail, RAIL_WIDTH, column_width};
+    use super::{LinkState, NavRail, RAIL_WIDTH, SidebarView, column_width};
 
     /// The column of icons of a linked app.
     fn rail() -> NavRail {
@@ -637,6 +648,18 @@ mod tests {
         settings.set_settings_open(true);
         assert!(settings.bottom_buttons()[2].active);
         assert!(settings.settings_open());
+    }
+
+    #[test]
+    fn opening_settings_closes_the_view_that_was_in_front() {
+        let mut rail = rail();
+        rail.set_states_open(true);
+        assert_eq!(rail.view(), SidebarView::States);
+        rail.set_settings_open(true);
+        assert_eq!(rail.view(), SidebarView::Settings);
+        assert!(!rail.states_open());
+        assert!(!rail.top_buttons()[2].active);
+        assert!(rail.bottom_buttons()[2].active);
     }
 
     #[test]

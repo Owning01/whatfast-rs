@@ -100,6 +100,9 @@ pub struct Server {
     sticker_prefetch: Arc<AtomicBool>,
     /// Ensures the periodic SQLite maintenance task is spawned at most once.
     maintenance_started: bool,
+    /// Whether the session of this process was closed by a logout: the auth
+    /// state then answers `LoggedOut`, not the `Offline` of a fresh install.
+    logged_out: bool,
 }
 
 /// Clears the prefetch flag when the task ends, including an early return.
@@ -108,6 +111,35 @@ struct PrefetchGuard(Arc<AtomicBool>);
 impl Drop for PrefetchGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Releases the older-history slot when the request ends before the expiry
+/// task takes it over.
+///
+/// A failed write of the coverage used to return with the slot still taken:
+/// the chat then answered `history_busy` until the process restarted.
+struct OlderHistoryGuard {
+    slot: Arc<Mutex<Option<(String, i64)>>>,
+    armed: bool,
+}
+
+impl OlderHistoryGuard {
+    fn new(slot: Arc<Mutex<Option<(String, i64)>>>) -> Self {
+        Self { slot, armed: true }
+    }
+
+    /// The expiry task releases the slot from here on.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OlderHistoryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.slot.lock().expect("older-history lock") = None;
+        }
     }
 }
 
@@ -129,6 +161,7 @@ impl Server {
             avatar_fetches: Arc::new(Mutex::new(std::collections::HashSet::new())),
             sticker_prefetch: Arc::new(AtomicBool::new(false)),
             maintenance_started: false,
+            logged_out: false,
         }
     }
 
@@ -246,7 +279,14 @@ impl Server {
                         paired: false,
                         logged_in: false,
                         own_user_id: String::new(),
-                        connection_state: ConnectionState::Offline as i32,
+                        // A profile that never paired is offline; one whose
+                        // session a logout closed is logged out, and the
+                        // window shows the way in instead of "reconnecting".
+                        connection_state: if self.logged_out {
+                            ConnectionState::LoggedOut as i32
+                        } else {
+                            ConnectionState::Offline as i32
+                        },
                     },
                 };
                 Ok(Handled {
@@ -276,6 +316,8 @@ impl Server {
                     String::new(),
                 ));
                 self.session = Some(session);
+                // A new pairing is the way back in after a logout.
+                self.logged_out = false;
                 Ok(Handled {
                     result: rpc_response::Result::StartPairing(StartPairingResponse {
                         started: true,
@@ -296,7 +338,10 @@ impl Server {
                                 self.events.clone(),
                             )
                             .await?;
+                            // The device still has its link: this is a
+                            // reconnect, not the login of a logged-out one.
                             self.session = Some(session);
+                            self.logged_out = false;
                             true
                         } else {
                             false
@@ -313,6 +358,9 @@ impl Server {
                     session.logout().await;
                     session.shutdown().await;
                 }
+                // The auth state of this process answers `LoggedOut` now,
+                // even though no session is left to ask.
+                self.logged_out = true;
                 Ok(Handled {
                     result: rpc_response::Result::Logout(whatfast_protocol::LogoutResponse {}),
                     exit_after: false,
@@ -3184,6 +3232,9 @@ impl Server {
             }
             *in_flight = Some((coverage.chat_id.clone(), now));
         }
+        // Every early return below releases the slot; the expiry task takes
+        // it over once the request reached the wire.
+        let mut slot_guard = OlderHistoryGuard::new(Arc::clone(&self.older_history));
         if !self.connected() {
             let saved = self.store.save_history_coverage(HistoryCoverageData {
                 state: "offline".into(),
@@ -3191,18 +3242,18 @@ impl Server {
                 ..coverage
             })?;
             self.push_event(Self::history_coverage_changed(&saved));
-            *self.older_history.lock().expect("older-history lock") = None;
             return Err(Failure::retryable(
                 "not_connected",
                 "WhatsApp is not connected",
             ));
         }
-        let session = self.session.clone().ok_or_else(|| {
-            *self.older_history.lock().expect("older-history lock") = None;
-            Failure::retryable("not_connected", "WhatsApp is not connected")
-        })?;
+        let Some(session) = self.session.clone() else {
+            return Err(Failure::retryable(
+                "not_connected",
+                "WhatsApp is not connected",
+            ));
+        };
         let Some(anchor) = self.store.oldest_message_row(&coverage.chat_id)? else {
-            *self.older_history.lock().expect("older-history lock") = None;
             return Err(Failure::fatal(
                 "history_unavailable",
                 "no local message is available to anchor an older-history request",
@@ -3212,7 +3263,6 @@ impl Server {
             .transport_jid
             .parse::<whatsapp_rust::Jid>()
             .map_err(|_| {
-                *self.older_history.lock().expect("older-history lock") = None;
                 Failure::fatal("invalid_argument", "not a WhatsApp JID: the stored anchor")
             })?;
         let before = coverage.local_message_count;
@@ -3238,7 +3288,6 @@ impl Server {
                 ..requesting
             })?;
             self.push_event(Self::history_coverage_changed(&saved));
-            *self.older_history.lock().expect("older-history lock") = None;
             return Err(Failure::retryable(
                 "history_request_failed",
                 format!("{error}"),
@@ -3248,6 +3297,7 @@ impl Server {
         // messages; when nothing lands in 30 s the request failed, the Go's
         // `expireOlderHistoryRequest`. The slot releases when the expiry
         // runs, so a second call while one runs still answers `history_busy`.
+        slot_guard.disarm();
         let store = Arc::clone(&self.store);
         let events = self.events.clone();
         let in_flight = Arc::clone(&self.older_history);
@@ -4181,8 +4231,37 @@ fn receipt_participant(transport: &str, sender: &str) -> Option<whatsapp_rust::J
 
 #[cfg(test)]
 mod tests {
-    use super::{is_uuid, newsletter_invite_key, receipt_participant, valid_reaction_emoji};
+    use super::{
+        OlderHistoryGuard, is_uuid, newsletter_invite_key, receipt_participant, valid_reaction_emoji,
+    };
     use std::sync::Arc;
+
+    /// The slot of the older-history request goes back on every early return;
+    /// only the expiry task keeps it, and only once the request reached the
+    /// wire.
+    #[test]
+    fn the_older_history_guard_releases_the_slot_unless_disarmed() {
+        let slot = Arc::new(std::sync::Mutex::new(Some((
+            "c@s.whatsapp.net".to_string(),
+            7,
+        ))));
+        {
+            let _guard = OlderHistoryGuard::new(Arc::clone(&slot));
+        }
+        assert!(
+            slot.lock().expect("the slot").is_none(),
+            "an early return releases the slot"
+        );
+        *slot.lock().expect("the slot") = Some(("c@s.whatsapp.net".to_string(), 7));
+        {
+            let mut guard = OlderHistoryGuard::new(Arc::clone(&slot));
+            guard.disarm();
+        }
+        assert!(
+            slot.lock().expect("the slot").is_some(),
+            "the expiry task owns the slot after the request is sent"
+        );
+    }
 
     /// A server on a throwaway profile. The directory stays behind: Windows
     /// keeps the handle of the database open until the test process ends.

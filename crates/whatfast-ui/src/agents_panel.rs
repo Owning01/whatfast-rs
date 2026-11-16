@@ -281,7 +281,11 @@ impl AgentsPanel {
             return;
         };
         let mut drafts = Vec::new();
-        for wanted in [DraftState::Proposed, DraftState::Approved] {
+        for wanted in [
+            DraftState::Proposed,
+            DraftState::Approved,
+            DraftState::Failed,
+        ] {
             match db.drafts(wanted, DRAFT_LIMIT) {
                 Ok(list) => drafts.extend(list),
                 Err(error) => {
@@ -366,8 +370,19 @@ impl AgentsPanel {
         state.notice = None;
     }
 
-    /// Records that a draft is on its way to the backend.
+    /// Records that a draft is on its way to the backend. The row changes to
+    /// `sending` on disk too, so a second approval cannot send it again.
     pub(crate) fn mark_sending(&self, chat_id: &str, text: &str, draft_id: i64) {
+        let db = self.state.borrow().db.clone();
+        if let Some(db) = db
+            && let Err(error) = db.set_draft_state(draft_id, DraftState::Sending)
+        {
+            self.fail(i18n::t_args(
+                "The drawer of the agents could not be written: {error}",
+                &[("error", crate::helpers::user_error(&error))],
+            ));
+            return;
+        }
         let mut state = self.state.borrow_mut();
         state.sends.retain(|send| send.draft_id != draft_id);
         state.sends.push(PendingSend {
@@ -393,12 +408,13 @@ impl AgentsPanel {
         let PendingRequest::SendText {
             chat_id,
             draft_text,
+            draft_id,
             ..
         } = pending
         else {
             return None;
         };
-        let send = self.take_send(chat_id, draft_text)?;
+        let send = self.take_send(*draft_id, chat_id, draft_text)?;
         let sent = match result {
             whatfast_protocol::rpc_response::Result::Error(error) => {
                 self.fail(i18n::t_args(
@@ -419,8 +435,8 @@ impl AgentsPanel {
     /// Marks a draft that timed out, so the answer never comes.
     ///
     /// Returns whether the request belonged to the tray.
-    pub(crate) fn fail_send(&self, chat_id: &str, text: &str) -> bool {
-        let Some(send) = self.take_send(chat_id, text) else {
+    pub(crate) fn fail_send(&self, draft_id: Option<i64>, chat_id: &str, text: &str) -> bool {
+        let Some(send) = self.take_send(draft_id, chat_id, text) else {
             return false;
         };
         self.fail(i18n::t("The draft could not be sent in time.").to_string());
@@ -428,13 +444,14 @@ impl AgentsPanel {
         true
     }
 
-    /// Takes the row of a send that is in flight.
-    fn take_send(&self, chat_id: &str, text: &str) -> Option<PendingSend> {
+    /// Takes the row of a send that is in flight. A draft send carries its row
+    /// id: two drafts with the same text in the same chat are different sends.
+    fn take_send(&self, draft_id: Option<i64>, chat_id: &str, text: &str) -> Option<PendingSend> {
         let mut state = self.state.borrow_mut();
-        let index = state
-            .sends
-            .iter()
-            .position(|send| send.chat_id == chat_id && send.text == text)?;
+        let index = state.sends.iter().position(|send| match draft_id {
+            Some(id) => send.draft_id == id,
+            None => send.chat_id == chat_id && send.text == text,
+        })?;
         Some(state.sends.remove(index))
     }
 

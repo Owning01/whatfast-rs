@@ -451,6 +451,10 @@ pub(crate) struct MediaEditor {
     pub(crate) active_blur_start: Option<(f64, f64)>,
     pub(crate) active_blur_rect: Option<CropRect>,
     pub(crate) drag: Option<DragState>,
+    /// La herramienta que empezo el gesto actual. La barra superior puede
+    /// cambiar `active_tool` antes de soltar el mouse; `move_drag` y
+    /// `end_drag` deben cerrar el gesto que realmente esta en curso.
+    active_gesture: Option<EditorTool>,
     pub(crate) working: bool,
     pub(crate) error: Option<String>,
     pub(crate) undo_stack: Vec<ItemStateSnapshot>,
@@ -489,6 +493,7 @@ impl MediaEditor {
             active_blur_start: None,
             active_blur_rect: None,
             drag: None,
+            active_gesture: None,
             working: false,
             error: None,
             undo_stack: Vec::new(),
@@ -1045,10 +1050,20 @@ impl MediaEditor {
     }
 
     fn begin_drag(&mut self, position: Point<Pixels>) {
+        // Un gesto nuevo cierra el anterior; si no, un trazo o un desenfoque
+        // empezado con otra herramienta queda pendiente para siempre.
+        self.end_drag();
         let Some((x, y)) = self.picture_point(position) else {
             return;
         };
-        match self.active_tool {
+        let gesture = match self.active_tool {
+            EditorTool::Pen | EditorTool::Blur | EditorTool::Crop | EditorTool::None => {
+                self.active_tool
+            }
+            _ => return,
+        };
+        self.active_gesture = Some(gesture);
+        match gesture {
             EditorTool::Pen => {
                 self.push_undo();
                 self.active_stroke = Some(DrawStroke {
@@ -1077,7 +1092,7 @@ impl MediaEditor {
                     start: crop,
                 });
             }
-            _ => {}
+            _ => unreachable!("only a gesture tool starts a gesture"),
         }
     }
 
@@ -1085,7 +1100,8 @@ impl MediaEditor {
         let Some((x, y)) = self.picture_point(position) else {
             return;
         };
-        match self.active_tool {
+        // El gesto en curso manda, no la herramienta que muestra la barra.
+        match self.active_gesture.unwrap_or(self.active_tool) {
             EditorTool::Pen => {
                 if let Some(stroke) = self.active_stroke.as_mut() {
                     stroke.points.push((x, y));
@@ -1217,7 +1233,8 @@ impl MediaEditor {
     }
 
     fn end_drag(&mut self) {
-        match self.active_tool {
+        let gesture = self.active_gesture.take().unwrap_or(self.active_tool);
+        match gesture {
             EditorTool::Pen => {
                 if let Some(stroke) = self.active_stroke.take()
                     && stroke.points.len() > 1
@@ -3128,6 +3145,7 @@ mod tests {
             active_blur_start: None,
             active_blur_rect: None,
             drag: None,
+            active_gesture: None,
             working: false,
             error: None,
             undo_stack: Vec::new(),
@@ -3324,6 +3342,21 @@ mod tests {
             size: gpui::size(px(200.), px(100.)),
         }));
         editor
+    }
+
+    #[test]
+    fn switching_tools_mid_gesture_still_closes_the_original_gesture() {
+        let mut editor = editor_with_surface();
+        editor.active_tool = EditorTool::Pen;
+        editor.begin_drag(gpui::point(px(20.), px(20.)));
+        editor.move_drag(gpui::point(px(80.), px(60.)));
+        // La barra superior cambia la herramienta antes de soltar el mouse.
+        editor.active_tool = EditorTool::Blur;
+        editor.end_drag();
+        assert_eq!(editor.active_item().strokes.len(), 1);
+        assert_eq!(editor.active_item().strokes[0].points.len(), 2);
+        assert!(editor.active_item().blurs.is_empty());
+        assert_eq!(editor.active_gesture, None);
     }
 
     #[test]

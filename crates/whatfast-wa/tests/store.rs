@@ -1517,6 +1517,17 @@ fn a_failed_inbound_message_is_journaled_with_its_error() {
 }
 
 #[test]
+fn a_journaled_message_that_arrives_later_leaves_the_backlog() {
+    let (_dir, store) = temp_store("journal-reconcile");
+    store.ensure_chat("a@x", "a@x").unwrap();
+    let row = message("a@x", "m1", 100, false, "hi");
+    store.journal_inbound(&row, "disk full").unwrap();
+    store.insert_message(&row).unwrap();
+    let status = store.repair_local_cache().unwrap();
+    assert_eq!(status.pending_inbound + status.failed_inbound, 0);
+}
+
+#[test]
 fn reserve_outgoing_writes_the_message_and_the_request_together() {
     let (_dir, store) = temp_store("reserve");
     store.ensure_chat("a@x", "a@x").unwrap();

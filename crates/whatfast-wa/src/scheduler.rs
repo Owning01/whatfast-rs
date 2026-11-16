@@ -16,12 +16,24 @@ use std::sync::Arc;
 
 use async_channel::Sender;
 use whatfast_auto::{
-    Draft, DraftState, Output, Schedule,
+    Draft, DraftState, Grant, Output, Schedule,
     runner::{self, RunError},
 };
-use whatfast_protocol::{BackendEvent, ConnectionState, SendTextRequest};
+use whatfast_protocol::{
+    BackendEvent, ConnectionState, DraftProposeRequest, ListMessagesRequest, SendTextRequest,
+    rpc_request::Request as RpcRequest,
+};
 
-use crate::{db::Store, guard::Guard, session::Session};
+use crate::{
+    db::Store,
+    guard::{Guard, Who},
+    session::Session,
+};
+
+/// How long a claimed turn stays out of `due` while its harness runs. A
+/// backend that dies mid-run leaves the lease; the next one picks the task up
+/// again after it expires.
+const RUN_LEASE_MS: i64 = 15 * 60 * 1000;
 
 /// Turns a schedule is carried out with: `once` has no next turn.
 fn next_turn(guard: &Guard, task: &Schedule, now_ms: i64) -> Option<i64> {
@@ -85,36 +97,65 @@ pub fn dispatch(
     };
     let mut started = 0;
     for task in due {
-        // The next turn is written before the run: a harness that hangs or a
-        // backend that dies must not fire the same task twice.
-        let next = next_turn(guard, &task, now_ms);
-        if let Err(error) = guard.db().set_schedule_next(task.id, next) {
-            tracing::warn!(
-                "the next turn of the task {} was not written: {error}",
-                task.id
-            );
+        let previous_next = task.next_at_ms.unwrap_or(now_ms);
+        // The lease is written only if the row still has the turn that `due`
+        // read. Two backends looking at the same table cannot both claim the
+        // same turn. The real next turn is written when the run ends: a
+        // `once` task is closed only after it actually ran.
+        let lease = now_ms + RUN_LEASE_MS;
+        if let Err(error) = guard.db().claim_schedule(task.id, previous_next, Some(lease)) {
+            tracing::warn!("the task {} could not be claimed: {error}", task.id);
             continue;
         }
+        let next = next_turn(guard, &task, now_ms);
         let guard = Arc::clone(guard);
         let store = Arc::clone(store);
         let session = session.clone();
         let events = events.clone();
         tokio::spawn(async move {
-            run_one(&guard, &store, session, &events, &task).await;
+            run_one(&guard, &store, session, &events, &task, lease, next).await;
         });
         started += 1;
     }
     started
 }
 
-/// One task: the harness, its answer, and the row in the log.
+/// One task: it runs, then its turn is closed. A `once` task that never got
+/// to run stays due, so the single shot is not lost to a harness that is
+/// missing or a pause that arrived after the dispatch.
 async fn run_one(
     guard: &Guard,
     store: &Store,
     session: Option<Arc<Session>>,
     events: &Sender<BackendEvent>,
     task: &Schedule,
+    lease: i64,
+    next: Option<i64>,
 ) {
+    let ran = run_task(guard, store, session, events, task).await;
+    let final_next = if task.kind == whatfast_auto::Kind::Once && !ran {
+        task.next_at_ms
+    } else {
+        next
+    };
+    // The lease is only replaced if it is still ours: an edit of the task
+    // while it ran wins, and its own turn is left alone.
+    match guard.db().claim_schedule(task.id, lease, final_next) {
+        Ok(true) => {}
+        Ok(false) => tracing::info!("the turn of the task {} changed while it ran", task.id),
+        Err(error) => tracing::warn!("the turn of the task {} was not closed: {error}", task.id),
+    }
+}
+
+/// The body of one task. `false` means the harness never ran or its answer
+/// could not be kept: the task is still due and the next tick retries it.
+async fn run_task(
+    guard: &Guard,
+    store: &Store,
+    session: Option<Arc<Session>>,
+    events: &Sender<BackendEvent>,
+    task: &Schedule,
+) -> bool {
     let started = std::time::Instant::now();
     let agent_id = task.agent_id.clone();
     let chat_id = task.chat_id.clone();
@@ -138,16 +179,22 @@ async fn run_one(
             crate::db::now_ms(),
         );
     };
+    // A pause, a revocation or a change of grant after the dispatch stops the
+    // run here. The same check runs again just before the send.
+    if let Err(reason) = permitted(guard, store, task, false) {
+        log(false, Some(format!("la automatización no se ejecutó: {reason}")));
+        return false;
+    }
     let Some(spec) = whatfast_agents::by_id(&task.agent_id) else {
         log(
             false,
             Some(format!("the harness {} is not known", task.agent_id)),
         );
-        return;
+        return false;
     };
     let Some(run) = spec.run else {
         log(false, Some(format!("{} has no headless mode", spec.name)));
-        return;
+        return false;
     };
     let prompt = build_prompt(task);
     // The harness blocks on its own child; the run waits for it on the pool so
@@ -161,11 +208,11 @@ async fn run_one(
         Ok(Err(error)) => {
             tracing::info!("the task {} did not answer: {error}", task.id);
             log(false, Some(describe(&error)));
-            return;
+            return false;
         }
         Err(error) => {
             log(false, Some(format!("the harness task did not finish: {error}")));
-            return;
+            return false;
         }
     };
 
@@ -179,6 +226,7 @@ async fn run_one(
             // the log, so the user can still see that the task ran and what it
             // found.
             log(true, Some(format!("solo lectura: {}", first_line(&answer.text))));
+            true
         }
         Delivery::Draft => leave_draft(
             guard,
@@ -201,8 +249,19 @@ async fn run_one(
                     DraftState::Proposed,
                     &log,
                 );
-                return;
+                return false;
             };
+            if let Err(reason) = permitted(guard, store, task, true) {
+                tracing::info!("the task {} may not send now: {reason}", task.id);
+                return leave_draft(
+                    guard,
+                    task,
+                    &answer.text,
+                    format!("la automatización no pudo enviar: {reason}"),
+                    DraftState::Failed,
+                    &log,
+                );
+            }
             let request = SendTextRequest {
                 client_message_id: crate::send::uuid4(),
                 chat_id: task.chat_id.clone(),
@@ -223,7 +282,26 @@ async fn run_one(
                         }
                     }
                     tracing::info!("the task {} sent a message to {}", task.id, task.chat_id);
+                    // A message of an automation uses the ceiling of its
+                    // agent, just like a message sent through the endpoint.
+                    guard.log(
+                        &Who::Agent {
+                            id: agent_id.clone(),
+                            grant: Grant::default(),
+                        },
+                        &whatfast_auto::Call {
+                            agent_id: agent_id.clone(),
+                            tool: "send_text".to_owned(),
+                            chat_id: Some(chat_id.clone()),
+                            ok: true,
+                            ms: started.elapsed().as_millis() as i64,
+                            bytes: 0,
+                            detail: Some(format!("automatización {}", task.id)),
+                        },
+                        crate::db::now_ms(),
+                    );
                     log(true, None);
+                    true
                 }
                 Err((code, message, _)) => {
                     tracing::warn!("the task {} could not send ({code}): {message}", task.id);
@@ -234,11 +312,52 @@ async fn run_one(
                         format!("la automatización no pudo enviar ({code}): {message}"),
                         DraftState::Failed,
                         &log,
-                    );
+                    )
                 }
             }
         }
     }
+}
+
+/// Re-reads the row and the grant before a run or a send: a task paused or an
+/// agent revoked after the dispatch does not act for the account. The same
+/// `check` of the local endpoint enforces the scope, the hours and the
+/// ceiling of messages; a send request also counts against that ceiling.
+fn permitted(guard: &Guard, store: &Store, task: &Schedule, sending: bool) -> Result<(), String> {
+    let current = guard
+        .db()
+        .schedule(task.id)
+        .map_err(|error| format!("agents.db: {error}"))?
+        .ok_or_else(|| format!("the task {} was removed", task.id))?;
+    if current.paused {
+        return Err("the task was paused".to_owned());
+    }
+    // A missing or revoked agent closes the door even for a read.
+    guard
+        .current_grant(&task.agent_id)
+        .map_err(|denied| denied.message)?;
+    let who = Who::Agent {
+        id: task.agent_id.clone(),
+        grant: Grant::default(),
+    };
+    let request = if sending || task.output == Output::Send {
+        RpcRequest::SendText(SendTextRequest {
+            chat_id: task.chat_id.clone(),
+            ..SendTextRequest::default()
+        })
+    } else if task.output == Output::Draft {
+        RpcRequest::DraftPropose(DraftProposeRequest {
+            chat_id: task.chat_id.clone(),
+            agent_id: task.agent_id.clone(),
+            ..DraftProposeRequest::default()
+        })
+    } else {
+        RpcRequest::ListMessages(ListMessagesRequest {
+            chat_id: task.chat_id.clone(),
+            ..ListMessagesRequest::default()
+        })
+    };
+    guard.check(&who, &request, store).map_err(|denied| denied.message)
 }
 
 /// Saves the answer as a draft and logs the result.
@@ -249,7 +368,7 @@ fn leave_draft(
     reason: String,
     state: DraftState,
     log: &impl Fn(bool, Option<String>),
-) {
+) -> bool {
     let draft = Draft {
         id: 0,
         agent_id: task.agent_id.clone(),
@@ -265,8 +384,12 @@ fn leave_draft(
         Ok(id) => {
             tracing::info!("the task {} left the draft {id}", task.id);
             log(true, None);
+            true
         }
-        Err(error) => log(false, Some(format!("the draft was not saved: {error}"))),
+        Err(error) => {
+            log(false, Some(format!("the draft was not saved: {error}")));
+            false
+        }
     }
 }
 

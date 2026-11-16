@@ -186,8 +186,9 @@ impl Whatfast {
                                 this.voice_audio.stop();
                                 this.voice.key = None;
                             } else {
-                                this.video_engine.stop();
-                                this.video.key = None;
+                                // El corte del reproductor apaga tambien el
+                                // reloj de 16 ms y el pedido de descarga.
+                                this.stop_video();
                             }
                             cx.notify();
                         }))

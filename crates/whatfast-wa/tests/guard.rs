@@ -152,18 +152,20 @@ fn a_client_without_an_agent_is_the_user() {
     );
 }
 
+/// A profile without rows has no agent to trust: naming one is not the way in,
+/// not even on the first install.
 #[test]
-fn the_first_install_lets_the_harness_work_without_a_token() {
+fn a_profile_without_agents_turns_the_harness_away() {
     let (_profile, store, guard) = profile("bootstrap");
-    assert_eq!(guard.identify("claude-code", ""), Who::User);
+    let who = guard.identify("claude-code", "");
+    assert!(
+        matches!(who, Who::Denied(_)),
+        "an agent with no row is denied: {who:?}"
+    );
     assert!(
         guard
-            .check(
-                &Who::User,
-                &send_text("5491100000000@s.whatsapp.net"),
-                &store
-            )
-            .is_ok()
+            .check(&who, &send_text("5491100000000@s.whatsapp.net"), &store)
+            .is_err()
     );
 }
 

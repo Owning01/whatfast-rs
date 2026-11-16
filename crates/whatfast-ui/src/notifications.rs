@@ -276,15 +276,14 @@ mod toast {
             }
             // The system has the last word: this line tells whether the toasts
             // of the app would appear at all.
-            unsafe {
-                use windows::UI::Notifications::ToastNotificationManager;
-                use windows::core::HSTRING;
-                let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
-                    super::APP_ID,
-                ))
+            // The system has the last word: this line tells whether the toasts
+            // of the app would appear at all.
+            let notifier =
+                windows::UI::Notifications::ToastNotificationManager::CreateToastNotifierWithId(
+                    &HSTRING::from(super::APP_ID),
+                )
                 .unwrap();
-                eprintln!("toast setting: {:?}", notifier.Setting().unwrap());
-            }
+            eprintln!("toast setting: {:?}", notifier.Setting().unwrap());
         }
     }
 }

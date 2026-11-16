@@ -16,9 +16,45 @@ use whatfast_protocol::transport::{
     ATTACHMENT_REQUEST_TIMEOUT, BackendClient, BridgeExitKind, BridgeMessage,
     CONTROL_REQUEST_TIMEOUT, Incoming, MAX_FRAME_BYTES, MAX_PENDING_REQUESTS, PROTOCOL_VERSION,
     PendingRequest, READ_REQUEST_TIMEOUT, RequestClass, RequestTracker, WRITE_REQUEST_TIMEOUT,
-    classify_exit, exit_message, read_frame, write_frame,
+    classify_exit, exit_message, read_frame, write_frame, writer_loop,
 };
 use whatfast_protocol::{Envelope, HelloRequest, RpcRequest, RpcResponse, envelope, rpc_request};
+
+/// A writer that fails leaves its queue closed: the next send fails at once
+/// instead of filling the buffer until every request expires.
+#[test]
+fn a_dead_writer_closes_the_outgoing_queue() {
+    struct Dead;
+    impl std::io::Write for Dead {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the sidecar does not read",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let hello = || Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 1,
+        body: Some(envelope::Body::Request(RpcRequest {
+            request: Some(rpc_request::Request::Hello(HelloRequest::default())),
+        })),
+    };
+    let (outgoing, outgoing_rx) = async_channel::bounded(2);
+    outgoing.try_send(hello()).expect("the queue takes one");
+    let error = writer_loop(Dead, outgoing_rx).expect_err("the writer reports the failure");
+    assert!(
+        matches!(error, whatfast_protocol::transport::TransportError::Io(_)),
+        "{error:?}"
+    );
+    assert!(
+        outgoing.try_send(hello()).is_err(),
+        "the queue is closed after the writer died"
+    );
+}
 
 #[test]
 fn frames_round_trip() {

@@ -265,9 +265,10 @@ async fn serve(
     let mut idle_timer = tokio::time::interval(Duration::from_secs(5));
     let idle_after = idle_exit.unwrap_or(Duration::MAX);
 
-    // Events stay gated until the handshake completes, like the Go server's
-    // `handshaken` flag: a desktop still negotiating versions has no event
-    // listener up yet.
+    // Events stay gated until the handshake of the desktop completes, like the
+    // Go server's `handshaken` flag: a desktop still negotiating versions has
+    // no event listener up yet. A backend started for an agent has no desktop,
+    // so its events drain and drop from the start.
     let mut handshaken = false;
     // The guard reads `agents.db` and decides what a local connection may do.
     // A database that cannot be opened leaves the endpoint serving the user
@@ -342,7 +343,7 @@ async fn serve(
                 }
                 break Stop::IncomingClosed;
             }
-            event = events_rx.recv(), if handshaken => match event {
+            event = events_rx.recv(), if handshaken || !stdio => match event {
                 Ok(mut event) => {
                     // A local-only backend has no window to render them: the
                     // store already has the data, so they are read and
@@ -422,9 +423,11 @@ async fn route(
         Some(whatfast_protocol::rpc_request::Request::Hello(_))
     );
     // The hello of a local connection names the agent, and the answer fixes the
-    // identity of the connection for the rest of its life.
-    let mut who = known;
+    // identity of the connection for the rest of its life. A connection that
+    // already proved who it is does not get to name someone else.
+    let mut who = known.clone();
     if let (Some(guard), true) = (guard, is_hello)
+        && known.is_none()
         && let Some((agent_id, token)) = guard::hello_agent(&envelope)
     {
         let identified = guard.identify(&agent_id, &token);
@@ -583,8 +586,10 @@ async fn route(
                 return Some(Stop::WriterGone);
             }
             // Events become eligible only after the correlated Hello response
-            // is on the wire.
-            if hello {
+            // is on the wire, and only the desktop's own pipe opens that gate:
+            // an agent that says Hello on the local socket has no window to
+            // send events to.
+            if hello && matches!(&origin, Origin::Stdio) {
                 *handshaken = true;
             }
             None

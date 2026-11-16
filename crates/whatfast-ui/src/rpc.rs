@@ -103,6 +103,10 @@ pub(crate) enum PendingRequest {
         reply_to_message_id: Option<String>,
         /// (display name, JID) pairs backing `@Name` tokens in `draft_text`.
         mentions: Vec<(String, String)>,
+        /// The row of the agent draft this send closes. `None` when the text
+        /// came from the composer: two equal texts must not close each other's
+        /// row.
+        draft_id: Option<i64>,
     },
     SendImage {
         chat_id: String,
@@ -999,6 +1003,26 @@ impl RpcClient {
         }
     }
 
+    /// Starts the sidecar again after a failed update stopped it. The event
+    /// stream is the same one the window already reads.
+    pub(crate) fn restart_backend(&mut self) -> Result<()> {
+        let (mut command, executable) = backend_command()?;
+        let child = command
+            .spawn()
+            .with_context(|| format!("start backend {}", executable.display()))?;
+        #[cfg(windows)]
+        let _ = backend_job::adopt(&child);
+        match &mut self.backend {
+            Backend::Real(client) => client.restart_with(child)?,
+            Backend::Fake(_) => anyhow::bail!("a harness backend cannot be restarted"),
+        }
+        // The old requests died with the old process: none of them can be
+        // answered now, so their entries must not wait for a deadline.
+        self.tracker.clear();
+        self.pending.clear();
+        Ok(())
+    }
+
     /// Classify an inbound message of the backend.
     ///
     /// port: the origin correlated the answers with its own table. Here the
@@ -1162,6 +1186,20 @@ mod backend_job {
 /// port: the origin did this inside its `bridge.rs`, with the same flags and
 /// the same `CREATE_NO_WINDOW` on Windows.
 fn spawn_backend() -> Result<transport::BackendClient> {
+    let (mut command, executable) = backend_command()?;
+    let child = command
+        .spawn()
+        .with_context(|| format!("start backend {}", executable.display()))?;
+    // El backend no puede sobrevivir a esta aplicacion, ni siquiera cuando el
+    // proceso muere sin pasar por el `Drop` que le pide apagarse.
+    #[cfg(windows)]
+    let _ = backend_job::adopt(&child);
+    Ok(transport::BackendClient::from_child(child)?)
+}
+
+/// The command of the sidecar, shared by the first start and by a restart
+/// after a failed update.
+fn backend_command() -> Result<(Command, PathBuf)> {
     let executable = backend_executable()?;
     let data_dir = whatfast_model::paths::data_dir();
     std::fs::create_dir_all(&data_dir)
@@ -1173,7 +1211,7 @@ fn spawn_backend() -> Result<transport::BackendClient> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let child = command
+    command
         .arg("--stdio")
         .arg("--data-dir")
         .arg(&data_dir)
@@ -1181,14 +1219,8 @@ fn spawn_backend() -> Result<transport::BackendClient> {
         .arg(log_file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("start backend {}", executable.display()))?;
-    // El backend no puede sobrevivir a esta aplicacion, ni siquiera cuando el
-    // proceso muere sin pasar por el `Drop` que le pide apagarse.
-    #[cfg(windows)]
-    let _ = backend_job::adopt(&child);
-    Ok(transport::BackendClient::from_child(child)?)
+        .stderr(Stdio::piped());
+    Ok((command, executable))
 }
 
 /// Where the Go sidecar is.

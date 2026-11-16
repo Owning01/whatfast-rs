@@ -985,7 +985,15 @@ impl crate::app::Whatfast {
                 });
                 match playing {
                     Ok(Ok(true)) => {}
-                    _ => break,
+                    _ => {
+                        // The window closed or the view could not be read: the
+                        // flag must not stay on, or the next note never starts
+                        // its own tick.
+                        let _ = window.update(|_, cx| {
+                            let _ = view.update(cx, |this, _| this.voice_tick = false);
+                        });
+                        break;
+                    }
                 }
             }
         })

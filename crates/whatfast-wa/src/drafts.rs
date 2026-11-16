@@ -146,10 +146,27 @@ pub fn decide(
     } else {
         DraftState::Discarded
     };
-    guard
+    if !draft.state.may_advance(next) {
+        return Err(Denied {
+            code: "failed_precondition",
+            message: format!(
+                "the draft {} is {}, which cannot become {}",
+                draft.id,
+                draft.state.as_str(),
+                next.as_str()
+            ),
+        });
+    }
+    if !guard
         .db()
         .set_draft_state(draft.id, next)
-        .map_err(internal)?;
+        .map_err(internal)?
+    {
+        return Err(Denied {
+            code: "failed_precondition",
+            message: format!("the draft {} changed while it was decided", draft.id),
+        });
+    }
     let mut draft = draft;
     draft.state = next;
     Ok(answer(rpc_response::Result::DraftDecide(
@@ -203,10 +220,19 @@ pub fn finish(
     } else {
         DraftState::Failed
     };
-    guard
+    if !guard
         .db()
         .set_draft_state(draft.id, next)
-        .map_err(internal)?;
+        .map_err(internal)?
+    {
+        return Err(Denied {
+            code: "failed_precondition",
+            message: format!(
+                "the draft {} changed while it was finishing",
+                draft.id
+            ),
+        });
+    }
     let mut draft = draft;
     draft.state = next;
     // The reason of a failure is the last thing the user read about it: it

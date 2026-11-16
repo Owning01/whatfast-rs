@@ -503,13 +503,17 @@ fn message_send(client: &mut Client, arguments: &Value) -> Result<Value, String>
         if wait > 0 {
             std::thread::sleep(Duration::from_millis(wait));
         }
+        // A retry of the whole tool call names the same base id; deriving the
+        // id of every part from it keeps the send idempotent even when the text
+        // was cut into several messages.
+        let part_message_id = if index == 0 {
+            client_message_id.clone()
+        } else {
+            format!("{client_message_id}-{index}")
+        };
         let answer = match client.call(
             rpc_request::Request::SendText(SendTextRequest {
-                client_message_id: if index == 0 {
-                    client_message_id.clone()
-                } else {
-                    uuid4()
-                },
+                client_message_id: part_message_id,
                 chat_id: chat_id.clone(),
                 text: part.clone(),
                 // The reply quotes the message of the user: only the first part
@@ -720,8 +724,35 @@ fn latest(client: &mut Client, chat_id: Option<&str>) -> Result<(i64, String), S
                 .map(|chat| chat.last_message_timestamp_ms)
                 .max()
                 .unwrap_or(0);
-            // The id of that message is not in the chat row; the timestamp is
-            // the cursor and the caller keeps the instant for the next call.
+            if newest <= 0 {
+                return Ok((0, String::new()));
+            }
+            // The row of a chat carries the instant but not the id of its
+            // newest message. Read that one message: without its id, two
+            // messages of the same millisecond are delivered again on the
+            // next wait.
+            let newest_chat = page
+                .chats
+                .iter()
+                .find(|chat| chat.last_message_timestamp_ms == newest)
+                .map(|chat| chat.id.clone());
+            if let Some(chat_id) = newest_chat {
+                let answer = request(
+                    client,
+                    rpc_request::Request::ListMessages(ListMessagesRequest {
+                        chat_id,
+                        before_timestamp_ms: 0,
+                        before_message_id: String::new(),
+                        limit: 1,
+                    }),
+                    READ_TIMEOUT,
+                )?;
+                if let RpcResult::ListMessages(page) = answer
+                    && let Some(message) = page.messages.last()
+                {
+                    return Ok((message.timestamp_ms, message.id.clone()));
+                }
+            }
             Ok((newest, String::new()))
         }
     }

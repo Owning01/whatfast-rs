@@ -379,6 +379,16 @@ impl TabStrip {
             .retain(|closing| !tabs.iter().any(|tab| tab.chat_id == closing.entry.chat_id));
         self.tabs = tabs;
         self.active_chat_id = active_chat_id.into();
+        // A tab that disappears while it is dragged has no mouse-up waiting:
+        // cancel the drop instead of keeping a ghost in the strip forever.
+        if self
+            .dragging
+            .as_ref()
+            .is_some_and(|drag| !self.tabs.iter().any(|tab| tab.chat_id == drag.chat_id))
+        {
+            self.dragging = None;
+            self.drop_index = None;
+        }
         self.prune_closing();
     }
 
@@ -1315,6 +1325,15 @@ mod tests {
         let moved = strip.commit_drag();
         assert_eq!(moved.map(|moved| moved.to_index), Some(0));
         assert_eq!(strip.index_of("a"), Some(0));
+    }
+
+    #[test]
+    fn a_dragged_tab_that_disappears_cancels_the_drop() {
+        let mut strip = strip();
+        strip.drag_over("a", 2);
+        strip.set_tabs(vec![entry("b"), entry("c")], "b");
+        assert_eq!(strip.dragging(), None);
+        assert_eq!(strip.commit_drag(), None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ mod windows_tray {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-    use gpui::{App, Window};
+    use gpui::{App, WeakEntity, Window};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use whatfast_i18n as i18n;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -33,6 +33,8 @@ mod windows_tray {
         SetForegroundWindow, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
         WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
     };
+
+    use crate::app::Whatfast;
 
     /// The identifier of the icon inside the profile of the shell.
     const ICON_ID: u32 = 1;
@@ -69,7 +71,11 @@ mod windows_tray {
         /// Returns `None` when the shell does not take the icon: the app then
         /// closes as it always did, with no hidden window that nobody can
         /// bring back.
-        pub(crate) fn install(window: &Window, cx: &App) -> Option<Self> {
+        pub(crate) fn install(
+            window: &Window,
+            cx: &App,
+            app: WeakEntity<Whatfast>,
+        ) -> Option<Self> {
             if let Ok(mut labels) = LABELS.lock() {
                 *labels = Some(Labels {
                     open: wide(i18n::t("Open Whatfast")),
@@ -104,9 +110,11 @@ mod windows_tray {
             };
             MAIN_WINDOW.store(main, Ordering::SeqCst);
             // Closing the window hides it: the application stays alive in the
-            // tray, and only the menu of the icon closes it for real.
-            window.on_window_should_close(cx, |_window, _cx| {
+            // tray, and only the menu of the icon closes it for real. The real
+            // close writes the text that the debounce has not saved yet.
+            window.on_window_should_close(cx, move |_window, cx| {
                 if QUITTING.load(Ordering::SeqCst) {
+                    let _ = app.update(cx, |this, _| this.save_drafts_now());
                     return true;
                 }
                 hide_main();
@@ -378,11 +386,13 @@ mod linux_tray {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use gpui::{App, AppContext as _, Window};
+    use gpui::{App, AppContext as _, WeakEntity, Window};
     use whatfast_i18n as i18n;
     use zbus::blocking::Connection;
     use zbus::interface;
     use zbus::zvariant::{OwnedValue, Value};
+
+    use crate::app::Whatfast;
 
     enum TrayEvent {
         Open,
@@ -504,7 +514,11 @@ mod linux_tray {
     }
 
     impl Tray {
-        pub(crate) fn install(window: &Window, cx: &App) -> Option<Self> {
+        pub(crate) fn install(
+            window: &Window,
+            cx: &App,
+            app: WeakEntity<Whatfast>,
+        ) -> Option<Self> {
             let (tx, rx) = async_channel::bounded::<TrayEvent>(8);
             let sni = StatusNotifierItem { events: tx.clone() };
             let menu = DbusMenu {
@@ -552,6 +566,9 @@ mod linux_tray {
                         }
                         TrayEvent::Quit => {
                             quitting_task.store(true, Ordering::SeqCst);
+                            // The text that the debounce has not saved yet
+                            // lands before the process leaves.
+                            let _ = app.update(cx, |this, _| this.save_drafts_now());
                             let _ = cx.update(|cx| cx.quit());
                             break;
                         }
@@ -577,7 +594,11 @@ pub(crate) struct Tray;
 #[cfg(not(any(windows, target_os = "linux")))]
 impl Tray {
     /// There is no tray on other targets: closing the window quits the app.
-    pub(crate) fn install(_window: &gpui::Window, _cx: &gpui::App) -> Option<Self> {
+    pub(crate) fn install(
+        _window: &gpui::Window,
+        _cx: &gpui::App,
+        _app: gpui::WeakEntity<crate::app::Whatfast>,
+    ) -> Option<Self> {
         None
     }
 }

@@ -145,6 +145,18 @@ impl DraftState {
             _ => None,
         }
     }
+    /// Whether `next` is a step this row may take from here. `Sent` and
+    /// `Discarded` end the life of a draft; a failed send can be retried.
+    pub fn may_advance(self, next: Self) -> bool {
+        use DraftState::*;
+        matches!(
+            (self, next),
+            (Proposed, Approved | Discarded)
+                | (Approved, Sending | Sent | Failed | Discarded)
+                | (Sending, Sent | Failed)
+                | (Failed, Approved | Discarded)
+        )
+    }
 }
 
 /// One message the agent proposed for a chat.
@@ -654,9 +666,29 @@ impl Db {
         })
     }
 
-    /// Moves a draft to its next state.
+    /// Moves a draft to its next state, only when the transition is one the
+    /// life of a draft allows. `false` means the row is gone or the step is
+    /// not legal from its current state.
     pub fn set_draft_state(&self, id: i64, state: DraftState) -> rusqlite::Result<bool> {
         self.write(|conn| {
+            let current: Option<String> = conn
+                .query_row(
+                    "SELECT state FROM drafts WHERE id=?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(current) = current.and_then(|text| DraftState::parse(&text)) else {
+                return Ok(false);
+            };
+            if !current.may_advance(state) {
+                tracing::warn!(
+                    "the draft {id} cannot move from {} to {}",
+                    current.as_str(),
+                    state.as_str()
+                );
+                return Ok(false);
+            }
             let changed = conn.execute(
                 "UPDATE drafts SET state=?2 WHERE id=?1",
                 params![id, state.as_str()],
@@ -760,6 +792,25 @@ impl Db {
                 params![id, next_at_ms],
             )?;
             Ok(())
+        })
+    }
+
+    /// Takes one due task, writing its next turn only if the row still has the
+    /// turn that was read and has not been paused since. Two backends looking
+    /// at the same table cannot both run the same turn.
+    pub fn claim_schedule(
+        &self,
+        id: i64,
+        previous_next: i64,
+        next_at_ms: Option<i64>,
+    ) -> rusqlite::Result<bool> {
+        self.write(|conn| {
+            let changed = conn.execute(
+                "UPDATE schedules SET next_at_ms=?3
+                 WHERE id=?1 AND next_at_ms=?2 AND paused=0",
+                params![id, previous_next, next_at_ms],
+            )?;
+            Ok(changed > 0)
         })
     }
 
@@ -1071,13 +1122,52 @@ mod tests {
         assert_eq!(stored.text, "hola");
         assert_eq!(stored.state, DraftState::Proposed);
         assert_eq!(db.drafts(DraftState::Proposed, 10).expect("list").len(), 1);
+        // The states follow the life of a draft: approved, on the wire, sent.
+        assert!(db
+            .set_draft_state(id, DraftState::Approved)
+            .expect("approve"));
+        assert!(db
+            .set_draft_state(id, DraftState::Sending)
+            .expect("sending"));
         assert!(db.set_draft_state(id, DraftState::Sent).expect("move"));
         assert_eq!(db.drafts(DraftState::Proposed, 10).expect("list").len(), 0);
         assert_eq!(
             db.draft(id).expect("read").expect("row").state,
             DraftState::Sent
         );
+        // A sent draft is terminal, and a missing row cannot move.
+        assert!(!db
+            .set_draft_state(id, DraftState::Approved)
+            .expect("terminal"));
         assert!(!db.set_draft_state(9_999, DraftState::Sent).expect("move"));
+    }
+
+    #[test]
+    fn a_failed_draft_can_be_retried_but_a_discarded_one_cannot() {
+        let db = Db::in_memory().expect("db");
+        let id = db
+            .add_draft(&draft("codex", "a@s.whatsapp.net", "hola", 1_000))
+            .expect("add");
+        assert!(db
+            .set_draft_state(id, DraftState::Approved)
+            .expect("approve"));
+        assert!(db
+            .set_draft_state(id, DraftState::Sending)
+            .expect("sending"));
+        assert!(db.set_draft_state(id, DraftState::Failed).expect("fail"));
+        assert!(db
+            .set_draft_state(id, DraftState::Approved)
+            .expect("retry"));
+        assert!(db
+            .set_draft_state(id, DraftState::Discarded)
+            .expect("discard"));
+        assert!(!db
+            .set_draft_state(id, DraftState::Approved)
+            .expect("terminal"));
+        assert_eq!(
+            db.draft(id).expect("read").expect("row").state,
+            DraftState::Discarded
+        );
     }
 
     #[test]

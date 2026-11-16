@@ -970,13 +970,26 @@ impl Store {
         entity_id: &str,
         error: &str,
     ) -> rusqlite::Result<()> {
+        self.journal_inbound_event_with_payload(kind, chat_jid, entity_id, &[], error)
+    }
+
+    /// Guards one event together with the bytes it could not decrypt, so a
+    /// later repair can try again once the parent secret arrives.
+    pub fn journal_inbound_event_with_payload(
+        &self,
+        kind: &str,
+        chat_jid: &str,
+        entity_id: &str,
+        payload: &[u8],
+        error: &str,
+    ) -> rusqlite::Result<()> {
         self.write(|conn| {
             conn.execute(
                 "INSERT INTO inbound_events(
                    event_kind,chat_jid,entity_id,payload,attempts,
                    next_attempt_at,last_error,created_at)
-                 VALUES(?1,?2,?3,x'',1,?4,?5,?4)",
-                params![kind, chat_jid, entity_id, now_ms(), error],
+                  VALUES(?1,?2,?3,?4,1,?5,?6,?5)",
+                params![kind, chat_jid, entity_id, payload, now_ms(), error],
             )?;
             Ok(())
         })
@@ -2738,7 +2751,9 @@ impl Store {
         emoji: &str,
     ) -> rusqlite::Result<ReactionReservation> {
         let chat_jid = self.resolve_chat_id(chat_jid)?;
-        self.read(|conn| {
+        // The read and the insert share one write transaction: two callers
+        // with the same id used to both see "send" and reach the network.
+        self.write(|conn| {
             let existing = conn
                 .query_row(
                     "SELECT chat_jid,message_id,emoji,completed_at FROM outgoing_reactions
@@ -2754,30 +2769,25 @@ impl Store {
                     },
                 )
                 .optional()?;
-            match existing {
+            let reservation = match existing {
                 Some((chat, message, previous, _))
                     if chat != chat_jid || message != message_id || previous != emoji =>
                 {
-                    Err(invalid_parameter(
+                    return Err(invalid_parameter(
                         "client_reaction_id already used with different payload",
-                    ))
+                    ));
                 }
                 Some((_, _, _, completed_at)) if completed_at > 0 => {
-                    Ok(ReactionReservation::Completed(completed_at))
+                    ReactionReservation::Completed(completed_at)
                 }
-                _ => Ok(ReactionReservation::Send),
-            }
-        })
-        .and_then(|reservation| {
+                _ => ReactionReservation::Send,
+            };
             if matches!(reservation, ReactionReservation::Send) {
-                self.write(|conn| {
-                    conn.execute(
-                        "INSERT INTO outgoing_reactions(client_reaction_id,chat_jid,message_id,emoji,created_at)
-                         VALUES(?1,?2,?3,?4,?5) ON CONFLICT(client_reaction_id) DO NOTHING",
-                        params![client_reaction_id, chat_jid, message_id, emoji, now_ms()],
-                    )?;
-                    Ok(())
-                })?;
+                conn.execute(
+                    "INSERT INTO outgoing_reactions(client_reaction_id,chat_jid,message_id,emoji,created_at)
+                     VALUES(?1,?2,?3,?4,?5) ON CONFLICT(client_reaction_id) DO NOTHING",
+                    params![client_reaction_id, chat_jid, message_id, emoji, now_ms()],
+                )?;
             }
             Ok(reservation)
         })
@@ -3063,6 +3073,24 @@ impl Store {
                    last_message_text=COALESCE((SELECT text FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),''),
                    last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),0),
                    unread_count=(SELECT count(*) FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' AND unread=1)",
+                [],
+            )?;
+            // A resync or a later event often stores the row whose write
+            // failed. The journal records failures, not a second copy: clear
+            // the rows that are now in the real tables so the integrity panel
+            // goes back to zero instead of showing a permanent backlog.
+            conn.execute(
+                "DELETE FROM inbound_messages WHERE EXISTS (
+                   SELECT 1 FROM messages
+                   WHERE messages.id=inbound_messages.message_id
+                     AND messages.chat_jid=inbound_messages.chat_jid)",
+                [],
+            )?;
+            conn.execute(
+                "DELETE FROM inbound_events WHERE event_kind='reaction' AND EXISTS (
+                   SELECT 1 FROM reactions
+                   WHERE reactions.chat_jid=inbound_events.chat_jid
+                     AND reactions.message_id=inbound_events.entity_id)",
                 [],
             )?;
             conn.execute(

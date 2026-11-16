@@ -13,7 +13,10 @@
 use std::collections::VecDeque;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -47,7 +50,8 @@ pub(crate) const MAX_DURATION_SECONDS: f32 = 300.0;
 
 /// One command for the thread of the microphone.
 enum Command {
-    Start,
+    /// The generation of the note: an event of an older note is ignored.
+    Start(u64),
     /// Stops the capture without closing the device: the note keeps its
     /// samples and its length up to this point.
     Pause,
@@ -62,13 +66,29 @@ enum Command {
 /// What the thread of the microphone says back to the window.
 pub(crate) enum RecorderEvent {
     /// The device is open and the samples are coming.
-    Started,
+    Started { generation: u64 },
     /// The note is coded and ready to go to the backend.
-    Finished { path: PathBuf, duration: f32 },
+    Finished {
+        path: PathBuf,
+        duration: f32,
+        generation: u64,
+    },
     /// The device, or the encoder, could not be used.
-    Failed(String),
+    Failed(String, u64),
     /// The user dropped the note: there is no file to send.
-    Cancelled,
+    Cancelled { generation: u64 },
+}
+
+impl RecorderEvent {
+    /// The note this event belongs to.
+    pub(crate) fn generation(&self) -> u64 {
+        match self {
+            Self::Started { generation }
+            | Self::Finished { generation, .. }
+            | Self::Failed(_, generation)
+            | Self::Cancelled { generation } => *generation,
+        }
+    }
 }
 
 /// The handle of the thread of the microphone.
@@ -78,6 +98,9 @@ pub(crate) struct VoiceRecorder {
     /// What the microphone keeps for the window: the samples of the note and
     /// the loudness of its latest chunks.
     captured: Arc<Mutex<Captured>>,
+    /// The note that is current. A cancelled one can still send its events
+    /// after the next note started; its generation marks them as old.
+    generation: AtomicU64,
 }
 
 /// Everything the audio callback shares with the window.
@@ -114,12 +137,19 @@ impl VoiceRecorder {
             commands,
             events,
             captured,
+            generation: AtomicU64::new(0),
         }
     }
 
     /// Opens the microphone and starts keeping the samples.
     pub(crate) fn start(&self) {
-        let _ = self.commands.send_blocking(Command::Start);
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.commands.send_blocking(Command::Start(generation));
+    }
+
+    /// The generation of the note the window is waiting for.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Stops the capture without closing the device.
@@ -325,9 +355,11 @@ fn run_recorder(
     captured: Arc<Mutex<Captured>>,
 ) {
     let mut session: Option<Session> = None;
+    let mut generation = 0;
     while let Ok(command) = commands.recv_blocking() {
         match command {
-            Command::Start => {
+            Command::Start(new_generation) => {
+                generation = new_generation;
                 if session.is_some() {
                     continue;
                 }
@@ -340,12 +372,13 @@ fn run_recorder(
                 match Session::open(captured.clone()) {
                     Ok(open) => {
                         session = Some(open);
-                        let _ = events.send_blocking(RecorderEvent::Started);
+                        let _ = events.send_blocking(RecorderEvent::Started { generation });
                     }
                     Err(error) => {
                         eprintln!("recording: {error:#}");
                         let _ = events.send_blocking(RecorderEvent::Failed(
                             i18n::t("The microphone could not be used.").to_string(),
+                            generation,
                         ));
                     }
                 }
@@ -371,18 +404,21 @@ fn run_recorder(
                 if samples.is_empty() {
                     let _ = events.send_blocking(RecorderEvent::Failed(
                         i18n::t("The microphone did not record anything").to_string(),
+                        generation,
                     ));
                     continue;
                 }
                 let path = note_path();
                 match encode_voice_note(&samples, open.sample_rate, open.channels, &path) {
                     Ok(duration) => {
-                        let _ = events.send_blocking(RecorderEvent::Finished { path, duration });
+                        let _ = events
+                            .send_blocking(RecorderEvent::Finished { path, duration, generation });
                     }
                     Err(error) => {
                         eprintln!("recording: {error:#}");
                         let _ = events.send_blocking(RecorderEvent::Failed(
                             i18n::t("The voice note could not be saved.").to_string(),
+                            generation,
                         ));
                     }
                 }
@@ -393,7 +429,7 @@ fn run_recorder(
                     captured.samples.clear();
                     captured.levels.clear();
                 }
-                let _ = events.send_blocking(RecorderEvent::Cancelled);
+                let _ = events.send_blocking(RecorderEvent::Cancelled { generation });
             }
         }
     }

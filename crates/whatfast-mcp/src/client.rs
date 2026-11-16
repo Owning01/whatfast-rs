@@ -343,8 +343,9 @@ impl Client {
     /// when it opens: a backend that nobody else started is offline until it
     /// is told to connect, and an offline backend receives nothing.
     ///
-    /// A session that does not resume is not fatal — the local cache is still
-    /// readable — so only a dead connection fails here.
+    /// A session that does not resume is an error, not a quiet success: the
+    /// caller must know that live requests cannot reach WhatsApp yet. The
+    /// local cache stays readable through the other tools.
     async fn welcome(&self, connection: &Connection) -> Result<(), Error> {
         let envelope = Envelope {
             protocol_version: PROTOCOL_VERSION,
@@ -359,11 +360,24 @@ impl Client {
             .await
             .map_err(|_| Error::Io("the connection closed before the session resumed".into()))?;
         match await_answer(&connection.answers, 2, WELCOME_TIMEOUT).await {
-            Ok(_) => Ok(()),
-            Err(Error::Io(message)) => Err(Error::Io(message)),
-            Err(error) => {
-                eprintln!("whatfast mcp: the session did not resume yet: {error}");
+            Ok(RpcResult::Reconnect(started)) => {
+                if !started.started {
+                    // Already connected or not paired yet: the cache is still
+                    // there, and the caller can ask for the auth state.
+                    eprintln!("whatfast mcp: the session did not start a reconnect");
+                }
                 Ok(())
+            }
+            Ok(RpcResult::Error(RpcError { code, message, .. })) => Err(Error::Remote {
+                code,
+                message,
+            }),
+            Ok(_) => Err(Error::Protocol(
+                "the reconnect answered with another result".into(),
+            )),
+            Err(error) => {
+                eprintln!("whatfast mcp: the session did not resume: {error}");
+                Err(error)
             }
         }
     }

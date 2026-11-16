@@ -255,6 +255,9 @@ impl AutomationsPanel {
     pub(crate) fn toggle_form(&self, fallback: Vec<AskAgent>, default_chat: Option<String>) {
         let mut state = self.state.borrow_mut();
         state.form_open = !state.form_open;
+        // A form closed while a save was in flight left `saving` set: the
+        // button stayed disabled on every later open, with no save to answer.
+        state.saving = false;
         if !state.form_open {
             return;
         }

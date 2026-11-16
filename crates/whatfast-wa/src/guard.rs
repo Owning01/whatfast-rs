@@ -100,9 +100,8 @@ impl Guard {
     /// Who is on the other side of a handshake.
     ///
     /// A client that names no agent is the user. A client that names one needs
-    /// its token; while the profile has no agent registered at all, the token
-    /// is not asked for yet, so the first connection of a fresh install works
-    /// before the interface has written its row.
+    /// its token: while the profile has no agent registered at all, the agent
+    /// is unknown, not the user who started the interface.
     pub fn identify(&self, agent_id: &str, token: &str) -> Who {
         let agent_id = agent_id.trim();
         if agent_id.is_empty() {
@@ -125,18 +124,18 @@ impl Guard {
                 }
             }
             Ok(None) => match self.db.agents() {
-                // The profile has no agent yet: the interface that writes the
-                // rows does not exist in this build, so the harness is treated
-                // like the user who started it.
-                Ok(agents) if agents.is_empty() => {
-                    tracing::info!(
-                        "the agent {agent_id} speaks without a token: no agent is registered yet"
-                    );
-                    Who::User
+                // A profile without rows has no agent to trust: a client that
+                // names one gets nothing, not the user's permissions.
+                Ok(agents) => {
+                    if agents.is_empty() {
+                        tracing::info!(
+                            "the agent {agent_id} speaks without a token: no agent is registered"
+                        );
+                    }
+                    Who::Denied(format!(
+                        "the agent {agent_id} is not connected: connect it from Whatfast"
+                    ))
                 }
-                Ok(_) => Who::Denied(format!(
-                    "the agent {agent_id} is not connected: connect it from Whatfast"
-                )),
                 Err(error) => Who::Denied(format!("agents.db: {error}")),
             },
             Err(error) => Who::Denied(format!("agents.db: {error}")),
@@ -261,8 +260,13 @@ impl Guard {
                     Err(out_of_scope("*", Scope::Read))
                 }
             }
-            // The tools that only ask about the bridge itself.
-            Request::Hello(_) | Request::GetAuthState(_) | Request::Shutdown(_) => Ok(()),
+            // The tools that only ask about the bridge itself. `Reconnect`
+            // resumes the session of the profile; it is how a harness starts
+            // its own backend, and it writes nothing on behalf of the agent.
+            Request::Hello(_)
+            | Request::GetAuthState(_)
+            | Request::Shutdown(_)
+            | Request::Reconnect(_) => Ok(()),
             other => Err(Denied {
                 code: "forbidden",
                 message: format!(

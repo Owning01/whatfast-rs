@@ -13,6 +13,7 @@ use gpui_component::{
 use whatfast_i18n as i18n;
 
 use crate::app::Whatfast;
+use crate::navrail::SidebarView;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuickCommand {
@@ -167,35 +168,23 @@ impl Whatfast {
         self.command_palette.open = false;
         match cmd {
             QuickCommand::OpenSettings => {
-                self.settings_open = true;
+                self.sidebar_view = SidebarView::Settings;
             }
             QuickCommand::OpenDevStats => {
                 self.toggle_dev_stats(cx);
                 return;
             }
             QuickCommand::ToggleStates => {
-                self.states_open = true;
-                self.channels_open = false;
-                self.agents_open = false;
-                self.archived_open = false;
+                self.sidebar_view = SidebarView::States;
             }
             QuickCommand::ToggleChannels => {
-                self.channels_open = true;
-                self.states_open = false;
-                self.agents_open = false;
-                self.archived_open = false;
+                self.sidebar_view = SidebarView::Channels;
             }
             QuickCommand::ToggleAgents => {
-                self.agents_open = true;
-                self.states_open = false;
-                self.channels_open = false;
-                self.archived_open = false;
+                self.sidebar_view = SidebarView::Agents;
             }
             QuickCommand::ToggleArchived => {
-                self.archived_open = true;
-                self.states_open = false;
-                self.channels_open = false;
-                self.agents_open = false;
+                self.sidebar_view = SidebarView::Archived;
             }
             QuickCommand::FocusSearch => {
                 self.store.toast_info = Some(i18n::t("Press Ctrl+F to search inside messages").into());
@@ -213,6 +202,9 @@ impl Whatfast {
                 return;
             }
         }
+        // El comando cambia la vista: el riel tiene que reflejarla ahora, no
+        // en el proximo gesto que llame a `sync_shell`.
+        self.sync_shell(cx);
         cx.notify();
     }
 

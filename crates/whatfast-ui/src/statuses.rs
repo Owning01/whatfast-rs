@@ -318,6 +318,25 @@ pub(crate) fn newest_status_ms(group: &StatusGroup) -> i64 {
         .unwrap_or_default()
 }
 
+/// Marks the group the viewer moved to as seen and saves the mark.
+///
+/// Opening a status is not the only way to see it: the viewer also advances
+/// on its own and on a tap. Without this, the ring of a contact stays dashed
+/// after all of its statuses were shown.
+fn mark_viewer_group_seen(
+    state: &mut StatusStripState,
+    groups: &[StatusGroup],
+    group_index: usize,
+) {
+    let Some(group) = groups.get(group_index) else {
+        return;
+    };
+    let sender_id = group.sender_id.clone();
+    let newest = newest_status_ms(group);
+    mark_seen(state, &sender_id, newest);
+    crate::status_seen::save(&state.seen);
+}
+
 /// Marks the statuses of one sender as seen, up to `newest_ms`.
 ///
 /// The ring of a sender that was seen is solid; the ring of a sender that was
@@ -656,6 +675,9 @@ impl StatusStrip {
     /// Closes the viewer of the statuses.
     pub(crate) fn close_viewer(&self, cx: &mut Context<Whatfast>) {
         let mut state = self.state.borrow_mut();
+        // The advance task checks this generation: without bumping it the
+        // closed viewer can reopen on its own 80 ms later.
+        state.generation = state.generation.wrapping_add(1);
         state.viewer = None;
         state.reply_active = false;
         state.paused = false;
@@ -2296,6 +2318,7 @@ pub(crate) fn reply_to_the_open_status(
             draft_text: String::new(),
             reply_to_message_id: Some(status_id),
             mentions: Vec::new(),
+            draft_id: None,
         },
     );
     true
@@ -2427,13 +2450,14 @@ pub(crate) fn move_viewer(
     };
     if moved {
         inner.reply_active = false;
-        app.stop_video();
         if let Some(v) = inner.viewer
             && v.group_index != old_group
         {
+            mark_viewer_group_seen(&mut inner, groups, v.group_index);
             inner.transition_id += 1;
             inner.transition_forward = forward;
         }
+        app.stop_video();
     }
     if moved && inner.viewer.is_some() {
         inner.generation += 1;
@@ -2528,11 +2552,12 @@ fn spawn_advance(
                     cx.notify();
                     return false;
                 }
-                app.stop_video();
                 if viewer.group_index != old_group {
+                    mark_viewer_group_seen(&mut inner, groups, viewer.group_index);
                     inner.transition_id += 1;
                     inner.transition_forward = true;
                 }
+                app.stop_video();
                 inner.viewer = Some(viewer);
                 inner.reset_progress(now, false);
                 drop(inner);

@@ -277,9 +277,14 @@ impl ImageCache for BoundedImageCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let key = hash(resource);
         self.settle();
+        let mut failed_decode = false;
         let loaded = if let Some(entry) = self.entries.get_mut(&key) {
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
-            entry.item.get()
+            let result = entry.item.get();
+            // A broken or missing file must not be cached forever: the next
+            // draw retries, after the file has maybe been downloaded.
+            failed_decode = matches!(result, Some(Err(_)));
+            result
         } else {
             STAT_MISSES.fetch_add(1, Ordering::Relaxed);
             // A decode of every visible sticker at once is what made the
@@ -327,6 +332,11 @@ impl ImageCache for BoundedImageCache {
                 .detach();
             None
         };
+        if failed_decode {
+            self.entries.remove(&key);
+            self.lru.retain(|_, hash| *hash != key);
+            self.loading.remove(&key);
+        }
         self.touch(key);
         self.evict(key, window, cx);
         self.sync_stats();

@@ -66,6 +66,7 @@ use crate::app::{
     Whatfast, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
 use crate::message_actions::MessageAction;
+use crate::navrail::SidebarView;
 use crate::emoji_recent;
 use crate::helpers::{
     StatusGlyph, avatar_element, avatar_element_of, connection_label, format_disappearing_timer,
@@ -239,10 +240,11 @@ impl Whatfast {
         // el panel que la acompana no entra y la columna sola no puede dejar
         // un hueco muerto al lado.
         let full_column = compact && !show_conversation;
-        let states_open = self.states_open;
-        let channels_open = self.channels_open;
-        let archived_open = self.archived_open;
-        let agents_open = self.agents_open;
+        let view = self.sidebar_view;
+        let states_open = view == SidebarView::States;
+        let channels_open = view == SidebarView::Channels;
+        let archived_open = view == SidebarView::Archived;
+        let agents_open = view == SidebarView::Agents;
         // El menu de los filtros: lo abre la flecha del final de la fila de
         // los chips y elige el filtro de la columna.
         let filter_menu = cx.try_global::<ChatFilterMenu>();
@@ -432,9 +434,7 @@ impl Whatfast {
                                 // Los archivados son su propia vista: la
                                 // columna los muestra en la de los archivados.
                                 if filter == ChatFilter::Archived {
-                                    this.archived_open = true;
-                                    this.states_open = false;
-                                    this.channels_open = false;
+                                    this.sidebar_view = SidebarView::Archived;
                                 }
                                 cx.default_global::<ChatFilterMenu>().open = false;
                                 // El clic no sigue hacia la fila de la lista,
@@ -1729,7 +1729,13 @@ impl Whatfast {
                                             .small()
                                             .icon(IconName::Settings)
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.settings_open = !this.settings_open;
+                                                this.sidebar_view = if this.sidebar_view
+                                                    == SidebarView::Settings
+                                                {
+                                                    SidebarView::Chats
+                                                } else {
+                                                    SidebarView::Settings
+                                                };
                                                 this.reaction_details = None;
                                                 this.image_viewer = None;
                                                 cx.notify();
@@ -6197,7 +6203,7 @@ impl Whatfast {
                             )
                             .child(Button::new("close-settings").label("\u{00d7}").on_click(
                                 cx.listener(|this, _, _, cx| {
-                                    this.settings_open = false;
+                                    this.sidebar_view = SidebarView::Chats;
                                     cx.notify();
                                 }),
                             )),
@@ -6329,7 +6335,7 @@ impl Whatfast {
                                                     .outline()
                                                     .label(i18n::t("Keyboard shortcuts"))
                                                     .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.settings_open = false;
+                                                        this.sidebar_view = SidebarView::Chats;
                                                         this.show_shortcuts_help = true;
                                                         cx.notify();
                                                     })),
@@ -9889,6 +9895,10 @@ impl Render for Whatfast {
                 ..Default::default()
             })
             .track_focus(&self.focus_handle)
+            // Any pointer movement counts as activity for the auto lock.
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, _| {
+                this.last_activity = std::time::Instant::now();
+            }))
             .on_action(cx.listener(|this, _: &CycleRecentChat, window, cx| {
                 this.cycle_recent_chat(false, window, cx);
                 cx.stop_propagation();
@@ -10035,6 +10045,7 @@ impl Render for Whatfast {
                     cx.notify();
                     return;
                 }
+                this.last_activity = std::time::Instant::now();
                 if this.show_shortcuts_help && event.keystroke.key == "escape" {
                     this.show_shortcuts_help = false;
                     cx.stop_propagation();
@@ -10294,7 +10305,7 @@ impl Render for Whatfast {
                     && !search_focused
                     && !emoji_focused
                     && !this.command_palette.open
-                    && !this.settings_open
+                    && this.sidebar_view != SidebarView::Settings
                     && !this.show_shortcuts_help
                 {
                     let key = event.keystroke.key.as_str();
@@ -10472,7 +10483,7 @@ impl Render for Whatfast {
             .when(self.confirm_delete_status.is_some(), |root| {
                 root.child(self.render_confirm_delete_status(cx))
             })
-            .when(self.settings_open, |root| {
+            .when(self.sidebar_view == SidebarView::Settings, |root| {
                 root.child(self.render_settings(cx))
             })
             .when(self.dev_stats_open, |root| {

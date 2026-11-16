@@ -337,8 +337,15 @@ impl Store {
     pub fn apply_sync_progress(&mut self, chats: u64, messages: u64, complete: bool) {
         self.sync_chats = self.sync_chats.saturating_add(chats);
         self.sync_messages = self.sync_messages.saturating_add(messages);
-        self.sync_active = !complete;
-        self.sync_complete = complete;
+        // A sync that already completed stays completed: a late progress
+        // event with `complete = false` (a second batch, a retry) used to
+        // take the window back to "importing" and never finish.
+        if complete {
+            self.sync_active = false;
+            self.sync_complete = true;
+        } else if !self.sync_complete {
+            self.sync_active = true;
+        }
     }
 
     pub fn message(&self, id: &str) -> Option<&whatfast_protocol::Message> {
@@ -470,6 +477,10 @@ impl Store {
             self.has_older_messages = true;
         }
         self.has_newer_messages = has_more || self.newer_activity;
+        // The page was applied: the flag of the events that it already covers
+        // goes back down. What it did not cover stays as `has_newer_messages`,
+        // which is what the renderer reads to keep offering the next page.
+        self.newer_activity = false;
         self.reindex_messages();
         self.rebuild_reply_metadata();
         self.rebuild_message_sizes();
@@ -575,7 +586,11 @@ impl Store {
             .iter_mut()
             .find(|message| message.id == receipt.message_id && message.chat_id == receipt.chat_id)
         {
-            message.status = receipt.status;
+            // The receipts of the phone arrive out of order: a late
+            // `Delivered` must not take a message back from `Read`.
+            if receipt_advances(message.status(), receipt.status()) {
+                message.status = receipt.status;
+            }
         }
     }
 
@@ -617,6 +632,9 @@ impl Store {
     }
 
     pub fn set_chat_avatar(&mut self, chat_id: &str, avatar_path: String) {
+        // The avatar is read by `media_present` on every paint: resolve it
+        // once now, as the paths of messages do.
+        self.refresh_media_path(&avatar_path);
         if let Some(chat) = self
             .chat_index
             .get(chat_id)
@@ -627,6 +645,7 @@ impl Store {
     }
 
     pub fn set_participant_avatar(&mut self, participant_id: String, avatar_path: String) {
+        self.refresh_media_path(&avatar_path);
         self.participant_avatar_paths
             .insert(participant_id, avatar_path);
     }
@@ -1654,6 +1673,25 @@ fn compare_messages(
     (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
 }
 
+/// Whether a receipt may replace the status a message already shows.
+///
+/// The wire values are not an order, as the contract of the enum says: a
+/// failed message may recover, and a receipt that arrives late never takes a
+/// message back from read to delivered.
+fn receipt_advances(
+    current: whatfast_protocol::MessageStatus,
+    next: whatfast_protocol::MessageStatus,
+) -> bool {
+    use whatfast_protocol::MessageStatus::{Delivered, Failed, Pending, Read, Sent, Unspecified};
+    matches!(
+        (current, next),
+        (Unspecified | Pending, Sent | Delivered | Read | Failed)
+            | (Failed, Sent | Delivered | Read)
+            | (Sent, Delivered | Read)
+            | (Delivered, Read)
+    )
+}
+
 /// Whether the thread skips the message: the deleted ones and the rows that
 /// carry no visible content at all.
 ///
@@ -2041,6 +2079,63 @@ mod tests {
         assert_eq!(store.sync_messages, 160);
         assert!(!store.sync_active);
         assert!(store.sync_complete);
+    }
+
+    #[test]
+    fn a_late_progress_event_does_not_reopen_the_sync() {
+        let mut store = Store::default();
+        store.apply_sync_progress(8, 120, true);
+        store.apply_sync_progress(1, 2, false);
+
+        assert!(store.sync_complete);
+        assert!(!store.sync_active);
+        assert_eq!(store.sync_chats, 9);
+        assert_eq!(store.sync_messages, 122);
+    }
+
+    #[test]
+    fn a_receipt_never_takes_a_message_back() {
+        use whatfast_protocol::MessageStatus;
+        let receipt = |status| whatfast_protocol::ReceiptUpdated {
+            chat_id: "chat".into(),
+            message_id: "1".into(),
+            status: status as i32,
+            timestamp_ms: 10,
+        };
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1)], false, false);
+        store.update_receipt(receipt(MessageStatus::Sent));
+        assert_eq!(store.message("1").unwrap().status(), MessageStatus::Sent);
+        store.update_receipt(receipt(MessageStatus::Read));
+        assert_eq!(store.message("1").unwrap().status(), MessageStatus::Read);
+        // A late receipt does not take the message back.
+        store.update_receipt(receipt(MessageStatus::Delivered));
+        assert_eq!(store.message("1").unwrap().status(), MessageStatus::Read);
+        // A failed send recovers with the confirmation of the phone.
+        store.messages[0].status = MessageStatus::Failed as i32;
+        store.update_receipt(receipt(MessageStatus::Read));
+        assert_eq!(store.message("1").unwrap().status(), MessageStatus::Read);
+    }
+
+    #[test]
+    fn an_applied_page_clears_the_activity_it_covers() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1)], false, false);
+        store.newer_activity = true;
+        store.append_newer_messages(vec![message(2)], false);
+        // The flag of the activity goes down once the page is applied, and the
+        // next page stays on offer: the event may have raced the response.
+        assert!(!store.newer_activity);
+        assert!(store.has_newer_messages);
+        // A page with no activity behind it closes the window.
+        store.append_newer_messages(Vec::new(), false);
+        assert!(!store.has_newer_messages);
     }
 
     #[test]

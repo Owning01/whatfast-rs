@@ -63,7 +63,6 @@ pub(crate) fn verify(pin: &str, salt: &str, hash: &str) -> bool {
 }
 
 /// Returns true if `auto_lock_minutes > 0` and idle time exceeded the threshold.
-#[allow(dead_code)]
 pub(crate) fn should_auto_lock(last_activity: std::time::Instant, auto_lock_minutes: u32) -> bool {
     auto_lock_minutes > 0
         && last_activity.elapsed() >= std::time::Duration::from_secs(u64::from(auto_lock_minutes) * 60)
@@ -89,6 +88,17 @@ pub(crate) fn try_system_biometric_unlock() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{hash_pin, is_valid_pin, new_salt, verify};
+
+    #[test]
+    fn only_an_idle_profile_with_a_pin_locks() {
+        use super::should_auto_lock;
+        assert!(!should_auto_lock(std::time::Instant::now(), 0));
+        assert!(!should_auto_lock(std::time::Instant::now(), 1));
+        assert!(should_auto_lock(
+            std::time::Instant::now() - std::time::Duration::from_secs(61),
+            1
+        ));
+    }
 
     #[test]
     fn a_pin_is_four_to_eight_digits() {

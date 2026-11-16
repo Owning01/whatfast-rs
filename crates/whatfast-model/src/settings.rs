@@ -44,7 +44,7 @@ pub const MIN_MESSAGE_FONT_SCALE: f32 = 0.85;
 pub const MAX_MESSAGE_FONT_SCALE: f32 = 1.3;
 
 /// Where the background of a conversation comes from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatBackground {
     /// The pattern of the reference: the default of the application.
@@ -56,8 +56,21 @@ pub enum ChatBackground {
     None,
 }
 
+impl<'de> Deserialize<'de> for ChatBackground {
+    /// An unknown value comes from a newer release: this one keeps the
+    /// default of the field instead of discarding the whole file.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("color") => Self::Color,
+            Some("none") => Self::None,
+            _ => Self::Pattern,
+        })
+    }
+}
+
 /// How much air the interface leaves between rows and messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Density {
     /// The default spacing: the one of the reference screenshots.
@@ -65,6 +78,18 @@ pub enum Density {
     Comfortable,
     /// Tighter spacing, for more messages on screen.
     Compact,
+}
+
+impl<'de> Deserialize<'de> for Density {
+    /// An unknown value comes from a newer release: this one keeps the
+    /// default of the field instead of discarding the whole file.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("compact") => Self::Compact,
+            _ => Self::Comfortable,
+        })
+    }
 }
 
 /// The preferences of the profile.
@@ -345,8 +370,20 @@ pub fn load_from(path: &Path, legacy: &Path) -> Settings {
     settings
 }
 
+/// Serializes the writers of the settings, so a reader that merges one field
+/// does not lose the change that the interface wrote at the same time.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the lock of the writers, surviving a panic of another one.
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 /// Stores the settings, replacing the file atomically.
 pub fn save(settings: &Settings) -> std::io::Result<()> {
+    let _guard = write_lock();
     save_to(&settings_path(), settings)
 }
 
@@ -384,11 +421,16 @@ pub fn load_ui_scale() -> Option<f32> {
 }
 
 /// Stores the UI scale, keeping the other settings.
+///
+/// The read and the write share the lock of the other writers: without it,
+/// the interface saving its whole file at the same time left one of the two
+/// changes behind.
 pub fn save_ui_scale(scale: f32) -> std::io::Result<()> {
+    let _guard = write_lock();
     let mut settings = load();
     settings.ui_scale = scale;
     settings.normalize();
-    save(&settings)
+    save_to(&settings_path(), &settings)
 }
 
 #[cfg(test)]
@@ -482,6 +524,31 @@ mod tests {
         assert!(settings.sounds_enabled);
         assert_eq!(settings.sound_received, "builtin:pop");
         assert_eq!(settings.sound_sent, "builtin:ping");
+    }
+
+    #[test]
+    fn a_newer_closed_value_falls_back_to_the_default_of_the_field() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let legacy = directory.path().join("settings");
+        fs::write(
+            &path,
+            r#"{ "ui_scale": 1.2, "language": "es", "enter_to_send": false,
+                 "density": "spacious", "chat_background": "video" }"#,
+        )
+        .unwrap();
+        let settings = load_from(&path, &legacy);
+        // The values of this release survive; only the unknown ones fall back.
+        assert_eq!(settings.ui_scale, 1.2);
+        assert_eq!(settings.language, "es");
+        assert!(!settings.enter_to_send);
+        assert_eq!(settings.density, Density::Comfortable);
+        assert_eq!(settings.chat_background, super::ChatBackground::Pattern);
+        // A value of the wrong type falls back the same way.
+        fs::write(&path, r#"{ "density": 7, "chat_background": ["color"] }"#).unwrap();
+        let settings = load_from(&path, &legacy);
+        assert_eq!(settings.density, Density::Comfortable);
+        assert_eq!(settings.chat_background, super::ChatBackground::Pattern);
     }
 
     #[test]

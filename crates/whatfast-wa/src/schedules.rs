@@ -193,6 +193,18 @@ fn build(guard: &Guard, request: &SchedulePutRequest, now_ms: i64) -> Result<Sch
             message: "a task needs a prompt".into(),
         });
     }
+    // Editing a paused task keeps it paused: pausing is a decision of the
+    // user, not a field of the form.
+    let paused = if request.id == 0 {
+        false
+    } else {
+        guard
+            .db()
+            .schedule(request.id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.paused)
+    };
     let mut schedule = Schedule {
         id: request.id,
         agent_id: agent_id.to_owned(),
@@ -204,7 +216,7 @@ fn build(guard: &Guard, request: &SchedulePutRequest, now_ms: i64) -> Result<Sch
         output,
         window,
         next_at_ms: None,
-        paused: false,
+        paused,
     };
     match kind {
         Kind::Once => {

@@ -314,29 +314,54 @@ fn run_video(commands: Receiver<Command>, events: Sender<VideoEvent>, volume: Ar
     loop {
         // Espera una sesion nueva; la pausa y el alto de una sesion que ya
         // termino no tienen a quien avisar.
-        let (key, path) = loop {
+        let (mut key, mut path) = loop {
             match commands.recv_blocking() {
                 Ok(Command::Play { key, path }) => break (key, path),
                 Ok(_) => continue,
                 Err(_) => return,
             }
         };
-        match play_session(&key, &path, &commands, &events, &volume) {
-            Ok(SessionEnd::Stop) => {}
-            Ok(SessionEnd::Restart { key, path }) => {
-                if let Err(message) = play_session(&key, &path, &commands, &events, &volume) {
-                    let _ = events.send_blocking(VideoEvent::Failed {
-                        key,
-                        message: message.into(),
+        // Un `Restart` pide la siguiente sesion sin volver a esperar un
+        // comando: el tercer `Play` tambien tiene que reproducirse.
+        loop {
+            match play_session(&key, &path, &commands, &events, &volume) {
+                Ok(SessionEnd::Stop) => break,
+                Ok(SessionEnd::Restart {
+                    key: next_key,
+                    path: next_path,
+                }) => {
+                    key = next_key;
+                    path = next_path;
+                }
+                Err(message) => {
+                    push_terminal(&events, || VideoEvent::Failed {
+                        key: key.clone(),
+                        message: message.clone().into(),
                     });
+                    break;
                 }
             }
-            Err(message) => {
-                let _ = events.send_blocking(VideoEvent::Failed {
-                    key,
-                    message: message.into(),
-                });
-            }
+        }
+    }
+}
+
+/// Sends a terminal event without blocking the video thread. The queue is
+/// small and holds frames; the interface drains it on every tick. If it is
+/// full, give the tick time to make room instead of waiting forever on
+/// `send_blocking`. After ~100 ms the session is dropped: a stuck interface
+/// must not keep the decoder thread alive.
+fn push_terminal(events: &Sender<VideoEvent>, make: impl Fn() -> VideoEvent) {
+    for attempt in 0..100 {
+        if events.is_closed() {
+            return;
+        }
+        if events.try_send(make()).is_ok() {
+            return;
+        }
+        if attempt < 8 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }
@@ -427,7 +452,7 @@ fn play_session(
             continue;
         }
         let Some((frame, timestamp)) = source.next_frame()? else {
-            let _ = events.send_blocking(VideoEvent::Finished { key: key.clone() });
+            push_terminal(events, || VideoEvent::Finished { key: key.clone() });
             return Ok(SessionEnd::Stop);
         };
         last_ts_100ns = timestamp;

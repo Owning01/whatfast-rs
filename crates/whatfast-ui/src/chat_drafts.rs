@@ -59,10 +59,16 @@ pub(crate) fn drafts_of(chat_id: Option<&str>) -> Vec<Draft> {
 /// drafts come from another process, and the messages of the chat are the
 /// ones that matter.
 pub(crate) fn read(db: &Db, chat_id: &str) -> Vec<Draft> {
-    match db.drafts(DraftState::Proposed, DRAFT_LIMIT) {
-        Ok(rows) => of_chat(rows, chat_id),
-        Err(_) => Vec::new(),
+    let mut drafts = Vec::new();
+    // A draft whose send failed keeps its text for a retry: it belongs in the
+    // band as much as a proposed one, with the failure as its reason.
+    for state in [DraftState::Proposed, DraftState::Failed] {
+        if let Ok(rows) = db.drafts(state, DRAFT_LIMIT) {
+            drafts.extend(rows);
+        }
     }
+    drafts.sort_by_key(|draft| std::cmp::Reverse(draft.id));
+    of_chat(drafts, chat_id)
 }
 
 /// The drafts of one chat, in the order the database gave them.
@@ -315,6 +321,29 @@ mod tests {
         // The newest first, as the database orders the rows, and neither the
         // other chat nor the draft the user already discarded.
         assert_eq!(texts, vec!["second".to_string(), "first".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_draft_stays_in_the_band_for_a_retry() {
+        let (_dir, db) = database();
+        db.add_draft(&draft("chat-a", "enviado", DraftState::Sent))
+            .expect("the sent draft");
+        let id = db
+            .add_draft(&draft("chat-a", "reintentar", DraftState::Proposed))
+            .expect("the proposed draft");
+        db.set_draft_state(id, DraftState::Approved)
+            .expect("approve");
+        db.set_draft_state(id, DraftState::Sending)
+            .expect("send");
+        db.set_draft_state(id, DraftState::Failed)
+            .expect("fail");
+        let texts: Vec<String> = read(&db, "chat-a")
+            .into_iter()
+            .map(|draft| draft.text)
+            .collect();
+        // The failed text can be sent again or thrown away; a sent one is
+        // gone for good.
+        assert_eq!(texts, vec!["reintentar".to_string()]);
     }
 
     #[test]

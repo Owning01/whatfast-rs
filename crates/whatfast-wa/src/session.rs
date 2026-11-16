@@ -186,9 +186,17 @@ impl Session {
     /// Asks the connection to come back. True when an attempt actually
     /// started, the Go contract for `Reconnect`.
     pub async fn reconnect(&self) -> bool {
-        if self.state.connection() == ConnectionState::Connected {
+        // A logged-out device has nothing to reconnect to: the desktop links
+        // it again with a fresh pairing.
+        if matches!(
+            self.state.connection(),
+            ConnectionState::Connected | ConnectionState::LoggedOut
+        ) {
             return false;
         }
+        // The attempt is in flight from here on: the desktop shows
+        // "connecting" until the pump reports the outcome.
+        self.state.set_connection(ConnectionState::Connecting);
         self.client.reconnect().await;
         true
     }
@@ -388,6 +396,19 @@ impl EventPump {
     /// announces the change, the way the Go `updateSyncStatus` did.
     fn record_history(&self, counters: HistoryCounters, failed_chunk: bool) {
         let mut status = self.state.sync_status();
+        // The phase of a finished sync is terminal: a late or repeated chunk
+        // does not reopen it, and a failed one never turns into a complete
+        // one. The desktop would otherwise show "receiving history" forever
+        // or announce a sync that already gave up.
+        if status.phase == whatfast_protocol::SyncPhase::Complete as i32
+            || status.phase == whatfast_protocol::SyncPhase::Failed as i32
+        {
+            tracing::debug!(
+                "history chunk ignored: the sync already ended in phase {}",
+                status.phase
+            );
+            return;
+        }
         if status.started_at_ms == 0 {
             status.started_at_ms = unix_ms();
         }
@@ -490,6 +511,21 @@ struct HistoryCounters {
 
 impl EventHandler for EventPump {
     fn handle_event(&self, event: Arc<Event>) {
+        // A session that logged out is over for the process: the connection
+        // events of the teardown that follows do not move it back to another
+        // state. A late `Connected` used to override `LoggedOut`.
+        let connection_event = matches!(
+            event.as_ref(),
+            Event::PairingQrCode(_)
+                | Event::Connected(_)
+                | Event::Disconnected(_)
+                | Event::ConnectFailure(_)
+                | Event::PairingQrCodesExhausted(_)
+        );
+        if connection_event && self.state.connection() == ConnectionState::LoggedOut {
+            tracing::debug!("connection event ignored: the session logged out");
+            return;
+        }
         match event.as_ref() {
             // ---- connection events (session state) ----
             Event::PairingQrCode(qr) => {
@@ -773,5 +809,81 @@ mod tests {
             "{}",
             status.detail
         );
+    }
+
+    /// A chunk that lands after the sync ended does not reopen it, and a
+    /// failed sync never becomes a complete one.
+    #[test]
+    fn a_late_chunk_does_not_reopen_a_finished_sync() {
+        let pump = pump("terminal");
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 2,
+                received: 2,
+                decoded: 2,
+                progress: 100,
+                terminal: true,
+                ..HistoryCounters::default()
+            },
+            false,
+        );
+        let complete = pump.state.sync_status();
+        assert_eq!(
+            complete.phase,
+            whatfast_protocol::SyncPhase::Complete as i32
+        );
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 1,
+                received: 1,
+                decoded: 0,
+                failed: 1,
+                progress: 40,
+                terminal: false,
+            },
+            true,
+        );
+        let status = pump.state.sync_status();
+        assert_eq!(
+            status.phase,
+            whatfast_protocol::SyncPhase::Complete as i32,
+            "a late failed chunk keeps the completed phase"
+        );
+        assert_eq!(status.messages_processed, complete.messages_processed);
+        assert_eq!(status.messages_failed, complete.messages_failed);
+    }
+
+    #[test]
+    fn a_failed_sync_does_not_turn_complete() {
+        let pump = pump("failed-terminal");
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 0,
+                received: 4,
+                decoded: 3,
+                failed: 1,
+                progress: 100,
+                terminal: true,
+            },
+            true,
+        );
+        pump.record_history(
+            HistoryCounters {
+                chats: 1,
+                stored: 4,
+                received: 4,
+                decoded: 4,
+                progress: 100,
+                terminal: true,
+                ..HistoryCounters::default()
+            },
+            false,
+        );
+        let status = pump.state.sync_status();
+        assert_eq!(status.phase, whatfast_protocol::SyncPhase::Failed as i32);
+        assert_eq!(status.messages_failed, 1);
     }
 }

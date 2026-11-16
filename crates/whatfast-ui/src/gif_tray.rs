@@ -60,10 +60,13 @@ impl GifTray {
     pub(crate) fn ensure_loaded(&self, cx: &mut Context<Whatfast>) {
         let should_fetch = {
             let mut st = self.state.borrow_mut();
-            if st.initialized {
+            // A failed load leaves `initialized` false: the next draw retries
+            // instead of showing the error forever. A load in flight already
+            // owns the one attempt.
+            if st.initialized || st.loading {
                 false
             } else {
-                st.initialized = true;
+                st.loading = true;
                 true
             }
         };
@@ -94,7 +97,10 @@ impl GifTray {
                 }
                 st.loading = false;
                 match result {
-                    Ok(items) => st.items = items,
+                    Ok(items) => {
+                        st.initialized = true;
+                        st.items = items;
+                    }
                     Err(err) => {
                         st.error = Some(err);
                         if st.items.is_empty() {
@@ -163,6 +169,7 @@ impl GifTray {
             let st = self.state.borrow();
             (st.items.clone(), st.loading, st.error.clone())
         };
+        let retry_tray = self.clone();
 
         v_flex()
             .id("gif-tray")
@@ -211,14 +218,32 @@ impl GifTray {
                     })
                     .when_some(error, |el, err| {
                         el.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(secondary)
-                                .text_xs()
-                                .text_color(muted)
-                                .child(err),
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(secondary)
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(err),
+                                )
+                                .child(
+                                    div()
+                                        .id("gif-retry")
+                                        .px_1()
+                                        .py_1()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            retry_tray.ensure_loaded(cx);
+                                            cx.notify();
+                                        }))
+                                        .child(i18n::t("Retry")),
+                                ),
                         )
                     })
                     .when(!loading && items.is_empty(), |el| {
@@ -293,7 +318,39 @@ fn url_encode(input: &str) -> String {
     out
 }
 
+/// Keeps the preview cache from growing without bound: a few dozen files,
+/// and only the ones a week old at most.
+fn prune_gif_cache() {
+    let dir = GifTray::cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let max_age = Duration::from_secs(7 * 24 * 60 * 60);
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("gif") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (index, (modified, path)) in files.into_iter().enumerate() {
+        let too_old = now
+            .duration_since(modified)
+            .is_ok_and(|age| age > max_age);
+        if index >= 64 || too_old {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn fetch_and_cache_gifs(query: &str) -> Result<Vec<GifItem>, String> {
+    prune_gif_cache();
     let url = if query.is_empty() {
         "https://g.tenor.com/v1/trending?key=LIVDSRZULELA&limit=18&media_filter=minimal".to_string()
     } else {
@@ -377,6 +434,7 @@ fn fetch_and_cache_gifs(query: &str) -> Result<Vec<GifItem>, String> {
 }
 
 fn load_cached_gifs_fallback() -> Vec<GifItem> {
+    prune_gif_cache();
     let dir = GifTray::cache_dir();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

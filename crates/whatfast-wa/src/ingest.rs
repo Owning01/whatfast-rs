@@ -2274,6 +2274,22 @@ async fn apply_enc_reaction(
         },
     };
     let Some(secret) = secret else {
+        // The ciphertext stays in the journal with the keys its lookup tried:
+        // a repair that arrives after the parent message can decrypt it later
+        // instead of the reaction vanishing here.
+        let reason = format!(
+            "no secret for {target}: iv={} participant={participant} reactor={reactor}",
+            crate::db::hex_lower(&iv)
+        );
+        if let Err(journal) = store.journal_inbound_event_with_payload(
+            "encrypted_reaction",
+            &canonical,
+            &target,
+            &payload,
+            &reason,
+        ) {
+            tracing::error!(%journal, "the encrypted reaction could not be journaled");
+        }
         anyhow::bail!("no secret for {target}");
     };
     let parent_sender = if participant.is_empty() {

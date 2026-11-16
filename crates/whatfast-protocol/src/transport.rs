@@ -187,12 +187,21 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Envelope, TransportError> {
 }
 
 /// Write the queued envelopes to the sidecar until the queue is closed.
-pub fn writer_loop(mut writer: impl Write, outgoing: async_channel::Receiver<Envelope>) {
+///
+/// A frame that cannot be written leaves the sidecar without a reader of its
+/// stdin: the queue closes with the error, so the next `send` fails at once
+/// instead of filling the buffer until every request expires.
+pub fn writer_loop(
+    mut writer: impl Write,
+    outgoing: async_channel::Receiver<Envelope>,
+) -> Result<(), TransportError> {
     while let Ok(envelope) = outgoing.recv_blocking() {
-        if write_frame(&mut writer, &envelope).is_err() {
-            break;
+        if let Err(error) = write_frame(&mut writer, &envelope) {
+            outgoing.close();
+            return Err(error);
         }
     }
+    Ok(())
 }
 
 /// Read the frames of the sidecar and publish them as an ordered stream.
@@ -222,6 +231,9 @@ pub struct BackendClient {
     outgoing: async_channel::Sender<Envelope>,
     /// The ordered stream of what the sidecar sends back.
     pub incoming: async_channel::Receiver<BridgeMessage>,
+    /// Kept so a restarted sidecar can write to the same stream: the window
+    /// holds the receiver and must not need to resubscribe.
+    incoming_tx: async_channel::Sender<BridgeMessage>,
     child: Option<Arc<Mutex<Child>>>,
 }
 
@@ -235,7 +247,37 @@ impl BackendClient {
     /// The three pipes of the child are taken over: the client writes the
     /// requests to its stdin, reads the frames from its stdout and keeps its
     /// stderr to explain a crash.
-    pub fn from_child(mut child: Child) -> Result<Self, TransportError> {
+    pub fn from_child(child: Child) -> Result<Self, TransportError> {
+        let (outgoing, outgoing_rx) = async_channel::bounded(OUTGOING_CHANNEL_CAPACITY);
+        let (incoming_tx, incoming) = async_channel::bounded(INCOMING_CHANNEL_CAPACITY);
+        Self::attach(child, outgoing, outgoing_rx, incoming_tx, incoming)
+    }
+
+    /// Starts the sidecar again on the same event stream.
+    ///
+    /// A failed update stops the old process to move its executable. The new
+    /// one writes to the `incoming` stream the window already reads, so no
+    /// event pump has to be rebuilt after a failure.
+    pub fn restart_with(&mut self, child: Child) -> Result<(), TransportError> {
+        let (outgoing, outgoing_rx) = async_channel::bounded(OUTGOING_CHANNEL_CAPACITY);
+        let restarted = Self::attach(
+            child,
+            outgoing,
+            outgoing_rx,
+            self.incoming_tx.clone(),
+            self.incoming.clone(),
+        )?;
+        *self = restarted;
+        Ok(())
+    }
+
+    fn attach(
+        mut child: Child,
+        outgoing: async_channel::Sender<Envelope>,
+        outgoing_rx: async_channel::Receiver<Envelope>,
+        incoming_tx: async_channel::Sender<BridgeMessage>,
+        incoming: async_channel::Receiver<BridgeMessage>,
+    ) -> Result<Self, TransportError> {
         let stdin = child.stdin.take().ok_or(TransportError::StdinUnavailable)?;
         let stdout = child
             .stdout
@@ -247,12 +289,24 @@ impl BackendClient {
             .ok_or(TransportError::StderrUnavailable)?;
         let child = Arc::new(Mutex::new(child));
         let diagnostics = Arc::new(Mutex::new(String::new()));
-        let (outgoing, outgoing_rx) = async_channel::bounded(OUTGOING_CHANNEL_CAPACITY);
-        let (incoming_tx, incoming) = async_channel::bounded(INCOMING_CHANNEL_CAPACITY);
+        let kept_incoming = incoming_tx.clone();
 
+        let writer_incoming = incoming_tx.clone();
         thread::Builder::new()
             .name("bridge-writer".into())
-            .spawn(move || writer_loop(stdin, outgoing_rx))?;
+            .spawn(move || {
+                if let Err(error) = writer_loop(stdin, outgoing_rx) {
+                    // The writer died with the pipe: say it the same way the
+                    // reader does, so the requests in flight fail now instead
+                    // of waiting for their deadline.
+                    let message = format!("the sidecar stopped taking requests: {error}");
+                    eprintln!("{message}");
+                    let _ = writer_incoming.send_blocking(BridgeMessage::Exited(BridgeExit {
+                        kind: BridgeExitKind::Transient,
+                        message,
+                    }));
+                }
+            })?;
         let stderr_thread = thread::Builder::new().name("bridge-stderr".into()).spawn({
             let diagnostics = diagnostics.clone();
             move || capture_stderr(stderr, diagnostics)
@@ -285,6 +339,7 @@ impl BackendClient {
         Ok(Self {
             outgoing,
             incoming,
+            incoming_tx: kept_incoming,
             child: Some(child),
         })
     }
@@ -292,11 +347,12 @@ impl BackendClient {
     /// A client with no sidecar behind it: every send fails.
     pub fn disconnected() -> Self {
         let (outgoing, _) = async_channel::bounded(1);
-        let (_, incoming) = async_channel::bounded(1);
+        let (incoming_tx, incoming) = async_channel::bounded(1);
         outgoing.close();
         Self {
             outgoing,
             incoming,
+            incoming_tx,
             child: None,
         }
     }
