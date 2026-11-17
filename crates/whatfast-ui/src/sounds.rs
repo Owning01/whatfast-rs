@@ -35,6 +35,8 @@ pub(crate) enum SoundEvent {
     Received,
     /// A message that this window sends.
     Sent,
+    /// A toast of the system that just appeared.
+    Notification,
 }
 
 impl SoundEvent {
@@ -43,6 +45,7 @@ impl SoundEvent {
         match self {
             Self::Received => "received",
             Self::Sent => "sent",
+            Self::Notification => "notification",
         }
     }
 }
@@ -58,11 +61,34 @@ pub(crate) enum Builtin {
     Ping,
     /// Three notes that go up.
     Chime,
+    /// Three warm notes of a marimba that come down.
+    Marimba,
+    /// A bubble that rises twice.
+    Bubble,
+    /// A low bell with two overtones.
+    Bell,
+    /// A short wooden knock.
+    Wood,
+    /// Two soft pulses with a gap between them.
+    Pulse,
+    /// Three bright notes that sparkle.
+    Sparkle,
 }
 
 impl Builtin {
     /// All the built-in sounds, in the order of the settings.
-    pub(crate) const ALL: [Self; 4] = [Self::Pop, Self::Ding, Self::Ping, Self::Chime];
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Pop,
+        Self::Ding,
+        Self::Ping,
+        Self::Chime,
+        Self::Marimba,
+        Self::Bubble,
+        Self::Bell,
+        Self::Wood,
+        Self::Pulse,
+        Self::Sparkle,
+    ];
 
     /// The name of the sound in the settings file.
     pub(crate) fn id(self) -> &'static str {
@@ -71,6 +97,12 @@ impl Builtin {
             Self::Ding => "ding",
             Self::Ping => "ping",
             Self::Chime => "chime",
+            Self::Marimba => "marimba",
+            Self::Bubble => "bubble",
+            Self::Bell => "bell",
+            Self::Wood => "wood",
+            Self::Pulse => "pulse",
+            Self::Sparkle => "sparkle",
         }
     }
 
@@ -93,6 +125,40 @@ impl Builtin {
                 let mut notes = tone(523.25, 523.25, 0.14, 2.0, 0.18);
                 notes.extend(tone(659.25, 659.25, 0.14, 2.0, 0.18));
                 notes.extend(tone(783.99, 783.99, 0.20, 2.0, 0.18));
+                notes
+            }
+            Self::Marimba => {
+                let mut notes = tone(523.25, 523.25, 0.09, 3.0, 0.17);
+                notes.extend(tone(440.0, 440.0, 0.09, 3.0, 0.17));
+                notes.extend(tone(349.23, 349.23, 0.12, 3.0, 0.17));
+                notes
+            }
+            Self::Bubble => {
+                let mut bubbles = tone(300.0, 900.0, 0.12, 2.4, 0.22);
+                bubbles.extend(tone(500.0, 1200.0, 0.08, 2.6, 0.18));
+                bubbles
+            }
+            Self::Bell => {
+                let mut bell = tone(440.0, 440.0, 0.40, 2.8, 0.18);
+                mix(&mut bell, &tone(880.0, 880.0, 0.40, 3.2, 0.08));
+                mix(&mut bell, &tone(1320.0, 1320.0, 0.40, 3.6, 0.04));
+                bell
+            }
+            Self::Wood => {
+                let mut knock = tone(180.0, 90.0, 0.06, 4.0, 0.34);
+                mix(&mut knock, &tone(360.0, 180.0, 0.06, 4.5, 0.10));
+                knock
+            }
+            Self::Pulse => {
+                let mut pulses = tone(880.0, 880.0, 0.05, 2.0, 0.22);
+                pulses.extend(vec![0.0; (0.05 * RATE as f32) as usize]);
+                pulses.extend(tone(880.0, 880.0, 0.05, 2.0, 0.22));
+                pulses
+            }
+            Self::Sparkle => {
+                let mut notes = tone(1046.5, 1046.5, 0.05, 2.0, 0.16);
+                notes.extend(tone(1318.5, 1318.5, 0.05, 2.0, 0.16));
+                notes.extend(tone(1568.0, 1568.0, 0.07, 2.0, 0.16));
                 notes
             }
         }
@@ -476,5 +542,6 @@ mod tests {
     fn the_events_have_a_name_for_the_settings() {
         assert_eq!(SoundEvent::Received.id(), "received");
         assert_eq!(SoundEvent::Sent.id(), "sent");
+        assert_eq!(SoundEvent::Notification.id(), "notification");
     }
 }

@@ -1190,6 +1190,27 @@ fn classify(content: &wa::Message, stanza_type: &str) -> Content {
     out
 }
 
+/// Whether the payload is the echo of a message sent from another device of
+/// this account.
+///
+/// WhatsApp folds those echoes into `deviceSentMessage`, sometimes under a
+/// `lottieStickerMessage` or a `futureProof` wrapper — the shape an animated
+/// sticker takes on its way back from the server. The source of the stanza can
+/// still name another sender, so the wrapper is the one that tells the truth.
+fn is_own_device_echo(message: &wa::Message) -> bool {
+    let mut current = message;
+    for _ in 0..4 {
+        if current.device_sent_message.as_option().is_some() {
+            return true;
+        }
+        let Some(inner) = envelope_message(current) else {
+            break;
+        };
+        current = inner;
+    }
+    false
+}
+
 fn is_edit(info: &MessageInfo) -> bool {
     matches!(
         info.edit,
@@ -1213,6 +1234,10 @@ fn stanza_type(info: &MessageInfo) -> String {
 pub fn inbound_to_row(inbound: &InboundMessage, mine: &str) -> Option<Ingested> {
     let info = &inbound.info;
     let raw_content: &wa::Message = &inbound.message;
+    // The source of an echo that went through `deviceSentMessage` can still
+    // say "from somebody else". An animated sticker reaches us inside that
+    // wrapper, and without this it was painted as a received bubble.
+    let from_me = info.source.is_from_me || is_own_device_echo(raw_content);
     let protocol = raw_content.protocol_message.as_option();
     let mut content: &wa::Message = raw_content;
     if is_edit(info)
@@ -1230,12 +1255,12 @@ pub fn inbound_to_row(inbound: &InboundMessage, mine: &str) -> Option<Ingested> 
         transport_jid: jid_text(&info.source.chat),
         sender_jid: jid_text(&info.source.sender.to_non_ad()),
         timestamp,
-        from_me: info.source.is_from_me,
+        from_me,
         status: INBOUND_STATUS,
         // The live path is the Go's `incrementUnread=true`: a new incoming
         // row grows the chat counter once, and the store owns the `!existed`
         // half of the rule.
-        unread: !info.source.is_from_me,
+        unread: !from_me,
         ..MessageRow::default()
     };
     // The quoted message the author answered: the Go copied it off the first
@@ -2646,6 +2671,32 @@ mod tests {
         let (parts, sticker) = classified.image.expect("the sticker");
         assert!(sticker);
         assert_eq!(parts.direct_path, "/v/t62/lottie");
+    }
+
+    /// El eco de un sticker animado que el usuario mando desde otro
+    /// dispositivo trae `deviceSentMessage` bajo el `lottieStickerMessage`.
+    /// Aunque la estrofa diga que viene de otra persona, la burbuja va a la
+    /// derecha y no cuenta como no leida.
+    #[test]
+    fn an_animated_sticker_sent_from_another_device_is_mine() {
+        let mut sticker = wa::message::StickerMessage::default();
+        sticker.mimetype = Some("image/webp".into());
+        sticker.direct_path = Some("/v/t62/lottie".into());
+        let mut content = wa::Message::default();
+        content.sticker_message = MessageField::some(sticker);
+        let mut sent = wa::message::DeviceSentMessage::default();
+        sent.message = MessageField::some(content);
+        let mut inner = wa::Message::default();
+        inner.device_sent_message = MessageField::some(sent);
+        let mut wrapper = wa::message::FutureProofMessage::default();
+        wrapper.message = MessageField::some(inner);
+        let mut envelope = wa::Message::default();
+        envelope.lottie_sticker_message = MessageField::some(wrapper);
+
+        let row = row_of(envelope);
+        assert!(row.from_me, "el eco del propio dispositivo no es recibido");
+        assert!(!row.unread, "un mensaje propio no cuenta como no leido");
+        assert_eq!(row.kind, "sticker");
     }
 
     #[test]

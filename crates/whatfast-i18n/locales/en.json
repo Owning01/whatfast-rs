@@ -714,6 +714,10 @@
     "{n} hours": "{n} hours",
     "{n} minutes": "{n} minutes",
     "{n} seconds": "{n} seconds",
-    "{size} in {files} files": "{size} in {files} files"
+    "{size} in {files} files": "{size} in {files} files",
+    "Whatfast": "Whatfast",
+    "This is a test notification": "This is a test notification",
+    "Send a test notification": "Send a test notification",
+    "Sound of a notification": "Sound of a notification"
   }
 }

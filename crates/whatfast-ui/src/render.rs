@@ -3472,13 +3472,10 @@ impl Whatfast {
             px(0.)
         };
         let available = conversation_width(window.viewport_size().width, rail, sidebar, members);
-        let wrap_width = if available < px(160.) {
-            px(160.)
-        } else if available > px(536.) {
-            px(536.)
-        } else {
-            available
-        };
+        // El ancho de la burbuja y el del texto se calculan una sola vez:
+        // medir con un ancho y pintar con otro movia el corte de las lineas.
+        let bubble_width = conversation_bubble_width(available, self.ui_scale);
+        let wrap_width = px((f32::from(bubble_width) - 24. * self.ui_scale).max(80.));
         // The wallpaper covers the whole area of the messages, not only the
         // width of the bubbles: the pattern of the reference reaches the
         // borders of the conversation.
@@ -4175,7 +4172,7 @@ impl Whatfast {
                                 cx.entity().clone(),
                                 "messages",
                                 list_sizes,
-                                |this, range: Range<usize>, _window, cx| {
+                                move |this, range: Range<usize>, _window, cx| {
                                     let visible_images = range
                                         .clone()
                                         .filter_map(|index| this.store.messages.get(index))
@@ -4254,7 +4251,9 @@ impl Whatfast {
                                     } else if range.end == this.store.messages.len() {
                                         this.mark_read();
                                     }
-                                    range.map(|index| this.render_message(index, cx)).collect()
+                                    range
+                                        .map(|index| this.render_message(index, bubble_width, cx))
+                                        .collect()
                                 },
                             )
                             .track_scroll(&self.message_scroll)
@@ -5665,7 +5664,17 @@ impl Whatfast {
                 self.settings.notification_previews,
                 !self.settings.notifications_enabled,
                 Whatfast::set_notification_previews,
-            ));
+            ))
+            .child(
+                Button::new("test-notification")
+                    .outline()
+                    .small()
+                    .label(i18n::t("Send a test notification"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.test_notification();
+                        cx.notify();
+                    })),
+            );
 
         // The sounds: one for a message that arrives and one for the message
         // that leaves. Every chip plays its sound when it is picked, so the
@@ -5701,6 +5710,18 @@ impl Whatfast {
             .child(sound_row(
                 SoundEvent::Sent,
                 &self.settings.sound_sent,
+                self.settings.sounds_enabled,
+                cx,
+            ))
+            .child(
+                div()
+                    .pt_1()
+                    .text_sm()
+                    .child(i18n::t("Sound of a notification")),
+            )
+            .child(sound_row(
+                SoundEvent::Notification,
+                &self.settings.sound_notification,
                 self.settings.sounds_enabled,
                 cx,
             ));
@@ -8191,7 +8212,12 @@ impl Whatfast {
             .into_any_element()
     }
 
-    fn render_linkified_text(&self, message_id: &str, text: &str) -> TextView {
+    fn render_linkified_text(
+        &self,
+        message_id: &str,
+        text: &str,
+        text_width: gpui::Pixels,
+    ) -> TextView {
         // La vista de texto de gpui-component (HTML simple) es la que sabe
         // seleccionar y copiar: el texto de la burbuja deja de ser una fila de
         // divs por palabra y pasa a ser un solo bloque seleccionable. Los
@@ -8217,7 +8243,7 @@ impl Whatfast {
             message_html_with_mentions(text, participants, &self.store.chats),
         )
         .selectable(true)
-        .max_w(px(TEXT_MAX_WIDTH * self.ui_scale))
+        .max_w(text_width)
         .style(text_style)
     }
 
@@ -8325,7 +8351,12 @@ impl Whatfast {
             })
     }
 
-    fn render_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_message(
+        &self,
+        index: usize,
+        bubble_width: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let message = &self.store.messages[index];
         // The bubbles of the messages: the gray of the received ones and the
         // green of the sent ones, the same colors of the reference.
@@ -8366,6 +8397,8 @@ impl Whatfast {
             // el del lugar: las tarjetas ya los dicen.
             attachments::bubble_text(message).to_string()
         };
+        // El texto se corta con el mismo ancho con el que se midio la altura.
+        let text_width = px((f32::from(bubble_width) - 24. * self.ui_scale).max(80.));
         let reaction_chips = reaction_counts(message);
         let reply_target_id = message.reply_to_message_id.clone();
         let reply_target = self.store.message(&reply_target_id).cloned();
@@ -8465,8 +8498,12 @@ impl Whatfast {
         } * self.ui_scale);
         let bubble_element = v_flex()
             .id(("message-bubble", index))
-            .max_w(px(560.))
-            .when(!sticker, |bubble| bubble.px_3().py(vertical_padding))
+            .max_w(bubble_width)
+            .when(!sticker, |bubble| {
+                bubble
+                    .px(px(12. * self.ui_scale))
+                    .py(vertical_padding)
+            })
             .when(starts_cluster, |bubble| {
                 if message.from_me {
                     bubble.rounded_l_lg().rounded_b_lg().rounded_tr_sm()
@@ -8702,7 +8739,8 @@ impl Whatfast {
                 bubble.child(self.render_view_once(index, cx))
             })
             .when_some(image_content, |bubble, image| {
-                let (image_width, image_height) = image_render_size(&image);
+                let (image_width, image_height) =
+                    image_render_size(&image, self.ui_scale, text_width);
                 let row_path = image_row_path(&image).to_string();
                 let viewer_path = image_viewer_path(&image).to_string();
                 // El sticker animado se pinta desde el archivo
@@ -8908,7 +8946,7 @@ impl Whatfast {
                         crate::document::render_document(&body_message_id, &parts, &doc_style)
                             .into_any_element()
                     } else {
-                        self.render_linkified_text(&body_message_id, &text)
+                        self.render_linkified_text(&body_message_id, &text, text_width)
                             .into_any_element()
                     };
                     bubble.child(
@@ -8936,7 +8974,7 @@ impl Whatfast {
                         h_flex()
                             .items_end()
                             .gap_2()
-                            .child(self.render_linkified_text(&body_message_id, &text))
+                            .child(self.render_linkified_text(&body_message_id, &text, text_width))
                             .when(starred, |row| {
                                 row.child(
                                     Icon::new(IconName::StarFill)
@@ -9449,12 +9487,12 @@ impl Whatfast {
                 // En multilínea el texto usa el ancho completo y la fila de hora/estado
                 // se coloca abajo en un v_flex con .gap_0p5().
                 let is_multiline = text.contains('\n') || text.chars().count() > 38;
-                // El texto de la burbuja es un `TextView` con tope de
-                // `TEXT_MAX_WIDTH` (ver `render_linkified_text`). Medir el
-                // corte con el ancho de la burbuja (24 px mas) daba una linea
-                // de menos en los mensajes que caen justo en el borde, y la
-                // fila siguiente se pintaba encima de la ultima linea.
-                let text_width = px(TEXT_MAX_WIDTH * self.ui_scale).min(wrap_width);
+                // El ancho de `wrap_width` ya es el del texto de la burbuja
+                // (vease `conversation_bubble_width` y `render_message`).
+                // Medir con el ancho de la burbuja daba una linea de menos en
+                // los mensajes que caen justo en el borde, y la fila siguiente
+                // se pintaba encima de la ultima linea.
+                let text_width = wrap_width;
                 let (text_wrap_width, time_row_height) = if text.is_empty() {
                     (wrap_width, px(0.))
                 } else if is_multiline {
@@ -9497,7 +9535,9 @@ impl Whatfast {
                         .unwrap_or(line_height)
                 };
                 let image_height = match self.store.messages[index].content.as_ref() {
-                    Some(proto::message::Content::Image(image)) => image_render_size(image).1,
+                    Some(proto::message::Content::Image(image)) => {
+                        image_render_size(image, self.ui_scale, wrap_width).1
+                    }
                     _ => px(0.),
                 };
                 let link_preview_height = match self.store.messages[index].content.as_ref() {
@@ -11054,6 +11094,7 @@ fn sound_row(
     let fallback = match event {
         SoundEvent::Received => BuiltinSound::Pop,
         SoundEvent::Sent => BuiltinSound::Ping,
+        SoundEvent::Notification => BuiltinSound::Bell,
     };
     let choice = SoundChoice::from_setting(current, fallback);
     let mut row = h_flex().gap_2().flex_wrap().items_center().pt_1();
@@ -11116,6 +11157,12 @@ fn builtin_label(builtin: BuiltinSound) -> &'static str {
         BuiltinSound::Ding => "Ding",
         BuiltinSound::Ping => "Ping",
         BuiltinSound::Chime => "Chime",
+        BuiltinSound::Marimba => "Marimba",
+        BuiltinSound::Bubble => "Bubble",
+        BuiltinSound::Bell => "Bell",
+        BuiltinSound::Wood => "Wood",
+        BuiltinSound::Pulse => "Pulse",
+        BuiltinSound::Sparkle => "Sparkle",
     }
 }
 
@@ -11732,9 +11779,28 @@ fn conversation_width(
     (viewport - rail - sidebar - members).max(px(0.))
 }
 
+/// The widest a bubble can be in the space the conversation has.
+///
+/// The limit lives in unscaled pixels and is multiplied by the scale of the
+/// interface: a profile that reads at 150 % gets wider bubbles, not the same
+/// 536 physical pixels with bigger letters inside. A narrow window still
+/// wins: no bubble is wider than the column that holds it.
+fn conversation_bubble_width(available: gpui::Pixels, scale: f32) -> gpui::Pixels {
+    let scale = scale.max(1.);
+    // El tope es el ancho del texto mas el relleno de los lados: a 150 % el
+    // globo mide 804 px fisicos, pero sigue cabiendo el mismo numero de
+    // caracteres por renglon que a 100 %.
+    let max_unscaled = TEXT_MAX_WIDTH + 24.;
+    let unscaled = (f32::from(available) / scale).clamp(160., max_unscaled);
+    px(unscaled * scale).min(available)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bubble_time_label, conversation_width, message_html, search_match_ranges};
+    use super::{
+        bubble_time_label, conversation_bubble_width, conversation_width, message_html,
+        search_match_ranges,
+    };
 
     #[test]
     fn the_conversation_keeps_the_room_of_the_open_panels() {
@@ -11893,5 +11959,21 @@ mod tests {
         assert!(!super::starts_cluster(&store.messages, 1));
         assert!(!super::starts_cluster(&store.messages, 2));
         assert!(!super::starts_cluster(&store.messages, 3));
+    }
+
+    /// El globo crece con la escala: a 150 % ocupa mas pixeles fisicos, pero
+    /// no cambia el numero de caracteres que caben en un renglon.
+    #[test]
+    fn bubbles_grow_with_the_scale_and_yield_to_a_narrow_window() {
+        use gpui::px;
+        assert_eq!(conversation_bubble_width(px(900.), 1.0), px(536.));
+        assert_eq!(conversation_bubble_width(px(900.), 1.5), px(804.));
+        assert_eq!(conversation_bubble_width(px(400.), 1.0), px(400.));
+        assert_eq!(conversation_bubble_width(px(400.), 1.5), px(400.));
+        assert_eq!(
+            conversation_bubble_width(px(100.), 1.0),
+            px(100.),
+            "el globo nunca excede el ancho disponible"
+        );
     }
 }

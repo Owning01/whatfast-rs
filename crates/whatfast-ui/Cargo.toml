@@ -117,6 +117,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # The lock of the single instance asks the system whether the process that

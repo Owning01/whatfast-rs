@@ -747,6 +747,10 @@
     "{n} hours": "{n} horas",
     "{n} minutes": "{n} minutos",
     "{n} seconds": "{n} segundos",
-    "{size} in {files} files": "{size} en {files} archivos"
+    "{size} in {files} files": "{size} en {files} archivos",
+    "Whatfast": "Whatfast",
+    "This is a test notification": "Esta es una notificación de prueba",
+    "Send a test notification": "Enviar una notificación de prueba",
+    "Sound of a notification": "Sonido de una notificación"
   }
 }

@@ -717,6 +717,10 @@
     "{n} hours": "{n} 小时",
     "{n} minutes": "{n} 分钟",
     "{n} seconds": "{n} 秒",
-    "{size} in {files} files": "{files} 个文件，共 {size}"
+    "{size} in {files} files": "{files} 个文件，共 {size}",
+    "Whatfast": "Whatfast",
+    "This is a test notification": "这是一条测试通知",
+    "Send a test notification": "发送测试通知",
+    "Sound of a notification": "通知提示音"
   }
 }

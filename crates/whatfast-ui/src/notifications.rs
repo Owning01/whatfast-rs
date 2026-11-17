@@ -15,6 +15,7 @@
 //! messages (`crate::sounds`), and two sounds for one message is noise.
 
 use std::sync::mpsc::{self, Sender};
+use std::time::Duration;
 
 /// One toast: the title of the conversation and the line of the message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,8 +41,17 @@ impl Notifier {
                 // shortcut of the app is registered in the same turn.
                 #[cfg(windows)]
                 toast::prepare();
-                for note in receiver {
-                    show(&note);
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(50)) {
+                        Ok(note) => show(&note),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    // WinRT paints the toast with the messages of this thread.
+                    // Without a pump Windows files it in the center but never
+                    // lifts it over the desk.
+                    #[cfg(windows)]
+                    toast::pump_messages();
                 }
             });
         Self {
@@ -111,7 +121,10 @@ mod toast {
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
         STGM_READWRITE, StructuredStorage::PROPVARIANT,
     };
-    use windows::Win32::UI::Shell::{IShellLinkW, PropertiesSystem::IPropertyStore, ShellLink};
+    use windows::Win32::UI::Shell::{
+        IShellLinkW, PropertiesSystem::IPropertyStore, SetCurrentProcessExplicitAppUserModelID,
+        ShellLink,
+    };
     use windows::core::{GUID, HSTRING, Interface as _, Result as WinResult};
 
     use super::Note;
@@ -137,8 +150,37 @@ mod toast {
         // WinRT runs on the apartment of this thread; the interface has its
         // own and never waits for a toast.
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        // An unpackaged app must name itself before Windows accepts its
+        // toasts. Writing the id on the shortcut is not enough: the process
+        // that calls the notifier has to carry the same id.
+        if let Err(error) =
+            unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID)) }
+        {
+            eprintln!("notifications: the process id was not set: {error}");
+        }
         if let Err(error) = register_app_id() {
             eprintln!("notifications: the id of the app was not registered: {error}");
+        }
+        if let Err(error) = enable_setting() {
+            eprintln!("notifications: the setting of the app was not enabled: {error}");
+        }
+    }
+
+    /// Processes the messages of this thread so the toast can paint.
+    ///
+    /// A WinRT toast needs a pump on the thread that shows it. With only a
+    /// blocking wait on the queue, Windows files the notice in the center but
+    /// never lifts it over the desk.
+    pub(super) fn pump_messages() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        };
+        unsafe {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                let _ = DispatchMessageW(&message);
+            }
         }
     }
 
@@ -153,19 +195,26 @@ mod toast {
             escape(&note.title),
             escape(&note.body)
         );
-        if show_with(APP_ID, &xml).is_err()
-            && let Err(error) = show_with(POWERSHELL_APP_ID, &xml)
+        // The first notifier uses the id the process declared for itself;
+        // the other two are the fallback of an installed app and of a build
+        // that runs from the tree.
+        if show_with(None, &xml).is_err()
+            && show_with(Some(APP_ID), &xml).is_err()
+            && let Err(error) = show_with(Some(POWERSHELL_APP_ID), &xml)
         {
             eprintln!("notifications: the toast was not shown: {error}");
         }
     }
 
-    /// Shows one toast with the given AppUserModelID.
-    fn show_with(app_id: &str, xml: &str) -> WinResult<()> {
+    /// Shows one toast. Without an id, Windows uses the one of the process.
+    fn show_with(app_id: Option<&str>, xml: &str) -> WinResult<()> {
         let document = XmlDocument::new()?;
         document.LoadXml(&HSTRING::from(xml))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
-        let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))?;
+        let notifier = match app_id {
+            Some(id) => ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))?,
+            None => ToastNotificationManager::CreateToastNotifier()?,
+        };
         notifier.Show(&toast)
     }
 
@@ -205,6 +254,64 @@ mod toast {
             store.SetValue(&PKEY_APP_USER_MODEL_ID, &value)?;
             store.Commit()?;
             file.Save(&wide, true)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `Enabled = 1` in the setting of the app.
+    ///
+    /// A fresh install creates the key without that value. Windows then treats
+    /// the app as one the user never allowed, and the toast goes straight to
+    /// the center without ever appearing on the desk.
+    fn enable_setting() -> WinResult<()> {
+        use windows::core::HRESULT;
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{
+            HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, RegCloseKey, RegCreateKeyExW,
+            RegSetValueExW,
+        };
+
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\Owning01.Whatfast"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let value: Vec<u16> = "Enabled"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut key: windows_sys::Win32::System::Registry::HKEY = std::ptr::null_mut();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                KEY_SET_VALUE,
+                std::ptr::null(),
+                &mut key,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(windows::core::Error::from_hresult(HRESULT(status as i32)));
+        }
+        let enabled: u32 = 1;
+        let status = unsafe {
+            RegSetValueExW(
+                key,
+                value.as_ptr(),
+                0,
+                REG_DWORD,
+                enabled.to_ne_bytes().as_ptr(),
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        unsafe {
+            RegCloseKey(key);
+        }
+        if status != ERROR_SUCCESS {
+            return Err(windows::core::Error::from_hresult(HRESULT(status as i32)));
         }
         Ok(())
     }

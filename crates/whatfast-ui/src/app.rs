@@ -1116,6 +1116,8 @@ pub(crate) struct Whatfast {
     pub(crate) pin_generations: HashMap<(String, String), u64>,
     /// The attachments whose download was already asked for.
     pub(crate) attachment_download_attempted: HashSet<(String, String)>,
+    /// Attachments that arrived while the four download slots were busy.
+    pub(crate) attachment_download_queue: VecDeque<(String, String)>,
     /// The attachments whose download failed.
     pub(crate) attachment_failures: HashMap<(String, String), String>,
     /// The attachment that the user asked to open and that is not in the
@@ -1718,6 +1720,7 @@ impl Whatfast {
             pending_message_deletes: HashMap::new(),
             pin_generations: HashMap::new(),
             attachment_download_attempted: HashSet::new(),
+            attachment_download_queue: VecDeque::new(),
             attachment_failures: HashMap::new(),
             attachment_open_requested: None,
             attachment_save_requested: None,
@@ -2294,6 +2297,7 @@ impl Whatfast {
                         &key,
                         i18n::t("Downloading the file timed out · Click to retry"),
                     );
+                    self.pump_image_download_queue();
                 }
                 PendingRequest::AgentAsk { .. } => {
                     self.quick_ask
@@ -2999,6 +3003,7 @@ impl Whatfast {
                         i18n::t("That file is no longer available")
                     },
                 );
+                self.pump_image_download_queue();
                 return;
             }
             if matches!(
@@ -3584,6 +3589,7 @@ impl Whatfast {
                             cx,
                         );
                     }
+                    self.pump_image_download_queue();
                 }
             }
             (PendingRequest::Stickers, rpc_response::Result::ListStickers(response)) => {
@@ -3910,6 +3916,21 @@ impl Whatfast {
             title: notification_title(chat, message),
             body: notification_body(message, self.settings.notification_previews),
         });
+        let choice = SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell);
+        self.sounds.play(&choice);
+    }
+
+    /// Shows a toast of prueba with the sound the profile chose for notices.
+    pub(crate) fn test_notification(&self) {
+        self.notifier.show(Note {
+            title: i18n::t("Whatfast").to_string(),
+            body: i18n::t("This is a test notification").to_string(),
+        });
+        if self.settings.sounds_enabled {
+            let choice =
+                SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell);
+            self.sounds.play(&choice);
+        }
     }
 
     /// Plays the sound of a message that arrives, if the profile asks for it.
@@ -3975,10 +3996,14 @@ impl Whatfast {
         match event {
             SoundEvent::Received => self.settings.sound_received = value,
             SoundEvent::Sent => self.settings.sound_sent = value,
+            SoundEvent::Notification => self.settings.sound_notification = value,
         }
         let (stored, fallback) = match event {
             SoundEvent::Received => (&self.settings.sound_received, BuiltinSound::Pop),
             SoundEvent::Sent => (&self.settings.sound_sent, BuiltinSound::Ping),
+            SoundEvent::Notification => {
+                (&self.settings.sound_notification, BuiltinSound::Bell)
+            }
         };
         if self.settings.sounds_enabled {
             self.sounds.play(&SoundChoice::from_setting(stored, fallback));
@@ -4203,29 +4228,36 @@ impl Whatfast {
             }
         };
         self.call_playback = Some(Arc::clone(&playback));
+        // A clone of the receiver wakes this task the moment a frame is
+        // ready. Dropping the capture closes the channel, so stopping the
+        // call ends the loop without waiting for any timer.
+        let frames = capture.receiver();
         self.call_capture = Some(capture);
         self.call_audio_id = Some(call_id.to_owned());
         cx.spawn_in(window, async move |this, cx| {
-            let mut scratch = Vec::with_capacity(960);
-            let mut echo = crate::call_audio::EchoCanceller::new(128);
             loop {
-                Timer::after(std::time::Duration::from_millis(20)).await;
+                let first = match frames.recv().await {
+                    Ok(frame) => frame,
+                    Err(_) => return, // the capture was dropped
+                };
                 let Ok(live) = this.update(cx, |app, _| {
                     let Some(call_id) = app.call_audio_id.clone() else {
                         return false;
                     };
-                    // The frames are drained into an owned list first, so
-                    // the mutable borrow of the app ends before the sends.
+                    // The frame that woke us plus all the ones already in the
+                    // queue are drained into an owned list first, so the
+                    // mutable borrow of the app ends before the sends.
                     let mut batch: Vec<Vec<u8>> = Vec::new();
-                    if let Some(capture) = app.call_capture.as_ref() {
-                        while capture.try_take_into(&mut scratch) {
-                            echo.process(&mut scratch, &[]);
-                            let mut pcm = Vec::with_capacity(scratch.len() * 2);
-                            for s in &scratch {
-                                pcm.extend_from_slice(&s.to_le_bytes());
-                            }
-                            batch.push(pcm);
+                    let mut ready = vec![first];
+                    while let Ok(frame) = frames.try_recv() {
+                        ready.push(frame);
+                    }
+                    for frame in ready {
+                        let mut pcm = Vec::with_capacity(frame.len() * 2);
+                        for sample in frame {
+                            pcm.extend_from_slice(&sample.to_le_bytes());
                         }
+                        batch.push(pcm);
                     }
                     for pcm in batch {
                         app.request(
@@ -4614,6 +4646,9 @@ impl Whatfast {
                     let is_new = self.store.message(&message.id).is_none();
                     self.notify_message(&message, is_new, window);
                     self.play_received_sound(&message, is_new);
+                    if is_new {
+                        self.auto_download_message_media(&message);
+                    }
                     // The typed-out message arrived; drop the indicator now
                     // rather than waiting for the paused update or the TTL.
                     if !message.from_me
@@ -4887,6 +4922,36 @@ impl Whatfast {
         );
     }
 
+    /// Downloads the media of a message that just arrived, without waiting for
+    /// the bubble to scroll into view. The ceiling of the profile keeps a
+    /// hostile chat from filling the disk; `0` means no ceiling.
+    fn auto_download_message_media(&mut self, message: &Message) {
+        if self.is_status_message(&message.id) {
+            return;
+        }
+        let max_bytes = u64::from(self.settings.auto_download_max_mb).saturating_mul(1024 * 1024);
+        match auto_download_target(message, max_bytes) {
+            AutoDownload::Image => {
+                if let Some(whatfast_protocol::message::Content::Image(image)) =
+                    message.content.as_ref()
+                    && crate::helpers::image_needs_download(image)
+                {
+                    self.load_message_image(message.chat_id.clone(), message.id.clone());
+                }
+            }
+            AutoDownload::Attachment => {
+                if let Some(whatfast_protocol::message::Content::Attachment(attachment)) =
+                    message.content.as_ref()
+                    && (attachment.local_path.is_empty()
+                        || !self.store.media_exists(&attachment.local_path))
+                {
+                    self.load_message_attachment(message.chat_id.clone(), message.id.clone());
+                }
+            }
+            AutoDownload::None => {}
+        }
+    }
+
     pub(crate) fn pump_image_download_queue(&mut self) {
         while self.rpc.pending_media_count() < 4 {
             let Some((chat_id, message_id)) = self.image_download_queue.pop_front() else {
@@ -4915,6 +4980,26 @@ impl Whatfast {
                 // El pedido no entró: la clave vuelve al final y se corta el
                 // bombeo para no girar en vacío.
                 self.image_download_queue.push_back(key);
+                break;
+            }
+        }
+        // Los archivos comparten el tope de cuatro descargas con las fotos.
+        // Un mensaje nuevo que llega con la cola llena se queda aqui hasta que
+        // termine alguna de las que ya van en camino.
+        while self.rpc.pending_media_count() < 4 {
+            let Some((chat_id, message_id)) = self.attachment_download_queue.pop_front() else {
+                break;
+            };
+            let key = (chat_id.clone(), message_id.clone());
+            if self.attachment_download_attempted.contains(&key) {
+                continue;
+            }
+            let result = self.rpc.request_message_attachment(chat_id, message_id);
+            if result.is_ok() {
+                self.attachment_download_attempted.insert(key);
+            } else {
+                report_failed_request(&mut self.store, result);
+                self.attachment_download_queue.push_back(key);
                 break;
             }
         }
@@ -7959,6 +8044,7 @@ impl Whatfast {
         self.avatar_retries.clear();
         self.participant_avatar_attempted.clear();
         self.image_download_attempted.clear();
+        self.image_download_queue.clear();
         self.image_failures.clear();
         self.reaction_repair_attempted.clear();
         self.latest_reaction_intents.clear();
@@ -7967,6 +8053,7 @@ impl Whatfast {
         self.pending_message_deletes.clear();
         self.pin_generations.clear();
         self.attachment_download_attempted.clear();
+        self.attachment_download_queue.clear();
         self.attachment_failures.clear();
         self.attachment_open_requested = None;
         self.attachment_save_requested = None;
@@ -9197,15 +9284,25 @@ impl Whatfast {
     /// Downloads the file of one attachment into the local cache.
     pub(crate) fn load_message_attachment(&mut self, chat_id: String, message_id: String) {
         let key = (chat_id.clone(), message_id.clone());
-        if self.attachment_download_attempted.contains(&key) || self.rpc.pending_media_count() >= 4
+        if self.attachment_download_attempted.contains(&key)
+            || self.attachment_download_queue.iter().any(|k| k == &key)
         {
             return;
         }
-        self.attachment_download_attempted.insert(key);
-        report_failed_request(
-            &mut self.store,
-            self.rpc.request_message_attachment(chat_id, message_id),
-        );
+        if self.rpc.pending_media_count() >= 4 {
+            self.attachment_download_queue.push_back(key);
+            return;
+        }
+        // La clave se marca recien cuando el pedido entro: si el transporte
+        // estaba caido, el archivo vuelve a la cola en vez de perder su
+        // oportunidad para siempre.
+        let result = self.rpc.request_message_attachment(chat_id, message_id);
+        if result.is_ok() {
+            self.attachment_download_attempted.insert(key);
+        } else {
+            report_failed_request(&mut self.store, result);
+            self.attachment_download_queue.push_back(key);
+        }
     }
 
     /// Downloads the file of one attachment again, after a failure.
@@ -11259,6 +11356,39 @@ impl Whatfast {
     }
 }
 
+/// The media a message that just arrived asks to download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoDownload {
+    None,
+    Image,
+    Attachment,
+}
+
+/// Decides whether the media of a fresh message is small enough and
+/// downloadable. Whether the file is already on the disk is checked by the
+/// caller, which owns the store.
+fn auto_download_target(message: &Message, max_bytes: u64) -> AutoDownload {
+    if message.from_me || message.revoked {
+        return AutoDownload::None;
+    }
+    let fits = |size: u64| max_bytes == 0 || size <= max_bytes;
+    match message.content.as_ref() {
+        Some(whatfast_protocol::message::Content::Image(image))
+            if image.downloadable && fits(image.file_size) =>
+        {
+            AutoDownload::Image
+        }
+        Some(whatfast_protocol::message::Content::Attachment(attachment))
+            if attachment.downloadable
+                && attachment.file_size > 0
+                && fits(attachment.file_size) =>
+        {
+            AutoDownload::Attachment
+        }
+        _ => AutoDownload::None,
+    }
+}
+
 /// Reports a request that could not even be queued: the sidecar is gone.
 ///
 /// port: the origin showed the fatal screen when the bridge could not send a
@@ -11752,5 +11882,74 @@ mod tests {
             SequenceObservation::Gap { last: 5, received: 7 }
         );
         assert_eq!(observe_event_sequence(3, 4), SequenceObservation::Accept);
+    }
+
+    /// Una foto que llega se baja sola. La del propio usuario y la revocada
+    /// no: nadie pide el archivo de un mensaje que ya no existe.
+    #[test]
+    fn a_fresh_image_downloads_but_own_and_revoked_do_not() {
+        let image = || {
+            whatfast_protocol::message::Content::Image(whatfast_protocol::ImageContent {
+                downloadable: true,
+                file_size: 1024,
+                ..Default::default()
+            })
+        };
+        let message = |content, from_me, revoked| Message {
+            content: Some(content),
+            from_me,
+            revoked,
+            ..Default::default()
+        };
+        let ceiling = 25 * 1024 * 1024;
+        assert_eq!(
+            auto_download_target(&message(image(), false, false), ceiling),
+            AutoDownload::Image
+        );
+        assert_eq!(
+            auto_download_target(&message(image(), true, false), ceiling),
+            AutoDownload::None
+        );
+        assert_eq!(
+            auto_download_target(&message(image(), false, true), ceiling),
+            AutoDownload::None
+        );
+    }
+
+    /// El tope de la entrada deja fuera los archivos grandes. Cero no pone
+    /// tope, y un adjunto sin tamaño no se pide.
+    #[test]
+    fn the_size_ceiling_keeps_big_files_out_of_the_auto_download() {
+        let attachment = |size| {
+            Message {
+                content: Some(whatfast_protocol::message::Content::Attachment(
+                    whatfast_protocol::AttachmentContent {
+                        downloadable: true,
+                        file_size: size,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }
+        };
+        let ceiling = 1024;
+        assert_eq!(
+            auto_download_target(&attachment(1024), ceiling),
+            AutoDownload::Attachment
+        );
+        assert_eq!(
+            auto_download_target(&attachment(1025), ceiling),
+            AutoDownload::None
+        );
+        assert_eq!(
+            auto_download_target(&attachment(20 * 1024 * 1024), 0),
+            AutoDownload::Attachment,
+            "cero no pone tope"
+        );
+        assert_eq!(
+            auto_download_target(&attachment(0), 0),
+            AutoDownload::None,
+            "sin tamaño no hay archivo que pedir"
+        );
     }
 }

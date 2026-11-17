@@ -25,19 +25,31 @@ use whatfast_protocol::{ConnectionState, ImageContent, Message, MessageStatus};
 ///
 /// port: the origin scaled the picture down to a square of at most 220 points
 /// for stickers and 320 points for photographs, keeping the aspect ratio.
-pub(crate) fn image_render_size(image: &ImageContent) -> (Pixels, Pixels) {
-    let max_edge = if image.sticker { 220. } else { 320. };
-    if image.width == 0 || image.height == 0 {
-        return if image.sticker {
-            (px(max_edge), px(max_edge))
+/// The ceiling follows the scale of the interface, and the width of the
+/// bubble wins in a narrow window: a big picture never pushes the tail of the
+/// bubble out of the conversation.
+pub(crate) fn image_render_size(
+    image: &ImageContent,
+    scale: f32,
+    max_width: Pixels,
+) -> (Pixels, Pixels) {
+    let scale = scale.max(1.);
+    let max_edge = (if image.sticker { 220. } else { 320. }) * scale;
+    let (width, height) = if image.width == 0 || image.height == 0 {
+        if image.sticker {
+            (max_edge, max_edge)
         } else {
-            (px(300.), px(220.))
-        };
-    }
-    let source_width = image.width as f32;
-    let source_height = image.height as f32;
-    let scale = (max_edge / source_width).min(max_edge / source_height);
-    (px(source_width * scale), px(source_height * scale))
+            (300. * scale, 220. * scale)
+        }
+    } else {
+        let source_width = image.width as f32;
+        let source_height = image.height as f32;
+        let fit = (max_edge / source_width).min(max_edge / source_height);
+        (source_width * fit, source_height * fit)
+    };
+    let limit = f32::from(max_width).max(80.);
+    let shrink = (limit / width).min(1.);
+    (px(width * shrink), px(height * shrink))
 }
 
 /// The pixel box of the picture inside the viewer card.
@@ -502,9 +514,9 @@ mod tests {
     use whatfast_protocol::{ImageContent, MessageStatus};
 
     use super::{
-        StatusGlyph, image_needs_download, image_source_candidates, jpeg_dimensions,
-        message_status_glyph, percent_encode, png_dimensions, viewer_picture_size,
-        webp_dimensions,
+        StatusGlyph, image_needs_download, image_render_size, image_source_candidates,
+        jpeg_dimensions, message_status_glyph, percent_encode, png_dimensions,
+        viewer_picture_size, webp_dimensions,
     };
 
     /// La busqueda en la web lleva la epigrafe como consulta: los espacios y
@@ -680,5 +692,41 @@ mod tests {
         );
         // A state without a glyph draws nothing.
         assert_eq!(message_status_glyph(MessageStatus::Unspecified), None);
+    }
+
+    /// Una foto crece con la escala de la interfaz: a 150 % el globo es mas
+    /// ancho y la foto tambien, sin cambiar la proporcion.
+    #[test]
+    fn a_picture_grows_with_the_interface_scale() {
+        let photo = ImageContent {
+            width: 1000,
+            height: 500,
+            ..Default::default()
+        };
+        assert_eq!(image_render_size(&photo, 1.0, px(512.)), (px(320.), px(160.)));
+        assert_eq!(
+            image_render_size(&photo, 1.5, px(768.)),
+            (px(480.), px(240.))
+        );
+    }
+
+    /// En una ventana angosta el ancho de la burbuja gana: la foto se achica
+    /// y conserva la proporcion en vez de salirse del globo.
+    #[test]
+    fn a_narrow_bubble_keeps_the_picture_inside() {
+        let photo = ImageContent {
+            width: 1000,
+            height: 500,
+            ..Default::default()
+        };
+        assert_eq!(
+            image_render_size(&photo, 1.0, px(180.)),
+            (px(180.), px(90.))
+        );
+        // Un ancho absurdo no llega a cero: la foto conserva un minimo.
+        assert_eq!(
+            image_render_size(&photo, 1.0, px(10.)),
+            (px(80.), px(40.))
+        );
     }
 }

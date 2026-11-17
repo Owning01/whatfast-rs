@@ -124,6 +124,9 @@ pub struct Settings {
     /// The sound of a message that this window sends. Same encoding as
     /// `sound_received`.
     pub sound_sent: String,
+    /// The sound of a toast that appears. Same encoding as `sound_received`;
+    /// `none` keeps the toast silent.
+    pub sound_notification: String,
     /// The directory of "Save to folder"; empty asks every time.
     pub download_dir: String,
     /// Whether the chat list stays beside the conversation even on narrow
@@ -243,6 +246,9 @@ impl Default for Settings {
             // leaves: the same pair the phone plays.
             sound_received: "builtin:pop".to_string(),
             sound_sent: "builtin:ping".to_string(),
+            // A softer bell for the popup, different from the one of the chat
+            // message: the two sounds tell the user what just happened.
+            sound_notification: "builtin:bell".to_string(),
             download_dir: String::new(),
             split_view: false,
             battery_saver: false,
@@ -524,6 +530,7 @@ mod tests {
         assert!(settings.sounds_enabled);
         assert_eq!(settings.sound_received, "builtin:pop");
         assert_eq!(settings.sound_sent, "builtin:ping");
+        assert_eq!(settings.sound_notification, "builtin:bell");
     }
 
     #[test]
