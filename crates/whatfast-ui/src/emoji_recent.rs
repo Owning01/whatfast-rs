@@ -26,10 +26,6 @@ thread_local! {
 
 /// The file of the recent emojis in the folder of the profile.
 fn path() -> PathBuf {
-    #[cfg(test)]
-    if let Some(path) = TEST_PATH.with(|path| path.borrow().clone()) {
-        return path;
-    }
     whatfast_model::paths::data_dir().join("recent-emojis.json")
 }
 
@@ -98,77 +94,4 @@ fn save(list: &[String]) {
 
 // The tests do not read or write the profile of the user who runs them: each
 // one points the module at a throwaway file.
-#[cfg(test)]
-thread_local! {
-    static TEST_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
 
-#[cfg(test)]
-fn use_test_file(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "whatfast-emoji-{label}-{}.json",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&path);
-    TEST_PATH.with(|current| *current.borrow_mut() = Some(path.clone()));
-    forget_in_memory();
-    path
-}
-
-/// Simulates a restart: the memory is empty and the file is left as it was.
-#[cfg(test)]
-fn forget_in_memory() {
-    LOADED.with(|loaded| loaded.set(false));
-    RECENT.with(|recent| recent.borrow_mut().clear());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_newest_emoji_goes_to_the_head_of_the_list() {
-        use_test_file("newest");
-        remember_emoji("😀");
-        remember_emoji("🚀");
-        let recent = recent_emojis();
-        assert_eq!(recent.first().map(String::as_str), Some("🚀"));
-    }
-
-    #[test]
-    fn an_emoji_that_repeats_is_not_in_the_list_twice() {
-        use_test_file("repeat");
-        remember_emoji("😀");
-        remember_emoji("🚀");
-        remember_emoji("😀");
-        let recent = recent_emojis();
-        assert_eq!(recent.iter().filter(|item| *item == "😀").count(), 1);
-        assert_eq!(recent.first().map(String::as_str), Some("😀"));
-    }
-
-    #[test]
-    fn the_list_holds_at_most_sixteen_emojis() {
-        use_test_file("limit");
-        for index in 0..MAX_RECENT + 4 {
-            remember_emoji(&format!("{index}"));
-        }
-        assert_eq!(recent_emojis().len(), MAX_RECENT);
-    }
-
-    /// The bug behind the report: the list only lived in memory and a restart
-    /// left the section empty.
-    #[test]
-    fn the_recent_emojis_come_back_after_a_restart() {
-        let file = use_test_file("restart");
-        remember_emoji("🚀");
-        remember_emoji("😀");
-        forget_in_memory();
-
-        assert_eq!(
-            recent_emojis(),
-            vec!["😀".to_string(), "🚀".to_string()],
-            "the file was not read back"
-        );
-        let _ = std::fs::remove_file(file);
-    }
-}

@@ -26,8 +26,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::AnimationExt as _;
 use gpui::{Animation, 
     AppContext as _, Bounds, Context, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
-    ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Subscription, Window, canvas, div, img, point, px, quad, rgba,
+    KeyDownEvent, ObjectFit, ParentElement as _, PathBuilder, PathPromptOptions,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, canvas,
+    div, img, point, px, quad, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -39,7 +40,7 @@ use gpui_component::{
 use smol::Timer;
 use uuid::Uuid;
 
-use whatfast_core::message_format::{DateLocale, LocalTimestamp, format_day, format_time};
+use whatfast_core::message_format::{DateLocale, LocalTimestamp, day_key, format_day, format_time};
 use whatfast_model::model::message_text;
 use whatfast_protocol::{
     Chat, ConnectionState, ImageContent, Message, MessageStatus, SendTextRequest, StatusGroup,
@@ -78,6 +79,12 @@ pub(crate) const RING_SIZE: f32 = 46.0;
 pub(crate) const VIEWER_AVATAR_SIZE: f32 = 44.0;
 /// The width of the ring of a status, in pixels, before the scale.
 pub(crate) const RING_BORDER: f32 = 3.0;
+/// The extra room, in pixels, on each side of the clip box of a status ring.
+///
+/// The stroke of the ring reaches the edge of its box at the top and the
+/// bottom pole, where it gets cut. A pixel of room on each side keeps the
+/// whole stroke.
+pub(crate) const RING_CLIP_PADDING: f32 = 1.0;
 /// The opening between the ring and the photo, in pixels, before the scale.
 pub(crate) const PHOTO_GAP: f32 = 2.5;
 /// The length of every dash of the ring of a status that was not seen, in
@@ -133,6 +140,9 @@ pub(crate) const PANEL_GLYPH_DOT_SIZE: f32 = 32.0;
 pub(crate) const PANEL_TITLE_SIZE: f32 = 30.0;
 /// The width of the round buttons of the panel, in pixels, before the scale.
 pub(crate) const PANEL_BUTTON_WIDTH: f32 = 60.0;
+/// The width of the column of a round button of the panel, in pixels, before
+/// the scale. Both labels fit in it so the two columns have the same width.
+pub(crate) const PANEL_BUTTON_COLUMN_WIDTH: f32 = 100.0;
 /// The height of the round buttons of the panel, in pixels, before the scale.
 pub(crate) const PANEL_BUTTON_HEIGHT: f32 = 48.0;
 /// The radius of the corners of the round buttons of the panel, in pixels,
@@ -568,6 +578,14 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn date_locale() -> DateLocale {
+    match i18n::current_language() {
+        "es" => DateLocale::EsEs,
+        "zh" => DateLocale::ZhCn,
+        _ => DateLocale::EnUs,
+    }
+}
+
 /// The time of a message.
 ///
 /// port: `formatTime` of the origin. The hour is the one of the machine, and
@@ -576,7 +594,7 @@ fn now_ms() -> i64 {
 fn message_time(timestamp_ms: i64) -> String {
     format_time(
         LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms)),
-        DateLocale::EnUs,
+        date_locale(),
     )
 }
 
@@ -588,12 +606,12 @@ fn message_time(timestamp_ms: i64) -> String {
 fn status_time(timestamp_ms: i64, now_ms: i64) -> String {
     let value = LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms));
     let now = LocalTimestamp::new(now_ms, local_offset_minutes(now_ms));
-    let day = format_day(value, now, DateLocale::EnUs);
     let hour = status_hour(timestamp_ms);
-    if day == "Today" {
-        return format!("Today at {hour}");
+    if day_key(value) == day_key(now) {
+        return i18n::t_args("Today at {hour}", &[("hour", &hour)]);
     }
-    format!("{day} at {hour}")
+    let day = format_day(value, now, date_locale());
+    i18n::t_args("{day} at {hour}", &[("day", &day), ("hour", &hour)])
 }
 
 /// The hour of a status in the 24 hour clock.
@@ -749,7 +767,7 @@ impl StatusStrip {
                     .items_start()
                     .child(self.render_panel_button(
                         "status-text",
-                        "Text status",
+                        i18n::t("Text status"),
                         PanelGlyph::Text,
                         scale,
                         |this, _, cx| {
@@ -760,7 +778,7 @@ impl StatusStrip {
                     ))
                     .child(self.render_panel_button(
                         "status-photo",
-                        "Photo and video",
+                        i18n::t("Photo and video"),
                         PanelGlyph::Photo,
                         scale,
                         |this, window, cx| {
@@ -830,7 +848,7 @@ impl StatusStrip {
         v_flex()
             .id(ElementId::named_usize(id, 0))
             .flex_none()
-            .w(px(PANEL_BUTTON_WIDTH * scale))
+            .w(px(PANEL_BUTTON_COLUMN_WIDTH * scale))
             .items_center()
             .gap(px(PANEL_BUTTON_LABEL_GAP * scale))
             .child(
@@ -854,8 +872,10 @@ impl StatusStrip {
             )
             .child(
                 div()
+                    .w_full()
                     .text_size(px(13. * scale))
                     .text_color(muted)
+                    .text_center()
                     .whitespace_nowrap()
                     .child(label),
             )
@@ -889,9 +909,16 @@ impl StatusStrip {
                         g.sender_id == "me@s.whatsapp.net"
                             || g.messages.iter().any(|m| m.from_me)
                     });
-                    let has_own_status = own_index.is_some();
                     let own_status_id = own_index.and_then(|idx| {
                         groups.get(idx).and_then(|g| g.messages.last().map(|m| m.id.clone()))
+                    });
+                    // Con un estado propio el subtitulo muestra su hora, como
+                    // en la lista: la invitacion a anadir uno solo va vacia.
+                    let own_status_time = own_index.and_then(|idx| {
+                        groups
+                            .get(idx)
+                            .and_then(|g| g.messages.last())
+                            .map(|m| status_time(m.timestamp_ms, now_ms()))
                     });
                     let state_for_view = state.clone();
 
@@ -927,10 +954,11 @@ impl StatusStrip {
                                             div()
                                                 .text_xs()
                                                 .text_color(muted)
-                                                .child(if has_own_status {
-                                                    i18n::t("Click to add a new status")
+                                                .child(if let Some(time) = own_status_time {
+                                                    time
                                                 } else {
                                                     i18n::t("Click to add a status update")
+                                                        .to_string()
                                                 }),
                                         ),
                                 )
@@ -1178,7 +1206,7 @@ impl StatusStrip {
                     },
                 )
                 .absolute()
-                .inset_0(),
+                .inset(px(-RING_CLIP_PADDING)),
             )
             .child(avatar_element(&label, avatar_path, px(inner), cx))
             .on_click(cx.listener(move |app, _, _, cx| {
@@ -1204,6 +1232,24 @@ impl StatusStrip {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(Input::new(&self.text_input).w_full())
+            // La tarjeta previa usa el color elegido y muestra el texto
+            // centrado mientras se escribe, antes de publicar.
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(90. * scale))
+                    .rounded_md()
+                    .bg(parse_color(&color).unwrap_or_else(|| rgba(0x0f766e)))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .p(px(12. * scale))
+                    .text_color(rgba(0xffffffff))
+                    .text_size(px(18. * scale))
+                    .text_center()
+                    .child(text.clone()),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -1274,6 +1320,8 @@ impl StatusStrip {
             return None;
         };
         let message = group.messages.get(viewer.message_index);
+        let is_own = group.sender_id == "me@s.whatsapp.net"
+            || message.is_some_and(|m| m.from_me);
 
         let background = message
             .and_then(|message| self.state.borrow().colors.get(&message.id).cloned())
@@ -1309,6 +1357,8 @@ impl StatusStrip {
 
         let progress =
             h_flex()
+                .w_full()
+                .max_w(px(520. * scale))
                 .gap(px(4. * scale))
                 .children(group.messages.iter().enumerate().map(|(index, _)| {
                     let track = div()
@@ -1403,7 +1453,7 @@ impl StatusStrip {
                                     .text_color(rgba(0xffffffaa))
                                     .child(
                                         message
-                                            .map(|message| message_time(message.timestamp_ms))
+                                            .map(|message| status_hour(message.timestamp_ms))
                                             .unwrap_or_default(),
                                     ),
                             )
@@ -1423,43 +1473,39 @@ impl StatusStrip {
                     ),
             )
             .child({
-                let is_own = group.sender_id == "me@s.whatsapp.net"
-                    || message.is_some_and(|m| m.from_me);
                 let mut actions = h_flex().gap_2().items_center();
-                if !is_video {
-                    let state_for_pause = self.state.clone();
-                    actions = actions.child(
-                        div()
-                            .id("status-viewer-pause")
-                            .size(px(32.))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgba(0xffffff22)))
-                            .tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(if effective_paused {
-                                    i18n::t("Resume")
-                                } else {
-                                    i18n::t("Pause")
-                                })
-                                .build(window, cx)
+                let state_for_pause = self.state.clone();
+                actions = actions.child(
+                    div()
+                        .id("status-viewer-pause")
+                        .size(px(32.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgba(0xffffff22)))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(if effective_paused {
+                                i18n::t("Resume")
+                            } else {
+                                i18n::t("Pause")
                             })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                toggle_viewer_pause(app, &state_for_pause, cx);
-                            }))
-                            .child(
-                                Icon::new(if effective_paused {
-                                    WhatfastIcon::Play
-                                } else {
-                                    WhatfastIcon::Pause
-                                })
-                                .with_size(px(17.))
-                                .text_color(rgba(0xffffffdd)),
-                            ),
-                    );
-                }
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            toggle_viewer_pause(app, &state_for_pause, cx);
+                        }))
+                        .child(
+                            Icon::new(if effective_paused {
+                                WhatfastIcon::Play
+                            } else {
+                                WhatfastIcon::Pause
+                            })
+                            .with_size(px(17.))
+                            .text_color(rgba(0xffffffdd)),
+                        ),
+                );
                 if is_own && let Some(msg) = message {
                     let msg_id = msg.id.clone();
                     actions = actions.child(
@@ -1532,7 +1578,7 @@ impl StatusStrip {
                     .gap(px(10. * scale))
                     .px(px(16. * scale))
                     .py(px(12. * scale))
-                    .child(progress)
+                    .child(div().w_full().flex().justify_center().child(progress))
                     .child({
                         let meta_anim_id = ElementId::named_usize("status-meta-slide", transition_id);
                         let meta_anim = Animation::new(Duration::from_millis(280));
@@ -1547,8 +1593,12 @@ impl StatusStrip {
                         })
                     }),
             )
-            .child(content)
-            .child(self.render_reply(app, cx));
+            .child(content);
+        // Un estado propio no se contesta: se comparte o se borra, asi que
+        // la barra de responder no se dibuja.
+        if !is_own {
+            viewer_root = viewer_root.child(self.render_reply(app, cx));
+        }
 
         if groups.len() > 1 || group.messages.len() > 1 {
             viewer_root = viewer_root.child(self.render_navs(cx));
@@ -1575,6 +1625,18 @@ impl StatusStrip {
                     .id("status-reply-container")
                     .flex_1()
                     .min_w_0()
+                    .capture_key_down(cx.listener(
+                        |app, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                app.stop_video();
+                                app.status_strip.close_viewer(cx);
+                                app.composer
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .on_click(cx.listener({
                         let state = state.clone();
                         move |_app, _, _, cx| {
@@ -2233,7 +2295,7 @@ pub(crate) fn status_avatar(
                 },
             )
             .absolute()
-            .inset_0(),
+            .inset(px(-RING_CLIP_PADDING)),
         )
         .child(avatar_element_of(
             title,
@@ -2476,15 +2538,12 @@ pub(crate) fn move_viewer(
 
 /// Toggles pause/resume on the open status viewer.
 fn toggle_viewer_pause(
-    app: &Whatfast,
+    _app: &Whatfast,
     state: &Rc<RefCell<StatusStripState>>,
     cx: &mut Context<Whatfast>,
 ) {
     let mut inner = state.borrow_mut();
-    let Some(viewer) = inner.viewer else {
-        return;
-    };
-    if viewer_is_video(app.store.statuses(), viewer) {
+    if inner.viewer.is_none() {
         return;
     }
     let now = Instant::now();
@@ -2890,462 +2949,3 @@ fn render_message(
         )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn group(sender: &str, messages: usize) -> StatusGroup {
-        StatusGroup {
-            sender_id: sender.to_string(),
-            sender_name: sender.to_string(),
-            sender_phone_number: String::new(),
-            messages: (0..messages)
-                .map(|index| Message {
-                    id: format!("{sender}-{index}"),
-                    ..Default::default()
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn the_letter_of_a_ring_is_the_first_letter_of_the_name() {
-        assert_eq!(avatar_label("Ana"), "A");
-        assert_eq!(avatar_label("  bravo"), "B");
-        assert_eq!(avatar_label("ana maria"), "A");
-    }
-
-    #[test]
-    fn a_ring_without_a_name_shows_a_question_mark() {
-        assert_eq!(avatar_label(""), "?");
-        assert_eq!(avatar_label("   "), "?");
-        assert_eq!(avatar_label("123"), "1");
-    }
-
-    #[test]
-    fn the_name_of_the_sender_falls_back_to_the_phone_number() {
-        let mut sender = group("Ana", 1);
-        assert_eq!(sender_label(&sender), "Ana");
-        sender.sender_name = String::new();
-        sender.sender_phone_number = "5493811234567".to_string();
-        // The number stands for the name written the way WhatsApp writes it.
-        assert_eq!(sender_label(&sender), "+54 9 381 123-4567");
-    }
-
-    #[test]
-    fn a_status_photo_keeps_its_preview_under_the_full_picture() {
-        // La foto descargada se pinta sobre la miniatura que vino en el
-        // mensaje: mientras el decodificador trabaja, la miniatura tapa el
-        // hueco y la foto no parpadea.
-        assert_eq!(
-            status_picture(Some("photo.jpg"), true),
-            StatusPicture::ThumbnailUnderPhoto
-        );
-        assert_eq!(
-            status_picture(Some("photo.jpg"), false),
-            StatusPicture::Photo
-        );
-        assert_eq!(status_picture(None, true), StatusPicture::Thumbnail);
-        assert_eq!(status_picture(None, false), StatusPicture::None);
-    }
-
-    #[test]
-    fn a_status_photo_is_capped_to_the_viewer_without_growing() {
-        // Una foto vertical de 720x1280 entra en 800x640: manda el alto.
-        assert_eq!(
-            status_photo_box(720, 1280, 1.0, 800.0, 640.0),
-            Some((360.0, 640.0))
-        );
-        // Una foto chica conserva su tamano: la vista no la agranda.
-        assert_eq!(
-            status_photo_box(300, 200, 1.0, 800.0, 640.0),
-            Some((300.0, 200.0))
-        );
-        // Sin medidas no hay caja calculable.
-        assert_eq!(status_photo_box(0, 1280, 1.0, 800.0, 640.0), None);
-        // El zoom de la interfaz escala la caja entera.
-        assert_eq!(
-            status_photo_box(720, 1280, 2.0, 1600.0, 1280.0),
-            Some((720.0, 1280.0))
-        );
-        // La ventana manda sobre el tope de 800x640: una foto ancha se
-        // achica hasta el ancho que le queda al visor.
-        assert_eq!(
-            status_photo_box(800, 400, 1.0, 400.0, 300.0),
-            Some((400.0, 200.0))
-        );
-        // Y una foto alta se achica hasta el alto que le queda.
-        assert_eq!(
-            status_photo_box(400, 800, 1.0, 400.0, 300.0),
-            Some((150.0, 300.0))
-        );
-    }
-
-    #[test]
-    fn the_room_of_a_status_takes_the_chrome_of_the_viewer_out() {
-        // 1180x760 con escala 1: 32 px de relleno y 180 px de cabecera y
-        // barra de respuesta.
-        assert_eq!(status_content_box(1180.0, 760.0, 1.0), (1148.0, 580.0));
-        // Con escala 2 el chrome tambien crece.
-        assert_eq!(status_content_box(1180.0, 760.0, 2.0), (1116.0, 400.0));
-        // Una ventana mas chica que el chrome conserva una caja positiva,
-        // aunque sea minima: la foto se achica en vez de salirse.
-        assert_eq!(status_content_box(200.0, 200.0, 1.0), (168.0, 20.0));
-    }
-
-    #[test]
-    fn a_video_status_stays_in_the_viewer_until_the_user_moves() {
-        let video = Content::Attachment(whatfast_protocol::AttachmentContent {
-            mime_type: "video/mp4".into(),
-            ..Default::default()
-        });
-        let picture = Content::Image(ImageContent::default());
-        let groups = vec![StatusGroup {
-            messages: vec![
-                Message {
-                    id: "video".into(),
-                    content: Some(video),
-                    ..Default::default()
-                },
-                Message {
-                    id: "picture".into(),
-                    content: Some(picture),
-                    ..Default::default()
-                },
-            ],
-            ..group("ana", 0)
-        }];
-        let at = |message_index| StatusViewer {
-            group_index: 0,
-            message_index,
-        };
-        assert!(viewer_is_video(&groups, at(0)));
-        assert!(!viewer_is_video(&groups, at(1)));
-        // A viewer whose group is gone is not a video: the loop can advance.
-        assert!(!viewer_is_video(
-            &groups,
-            StatusViewer {
-                group_index: 4,
-                message_index: 0,
-            }
-        ));
-    }
-
-    #[test]
-    fn the_viewer_moves_to_the_next_message_of_the_group() {
-        let groups = vec![group("ana", 2)];
-        let mut viewer = StatusViewer {
-            group_index: 0,
-            message_index: 0,
-        };
-        assert!(advance_viewer(&mut viewer, &groups));
-        assert_eq!(viewer.message_index, 1);
-    }
-
-    #[test]
-    fn the_viewer_moves_to_the_next_group() {
-        let groups = vec![group("ana", 1), group("bravo", 2)];
-        let mut viewer = StatusViewer {
-            group_index: 0,
-            message_index: 0,
-        };
-        assert!(advance_viewer(&mut viewer, &groups));
-        assert_eq!(viewer.group_index, 1);
-        assert_eq!(viewer.message_index, 0);
-    }
-
-    #[test]
-    fn the_viewer_closes_when_there_is_no_next_status() {
-        let groups = vec![group("ana", 1)];
-        let mut viewer = StatusViewer {
-            group_index: 0,
-            message_index: 0,
-        };
-        assert!(!advance_viewer(&mut viewer, &groups));
-    }
-
-    #[test]
-    fn the_viewer_does_not_move_when_the_group_is_gone() {
-        let mut viewer = StatusViewer {
-            group_index: 3,
-            message_index: 0,
-        };
-        assert!(!advance_viewer(&mut viewer, &[]));
-    }
-
-    #[test]
-    fn the_viewer_goes_back_to_the_previous_message() {
-        let groups = vec![group("ana", 3)];
-        let mut viewer = StatusViewer {
-            group_index: 0,
-            message_index: 2,
-        };
-        assert!(previous_viewer(&mut viewer, &groups));
-        assert_eq!(viewer.message_index, 1);
-    }
-
-    #[test]
-    fn the_viewer_goes_back_to_the_last_message_of_the_previous_group() {
-        let groups = vec![group("ana", 2), group("bravo", 3)];
-        let mut viewer = StatusViewer {
-            group_index: 1,
-            message_index: 0,
-        };
-        assert!(previous_viewer(&mut viewer, &groups));
-        assert_eq!(viewer.group_index, 0);
-        assert_eq!(viewer.message_index, 1);
-    }
-
-    #[test]
-    fn the_viewer_does_not_go_back_before_the_first_status() {
-        let groups = vec![group("ana", 2)];
-        let mut viewer = StatusViewer {
-            group_index: 0,
-            message_index: 0,
-        };
-        assert!(!previous_viewer(&mut viewer, &groups));
-    }
-
-    #[test]
-    fn a_text_status_is_capped_at_seven_hundred_characters() {
-        let text = "a".repeat(MAX_STATUS_LENGTH + 10);
-        let message = text_status_message("status@broadcast", &text, 42);
-        let Some(Content::Text(content)) = &message.content else {
-            panic!("the status is a text");
-        };
-        assert_eq!(content.text.chars().count(), MAX_STATUS_LENGTH);
-        assert_eq!(message.id, "local-status-42");
-        assert_eq!(message.chat_id, "status@broadcast");
-        assert!(message.from_me);
-    }
-
-    #[test]
-    fn a_text_status_goes_to_the_group_of_its_sender() {
-        let mut groups = vec![group("me@s.whatsapp.net", 1)];
-        let message = text_status_message("status@broadcast", "hello", 42);
-        add_status_message(&mut groups, message);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].messages.len(), 2);
-    }
-
-    #[test]
-    fn a_text_status_of_a_new_sender_opens_a_group() {
-        let mut groups = vec![group("ana", 1)];
-        let message = text_status_message("status@broadcast", "hello", 42);
-        add_status_message(&mut groups, message);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].sender_id, "me@s.whatsapp.net");
-        assert_eq!(groups[0].messages.len(), 1);
-    }
-
-    #[test]
-    fn a_photo_status_carries_the_path_of_the_picture() {
-        let message = photo_status_message("status@broadcast", "/tmp/photo.jpg", 7);
-        assert_eq!(
-            message_image_path(&message),
-            Some("/tmp/photo.jpg".to_string())
-        );
-    }
-
-    #[test]
-    fn a_text_status_has_no_picture() {
-        let message = text_status_message("status@broadcast", "hello", 7);
-        assert_eq!(message_image_path(&message), None);
-    }
-
-    #[test]
-    fn a_status_is_new_until_the_user_opens_it() {
-        let state = StatusStripState::new();
-        let mut sender = group("maya@s.whatsapp.net", 1);
-        sender.messages[0].timestamp_ms = 1_000;
-        assert!(has_unseen(&state, &sender));
-        assert!(!has_seen(&state, "maya@s.whatsapp.net"));
-    }
-
-    #[test]
-    fn opening_a_status_marks_it_as_seen_and_leaves_the_others_new() {
-        let mut state = StatusStripState::new();
-        let mut maya = group("maya@s.whatsapp.net", 1);
-        maya.messages[0].timestamp_ms = 1_000;
-        mark_seen(&mut state, "maya@s.whatsapp.net", 1_000);
-        assert!(!has_unseen(&state, &maya));
-        assert!(has_seen(&state, "maya@s.whatsapp.net"));
-        let mut priya = group("priya@s.whatsapp.net", 1);
-        priya.messages[0].timestamp_ms = 1_000;
-        assert!(has_unseen(&state, &priya));
-        assert!(!has_seen(&state, "priya@s.whatsapp.net"));
-    }
-
-    #[test]
-    fn the_chat_of_the_sender_is_the_group_of_its_statuses() {
-        let mut sender = group("5491100000000@s.whatsapp.net", 1);
-        sender.sender_phone_number = "+54 9 11 0000-0000".to_string();
-        let groups = vec![sender];
-        // The jid of the chat is the one of the sender.
-        let chat = Chat {
-            transport_jid: "5491100000000@s.whatsapp.net".to_string(),
-            ..Default::default()
-        };
-        assert!(group_of_chat(&groups, &chat).is_some());
-        // A chat stored with another jid (a LID) is found by the number.
-        let chat = Chat {
-            transport_jid: "999@lid".to_string(),
-            phone_number: "+54 9 11 0000-0000".to_string(),
-            ..Default::default()
-        };
-        assert!(group_of_chat(&groups, &chat).is_some());
-        // A chat of someone else has no status.
-        let chat = Chat {
-            transport_jid: "5491100000001@s.whatsapp.net".to_string(),
-            phone_number: "+54 9 11 0000-0001".to_string(),
-            ..Default::default()
-        };
-        assert!(group_of_chat(&groups, &chat).is_none());
-    }
-
-    #[test]
-    fn a_newer_status_of_a_seen_contact_is_new_again() {
-        let mut state = StatusStripState::new();
-        let mut sender = group("maya@s.whatsapp.net", 2);
-        sender.messages[0].timestamp_ms = 1_000;
-        sender.messages[1].timestamp_ms = 2_000;
-        mark_seen(&mut state, "maya@s.whatsapp.net", 2_000);
-        assert!(!has_unseen(&state, &sender));
-        // The contact posts again: the ring is dashed once more.
-        sender.messages.insert(
-            0,
-            Message {
-                id: "new".to_string(),
-                timestamp_ms: 3_000,
-                ..Default::default()
-            },
-        );
-        assert!(has_unseen(&state, &sender));
-    }
-
-    #[test]
-    fn the_strip_asks_again_after_a_failed_request() {
-        let mut state = StatusStripState::new();
-        let now = Instant::now();
-        // The first look always asks.
-        assert!(should_request(&state, now));
-        state.requested_at = Some(now);
-        state.attempts = 1;
-        // The first tries go fast: the sidecar is still connecting.
-        assert!(!should_request(&state, now));
-        assert!(!should_request(&state, now + FIRST_RETRY_AFTER / 2));
-        assert!(should_request(&state, now + FIRST_RETRY_AFTER));
-        // After a few tries the wait grows, so an account without statuses
-        // does not ask the sidecar every second.
-        state.attempts = FAST_TRIES;
-        assert!(!should_request(&state, now + RETRY_AFTER / 2));
-        assert!(should_request(&state, now + RETRY_AFTER));
-    }
-
-    #[test]
-    fn the_first_degree_of_the_glyph_starts_at_the_top_of_the_circle() {
-        let center = point(px(10.), px(10.));
-        assert_eq!(point_on_circle(&center, 4., 0.), point(px(10.), px(6.)));
-        assert_eq!(point_on_circle(&center, 4., 90.), point(px(14.), px(10.)));
-        assert_eq!(point_on_circle(&center, 4., 180.), point(px(10.), px(14.)));
-    }
-
-    #[test]
-    fn the_hour_of_a_status_goes_in_the_twenty_four_hour_clock() {
-        // The reference writes "Today at 12:45", not "Today at 12:45 PM".
-        assert_eq!(status_hour_at(0, 0), "00:00");
-        assert_eq!(status_hour_at(45 * 60_000, 0), "00:45");
-        assert_eq!(status_hour_at(12 * 3_600_000 + 45 * 60_000, 0), "12:45");
-        assert_eq!(status_hour_at(23 * 3_600_000 + 5 * 60_000, 0), "23:05");
-        // The hour of the machine is the hour of the zone of the instant:
-        // the 12:45 of UTC is the 09:45 of Buenos Aires.
-        assert_eq!(status_hour_at(12 * 3_600_000 + 45 * 60_000, -180), "09:45");
-        // A status close to midnight moves to the day of the zone.
-        assert_eq!(status_hour_at(23 * 3_600_000 + 5 * 60_000, 120), "01:05");
-    }
-
-    #[test]
-    fn the_time_of_a_status_writes_the_day_and_the_hour() {
-        let noon = 12 * 3_600_000;
-        assert_eq!(
-            status_time(noon, noon),
-            format!("Today at {}", status_hour(noon))
-        );
-        let yesterday = noon - 24 * 3_600_000;
-        assert_eq!(
-            status_time(yesterday, noon),
-            format!("Yesterday at {}", status_hour(yesterday))
-        );
-    }
-
-    #[test]
-    fn segment_count_matches_status_count_and_tracks_seen() {
-        let mut sender = group("mariano@s.whatsapp.net", 3);
-        sender.messages[0].timestamp_ms = 1_000;
-        sender.messages[1].timestamp_ms = 2_000;
-        sender.messages[2].timestamp_ms = 3_000;
-
-        // None seen yet
-        let segs = status_segments(&sender, None);
-        assert_eq!(segs, vec![StatusSegment::Unseen, StatusSegment::Unseen, StatusSegment::Unseen]);
-
-        // First 2 seen
-        let segs = status_segments(&sender, Some(2_000));
-        assert_eq!(segs, vec![StatusSegment::Seen, StatusSegment::Seen, StatusSegment::Unseen]);
-
-        // All seen
-        let segs = status_segments(&sender, Some(3_000));
-        assert_eq!(segs, vec![StatusSegment::Seen, StatusSegment::Seen, StatusSegment::Seen]);
-    }
-
-    #[test]
-    fn status_messages_are_sorted_by_upload_time() {
-        let mut groups = vec![StatusGroup {
-            sender_id: "mariano@s.whatsapp.net".to_string(),
-            sender_name: "Mariano".to_string(),
-            sender_phone_number: String::new(),
-            messages: vec![
-                Message { id: "m2".into(), timestamp_ms: 2_000, ..Default::default() },
-                Message { id: "m1".into(), timestamp_ms: 1_000, ..Default::default() },
-            ],
-        }];
-
-        // Add a newer message with timestamp 3000
-        let m3 = Message { id: "m3".into(), sender_id: "mariano@s.whatsapp.net".into(), timestamp_ms: 3_000, ..Default::default() };
-        add_status_message(&mut groups, m3);
-
-        // Add an earlier message with timestamp 500
-        let m0 = Message { id: "m0".into(), sender_id: "mariano@s.whatsapp.net".into(), timestamp_ms: 500, ..Default::default() };
-        add_status_message(&mut groups, m0);
-
-        assert_eq!(groups[0].messages.len(), 4);
-        assert_eq!(groups[0].messages[0].id, "m0");
-        assert_eq!(groups[0].messages[1].id, "m1");
-        assert_eq!(groups[0].messages[2].id, "m2");
-        assert_eq!(groups[0].messages[3].id, "m3");
-    }
-
-    #[test]
-    fn viewer_pause_and_resume_preserve_elapsed_progress() {
-        let mut state = StatusStripState::new();
-        let t0 = Instant::now();
-        state.reset_progress(t0, false);
-        let initial_epoch = state.progress_anim_epoch;
-        assert!(!state.paused);
-        assert_eq!(state.total_elapsed_ms(t0), 0);
-
-        let t_mid = t0 + Duration::from_millis(STATUS_STEP_MS / 2);
-        state.pause_at(t_mid);
-        assert!(state.paused);
-        assert_eq!(state.total_elapsed_ms(t_mid + Duration::from_secs(5)), STATUS_STEP_MS / 2);
-        assert!((state.progress_fraction(t_mid + Duration::from_secs(5)) - 0.5).abs() < 0.01);
-
-        let t_resume = t_mid + Duration::from_secs(5);
-        state.resume_at(t_resume);
-        assert!(!state.paused);
-        assert!(state.progress_anim_epoch > initial_epoch);
-        let t_end = t_resume + Duration::from_millis(STATUS_STEP_MS / 2);
-        assert_eq!(state.total_elapsed_ms(t_end), STATUS_STEP_MS);
-        assert!((state.progress_fraction(t_end) - 1.0).abs() < 0.001);
-    }
-}

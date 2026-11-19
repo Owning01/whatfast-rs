@@ -20,7 +20,7 @@ impl Whatfast {
                 &[
                     ("F6 / Shift+F6", "Cycle focus between panes"),
                     ("Ctrl+K", "Open Command Palette"),
-                    ("Ctrl+F / /", "Search messages"),
+                    ("Ctrl+F · /", "Search messages"),
                     ("Alt+Up / Alt+Down", "Previous / Next chat"),
                     ("Ctrl+Tab", "Recent chats switcher"),
                     ("Ctrl+E", "Focus message composer"),
@@ -74,7 +74,7 @@ impl Whatfast {
                     .id("shortcuts-help-modal")
                     .w(px(640. * scale))
                     .max_w_full()
-                    .max_h(px(640. * scale))
+                    .max_h(px(680. * scale))
                     .rounded_xl()
                     .border_1()
                     .border_color(theme.border)
@@ -118,12 +118,14 @@ impl Whatfast {
                     .child(
                         v_flex()
                             .id("shortcuts-help-body")
-                            .p_5()
-                            .gap_4()
+                            .p_4()
+                            .gap_3()
+                            .flex_1()
+                            .min_h_0()
                             .overflow_y_scroll()
                             .children(groups.into_iter().map(|(heading, rows)| {
                                 v_flex()
-                                    .gap_2()
+                                    .gap_1p5()
                                     .child(
                                         div()
                                             .text_xs()
@@ -132,6 +134,11 @@ impl Whatfast {
                                             .child(i18n::t(heading)),
                                     )
                                     .children(rows.iter().map(|(keys, desc)| {
+                                        let key_label = if *keys == "Up / Down (or K / J)" {
+                                            i18n::t("Up / Down (or K / J)")
+                                        } else {
+                                            *keys
+                                        };
                                         h_flex()
                                             .justify_between()
                                             .items_center()
@@ -155,7 +162,7 @@ impl Whatfast {
                                                     .bg(theme.background)
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
-                                                    .child(*keys),
+                                                    .child(key_label),
                                             )
                                     }))
                             })),

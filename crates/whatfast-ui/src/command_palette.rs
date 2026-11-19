@@ -13,7 +13,11 @@ use gpui_component::{
 use whatfast_i18n as i18n;
 
 use crate::app::Whatfast;
+use crate::helpers::avatar_element;
 use crate::navrail::SidebarView;
+
+/// Un resultado de chat de la paleta: id, titulo, no leidos y avatar.
+type ChatMatch = (String, String, u32, String);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuickCommand {
@@ -33,15 +37,38 @@ impl QuickCommand {
     fn label(self) -> &'static str {
         match self {
             Self::OpenSettings => "Open Settings",
-            Self::OpenDevStats => "Open DevStats Inspector (Ctrl+Shift+D)",
+            Self::OpenDevStats => "Open DevStats Inspector",
             Self::ToggleStates => "Open Statuses",
             Self::ToggleChannels => "Open Channels",
             Self::ToggleAgents => "Open Agents",
             Self::ToggleArchived => "Open Archived Chats",
             Self::FocusSearch => "Search Messages",
             Self::ToggleDoNotDisturb => "Toggle Do Not Disturb",
-            Self::LockApp => "Lock App (Ctrl+L)",
+            Self::LockApp => "Lock App",
             Self::ExportActiveChat => "Export Current Chat",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::OpenSettings => IconName::Settings,
+            Self::OpenDevStats => IconName::Inspector,
+            Self::ToggleStates => IconName::CircleCheck,
+            Self::ToggleChannels => IconName::Inbox,
+            Self::ToggleAgents => IconName::Bot,
+            Self::ToggleArchived => IconName::FolderClosed,
+            Self::FocusSearch => IconName::Search,
+            Self::ToggleDoNotDisturb => IconName::Moon,
+            Self::LockApp => IconName::EyeOff,
+            Self::ExportActiveChat => IconName::File,
+        }
+    }
+
+    fn shortcut(self) -> Option<&'static str> {
+        match self {
+            Self::OpenDevStats => Some("Ctrl+Shift+D"),
+            Self::LockApp => Some("Ctrl+L"),
+            _ => None,
         }
     }
 
@@ -108,7 +135,7 @@ impl Whatfast {
         cx.notify();
     }
 
-    fn palette_matches(&self) -> (Vec<QuickCommand>, Vec<(String, String, u32)>) {
+    fn palette_matches(&self) -> (Vec<QuickCommand>, Vec<ChatMatch>) {
         let q = self.command_palette.query.trim().to_lowercase();
         let matched_cmds: Vec<QuickCommand> = QuickCommand::ALL
             .iter()
@@ -116,7 +143,7 @@ impl Whatfast {
             .filter(|cmd| q.is_empty() || i18n::t(cmd.label()).to_lowercase().contains(&q))
             .take(5)
             .collect();
-        let matched_chats: Vec<(String, String, u32)> = self
+        let matched_chats: Vec<ChatMatch> = self
             .store
             .chats
             .iter()
@@ -126,7 +153,14 @@ impl Whatfast {
                     || c.id.to_lowercase().contains(&q)
             })
             .take(8)
-            .map(|c| (c.id.clone(), c.title.clone(), c.unread_count))
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.title.clone(),
+                    c.unread_count,
+                    c.avatar_path.clone(),
+                )
+            })
             .collect();
         (matched_cmds, matched_chats)
     }
@@ -155,7 +189,7 @@ impl Whatfast {
         let idx = self.command_palette.selected_index.min(total - 1);
         if idx < cmds.len() {
             self.run_quick_command(cmds[idx], cx);
-        } else if let Some((chat_id, _, _)) = chats.get(idx - cmds.len()) {
+        } else if let Some((chat_id, _, _, _)) = chats.get(idx - cmds.len()) {
             let chat_id = chat_id.clone();
             self.command_palette.open = false;
             self.store.select_chat(chat_id.clone());
@@ -224,7 +258,8 @@ impl Whatfast {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000080))
+            .occlude()
+            .bg(rgba(0x00000088))
             .flex()
             .items_start()
             .justify_center()
@@ -248,17 +283,20 @@ impl Whatfast {
                     .child(
                         h_flex()
                             .p_3()
-                            .gap_2()
                             .items_center()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(
-                                Icon::new(IconName::Search)
-                                    .size(px(16. * scale))
-                                    .text_color(theme.muted_foreground),
-                            )
                             .when_some(self.command_palette.input.clone(), |el, input| {
-                                el.child(div().flex_1().child(Input::new(&input).cleanable(true)))
+                                el.child(
+                                    Input::new(&input)
+                                        .w_full()
+                                        .cleanable(true)
+                                        .prefix(
+                                            Icon::new(IconName::Search)
+                                                .size(px(16. * scale))
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
                             }),
                     )
                     .child(
@@ -279,7 +317,7 @@ impl Whatfast {
                                 )
                                 .children(matched_cmds.into_iter().enumerate().map(|(i, cmd)| {
                                     let selected = active_idx == Some(i);
-                                    div()
+                                    h_flex()
                                         .id(("palette-cmd", i))
                                         .px_3()
                                         .py_2()
@@ -293,12 +331,38 @@ impl Whatfast {
                                         })
                                         .when(selected, |s| s.bg(theme.accent.opacity(0.16)))
                                         .hover(|s| s.bg(theme.secondary))
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .text_color(theme.foreground)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.run_quick_command(cmd, cx);
                                         }))
-                                        .child(i18n::t(cmd.label()))
+                                        .child(
+                                            Icon::new(cmd.icon())
+                                                .size(px(16. * scale))
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .truncate()
+                                                .child(i18n::t(cmd.label())),
+                                        )
+                                        .when_some(cmd.shortcut(), |row, shortcut| {
+                                            row.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(theme.border)
+                                                    .bg(theme.background)
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(i18n::t(shortcut)),
+                                            )
+                                        })
                                 }))
                             })
                             .when(!matched_chats.is_empty(), |el| {
@@ -311,7 +375,7 @@ impl Whatfast {
                                         .child(i18n::t("Chats")),
                                 )
                                 .children(matched_chats.into_iter().enumerate().map(
-                                    |(i, (id, title, unread))| {
+                                    |(i, (id, title, unread, avatar_path))| {
                                         let selected = active_idx == Some(cmd_count + i);
                                         h_flex()
                                             .id(("palette-chat", i))
@@ -326,7 +390,8 @@ impl Whatfast {
                                                 gpui::transparent_black()
                                             })
                                             .when(selected, |s| s.bg(theme.accent.opacity(0.16)))
-                                            .justify_between()
+                                            .items_center()
+                                            .gap_2()
                                             .hover(|s| s.bg(theme.secondary))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.command_palette.open = false;
@@ -334,8 +399,15 @@ impl Whatfast {
                                                 this.load_selected_chat(id.clone());
                                                 cx.notify();
                                             }))
+                                            .child(avatar_element(
+                                                &title,
+                                                &avatar_path,
+                                                px(20. * scale),
+                                                cx,
+                                            ))
                                             .child(
                                                 div()
+                                                    .flex_1()
                                                     .text_sm()
                                                     .text_color(theme.foreground)
                                                     .truncate()

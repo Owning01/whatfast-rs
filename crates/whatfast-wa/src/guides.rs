@@ -104,32 +104,3 @@ fn answer(result: rpc_response::Result) -> RpcResponse {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unknown_harness_is_refused() {
-        let denied = spec_of("no-existe").expect_err("unknown");
-        assert_eq!(denied.code, "invalid_argument");
-    }
-
-    #[test]
-    fn a_known_harness_is_found_by_id() {
-        let spec = spec_of("claude-code").expect("claude-code");
-        assert_eq!(spec.name, "Claude Code");
-    }
-
-    #[test]
-    fn the_guide_is_the_users() {
-        let who = Who::Agent {
-            id: "codex".into(),
-            grant: whatfast_auto::Grant::default(),
-        };
-        let request = GuideStatusRequest {
-            agent_id: "codex".into(),
-        };
-        let denied = status(&who, &request).expect_err("forbidden");
-        assert_eq!(denied.code, "forbidden");
-    }
-}

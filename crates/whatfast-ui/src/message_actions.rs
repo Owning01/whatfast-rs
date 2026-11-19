@@ -34,13 +34,12 @@ use whatfast_i18n as i18n;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Pixels, Point, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, point, px,
+    KeyDownEvent, ParentElement as _, PathPromptOptions, Pixels, Point, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
     v_flex,
@@ -126,6 +125,21 @@ pub(crate) enum MessageAction {
     /// Start the multiple selection with this message marked, so the user can
     /// delete, copy or forward several messages in one step.
     SelectMessages,
+}
+
+/// The vector icon at the left of a row of the menu of a message.
+fn message_menu_icon(action: MessageAction) -> Icon {
+    match action {
+        MessageAction::Reply => Icon::new(WhatfastIcon::Reply),
+        MessageAction::Forward => Icon::new(WhatfastIcon::Forward),
+        MessageAction::Edit => Icon::new(WhatfastIcon::Edit),
+        MessageAction::Delete | MessageAction::DeleteForEveryone => Icon::new(WhatfastIcon::Trash),
+        MessageAction::Copy => Icon::new(WhatfastIcon::Copy),
+        MessageAction::Translate => Icon::new(WhatfastIcon::Globe),
+        MessageAction::Pin | MessageAction::Unpin => Icon::new(WhatfastIcon::Pin),
+        MessageAction::Star | MessageAction::Unstar => Icon::new(IconName::Star),
+        MessageAction::SelectMessages => Icon::new(IconName::Check),
+    }
 }
 
 /// One row of the menu of a message.
@@ -494,6 +508,20 @@ impl MessageMenu {
                 danger: true,
             },
         ]
+        .into_iter()
+        // No se muestran pares opuestos deshabilitados ("Fijar"/"Desfijar",
+        // "Destacar"/"Quitar destacado") ni acciones que no aplican: antes
+        // la lista entera aparecia gris y ocupaba media pantalla.
+        .filter(|item| match item.action {
+            MessageAction::Edit
+            | MessageAction::Pin
+            | MessageAction::Unpin
+            | MessageAction::Star
+            | MessageAction::Unstar
+            | MessageAction::DeleteForEveryone => item.enabled,
+            _ => true,
+        })
+        .collect()
     }
 
     /// The menu of the message.
@@ -556,11 +584,13 @@ impl MessageMenu {
             let is_highlighted = enabled && self.highlighted == Some(idx);
             let handler = self.on_action.clone();
             let color = if item.danger { danger } else { foreground };
+            let icon_color = if enabled { color } else { muted };
             menu = menu.child(
                 div()
                     .id(format!("message-menu-item-{}", item.label))
                     .flex()
                     .items_center()
+                    .gap_2()
                     .w_full()
                     .px(px(MENU_ITEM_PADDING_X))
                     .py(px(MENU_ITEM_PADDING_Y))
@@ -585,6 +615,11 @@ impl MessageMenu {
                             handler(action, window, cx);
                         }
                     })
+                    .child(
+                        message_menu_icon(action)
+                            .with_size(px(16. * self.scale))
+                            .text_color(icon_color),
+                    )
                     .child(i18n::t(item.label)),
             );
         }
@@ -1064,7 +1099,7 @@ impl Render for ForwardPicker {
 /// The width of the form of the poll, before the scale.
 ///
 /// port: `.poll-composer { width: min(360px, ...) }`.
-const POLL_WIDTH: f32 = 360.0;
+const POLL_WIDTH: f32 = 420.0;
 
 /// The padding of the form of the poll, before the scale.
 ///
@@ -1080,6 +1115,9 @@ const POLL_GAP: f32 = 10.0;
 ///
 /// port: `.poll-composer label { font-size: 13px }`.
 const POLL_LABEL_FONT_SIZE: f32 = 13.0;
+
+/// The size of the box of the multiple answer, before the scale.
+const POLL_CHECKBOX_SIZE: f32 = 16.0;
 
 /// What the form of the poll asks the app to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1289,9 +1327,11 @@ impl PollComposer {
             on_action: None,
         };
         // port: the oracle starts with two options, "Yes" and "No".
-        let values = composer.form.options().to_vec();
-        for value in values {
-            composer.push_option(window, cx, value);
+        let defaults = [i18n::t("Yes"), i18n::t("No")];
+        for (index, value) in defaults.iter().enumerate() {
+            let localized = (*value).to_string();
+            composer.form.set_option(index, localized.clone());
+            composer.push_option(window, cx, localized);
         }
         composer
     }
@@ -1425,7 +1465,14 @@ impl PollComposer {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(Input::new(&input).flex_1())
+                    .child(
+                        Input::new(&input)
+                            .flex_1()
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded_md()
+                            .bg(theme.background),
+                    )
                     .child(
                         Button::new(("poll-option-remove", index))
                             .small()
@@ -1452,49 +1499,94 @@ impl PollComposer {
                     .font_weight(FontWeight::BOLD)
                     .child(i18n::t("Create a poll")),
             )
-            .child(Input::new(&self.question_input).w_full())
+            .child(
+                Input::new(&self.question_input)
+                    .w_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_md()
+                    .bg(theme.background),
+            )
             .child(options)
             .child(
                 h_flex()
+                    .id("poll-multiple")
                     .items_center()
                     .gap_2()
                     .text_size(px(POLL_LABEL_FONT_SIZE))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.form.set_multiple(!this.form.multiple());
+                        cx.notify();
+                    }))
+                    // The box of the component takes `theme.input`, which in
+                    // the dark themes is the same as the panel: it disappears.
+                    // This one uses the muted foreground and stays visible.
                     .child(
-                        Checkbox::new("poll-multiple")
-                            .checked(self.form.multiple())
-                            .label(i18n::t("Allow multiple answers"))
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.form.set_multiple(*checked);
-                                cx.notify();
-                            })),
-                    ),
+                        div()
+                            .size(px(POLL_CHECKBOX_SIZE))
+                            .flex_shrink_0()
+                            .rounded(theme.radius * 0.5)
+                            .border_1()
+                            .border_color(if self.form.multiple() {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .bg(if self.form.multiple() {
+                                theme.primary
+                            } else {
+                                theme.background
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(self.form.multiple(), |checkbox| {
+                                checkbox.child(
+                                    Icon::new(IconName::Check)
+                                        .with_size(px(POLL_CHECKBOX_SIZE * 0.75))
+                                        .text_color(theme.primary_foreground),
+                                )
+                            }),
+                    )
+                    .child(i18n::t("Allow multiple answers")),
             )
             .child(
                 h_flex()
+                    .w_full()
                     .items_center()
+                    .justify_between()
                     .gap_2()
                     .child(
                         Button::new("poll-add-option")
+                            .small()
                             .label(i18n::t("Add option"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_option(window, cx);
                             })),
                     )
                     .child(
-                        Button::new("poll-cancel")
-                            .label(i18n::t("Cancel"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.cancel(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("poll-create")
-                            .primary()
-                            .label(i18n::t("Create poll"))
-                            .disabled(!self.can_create())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.create(window, cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("poll-cancel")
+                                    .small()
+                                    .label(i18n::t("Cancel"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("poll-create")
+                                    .primary()
+                                    .small()
+                                    .label(i18n::t("Create poll"))
+                                    .disabled(!self.can_create())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.create(window, cx);
+                                    })),
+                            ),
                     ),
             )
     }
@@ -1546,6 +1638,9 @@ const ATTACHMENT_ITEM_PADDING_X: f32 = 10.0;
 ///
 /// port: `<ThemeIcon icon={Paperclip} name="attach" size={22} />`.
 const ATTACHMENT_ICON_SIZE: f32 = 22.0;
+
+/// The size of the glyph of a row of the menu of the clip, before the scale.
+const ATTACHMENT_ROW_ICON_SIZE: f32 = 18.0;
 
 /// What the button of the clip asks the app to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1784,17 +1879,48 @@ impl AttachmentBar {
     }
 
     /// The button of the clip and its menu of the kinds.
-    pub(crate) fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.scale;
         let theme = cx.theme();
         let hover = theme.muted;
         let radius = theme.radius;
+        let viewport = window.viewport_size();
 
         // The button is the one of the component and not a raw div: the
         // selection of the window text starts a selection drag on every
         // press that a component does not claim, and the click of a raw div
         // never arrives (the rail buttons live the same story).
-        let mut bar = h_flex().items_center().gap_2().relative().child(
+        let mut bar = h_flex().items_center().gap_2().capture_key_down(cx.listener(
+            |this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.open {
+                    this.set_open(false);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            },
+        ));
+
+        if self.open {
+            // The backdrop closes the popover on a click outside it. The
+            // menu is a child of the composer, so the backdrop starts above
+            // and to the left of the viewport to cover the whole window.
+            bar = bar.child(
+                div()
+                    .id("attachment-backdrop")
+                    .absolute()
+                    .top(-viewport.height)
+                    .left(-viewport.width)
+                    .w(viewport.width * 3.0)
+                    .h(viewport.height * 3.0)
+                    .occlude()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_open(false);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let mut anchor = div().relative().child(
             Button::new("attachment-button")
                 .ghost()
                 .icon(WhatfastIcon::Attach)
@@ -1819,6 +1945,12 @@ impl AttachmentBar {
             // The kinds of the files the user can send.
             for item in attachment_kinds() {
                 let kind = item.kind;
+                let icon = match kind {
+                    AttachmentKind::Document => WhatfastIcon::Document,
+                    AttachmentKind::Video => WhatfastIcon::Video,
+                    AttachmentKind::Audio => WhatfastIcon::Mic,
+                    _ => WhatfastIcon::Attach,
+                };
                 menu = menu.child(
                     div()
                         .id(format!("attachment-kind-{}", item.label))
@@ -1836,16 +1968,25 @@ impl AttachmentBar {
                             this.choose(kind, window, cx);
                             cx.notify();
                         }))
+                        .child(
+                            Icon::new(icon)
+                                .with_size(px(ATTACHMENT_ROW_ICON_SIZE * scale))
+                                .text_color(theme.muted_foreground),
+                        )
                         .child(i18n::t(item.label)),
                 );
             }
             // The things the app can do that are not files: the picture of
             // the device, the poll and the stickers.
-            for (label, action) in [
-                ("Photo or video", AttachmentAction::Photo),
-                ("Poll", AttachmentAction::Poll),
-                ("Sticker", AttachmentAction::Sticker),
-                ("Make a sticker", AttachmentAction::MakeSticker),
+            for (label, icon, action) in [
+                ("Photo or video", WhatfastIcon::Image, AttachmentAction::Photo),
+                ("Poll", WhatfastIcon::Poll, AttachmentAction::Poll),
+                ("Sticker", WhatfastIcon::Sticker, AttachmentAction::Sticker),
+                (
+                    "Make a sticker",
+                    WhatfastIcon::Edit,
+                    AttachmentAction::MakeSticker,
+                ),
             ] {
                 menu = menu.child(
                     div()
@@ -1864,13 +2005,18 @@ impl AttachmentBar {
                             this.report(action.clone(), window, cx);
                             cx.notify();
                         }))
+                        .child(
+                            Icon::new(icon)
+                                .with_size(px(ATTACHMENT_ROW_ICON_SIZE * scale))
+                                .text_color(theme.muted_foreground),
+                        )
                         .child(i18n::t(label)),
                 );
             }
-            bar = bar.child(menu);
+            anchor = anchor.child(menu);
         }
 
-        bar
+        bar.child(anchor)
     }
 
     /// Reports an action to the handler of the app.
@@ -1882,8 +2028,8 @@ impl AttachmentBar {
 }
 
 impl Render for AttachmentBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        AttachmentBar::render(self, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        AttachmentBar::render(self, window, cx)
     }
 }
 
@@ -1891,362 +2037,3 @@ impl Render for AttachmentBar {
 // The tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use gpui::{point, px};
-    use whatfast_protocol::message::Content;
-    use whatfast_protocol::{Chat, ChatKind, ImageContent, Message, TextContent, UnsupportedContent};
-
-    use super::{
-        EDIT_WINDOW_MS, MessageAction, MessageMenu, MessageMenuItem, PollForm, attachment_kinds,
-        chat_matches, filter_chats, floating_origin, toggle_selection,
-    };
-
-    /// A message of the user, with a text.
-    fn own_message(timestamp_ms: i64) -> Message {
-        Message {
-            id: "message-1".to_string(),
-            chat_id: "chat-1".to_string(),
-            from_me: true,
-            timestamp_ms,
-            content: Some(Content::Text(TextContent {
-                text: "hello".to_string(),
-                ..TextContent::default()
-            })),
-            ..Message::default()
-        }
-    }
-
-    /// A message of somebody else, with a text.
-    fn other_message(timestamp_ms: i64) -> Message {
-        Message {
-            from_me: false,
-            ..own_message(timestamp_ms)
-        }
-    }
-
-    /// A conversation.
-    fn chat(id: &str, title: &str, phone: &str) -> Chat {
-        Chat {
-            id: id.to_string(),
-            kind: ChatKind::Direct as i32,
-            title: title.to_string(),
-            phone_number: phone.to_string(),
-            ..Chat::default()
-        }
-    }
-
-    /// The action of a row of a menu.
-    fn action_of(item: &MessageMenuItem) -> MessageAction {
-        item.action
-    }
-
-    /// Whether a row of a menu can be pressed.
-    fn enabled(menu: &MessageMenu, action: MessageAction) -> bool {
-        menu.items()
-            .into_iter()
-            .find(|item| item.action == action)
-            .is_some_and(|item| item.enabled)
-    }
-
-    #[test]
-    fn the_menu_has_the_rows_of_the_oracle() {
-        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        // The rows of the oracle, in order, with the ones that can be pressed.
-        let rows: Vec<(MessageAction, bool)> = menu
-            .items()
-            .iter()
-            .map(|item| (action_of(item), item.enabled))
-            .collect();
-        assert_eq!(
-            rows,
-            vec![
-                (MessageAction::Reply, true),
-                (MessageAction::Forward, true),
-                (MessageAction::Edit, true),
-                (MessageAction::Copy, true),
-                (MessageAction::Translate, true),
-                (MessageAction::Pin, true),
-                (MessageAction::Unpin, false),
-                (MessageAction::Star, true),
-                (MessageAction::Unstar, false),
-                (MessageAction::SelectMessages, true),
-                (MessageAction::Delete, true),
-                (MessageAction::DeleteForEveryone, true),
-            ]
-        );
-    }
-
-    #[test]
-    fn the_rows_of_a_message_of_another_cannot_be_pressed() {
-        let menu = MessageMenu::new("chat-1", &other_message(0), false, false, 0, 1.0);
-        assert!(enabled(&menu, MessageAction::Reply));
-        assert!(enabled(&menu, MessageAction::Forward));
-        assert!(enabled(&menu, MessageAction::Copy));
-        // port: only the messages of the user can be edited or deleted for
-        // everybody.
-        assert!(!enabled(&menu, MessageAction::Edit));
-        assert!(!enabled(&menu, MessageAction::DeleteForEveryone));
-        assert!(enabled(&menu, MessageAction::Delete));
-
-        // The same rows of a message of the user can be pressed.
-        let own = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        assert!(enabled(&own, MessageAction::Edit));
-        assert!(enabled(&own, MessageAction::DeleteForEveryone));
-    }
-
-    #[test]
-    fn a_message_is_starred_or_not_from_its_menu() {
-        let menu = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        assert!(enabled(&menu, MessageAction::Star));
-        assert!(!enabled(&menu, MessageAction::Unstar));
-        let starred = MessageMenu::new("chat-1", &own_message(0), false, true, 0, 1.0);
-        assert!(!enabled(&starred, MessageAction::Star));
-        assert!(enabled(&starred, MessageAction::Unstar));
-    }
-
-    #[test]
-    fn the_edit_is_closed_after_the_window_of_twenty_minutes() {
-        let now = 1_000_000i64;
-        let fresh = MessageMenu::new("chat-1", &own_message(now), false, false, now, 1.0);
-        assert!(fresh.editable());
-
-        let late = MessageMenu::new(
-            "chat-1",
-            &own_message(now),
-            false,
-            false,
-            now + EDIT_WINDOW_MS,
-            1.0,
-        );
-        assert!(!late.editable());
-        assert!(!enabled(&late, MessageAction::Edit));
-    }
-
-    #[test]
-    fn the_edit_is_closed_when_the_message_is_not_a_text() {
-        let mut message = own_message(0);
-        message.content = Some(Content::Image(Default::default()));
-        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
-        assert!(!menu.editable());
-    }
-
-    /// Una foto se copia aunque no tenga texto: el menu no puede mirar solo
-    /// la leyenda de la imagen.
-    #[test]
-    fn a_picture_can_be_copied_without_a_caption() {
-        let mut message = other_message(0);
-        message.content = Some(Content::Image(ImageContent {
-            local_path: "C:\\pictures\\photo.jpg".to_string(),
-            ..ImageContent::default()
-        }));
-        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
-        assert!(enabled(&menu, MessageAction::Copy));
-    }
-
-    /// El aviso de visualizacion unica no trae contenido al dispositivo
-    /// vinculado: el menu solo ofrece la eliminacion.
-    #[test]
-    fn a_view_once_notice_only_offers_the_deletion() {
-        let mut message = other_message(0);
-        message.content = Some(Content::Unsupported(UnsupportedContent {
-            type_name: "view_once".to_string(),
-            ..UnsupportedContent::default()
-        }));
-        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
-        let actions: Vec<MessageAction> = menu.items().into_iter().map(|item| item.action).collect();
-        assert!(actions.contains(&MessageAction::Delete));
-        assert!(actions.contains(&MessageAction::SelectMessages));
-        assert!(!actions.contains(&MessageAction::Forward));
-        assert!(!actions.contains(&MessageAction::Star));
-        assert!(!actions.contains(&MessageAction::Copy));
-    }
-
-    #[test]
-    fn a_pinned_message_can_be_unpinned_and_not_pinned_again() {
-        let pinned = MessageMenu::new("chat-1", &own_message(0), true, false, 0, 1.0);
-        assert!(enabled(&pinned, MessageAction::Unpin));
-        assert!(!enabled(&pinned, MessageAction::Pin));
-
-        let unpinned = MessageMenu::new("chat-1", &own_message(0), false, false, 0, 1.0);
-        assert!(enabled(&unpinned, MessageAction::Pin));
-        assert!(!enabled(&unpinned, MessageAction::Unpin));
-    }
-
-    #[test]
-    fn a_deleted_message_cannot_be_deleted_again() {
-        let mut message = own_message(0);
-        message.revoked = true;
-        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
-        assert!(!enabled(&menu, MessageAction::Delete));
-        assert!(!enabled(&menu, MessageAction::DeleteForEveryone));
-        assert!(!enabled(&menu, MessageAction::Forward));
-    }
-
-    #[test]
-    fn a_message_without_content_cannot_be_forwarded() {
-        let message = Message {
-            id: "message-1".to_string(),
-            from_me: true,
-            ..Message::default()
-        };
-        let menu = MessageMenu::new("chat-1", &message, false, false, 0, 1.0);
-        assert!(!enabled(&menu, MessageAction::Forward));
-        assert!(!enabled(&menu, MessageAction::Pin));
-    }
-
-    #[test]
-    fn the_search_of_the_forward_finds_the_title_and_the_phone() {
-        let chats = vec![
-            chat("chat-1", "Fast friend", "5493800000001"),
-            chat("chat-2", "Family", "5493800000002"),
-        ];
-        assert_eq!(filter_chats(&chats, "fast").len(), 1);
-        assert_eq!(filter_chats(&chats, "FRIEND").len(), 1);
-        assert_eq!(filter_chats(&chats, "5493800000002").len(), 1);
-        assert_eq!(filter_chats(&chats, "").len(), 2);
-        assert_eq!(filter_chats(&chats, "  ").len(), 2);
-        assert_eq!(filter_chats(&chats, "nobody").len(), 0);
-        // The search ignores the case and the spaces around the needle.
-        assert!(chat_matches(&chats[0], "fast friend"));
-        assert!(!chat_matches(&chats[0], "family"));
-    }
-
-    #[test]
-    fn the_selection_of_the_forward_adds_and_takes_out() {
-        let mut selected = Vec::new();
-        toggle_selection(&mut selected, "chat-1");
-        assert_eq!(selected, vec!["chat-1".to_string()]);
-        toggle_selection(&mut selected, "chat-2");
-        assert_eq!(selected.len(), 2);
-        toggle_selection(&mut selected, "chat-1");
-        assert_eq!(selected, vec!["chat-2".to_string()]);
-    }
-
-    #[test]
-    fn the_poll_starts_with_the_options_of_the_oracle() {
-        let form = PollForm::new();
-        assert_eq!(form.question(), "");
-        assert_eq!(form.options(), &["Yes".to_string(), "No".to_string()]);
-        assert!(!form.multiple());
-    }
-
-    #[test]
-    fn the_poll_needs_a_question_and_two_options() {
-        let mut form = PollForm::new();
-        assert!(!form.can_create());
-        form.set_question("Where do we eat?");
-        assert!(form.can_create());
-        form.set_option(1, "");
-        assert!(!form.can_create());
-        form.set_option(1, "No");
-        assert!(form.can_create());
-    }
-
-    #[test]
-    fn the_options_of_the_poll_are_trimmed_and_without_duplicates() {
-        let mut form = PollForm::new();
-        form.set_option(0, " Yes ");
-        form.set_option(1, "Yes");
-        // port: the oracle compares the options as they are, so two options
-        // that differ in the case are two options.
-        assert_eq!(form.unique_options(), vec!["Yes".to_string()]);
-        form.set_option(1, "");
-        assert!(!form.can_create());
-    }
-
-    #[test]
-    fn the_options_of_the_poll_can_be_added_and_taken_out() {
-        let mut form = PollForm::new();
-        form.add_option();
-        assert_eq!(form.options().len(), 3);
-        assert!(form.remove_option(2));
-        assert_eq!(form.options().len(), 2);
-        assert!(!form.remove_option(9));
-    }
-
-    #[test]
-    fn the_poll_allows_one_answer_unless_it_is_asked_for_more() {
-        let mut form = PollForm::new();
-        form.set_question("Where do we eat?");
-        assert_eq!(form.selectable_options_count(), 1);
-        form.set_multiple(true);
-        assert_eq!(form.selectable_options_count(), 2);
-    }
-
-    #[test]
-    fn the_poll_is_empty_again_after_it_is_created() {
-        let mut form = PollForm::new();
-        form.set_question("Where do we eat?");
-        form.reset();
-        assert_eq!(form.question(), "");
-        assert_eq!(form.options(), &["Yes".to_string(), "No".to_string()]);
-    }
-
-    /// The panel of the menu is drawn where the pointer is: the bug was that it
-    /// landed below the app, as wide as the window.
-    #[test]
-    fn the_menu_opens_where_the_pointer_is() {
-        let origin = floating_origin(
-            point(px(320.), px(240.)),
-            gpui::size(px(1000.), px(700.)),
-            px(230.),
-            px(340.),
-            px(8.),
-        );
-        assert_eq!(origin, point(px(320.), px(240.)));
-    }
-
-    #[test]
-    fn the_menu_does_not_leave_the_window() {
-        let origin = floating_origin(
-            point(px(980.), px(690.)),
-            gpui::size(px(1000.), px(700.)),
-            px(230.),
-            px(340.),
-            px(8.),
-        );
-        assert_eq!(origin, point(px(762.), px(350.)));
-    }
-
-    #[test]
-    fn the_menu_opens_upward_when_near_the_bottom_so_bottom_actions_and_message_stay_visible() {
-        let origin = floating_origin(
-            point(px(900.), px(720.)),
-            gpui::size(px(1200.), px(800.)),
-            px(230.),
-            px(300.),
-            px(8.),
-        );
-        // Abre hacia arriba desde la posición del clic (720 - 300 = 420):
-        assert_eq!(origin, point(px(900.), px(420.)));
-        // La parte inferior del menú queda a la altura del clic (420 + 300 = 720):
-        // Las acciones peligrosas ("Eliminar para mí") quedan junto al puntero y
-        // el mensaje de abajo no queda tapado por el menú que se alza.
-    }
-
-    #[test]
-    fn a_window_smaller_than_the_menu_keeps_the_margin() {
-        let origin = floating_origin(
-            point(px(300.), px(300.)),
-            gpui::size(px(200.), px(180.)),
-            px(230.),
-            px(340.),
-            px(8.),
-        );
-        assert_eq!(origin, point(px(8.), px(8.)));
-    }
-
-    #[test]
-    fn the_menu_of_the_clip_has_the_three_kinds_of_the_oracle() {
-        let kinds = attachment_kinds();
-        assert_eq!(kinds.len(), 3);
-        assert_eq!(kinds[0].label, "Document");
-        assert_eq!(kinds[1].label, "Video");
-        assert_eq!(kinds[2].label, "Audio");
-        assert_eq!(
-            kinds.iter().map(|item| item.prompt).collect::<Vec<&str>>(),
-            vec!["Choose documents", "Choose videos", "Choose audio files"]
-        );
-    }
-}

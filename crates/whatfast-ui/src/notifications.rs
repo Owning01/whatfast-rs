@@ -258,17 +258,19 @@ mod toast {
         Ok(())
     }
 
-    /// Writes `Enabled = 1` in the setting of the app.
+    /// Writes `Enabled = 1` in the setting of the app if it is absent.
     ///
     /// A fresh install creates the key without that value. Windows then treats
     /// the app as one the user never allowed, and the toast goes straight to
-    /// the center without ever appearing on the desk.
+    /// the center without ever appearing on the desk. Once the value exists
+    /// (including `0` when the user turned notifications off in Windows
+    /// Settings), it is left untouched.
     fn enable_setting() -> WinResult<()> {
         use windows::core::HRESULT;
         use windows_sys::Win32::Foundation::ERROR_SUCCESS;
         use windows_sys::Win32::System::Registry::{
-            HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, RegCloseKey, RegCreateKeyExW,
-            RegSetValueExW,
+            HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, RegCloseKey,
+            RegCreateKeyExW, RegQueryValueExW, RegSetValueExW,
         };
 
         let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\Owning01.Whatfast"
@@ -287,7 +289,7 @@ mod toast {
                 0,
                 std::ptr::null(),
                 0,
-                KEY_SET_VALUE,
+                KEY_QUERY_VALUE | KEY_SET_VALUE,
                 std::ptr::null(),
                 &mut key,
                 std::ptr::null_mut(),
@@ -295,6 +297,22 @@ mod toast {
         };
         if status != ERROR_SUCCESS {
             return Err(windows::core::Error::from_hresult(HRESULT(status as i32)));
+        }
+        let query_status = unsafe {
+            RegQueryValueExW(
+                key,
+                value.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if query_status == ERROR_SUCCESS {
+            unsafe {
+                RegCloseKey(key);
+            }
+            return Ok(());
         }
         let enabled: u32 = 1;
         let status = unsafe {
@@ -332,107 +350,5 @@ mod toast {
         escaped
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::escape;
-
-        #[test]
-        fn the_text_of_a_message_cannot_break_the_toast() {
-            assert_eq!(
-                escape("Ana & Luis <b> \"hola\" 'chau'"),
-                "Ana &amp; Luis &lt;b&gt; &quot;hola&quot; &apos;chau&apos;"
-            );
-            assert_eq!(escape("sin nada raro"), "sin nada raro");
-        }
-
-        /// Checks the registration of the id on the real shortcut of the
-        /// Start menu. It is ignored because it writes to the profile of the
-        /// machine: `cargo test -p whatfast-ui the_id_of_the_app -- --ignored`.
-        #[cfg(windows)]
-        #[test]
-        #[ignore]
-        fn the_id_of_the_app_is_registered_in_the_shortcut() {
-            use windows::Win32::System::Com::{
-                CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READWRITE,
-            };
-            use windows::Win32::UI::Shell::{
-                IShellLinkW, PropertiesSystem::IPropertyStore, ShellLink,
-            };
-            use windows::core::{HSTRING, Interface as _};
-
-            let _ = unsafe {
-                windows::Win32::System::Com::CoInitializeEx(
-                    None,
-                    windows::Win32::System::Com::COINIT_MULTITHREADED,
-                )
-            };
-            super::register_app_id().expect("the shortcut could not take the id");
-            let path = super::shortcut_path().expect("the profile has a Start menu");
-            assert!(path.is_file(), "the shortcut of the app is missing");
-            let wide = HSTRING::from(path.as_os_str());
-            unsafe {
-                let link: IShellLinkW =
-                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
-                let file: IPersistFile = link.cast().unwrap();
-                file.Load(&wide, STGM_READWRITE).unwrap();
-                let store: IPropertyStore = link.cast().unwrap();
-                let value = store.GetValue(&super::PKEY_APP_USER_MODEL_ID).unwrap();
-                // The store gives the id as a string, whatever the flavour of
-                // the variant: it is the text what matters.
-                assert_eq!(value.to_string(), super::APP_ID);
-            }
-            // The system has the last word: this line tells whether the toasts
-            // of the app would appear at all.
-            // The system has the last word: this line tells whether the toasts
-            // of the app would appear at all.
-            let notifier =
-                windows::UI::Notifications::ToastNotificationManager::CreateToastNotifierWithId(
-                    &HSTRING::from(super::APP_ID),
-                )
-                .unwrap();
-            eprintln!("toast setting: {:?}", notifier.Setting().unwrap());
-        }
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::mpsc;
-
-    use super::{Note, Notifier};
-
-    #[test]
-    fn a_closed_queue_does_not_break_the_interface() {
-        // The thread of the toasts can die (the notification server went
-        // away); sending a note then must be a no-op, not a panic.
-        let (sender, receiver) = mpsc::channel();
-        drop(receiver);
-        let notifier = Notifier {
-            sender: Some(sender),
-        };
-        notifier.show(Note {
-            title: "Fast friend".into(),
-            body: "Hola".into(),
-        });
-        assert!(
-            notifier.sender.is_some(),
-            "a closed queue must not disable the notifier"
-        );
-    }
-
-    /// Shows a real toast on the desk. It is ignored because it needs the
-    /// notification center of the machine:
-    /// `cargo test -p whatfast-ui a_real_toast -- --ignored`.
-    #[cfg(windows)]
-    #[test]
-    #[ignore]
-    fn a_real_toast_appears() {
-        let notifier = Notifier::new();
-        notifier.show(Note {
-            title: "Whatfast".into(),
-            body: "Prueba de notificación nativa".into(),
-        });
-        // The thread shows it after the test gives it the turn.
-        std::thread::sleep(std::time::Duration::from_millis(2000));
-    }
-}

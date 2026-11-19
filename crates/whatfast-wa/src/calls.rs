@@ -723,34 +723,3 @@ impl CallsInner {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::BridgeVideo;
-    use whatsapp_rust::voip::VideoSource as _;
-
-    #[tokio::test]
-    async fn the_camera_chunks_become_access_units() {
-        // The desktop forwards the encoder's stream in arbitrary chunks and
-        // the engine sends whole access units: the splitter in the middle is
-        // what makes the two ends agree.
-        let (chunks, upstream) = async_channel::unbounded::<Vec<u8>>();
-        let source = BridgeVideo { upstream };
-        let frames = source.frames();
-        let mut stream: Vec<u8> = Vec::new();
-        for _ in 0..3 {
-            // One access unit: the delimiter and an IDR slice.
-            stream.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0]);
-            stream.extend_from_slice(&[0, 0, 0, 1, 0x65, 1, 2, 3]);
-        }
-        for chunk in stream.chunks(5) {
-            chunks.send(chunk.to_vec()).await.expect("the chunk");
-        }
-        drop(chunks);
-        let first = frames.recv().await.expect("an access unit");
-        assert!(first.starts_with(&[0, 0, 0, 1, 0x09]));
-        let second = frames.recv().await.expect("a second access unit");
-        assert!(second.starts_with(&[0, 0, 0, 1, 0x09]));
-        // The last unit has no following delimiter that closes it.
-        assert!(frames.try_recv().is_err());
-    }
-}

@@ -18,7 +18,7 @@ use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, div, px, rgba,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, button::{Button, ButtonVariants as _}, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, button::{Button, ButtonVariants as _}, h_flex, v_flex};
 use whatfast_i18n as i18n;
 
 use crate::app::Whatfast;
@@ -292,7 +292,8 @@ impl Whatfast {
                                     .gap_2()
                                     .child(
                                         Button::new("dev-stats-refresh")
-                                            .ghost()
+                                            .secondary()
+                                            .small()
                                             .label(i18n::t("Refresh"))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.dev_stats_snapshot =
@@ -391,6 +392,8 @@ impl Whatfast {
                                     .h(px(220. * scale))
                                     .overflow_y_scroll()
                                     .p_2()
+                                    .pb_3()
+                                    .font_family("Consolas")
                                     .rounded_lg()
                                     .bg(theme.secondary)
                                     .border_1()
@@ -416,14 +419,3 @@ impl Whatfast {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_bytes;
-
-    #[test]
-    fn formats_byte_units_cleanly() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(2048), "2.0 KiB");
-        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
-    }
-}

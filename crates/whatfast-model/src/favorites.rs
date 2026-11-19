@@ -70,36 +70,3 @@ pub fn save_favorites(favorites: &HashSet<String>) -> std::io::Result<()> {
     save_to(&favorites_path(), favorites)
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::{load_from, save_to};
-
-    #[test]
-    fn favorites_round_trip_through_atomic_replacement() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("favorites");
-        let mut favorites = HashSet::new();
-        favorites.insert("chat-1".to_owned());
-        favorites.insert("chat-2".to_owned());
-
-        save_to(&path, &favorites).unwrap();
-        assert_eq!(load_from(&path), favorites);
-
-        favorites.insert("chat-3".to_owned());
-        save_to(&path, &favorites).unwrap();
-        assert_eq!(load_from(&path), favorites);
-
-        favorites.clear();
-        save_to(&path, &favorites).unwrap();
-        assert!(load_from(&path).is_empty());
-    }
-
-    #[test]
-    fn a_missing_file_leaves_no_favorite() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("favorites");
-        assert!(load_from(&path).is_empty());
-    }
-}

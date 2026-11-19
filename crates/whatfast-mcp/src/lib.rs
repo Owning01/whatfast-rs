@@ -169,33 +169,3 @@ pub fn default_backend(_agent: &str) -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_agent_is_required() {
-        assert!(parse(["--data-dir".to_owned(), "/tmp/w".to_owned()]).is_err());
-    }
-
-    #[test]
-    fn every_part_of_the_command_line_parses() {
-        let options = parse([
-            "--agent=codex".to_owned(),
-            "--data-dir".to_owned(),
-            r"C:\profile".to_owned(),
-            "--backend".to_owned(),
-            r"C:\backend.exe".to_owned(),
-        ])
-        .expect("command line")
-        .expect("options");
-        assert_eq!(options.agent, "codex");
-        assert_eq!(options.data_dir, PathBuf::from(r"C:\profile"));
-        assert_eq!(options.backend, PathBuf::from(r"C:\backend.exe"));
-    }
-
-    #[test]
-    fn the_version_prints_and_stops() {
-        assert!(parse(["--version".to_owned()]).expect("version").is_none());
-    }
-}

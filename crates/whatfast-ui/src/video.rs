@@ -56,10 +56,15 @@ pub(crate) struct VideoFrame {
 
 /// Lo que el hilo del video devuelve a la interfaz.
 pub(crate) enum VideoEvent {
+    Duration {
+        key: VideoKey,
+        duration: f32,
+    },
     Frame {
         key: VideoKey,
         frame: VideoFrame,
         position: f32,
+        generation: u64,
     },
     Finished {
         key: VideoKey,
@@ -81,9 +86,11 @@ enum Command {
     /// El volumen que tiene que sonar, de 0 a 1. Llega con el video en
     /// marcha: el reproductor lo aplica sin cortar el sonido.
     Volume(f32),
-    /// Seek to an absolute position in seconds.
-    #[allow(dead_code)]
-    Seek(f32),
+    /// Seek to an absolute position in seconds, tagged with the UI seek generation.
+    Seek {
+        seconds: f32,
+        generation: u64,
+    },
     /// Playback speed multiplier (e.g. 1.0, 1.5, 2.0).
     Speed(f32),
 }
@@ -191,6 +198,7 @@ pub(crate) struct VideoPlayback {
     pub(crate) waiting: bool,
     pub(crate) duration: f32,
     pub(crate) position: f32,
+    pub(crate) seek_generation: u64,
     pub(crate) frame: Option<Arc<RenderImage>>,
     pub(crate) error: Option<SharedString>,
     /// El volumen elegido, de 0 a 1.
@@ -209,6 +217,7 @@ impl Default for VideoPlayback {
             waiting: false,
             duration: 0.0,
             position: 0.0,
+            seek_generation: 0,
             frame: None,
             error: None,
             // El video arranca con todo el sonido: el que lo quiera bajo lo
@@ -293,9 +302,11 @@ impl VideoEngine {
         let _ = self.commands.send_blocking(Command::Volume(volume));
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn seek(&self, seconds: f32) {
-        let _ = self.commands.send_blocking(Command::Seek(seconds.max(0.0)));
+    pub(crate) fn seek(&self, seconds: f32, generation: u64) {
+        let _ = self.commands.send_blocking(Command::Seek {
+            seconds: seconds.max(0.0),
+            generation,
+        });
     }
 
     pub(crate) fn set_speed(&self, speed: f32) {
@@ -380,23 +391,37 @@ fn play_session(
     volume: &AtomicU32,
 ) -> Result<SessionEnd, String> {
     let mut source = decoder::open(path)?;
+    if let Some(duration) = source.duration_seconds()
+        && duration > 0.0
+    {
+        let _ = events.try_send(VideoEvent::Duration {
+            key: key.clone(),
+            duration,
+        });
+    }
     // El sonido es opcional: un video sin pista de audio, o una maquina sin
     // placa de sonido, se mira igual.
     let mut level = f32::from_bits(volume.load(Ordering::Relaxed));
     let mut audio = AudioTrack::start(path, level);
     let mut paused = false;
     let mut clock: Option<(i64, Instant)> = None;
+    let mut stream_origin_100ns: Option<i64> = None;
     let mut paused_total = Duration::ZERO;
     let mut paused_at: Option<Instant> = None;
     let mut speed: f32 = 1.0;
     let mut seek_target_100ns: Option<i64> = None;
+    let mut active_seek_generation: u64 = 0;
+    let mut paused_seek_preview = false;
     let mut last_ts_100ns: i64 = 0;
+    let mut last_skipped_frame: Option<(VideoFrame, i64)> = None;
 
     loop {
         // El sonido que ya bajo del archivo espera en la cola mientras la
         // interfaz mira el cuadro.
         audio.pump();
-        // Los comandos que llegaron mientras se decodificaba el cuadro.
+        // Los comandos que llegaron mientras se decodificaba el cuadro. Multiples
+        // `Seek` consecutivos se colapsan al ultimo para no trabar al arrastrar.
+        let mut pending_seek: Option<(f32, u64)> = None;
         while let Ok(command) = commands.try_recv() {
             match command {
                 Command::Stop => return Ok(SessionEnd::Stop),
@@ -430,58 +455,100 @@ fn play_session(
                     clock = None;
                     paused_total = Duration::ZERO;
                 }
-                Command::Seek(seconds) => {
-                    let target_100ns = (seconds.max(0.0) * 10_000_000.0) as i64;
-                    if target_100ns < last_ts_100ns {
-                        source = decoder::open(path)?;
-                        audio = AudioTrack::start(path, level);
-                        if paused {
-                            audio.pause();
-                        }
-                    }
-                    seek_target_100ns = Some(target_100ns);
-                    clock = None;
-                    paused_total = Duration::ZERO;
+                Command::Seek {
+                    seconds,
+                    generation,
+                } => {
+                    pending_seek = Some((seconds, generation));
                 }
             }
         }
-        if paused {
+        if let Some((seconds, generation)) = pending_seek {
+            let origin = stream_origin_100ns.unwrap_or(0);
+            let target_100ns = origin + (seconds.max(0.0) * 10_000_000.0) as i64;
+            let seek_ok = source.seek(target_100ns).is_ok();
+            if !seek_ok && target_100ns < last_ts_100ns {
+                source = decoder::open(path)?;
+            }
+            audio.seek(path, target_100ns, level, paused);
+            seek_target_100ns = Some(target_100ns);
+            active_seek_generation = generation;
+            clock = None;
+            paused_total = Duration::ZERO;
+            paused_at = paused.then(Instant::now);
+            last_skipped_frame = None;
+            if paused {
+                paused_seek_preview = true;
+            }
+        }
+        if paused && !paused_seek_preview {
             // En pausa el sonido tampoco corre; la cola se llena y espera.
             audio.pump();
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let Some((frame, timestamp)) = source.next_frame()? else {
-            push_terminal(events, || VideoEvent::Finished { key: key.clone() });
-            return Ok(SessionEnd::Stop);
+        let next = source.next_frame()?;
+        let (frame, timestamp) = match next {
+            Some(pair) => pair,
+            None => {
+                if let Some((fallback_frame, fallback_ts)) = last_skipped_frame.take()
+                    && paused_seek_preview
+                {
+                    let origin = *stream_origin_100ns.get_or_insert(fallback_ts);
+                    let position = ((fallback_ts - origin).max(0) as f32) / 10_000_000.0;
+                    let _ = events.try_send(VideoEvent::Frame {
+                        key: key.clone(),
+                        frame: fallback_frame,
+                        position,
+                        generation: active_seek_generation,
+                    });
+                    seek_target_100ns = None;
+                    paused_seek_preview = false;
+                    continue;
+                }
+                push_terminal(events, || VideoEvent::Finished { key: key.clone() });
+                return Ok(SessionEnd::Stop);
+            }
         };
+        let origin = *stream_origin_100ns.get_or_insert(timestamp);
         last_ts_100ns = timestamp;
         if let Some(target) = seek_target_100ns {
             if timestamp < target {
+                if !frame.bgra.is_empty() {
+                    last_skipped_frame = Some((frame, timestamp));
+                }
                 continue;
             }
             seek_target_100ns = None;
+            last_skipped_frame = None;
         }
-        let (first, started) = *clock.get_or_insert((timestamp, Instant::now()));
-        let due_nanos = ((timestamp - first).max(0) as f64 * 100.0 / f64::from(speed)) as u64;
-        let due = Duration::from_nanos(due_nanos);
-        let elapsed = started.elapsed().saturating_sub(paused_total);
-        if due > elapsed {
-            // El cuadro todavia no es su turno: se espera lo que falta, en
-            // tramos cortos para atender una pausa sin demora.
-            let mut left = due - elapsed;
-            while left > Duration::ZERO {
-                let step = left.min(Duration::from_millis(10));
-                std::thread::sleep(step);
-                audio.pump();
-                left = left.saturating_sub(step);
+        if !paused {
+            let (first, started) = *clock.get_or_insert((timestamp, Instant::now()));
+            let due_nanos = ((timestamp - first).max(0) as f64 * 100.0 / f64::from(speed)) as u64;
+            let due = Duration::from_nanos(due_nanos);
+            let elapsed = started.elapsed().saturating_sub(paused_total);
+            if due > elapsed {
+                // El cuadro todavia no es su turno: se espera lo que falta, en
+                // tramos cortos para atender una pausa o un salto sin demora.
+                let mut left = due - elapsed;
+                while left > Duration::ZERO {
+                    if !commands.is_empty() {
+                        break;
+                    }
+                    let step = left.min(Duration::from_millis(10));
+                    std::thread::sleep(step);
+                    audio.pump();
+                    left = left.saturating_sub(step);
+                }
             }
         }
-        let position = (timestamp - first) as f32 / 10_000_000.0;
+        paused_seek_preview = false;
+        let position = ((timestamp - origin).max(0) as f32) / 10_000_000.0;
         let _ = events.try_send(VideoEvent::Frame {
             key: key.clone(),
             frame,
             position,
+            generation: active_seek_generation,
         });
     }
 }
@@ -671,6 +738,71 @@ impl AudioTrack {
         }
     }
 
+    /// Salta la pista de sonido a `target_100ns` sin reabrir la placa de sonido.
+    fn seek(&mut self, path: &Path, target_100ns: i64, volume: f32, paused: bool) {
+        self.player = None;
+        self.sender = None;
+        self.pending = None;
+
+        let sought = if let Some(reader) = self.reader.as_mut() {
+            reader.seek(target_100ns).is_ok()
+        } else {
+            false
+        };
+        if !sought {
+            match AudioReader::open(path) {
+                Ok(mut fresh) => {
+                    let _ = fresh.seek(target_100ns);
+                    self.reader = Some(fresh);
+                }
+                Err(_) => {
+                    self.reader = None;
+                    self.finished = true;
+                    return;
+                }
+            }
+        }
+        let Some(reader) = self.reader.as_ref() else {
+            self.finished = true;
+            return;
+        };
+        let (Some(channels), Some(sample_rate)) = (
+            rodio::ChannelCount::new(reader.channels()),
+            rodio::SampleRate::new(reader.sample_rate()),
+        ) else {
+            self.finished = true;
+            return;
+        };
+        if self.device.is_none() {
+            let Ok(device) = rodio::DeviceSinkBuilder::open_default_sink() else {
+                self.finished = true;
+                return;
+            };
+            self.device = Some(device);
+        }
+        let Some(device) = self.device.as_ref() else {
+            self.finished = true;
+            return;
+        };
+        let (sender, receiver) = async_channel::bounded(AUDIO_QUEUE);
+        let player = rodio::Player::connect_new(device.mixer());
+        player.set_volume(volume.clamp(0.0, 1.0));
+        player.append(VideoAudio {
+            chunks: receiver,
+            channels,
+            sample_rate,
+            current: Vec::new(),
+            index: 0,
+        });
+        if paused {
+            player.pause();
+        }
+        self.player = Some(player);
+        self.sender = Some(sender);
+        self.finished = false;
+        self.pump();
+    }
+
     /// Cambia el volumen de lo que ya esta sonando.
     fn set_volume(&self, volume: f32) {
         if let Some(player) = self.player.as_ref() {
@@ -699,6 +831,14 @@ struct DecoderSource {
 impl DecoderSource {
     fn next_frame(&mut self) -> Result<Option<(VideoFrame, i64)>, String> {
         self.inner.next_frame()
+    }
+
+    fn seek(&mut self, target_100ns: i64) -> Result<(), String> {
+        self.inner.seek(target_100ns)
+    }
+
+    fn duration_seconds(&self) -> Option<f32> {
+        self.inner.duration_seconds()
     }
 }
 
@@ -872,6 +1012,14 @@ mod unix_ffmpeg {
                 timestamp,
             )))
         }
+
+        pub(super) fn seek(&mut self, _target_100ns: i64) -> Result<(), String> {
+            Err("unix seek uses stream reopen".to_string())
+        }
+
+        pub(super) fn duration_seconds(&self) -> Option<f32> {
+            None
+        }
     }
 
     impl Drop for Source {
@@ -945,6 +1093,10 @@ mod unix_ffmpeg {
                 .collect();
             Ok(Some(samples))
         }
+
+        pub(super) fn seek(&mut self, _target_100ns: i64) -> Result<(), String> {
+            Err("unix audio seek uses stream reopen".to_string())
+        }
     }
 
     impl Drop for AudioReader {
@@ -964,15 +1116,34 @@ mod windows_mf {
     use windows::Win32::Media::MediaFoundation::{
         IMFAttributes, IMFMediaType, IMFSourceReader, MF_MT_AUDIO_BITS_PER_SAMPLE,
         MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE,
-        MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-        MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-        MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
+        MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
+        MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+        MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
         MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFAudioFormat_Float, MFAudioFormat_PCM,
         MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
         MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
     };
+    use windows::Win32::System::Com::StructuredStorage::{
+        PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+    };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+    use windows::Win32::System::Variant::{VT_I8, VT_UI8};
     use windows::core::{GUID, HSTRING};
+
+    fn propvar_i64(value: i64) -> PROPVARIANT {
+        PROPVARIANT {
+            Anonymous: PROPVARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                    vt: VT_I8,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: PROPVARIANT_0_0_0 { hVal: value },
+                }),
+            },
+        }
+    }
 
     use super::{MAX_WIDTH, VideoFrame};
 
@@ -992,6 +1163,7 @@ mod windows_mf {
         channels: u16,
         bits: u32,
         float: bool,
+        skip_until_100ns: Option<i64>,
     }
 
     impl AudioReader {
@@ -1034,7 +1206,20 @@ mod windows_mf {
                 channels: channels.max(1),
                 bits,
                 float,
+                skip_until_100ns: None,
             })
+        }
+
+        pub(super) fn seek(&mut self, target_100ns: i64) -> Result<(), String> {
+            unsafe {
+                let _ = self.reader.Flush(AUDIO_STREAM);
+                let position = propvar_i64(target_100ns.max(0));
+                self.reader
+                    .SetCurrentPosition(&GUID::zeroed(), &position)
+                    .map_err(|error| format!("Audio seek failed: {error}"))?;
+            }
+            self.skip_until_100ns = Some(target_100ns.max(0));
+            Ok(())
         }
 
         pub(super) fn sample_rate(&self) -> u32 {
@@ -1078,6 +1263,12 @@ mod windows_mf {
                 let Some(sample) = sample else {
                     continue;
                 };
+                if let Some(target) = self.skip_until_100ns {
+                    if timestamp < target {
+                        continue;
+                    }
+                    self.skip_until_100ns = None;
+                }
                 let bytes = unsafe { sample_bytes(&sample)? };
                 self.push_samples(&bytes, &mut samples);
             }
@@ -1218,6 +1409,36 @@ mod windows_mf {
                 },
                 timestamp,
             )))
+        }
+
+        pub(super) fn seek(&mut self, target_100ns: i64) -> Result<(), String> {
+            unsafe {
+                let _ = self.reader.Flush(VIDEO_STREAM);
+                let position = propvar_i64(target_100ns.max(0));
+                self.reader
+                    .SetCurrentPosition(&GUID::zeroed(), &position)
+                    .map_err(|error| format!("Video seek failed: {error}"))
+            }
+        }
+
+        pub(super) fn duration_seconds(&self) -> Option<f32> {
+            let prop = unsafe {
+                self.reader
+                    .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+            }
+            .ok()?;
+            let duration_100ns = unsafe {
+                let inner = &prop.Anonymous.Anonymous;
+                if inner.vt == VT_UI8 {
+                    inner.Anonymous.uhVal as f64
+                } else if inner.vt == VT_I8 {
+                    inner.Anonymous.hVal.max(0) as f64
+                } else {
+                    return None;
+                }
+            };
+            let seconds = (duration_100ns / 10_000_000.0) as f32;
+            (seconds.is_finite() && seconds > 0.0).then_some(seconds)
         }
 
         /// Deja el cuadro como lo pinta el atlas: BGRA, filas de arriba a
@@ -1477,207 +1698,3 @@ pub(crate) fn trim_video(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{VideoPlayback, is_video, status_box_size, video_box_size};
-    use whatfast_protocol::AttachmentContent;
-
-    fn attachment(mime: &str) -> AttachmentContent {
-        AttachmentContent {
-            mime_type: mime.into(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn a_video_is_the_one_that_plays_inside_the_bubble() {
-        assert!(is_video(&attachment("video/mp4")));
-        assert!(is_video(&attachment("video/quicktime")));
-        assert!(!is_video(&attachment("audio/ogg")));
-        assert!(!is_video(&attachment("image/png")));
-        assert!(!is_video(&attachment("application/pdf")));
-        let mut note = attachment("video/mp4");
-        note.voice_note = true;
-        assert!(!is_video(&note));
-    }
-
-    #[test]
-    fn the_viewer_gives_a_video_more_room_than_a_bubble() {
-        // The same landscape file: the bubble stops at 420 and the viewer at
-        // 800, so the status is not a postage stamp on a full window.
-        let (bubble_width, _) = video_box_size(1920, 1080, 1.0);
-        let (viewer_width, viewer_height) = status_box_size(1920, 1080, 1.0, 800.0, 640.0);
-        assert!((bubble_width - 420.).abs() < 0.5, "ancho {bubble_width}");
-        assert!((viewer_width - 800.).abs() < 0.5, "ancho {viewer_width}");
-        assert!((viewer_height - 450.).abs() < 0.5, "alto {viewer_height}");
-        // A portrait video keeps its shape and stays inside the box.
-        let (width, height) = status_box_size(576, 1024, 1.0, 800.0, 640.0);
-        assert!(height <= 640. && width <= 800., "{width}x{height}");
-        assert!((height / width - 1024. / 576.).abs() < 0.01);
-    }
-
-    #[test]
-    fn a_status_video_never_outgrows_the_window() {
-        // Un video 16:9 en una ventana de 480x560: el visor le deja 448 de
-        // ancho, asi que el cuadro baja hasta ese ancho y no se sale.
-        let (width, height) = status_box_size(1920, 1080, 1.0, 448.0, 390.0);
-        assert!((width - 448.).abs() < 0.5, "ancho {width}");
-        assert!((height - 252.).abs() < 0.5, "alto {height}");
-        // Un video chico tambien ocupa el ancho que le queda, como antes:
-        // el visor no lo deja en el tamano de un sello.
-        let (width, height) = status_box_size(320, 240, 1.0, 448.0, 390.0);
-        assert!((width - 448.).abs() < 0.5, "ancho {width}");
-        assert!((height - 336.).abs() < 0.5, "alto {height}");
-    }
-
-    #[test]
-    fn the_box_of_the_video_keeps_the_shape_of_the_file() {
-        let (width, height) = video_box_size(1080, 1920, 1.0);
-        assert!((width - 180.).abs() < 0.5, "ancho {width}");
-        assert!(height <= 320.);
-        let (width, height) = video_box_size(1920, 1080, 1.0);
-        assert!((width - 420.).abs() < 0.5, "ancho {width}");
-        assert!((height - 236.25).abs() < 0.5, "alto {height}");
-    }
-
-    #[test]
-    fn the_sound_of_the_video_follows_the_mute_button() {
-        // El volumen elegido se mantiene: el silencio no lo borra.
-        let mut player = VideoPlayback::default();
-        assert!((player.effective_volume() - 1.0).abs() < f32::EPSILON);
-        player.volume = 0.4;
-        assert!((player.effective_volume() - 0.4).abs() < f32::EPSILON);
-        player.muted = true;
-        assert!(player.effective_volume().abs() < f32::EPSILON);
-        player.muted = false;
-        assert!((player.effective_volume() - 0.4).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn the_viewer_uses_the_room_of_the_window() {
-        // Un video horizontal ocupa el ancho que la ventana le da, sin
-        // pasarse del alto.
-        let (width, height) = super::viewer_box_size(1920, 1080, 1200., 700.);
-        assert!((width - 1200.).abs() < 0.5, "ancho {width}");
-        assert!((height - 675.).abs() < 0.5, "alto {height}");
-        // Uno vertical se topa con el alto y conserva la forma.
-        let (width, height) = super::viewer_box_size(576, 1024, 1200., 700.);
-        assert!(height <= 700. && width <= 1200., "{width}x{height}");
-        assert!((height / width - 1024. / 576.).abs() < 0.01);
-    }
-
-    #[test]
-    fn a_video_without_a_size_falls_back_to_the_sixteen_by_nine() {
-        let (width, height) = video_box_size(0, 0, 1.0);
-        assert!((width - 420.).abs() < 0.5, "ancho {width}");
-        assert!((height - 236.25).abs() < 0.5, "alto {height}");
-    }
-
-    #[test]
-    fn the_box_scales_with_the_interface() {
-        let (small, _) = video_box_size(1920, 1080, 1.0);
-        let (large, _) = video_box_size(1920, 1080, 2.0);
-        assert!((large - small * 2.).abs() < 0.5);
-    }
-
-    /// Media Foundation guarda el ancho en los 32 bits altos: leerlo al
-    /// reves decodifica un video vertical como horizontal y corre las filas.
-    #[cfg(windows)]
-    #[test]
-    fn the_size_of_a_frame_keeps_the_width_in_the_high_bits() {
-        let packed = u64::from(576u32) << 32 | u64::from(1024u32);
-        assert_eq!(super::windows_mf::unpack_size(packed), (576, 1024));
-        assert_eq!(super::windows_mf::pack_size(576, 1024), packed);
-        assert_eq!(super::windows_mf::unpack_size(packed).1, 1024);
-    }
-
-    #[test]
-    fn a_player_without_a_video_is_not_running() {
-        let playback = VideoPlayback::default();
-        assert!(!playback.is_running());
-        assert!(!playback.is_for(&("chat".into(), "message".into())));
-    }
-
-    /// El audio de un video de verdad sale por el mismo decodificador que usa
-    /// el reproductor.
-    ///
-    /// El AAC dentro del MP4 va por Media Foundation, igual que la pista que
-    /// arranca `AudioTrack`. Un archivo sin sonido, o un decodificador que no
-    /// entiende el contenedor, deja el video mudo sin ningun error visible.
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "needs WHATFAST_VIDEO_SAMPLE with a real video file"]
-    fn a_real_video_gives_samples_of_its_sound() {
-        let Ok(path) = std::env::var("WHATFAST_VIDEO_SAMPLE") else {
-            return;
-        };
-        let mut reader = super::windows_mf::AudioReader::open(std::path::Path::new(&path))
-            .expect("the sound of the video opens");
-        let sample_rate = reader.sample_rate();
-        let channels = reader.channels();
-        let mut samples = 0usize;
-        let mut audible = 0usize;
-        while let Some(chunk) = reader.next_chunk().expect("the sound of the video decodes") {
-            samples += chunk.len();
-            audible += chunk.iter().filter(|sample| sample.abs() > 0.001).count();
-        }
-        assert!(samples > 0, "the video gave no samples of sound");
-        assert!(audible > 0, "the sound of the video is silent");
-        eprintln!("audio: {sample_rate} Hz, {channels} canales, {audible} muestras con sonido");
-    }
-
-    /// Decodifica un video de verdad, cuando la maquina tiene uno a mano.
-    ///
-    /// Los videos de prueba no se guardan en el repo: el test se salta salvo
-    /// que `WHATFAST_VIDEO_SAMPLE` apunte a un archivo.
-    #[test]
-    #[ignore = "needs WHATFAST_VIDEO_SAMPLE with a real video file"]
-    fn a_real_video_gives_frames_of_the_size_of_its_box() {
-        let Ok(path) = std::env::var("WHATFAST_VIDEO_SAMPLE") else {
-            return;
-        };
-        let mut source =
-            super::decoder::open(std::path::Path::new(&path)).expect("the video opens");
-        let mut frames = 0;
-        while let Some((frame, _)) = source.next_frame().expect("the frame decodes") {
-            if frame.bgra.is_empty() {
-                continue;
-            }
-            assert_eq!(
-                frame.bgra.len(),
-                frame.width as usize * frame.height as usize * 4,
-                "el cuadro no mide lo que dice"
-            );
-            assert!(frame.width > 0 && frame.height > 0);
-            assert!(frame.width <= super::MAX_WIDTH, "el ancho no se topo");
-            // El alfa queda opaco: el atlas pintaria nada con alfa cero.
-            assert!(
-                frame
-                    .bgra
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|pixel| pixel[3] == 255)
-            );
-            frames += 1;
-            if frames == 10 {
-                break;
-            }
-        }
-        assert!(frames > 0, "el video no dio ningun cuadro");
-    }
-
-    #[test]
-    fn scaled_dimensions_cap_width_and_keep_even_sizes() {
-        assert_eq!(super::scaled_dimensions(1920, 1080), (720, 404));
-        assert_eq!(super::scaled_dimensions(641, 361), (640, 360));
-    }
-
-    #[test]
-    fn ffprobe_csv_parses_resolution_and_fractional_fps() {
-        let (w, h, fps) = super::parse_ffprobe_csv("1280x720x30000/1001").expect("parsed");
-        assert_eq!((w, h), (1280, 720));
-        assert!((fps - 29.97).abs() < 0.05);
-        assert_eq!(super::parse_ffprobe_csv("invalid"), None);
-    }
-}

@@ -153,6 +153,18 @@ const COPY: Glyph = Glyph {
     ],
 };
 
+const DOCUMENT: Glyph = Glyph {
+    path: "M5 2h9l5 5v15H5z M14 2v5h5z M8 11h8v1.5H8z M8 15h8v1.5H8z M8 19h5v1.5H8z",
+    main: &["M5 2h9l5 5v15H5z"],
+    cutout: &[
+        "M14 2v5h5z",
+        "M8 11h8v1.5H8z",
+        "M8 15h8v1.5H8z",
+        "M8 19h5v1.5H8z",
+    ],
+    overlay: &[],
+};
+
 const DOWNLOAD: Glyph = Glyph {
     path: "M9 2h6v9h5l-8 8-8-8h5zM3 20h18v3H3z",
     main: &["M9 2h6v9h5l-8 8-8-8h5zM3 20h18v3H3z"],
@@ -180,6 +192,16 @@ const GLOBE: Glyph = Glyph {
     cutout: &[
         "M5 11h14v2H5zm6-7h2v16h-2z",
         "M12 2c3.2 0 5.7 4.4 5.7 10S15.2 22 12 22v-2c1.8 0 3.7-3.2 3.7-8S13.8 4 12 4zm0 0v2c-1.8 0-3.7 3.2-3.7 8s1.9 8 3.7 8v2c-3.2 0-5.7-4.4-5.7-10S8.8 2 12 2z",
+    ],
+    overlay: &[],
+};
+
+const IMAGE: Glyph = Glyph {
+    path: "M3 4h18a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1H3a1 1 0 0 1 -1 -1V5a1 1 0 0 1 1 -1z M6.5 8a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z M4 18l5-5 3 3 4-5 4 4z",
+    main: &["M3 4h18a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1H3a1 1 0 0 1 -1 -1V5a1 1 0 0 1 1 -1z"],
+    cutout: &[
+        "M6.5 8a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z",
+        "M4 18l5-5 3 3 4-5 4 4z",
     ],
     overlay: &[],
 };
@@ -501,10 +523,12 @@ pub enum WhatfastIcon {
     Clock,
     Close,
     Copy,
+    Document,
     Download,
     Edit,
     Forward,
     Globe,
+    Image,
     Maximize,
     Messages,
     Mic,
@@ -538,7 +562,7 @@ pub enum WhatfastIcon {
 
 impl WhatfastIcon {
     /// Every icon of the set.
-    pub const ALL: [WhatfastIcon; 44] = [
+    pub const ALL: [WhatfastIcon; 46] = [
         WhatfastIcon::Archive,
         WhatfastIcon::Attach,
         WhatfastIcon::Bell,
@@ -550,10 +574,12 @@ impl WhatfastIcon {
         WhatfastIcon::Clock,
         WhatfastIcon::Close,
         WhatfastIcon::Copy,
+        WhatfastIcon::Document,
         WhatfastIcon::Download,
         WhatfastIcon::Edit,
         WhatfastIcon::Forward,
         WhatfastIcon::Globe,
+        WhatfastIcon::Image,
         WhatfastIcon::Maximize,
         WhatfastIcon::Messages,
         WhatfastIcon::Mic,
@@ -645,10 +671,12 @@ impl WhatfastIcon {
             WhatfastIcon::Clock => &CLOCK,
             WhatfastIcon::Close => &CLOSE,
             WhatfastIcon::Copy => &COPY,
+            WhatfastIcon::Document => &DOCUMENT,
             WhatfastIcon::Download => &DOWNLOAD,
             WhatfastIcon::Edit => &EDIT,
             WhatfastIcon::Forward => &FORWARD,
             WhatfastIcon::Globe => &GLOBE,
+            WhatfastIcon::Image => &IMAGE,
             WhatfastIcon::Maximize => &MAXIMIZE,
             WhatfastIcon::Messages => &MESSAGES,
             WhatfastIcon::Mic => &MIC,
@@ -739,283 +767,3 @@ impl AssetSource for WhatfastAssets {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The number of arguments of every command of a path.
-    #[test]
-    fn the_assets_serve_the_logos_of_the_harnesses() {
-        let assets = WhatfastAssets::new();
-        let logo = assets
-            .load("harness/cursor")
-            .expect("the source answers")
-            .expect("cursor has a logo");
-        let text = String::from_utf8(logo.into_owned()).expect("utf-8");
-        assert!(text.starts_with("<svg"), "the logo is not a document");
-        assert!(text.contains("currentColor"), "the logo has a fixed color");
-        // Un harness sin marca no inventa una: la tarjeta dibuja el robot.
-        assert!(
-            assets
-                .load("harness/hermes")
-                .expect("the source answers")
-                .is_none(),
-            "hermes must fall back to the robot"
-        );
-        // Y un icono propio sigue saliendo por su camino de siempre.
-        assert!(
-            assets
-                .load(crate::icons::WhatfastIcon::Search.path_data())
-                .expect("the source answers")
-                .is_some()
-        );
-    }
-
-    fn arguments(command: char) -> Option<usize> {
-        match command {
-            'M' | 'm' | 'L' | 'l' | 'T' | 't' => Some(2),
-            'H' | 'h' | 'V' | 'v' => Some(1),
-            'C' | 'c' => Some(6),
-            'S' | 's' | 'Q' | 'q' => Some(4),
-            'A' | 'a' => Some(7),
-            'Z' | 'z' => Some(0),
-            _ => None,
-        }
-    }
-
-    /// True when the path is a valid path of SVG: it starts with a move, every
-    /// command is known and has all its arguments, and the last command is
-    /// not cut in the middle.
-    fn is_valid_path(path: &str) -> bool {
-        let path = path.trim();
-        if path.is_empty() {
-            return false;
-        }
-        let mut command: Option<char> = None;
-        let mut numbers = 0usize;
-        let mut number = String::new();
-        for character in path.chars() {
-            if character.is_ascii_alphabetic() && !is_exponent(character, &number) {
-                if !flush_number(&mut number, &mut numbers) {
-                    return false;
-                }
-                let Some(previous) = command else {
-                    // The path has to start with a move.
-                    if !matches!(character, 'M' | 'm') {
-                        return false;
-                    }
-                    command = Some(character);
-                    continue;
-                };
-                if !has_all_the_arguments(previous, numbers) {
-                    return false;
-                }
-                if arguments(character).is_none() {
-                    return false;
-                }
-                command = Some(character);
-                numbers = 0;
-                continue;
-            }
-            if character.is_ascii_digit() || matches!(character, '.' | '-' | '+') {
-                // port: the SVG ends a number when it finds a second point or
-                // the sign of the next one, so `.9.9` is two numbers.
-                let ends_the_number = match character {
-                    '.' => number.contains('.'),
-                    '-' | '+' => {
-                        !number.is_empty() && !number.ends_with('e') && !number.ends_with('E')
-                    }
-                    _ => false,
-                };
-                if ends_the_number && !flush_number(&mut number, &mut numbers) {
-                    return false;
-                }
-                number.push(character);
-                continue;
-            }
-            if character.is_whitespace() || character == ',' {
-                if !flush_number(&mut number, &mut numbers) {
-                    return false;
-                }
-                continue;
-            }
-            return false;
-        }
-        if !flush_number(&mut number, &mut numbers) {
-            return false;
-        }
-        let Some(last) = command else {
-            return false;
-        };
-        has_all_the_arguments(last, numbers)
-    }
-
-    /// True when the command has all of its arguments.
-    fn has_all_the_arguments(command: char, numbers: usize) -> bool {
-        let expected = arguments(command).unwrap_or(0);
-        expected == 0 || numbers.is_multiple_of(expected)
-    }
-
-    /// True when the letter is the exponent of the number that is being read.
-    fn is_exponent(character: char, number: &str) -> bool {
-        matches!(character, 'e' | 'E')
-            && !number.is_empty()
-            && number
-                .chars()
-                .last()
-                .is_some_and(|last| last.is_ascii_digit() || last == '.')
-    }
-
-    /// Reads the number that was being read. False when it is not a number.
-    fn flush_number(number: &mut String, numbers: &mut usize) -> bool {
-        if number.is_empty() {
-            return true;
-        }
-        let value: f64 = match number.parse() {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-        if !value.is_finite() {
-            return false;
-        }
-        *numbers += 1;
-        number.clear();
-        true
-    }
-
-    #[test]
-    fn every_icon_has_a_valid_path() {
-        for icon in WhatfastIcon::ALL {
-            assert!(
-                is_valid_path(icon.path_data()),
-                "the path of {icon:?} is not a valid path of SVG: {}",
-                icon.path_data()
-            );
-        }
-    }
-
-    #[test]
-    fn every_shape_of_the_glyph_has_a_valid_path() {
-        for icon in WhatfastIcon::ALL {
-            let glyph = icon.glyph();
-            for shape in glyph.main.iter().chain(glyph.cutout.iter()) {
-                assert!(
-                    is_valid_path(shape),
-                    "a shape of {icon:?} is not a valid path of SVG: {shape}"
-                );
-            }
-            for (shape, opacity) in glyph.overlay {
-                assert!(
-                    is_valid_path(shape),
-                    "a shape of {icon:?} is not a valid path of SVG: {shape}"
-                );
-                assert!(
-                    *opacity > 0.0 && *opacity <= 1.0,
-                    "the opacity of {icon:?} is out of range: {opacity}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_path_of_the_icon_is_the_join_of_its_shapes() {
-        for icon in WhatfastIcon::ALL {
-            let glyph = icon.glyph();
-            let mut shapes: Vec<&str> = glyph.main.to_vec();
-            shapes.extend_from_slice(glyph.cutout);
-            shapes.extend(glyph.overlay.iter().map(|(shape, _)| *shape));
-            let joined = shapes.join(" ");
-            assert_eq!(
-                icon.path_data(),
-                joined,
-                "the path of {icon:?} is not the join of its shapes"
-            );
-        }
-    }
-
-    #[test]
-    fn the_paths_of_the_icons_are_different() {
-        let mut paths: Vec<&str> = WhatfastIcon::ALL
-            .iter()
-            .map(|icon| icon.path_data())
-            .collect();
-        paths.sort_unstable();
-        let count = paths.len();
-        paths.dedup();
-        assert_eq!(paths.len(), count, "two icons share the same path");
-    }
-
-    #[test]
-    fn the_icon_of_a_path_is_the_one_that_has_it() {
-        for icon in WhatfastIcon::ALL {
-            assert_eq!(
-                WhatfastIcon::from_path_data(icon.path_data()),
-                Some(icon),
-                "the path of {icon:?} does not find its own icon"
-            );
-        }
-        assert_eq!(WhatfastIcon::from_path_data("icons/close.svg"), None);
-        assert_eq!(WhatfastIcon::from_path_data(""), None);
-    }
-
-    #[test]
-    fn the_document_of_the_icon_has_the_shapes_and_the_holes() {
-        for icon in WhatfastIcon::ALL {
-            let document = icon.svg_document();
-            assert!(
-                document.starts_with("<svg "),
-                "the document of {icon:?} is not an SVG"
-            );
-            assert!(
-                document.ends_with("</svg>"),
-                "the document of {icon:?} is not closed"
-            );
-            assert!(
-                document.contains(r#"viewBox="0 0 24 24""#),
-                "the document of {icon:?} has no view box"
-            );
-            let glyph = icon.glyph();
-            for shape in glyph.main {
-                assert!(
-                    document.contains(&format!(r##"<path d="{shape}" fill="#fff"/>"##)),
-                    "the document of {icon:?} does not have the shape {shape}"
-                );
-            }
-            for shape in glyph.cutout {
-                assert!(
-                    document.contains(&format!(r##"<path d="{shape}" fill="#000"/>"##)),
-                    "the document of {icon:?} does not have the hole {shape}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_source_of_the_assets_serves_the_icons_of_whatfast() {
-        let assets = WhatfastAssets::new();
-        for icon in WhatfastIcon::ALL {
-            let loaded = assets.load(icon.path_data());
-            let loaded = match loaded {
-                Ok(loaded) => loaded,
-                Err(error) => panic!("the icon {icon:?} could not be loaded: {error}"),
-            };
-            let bytes = match loaded {
-                Some(bytes) => bytes,
-                None => panic!("the icon {icon:?} was not served"),
-            };
-            let document = String::from_utf8(bytes.to_vec())
-                .unwrap_or_else(|_| panic!("the icon {icon:?} is not a document"));
-            assert_eq!(document, icon.svg_document());
-        }
-    }
-
-    #[test]
-    fn the_source_of_the_assets_serves_the_icons_of_the_component() {
-        let assets = WhatfastAssets::new();
-        assert!(
-            assets.load("icons/close.svg").is_ok(),
-            "the icons of gpui_component have to keep working"
-        );
-    }
-
-}

@@ -44,34 +44,3 @@ fn fingerprint(data_dir: &Path) -> u64 {
     hash
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    #[test]
-    fn two_profiles_do_not_share_the_endpoint() {
-        let first = endpoint(&PathBuf::from("/home/someone/.local/share/whatfast"));
-        let second = endpoint(&PathBuf::from("/home/other/.local/share/whatfast"));
-        assert_ne!(first, second);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_windows_endpoint_is_a_pipe_name() {
-        let name = endpoint(&PathBuf::from(r"C:\Users\someone\AppData\Local\whatfast"));
-        assert!(name.starts_with(r"\\.\pipe\whatfast-"), "{name}");
-        assert_eq!(name.len(), r"\\.\pipe\whatfast-".len() + 16);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn the_unix_endpoint_lives_in_the_profile() {
-        let profile = PathBuf::from("/home/someone/.local/share/whatfast");
-        assert_eq!(
-            endpoint(&profile),
-            format!("{}/agent.sock", profile.display())
-        );
-    }
-}

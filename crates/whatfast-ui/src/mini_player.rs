@@ -40,9 +40,13 @@ impl Whatfast {
         let (chat_id, is_voice, paused, speed) = voice_other.or(video_other)?;
         let progress = if is_voice && self.voice.duration > 0.0 {
             (self.voice.position() / self.voice.duration).clamp(0.0, 1.0)
+        } else if !is_voice && self.video.duration > 0.0 {
+            (self.video.position / self.video.duration).clamp(0.0, 1.0)
         } else {
             0.0
         };
+        let has_progress = (is_voice && self.voice.duration > 0.0)
+            || (!is_voice && self.video.duration > 0.0);
         let title = self
             .store
             .chats
@@ -70,7 +74,7 @@ impl Whatfast {
                 .gap_2()
                 .items_center()
                 .bg(theme.secondary)
-                .when(is_voice && self.voice.duration > 0.0, |bar| {
+                .when(has_progress, |bar| {
                     bar.child(
                         div()
                             .absolute()

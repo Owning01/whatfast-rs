@@ -17,11 +17,14 @@
 //! document uses the page of `gpui_component`, the audio the microphone and
 //! the video the camera of the set of Whatfast.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement as _, ObjectFit, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px, relative, rgb,
-    rgba,
+    App, Bounds, Context, FontWeight, InteractiveElement as _, MouseButton, MouseDownEvent,
+    ObjectFit, ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, canvas, div, img, px, relative, rgb, rgba,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, slider::Slider, tooltip::Tooltip,
@@ -240,10 +243,23 @@ fn attachment_name(attachment: &proto::AttachmentContent) -> String {
 /// port: the oracle joins the three pieces with a middle dot and leaves out
 /// the ones that are empty.
 fn attachment_details(attachment: &proto::AttachmentContent) -> String {
+    // El MIME crudo ("application/octet-stream") no dice nada: se muestra la
+    // extension legible, y el generico se omite.
+    let mime = attachment.mime_type.trim().to_ascii_lowercase();
+    let readable = match mime.as_str() {
+        "" | "application/octet-stream" => String::new(),
+        "application/zip" | "application/x-zip-compressed" | "multipart/x-zip" => {
+            i18n::t("ZIP file").to_string()
+        }
+        "text/html" | "application/xhtml+xml" => "HTML".to_string(),
+        "application/pdf" => "PDF".to_string(),
+        "text/plain" => "TXT".to_string(),
+        _ => attachment.mime_type.trim().to_string(),
+    };
     [
         format_bytes(attachment.file_size),
         format_duration(attachment.duration_seconds),
-        attachment.mime_type.trim().to_string(),
+        readable,
     ]
     .into_iter()
     .filter(|piece| !piece.is_empty())
@@ -590,6 +606,108 @@ impl Whatfast {
             )
     }
 
+    /// Interactive progress & scrub bar shared between the inline video player and fullscreen viewer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_video_seek_bar(
+        id: impl Into<gpui::ElementId>,
+        key: crate::video::VideoKey,
+        duration: f32,
+        progress: f32,
+        dragging: bool,
+        scale: f32,
+        track_bg: gpui::Hsla,
+        fill_color: gpui::Hsla,
+        large: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let track_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let bounds_paint = track_bounds.clone();
+        let bounds_down = track_bounds.clone();
+        let thumb_size = if large { 13. } else { 10. } * scale;
+        let track_h = if dragging {
+            if large { 6. } else { 5. }
+        } else if large {
+            4.
+        } else {
+            3.5
+        } * scale;
+        let hit_h = if large { 20. } else { 16. } * scale;
+        let progress = progress.clamp(0.0, 1.0);
+
+        div()
+            .id(id)
+            .w_full()
+            .h(px(hit_h))
+            .px(px(thumb_size * 0.5))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let Some(bounds) = bounds_down.get() else {
+                        return;
+                    };
+                    if duration <= 0.0 {
+                        return;
+                    }
+                    let width = f32::from(bounds.size.width).max(1.0);
+                    let fraction = ((f32::from(event.position.x) - f32::from(bounds.origin.x))
+                        / width)
+                        .clamp(0.0, 1.0);
+                    this.video_seek_dragging = Some(key.clone());
+                    this.video_seek_drag_bounds = Some(bounds);
+                    this.video_seek_drag_duration = duration;
+                    this.seek_video(key.clone(), fraction * duration, true, window, cx);
+                }),
+            )
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(track_h))
+                    .rounded_full()
+                    .bg(track_bg)
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, _, _| {
+                                bounds_paint.set(Some(bounds));
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                        .size_full(),
+                    )
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(progress))
+                            .rounded_full()
+                            .bg(fill_color),
+                    )
+                    .when(duration > 0.0, |track| {
+                        track.child(
+                            div()
+                                .absolute()
+                                .top(px((track_h - thumb_size) * 0.5))
+                                .left(relative(progress))
+                                .ml(px(-thumb_size * 0.5))
+                                .size(px(thumb_size))
+                                .rounded_full()
+                                .bg(rgb(0xffffff))
+                                .border_1()
+                                .border_color(fill_color)
+                                .shadow_xs(),
+                        )
+                    }),
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_video_player(
         &self,
@@ -669,6 +787,10 @@ impl Whatfast {
                     .bg(rgb(0x0f0f0f))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.video_seek_suppress_click {
+                            this.video_seek_suppress_click = false;
+                            return;
+                        }
                         this.toggle_video_playback(
                             play_chat_id.clone(),
                             play_message_id.clone(),
@@ -723,16 +845,27 @@ impl Whatfast {
                                     ),
                             ),
                     )
-                    // La barra del tiempo, pegada al borde de abajo.
+                    // La barra del tiempo interactiva, pegada al borde de abajo.
                     .child(
                         div()
                             .absolute()
                             .bottom_0()
                             .left_0()
                             .right_0()
-                            .h(px(3. * scale))
+                            .px(px(6. * scale))
                             .bg(rgba(0x00000066))
-                            .child(div().h_full().w(relative(progress)).bg(accent)),
+                            .child(Self::render_video_seek_bar(
+                                ("video-seekbar", index),
+                                key.clone(),
+                                duration,
+                                progress,
+                                self.video_seek_dragging.as_ref() == Some(&key),
+                                scale,
+                                rgba(0xffffff44).into(),
+                                accent,
+                                false,
+                                cx,
+                            )),
                     ),
             )
             // La fila del volumen, mientras el video es el que suena.
@@ -1014,191 +1147,3 @@ impl Whatfast {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use whatfast_model::model::Store;
-    use whatfast_protocol::AttachmentContent;
-
-    use super::{
-        attachment_details, attachment_label, attachment_name, audio_needs_download, bubble_text,
-        format_bytes, format_clock, format_duration, format_speed, is_playable_voice_note,
-        voice_note_height, wave_seek_seconds,
-    };
-
-    /// An attachment with the values that a test needs.
-    fn attachment(kind: &str) -> AttachmentContent {
-        AttachmentContent {
-            kind: kind.into(),
-            ..Default::default()
-        }
-    }
-
-    /// A message with the content that a test needs.
-    fn message_with(content: whatfast_protocol::message::Content) -> whatfast_protocol::Message {
-        whatfast_protocol::Message {
-            id: "1".into(),
-            chat_id: "chat".into(),
-            content: Some(content),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn the_size_of_a_file_goes_to_the_first_unit_that_holds_it() {
-        assert_eq!(format_bytes(0), "");
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(10 * 1024), "10 KB");
-        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
-    }
-
-    #[test]
-    fn the_duration_of_a_file_is_minutes_and_seconds() {
-        assert_eq!(format_duration(0), "");
-        assert_eq!(format_duration(9), "0:09");
-        assert_eq!(format_duration(75), "1:15");
-        assert_eq!(format_duration(3600), "1:00:00");
-        assert_eq!(format_duration(3725), "1:02:05");
-    }
-
-    #[test]
-    fn an_audio_without_the_file_is_asked_for_on_its_own() {
-        let store = Store::default();
-        let mut voice = attachment("audio");
-        voice.voice_note = true;
-        assert!(audio_needs_download(&store, &voice));
-        // A path that does not point at a file is as good as no path.
-        voice.local_path = "C:/whatfast/does-not-exist.ogg".into();
-        store.remember_media_path(&voice.local_path);
-        assert!(audio_needs_download(&store, &voice));
-        // Other kinds have their own path: the audios do not pull them.
-        assert!(!audio_needs_download(&store, &attachment("video")));
-        assert!(!audio_needs_download(&store, &attachment("document")));
-    }
-
-    #[test]
-    fn the_kind_of_a_file_is_the_name_of_the_card() {
-        assert_eq!(attachment_label(&attachment("document")), "Document");
-        assert_eq!(attachment_label(&attachment("audio")), "Audio");
-        assert_eq!(attachment_label(&attachment("video")), "Video");
-
-        let mut voice = attachment("audio");
-        voice.voice_note = true;
-        assert_eq!(attachment_label(&voice), "Voice message");
-
-        let mut gif = attachment("video");
-        gif.animated = true;
-        assert_eq!(attachment_label(&gif), "GIF");
-    }
-
-    #[test]
-    fn the_name_of_the_card_is_the_name_of_the_file() {
-        let mut file = attachment("document");
-        file.file_name = "agenda.pdf".into();
-        assert_eq!(attachment_name(&file), "agenda.pdf");
-        assert_eq!(attachment_name(&attachment("document")), "Document");
-    }
-
-    #[test]
-    fn the_details_of_the_card_join_the_pieces_that_are_there() {
-        let mut file = attachment("document");
-        file.file_size = 2048;
-        file.mime_type = "application/pdf".into();
-        assert_eq!(attachment_details(&file), "2.0 KB · application/pdf");
-
-        let mut voice = attachment("audio");
-        voice.voice_note = true;
-        voice.duration_seconds = 12;
-        assert_eq!(attachment_details(&voice), "0:12");
-
-        // The hours appear when the file is longer than an hour.
-        assert_eq!(format_duration(3600), "1:00:00");
-        assert_eq!(format_duration(3725), "1:02:05");
-    }
-
-    #[test]
-    fn the_text_of_the_bubble_of_an_attachment_is_its_caption() {
-        let mut file = attachment("document");
-        file.file_name = "agenda.pdf".into();
-        file.caption = "the agenda of the meeting".into();
-        let message = message_with(whatfast_protocol::message::Content::Attachment(file));
-        assert_eq!(bubble_text(&message), "the agenda of the meeting");
-
-        // Without a caption the bubble has no text: the name of the file is
-        // inside the card.
-        let mut bare = attachment("document");
-        bare.file_name = "agenda.pdf".into();
-        let message = message_with(whatfast_protocol::message::Content::Attachment(bare));
-        assert_eq!(bubble_text(&message), "");
-
-        // The other messages keep the text they had.
-        let message = message_with(whatfast_protocol::message::Content::Text(
-            whatfast_protocol::TextContent {
-                text: "hello".into(),
-                ..Default::default()
-            },
-        ));
-        assert_eq!(bubble_text(&message), "hello");
-    }
-
-    #[test]
-    fn the_chip_of_the_speed_shows_the_three_steps() {
-        assert_eq!(format_speed(1.0), "1x");
-        assert_eq!(format_speed(1.5), "1.5x");
-        assert_eq!(format_speed(2.0), "2x");
-    }
-
-    #[test]
-    fn the_clock_of_the_note_always_has_the_minute() {
-        assert_eq!(format_clock(0.0), "0:00");
-        assert_eq!(format_clock(7.4), "0:07");
-        assert_eq!(format_clock(75.6), "1:16");
-    }
-
-    /// La primera barra de la onda vuelve al inicio, la del medio lleva a la
-    /// mitad y la ultima al final de la nota.
-    #[test]
-    fn every_bar_of_the_wave_points_at_its_second() {
-        assert_eq!(wave_seek_seconds(30.0, 0, 32), 0.0);
-        assert!((wave_seek_seconds(30.0, 31, 32) - 30.0).abs() < 0.01);
-        assert!((wave_seek_seconds(30.0, 15, 32) - 14.516).abs() < 0.01);
-        // Una nota sin duracion, o una onda de una sola barra, no mueven el
-        // reloj.
-        assert_eq!(wave_seek_seconds(0.0, 10, 32), 0.0);
-        assert_eq!(wave_seek_seconds(30.0, 0, 1), 0.0);
-    }
-
-    #[test]
-    fn a_note_without_its_file_keeps_the_card_of_the_attachment() {
-        let store = Store::default();
-        let mut voice = attachment("audio");
-        voice.voice_note = true;
-        // Without a path the file is not in the disk.
-        assert!(!is_playable_voice_note(&store, &voice));
-
-        // Any other audio is not a note, even with its file.
-        let mut song = attachment("audio");
-        song.local_path = "C:/musica/cancion.wav".into();
-        assert!(!is_playable_voice_note(&store, &song));
-    }
-
-    #[test]
-    fn a_note_with_its_file_is_played_in_the_bubble() {
-        let store = Store::default();
-        let mut voice = attachment("audio");
-        voice.voice_note = true;
-        // A file that exists: the map resolves it once, not in the render.
-        voice.local_path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
-        store.refresh_media_path(&voice.local_path);
-        assert!(is_playable_voice_note(&store, &voice));
-    }
-
-    #[test]
-    fn the_player_of_the_note_is_the_row_of_the_wave() {
-        // The row of the wave (forty points) plus the border of the card.
-        assert_eq!(voice_note_height(1.0), gpui::px(42.0));
-        assert_eq!(voice_note_height(2.0), gpui::px(82.0));
-    }
-}

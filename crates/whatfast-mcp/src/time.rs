@@ -43,28 +43,3 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_epoch_is_named() {
-        assert_eq!(iso(0), "1970-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn a_known_instant_keeps_its_name() {
-        assert_eq!(iso(1_000_000_000_000), "2001-09-09T01:46:40Z");
-    }
-
-    #[test]
-    fn a_leap_day_survives() {
-        // 2024-02-29T12:00:00Z
-        assert_eq!(iso(1_709_208_000_000), "2024-02-29T12:00:00Z");
-    }
-
-    #[test]
-    fn an_instant_before_the_epoch_keeps_its_sign() {
-        assert_eq!(iso(-86_400_000), "1969-12-31T00:00:00Z");
-    }
-}

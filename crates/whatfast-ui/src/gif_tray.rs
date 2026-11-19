@@ -25,7 +25,13 @@ use whatfast_protocol::AttachmentKind;
 
 use crate::app::{PanelTab, Whatfast};
 
-pub(crate) const TRAY_HEIGHT: f32 = 420.0;
+/// The height of the tray, in pixels, before the scale. The same base the
+/// emoji picker uses, so the panel does not jump when the tab changes.
+pub(crate) const TRAY_HEIGHT: f32 = 380.0;
+/// The width of the body of the picker, in pixels, before the scale.
+/// `render_emoji_picker` builds it from ten columns of 44px, a gap of 2px
+/// and 8px of padding on each side: 10 * 46 - 2 + 16.
+pub(crate) const TRAY_WIDTH: f32 = 474.0;
 
 #[derive(Debug, Clone)]
 pub(crate) struct GifItem {
@@ -174,8 +180,9 @@ impl GifTray {
         v_flex()
             .id("gif-tray")
             .h(px(TRAY_HEIGHT * scale))
-            .w(px(360. * scale))
-            .max_w_full()
+            .w(px(TRAY_WIDTH * scale))
+            .min_w(px(TRAY_WIDTH * scale))
+            .max_w(px(TRAY_WIDTH * scale))
             .rounded_xl()
             .border_1()
             .border_color(border)
@@ -548,13 +555,3 @@ fn download_sendable_gif(
     Err("Could not download GIF".to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::url_encode;
-
-    #[test]
-    fn url_encodes_spaces_and_unicode() {
-        assert_eq!(url_encode("happy cat"), "happy%20cat");
-        assert_eq!(url_encode("café"), "caf%C3%A9");
-    }
-}

@@ -35,6 +35,10 @@ pub enum DateLocale {
     /// `en-US`: `7:10 PM`, `Sun`, `10/12/26`, `Sunday, October 12`.
     #[default]
     EnUs,
+    /// `es-ES`: `19:10`, `lun`, `12/10/26`, `lunes, 12 de octubre`.
+    EsEs,
+    /// `zh-CN`: `19:10`, `周一`, `26/10/12`, `10月12日星期一`.
+    ZhCn,
 }
 
 /// An instant plus the offset of the time zone it has to be rendered in.
@@ -172,19 +176,59 @@ const EN_US_MONTHS_LONG: [&str; 12] = [
     "November",
     "December",
 ];
+const ES_ES_WEEKDAYS_SHORT: [&str; 7] = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+const ES_ES_WEEKDAYS_LONG: [&str; 7] = [
+    "domingo",
+    "lunes",
+    "martes",
+    "miércoles",
+    "jueves",
+    "viernes",
+    "sábado",
+];
+const ES_ES_MONTHS_LONG: [&str; 12] = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+];
+const ZH_CN_WEEKDAYS_SHORT: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const ZH_CN_WEEKDAYS_LONG: [&str; 7] = [
+    "星期日",
+    "星期一",
+    "星期二",
+    "星期三",
+    "星期四",
+    "星期五",
+    "星期六",
+];
+const ZH_CN_MONTHS_LONG: [&str; 12] = [
+    "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月",
+];
 
 /// port: `timeFormatter`, `hour: "numeric"` and `minute: "2-digit"`.
 fn format_time_of_day(value: &CivilDateTime, locale: DateLocale) -> String {
-    let hour = match value.hour % 12 {
-        0 => 12,
-        other => other,
-    };
     let minute = format!("{:02}", value.minute);
     match locale {
         DateLocale::EnUs => {
+            let hour = match value.hour % 12 {
+                0 => 12,
+                other => other,
+            };
             let period = if value.hour < 12 { "AM" } else { "PM" };
             format!("{hour}:{minute} {period}")
         }
+        // El reloj de veinticuatro horas es el de la burbuja y el de la
+        // referencia en español y en chino.
+        DateLocale::EsEs | DateLocale::ZhCn => format!("{:02}:{}", value.hour, minute),
     }
 }
 
@@ -193,6 +237,8 @@ fn format_weekday_short(weekday: u32, locale: DateLocale) -> String {
     let index = (weekday as usize) % 7;
     match locale {
         DateLocale::EnUs => EN_US_WEEKDAYS_SHORT[index].to_string(),
+        DateLocale::EsEs => ES_ES_WEEKDAYS_SHORT[index].to_string(),
+        DateLocale::ZhCn => ZH_CN_WEEKDAYS_SHORT[index].to_string(),
     }
 }
 
@@ -201,6 +247,8 @@ fn format_weekday_long(weekday: u32, locale: DateLocale) -> String {
     let index = (weekday as usize) % 7;
     match locale {
         DateLocale::EnUs => EN_US_WEEKDAYS_LONG[index].to_string(),
+        DateLocale::EsEs => ES_ES_WEEKDAYS_LONG[index].to_string(),
+        DateLocale::ZhCn => ZH_CN_WEEKDAYS_LONG[index].to_string(),
     }
 }
 
@@ -210,6 +258,8 @@ fn format_short_date(value: &CivilDateTime, locale: DateLocale) -> String {
     let year = value.year.rem_euclid(100);
     match locale {
         DateLocale::EnUs => format!("{:02}/{:02}/{:02}", value.month, value.day, year),
+        DateLocale::EsEs => format!("{:02}/{:02}/{:02}", value.day, value.month, year),
+        DateLocale::ZhCn => format!("{:02}/{:02}/{:02}", year, value.month, value.day),
     }
 }
 
@@ -219,9 +269,31 @@ fn format_day_long(value: &CivilDateTime, locale: DateLocale) -> String {
     let weekday = format_weekday_long(value.weekday, locale);
     let month = match locale {
         DateLocale::EnUs => EN_US_MONTHS_LONG[month_index(value.month)],
+        DateLocale::EsEs => ES_ES_MONTHS_LONG[month_index(value.month)],
+        DateLocale::ZhCn => ZH_CN_MONTHS_LONG[month_index(value.month)],
     };
     match locale {
         DateLocale::EnUs => format!("{weekday}, {month} {}", value.day),
+        DateLocale::EsEs => format!("{weekday}, {} de {month}", value.day),
+        DateLocale::ZhCn => format!("{month}{}日{weekday}", value.day),
+    }
+}
+
+/// The word for "today" in the language of the interface.
+fn today_label(locale: DateLocale) -> &'static str {
+    match locale {
+        DateLocale::EnUs => "Today",
+        DateLocale::EsEs => "Hoy",
+        DateLocale::ZhCn => "今天",
+    }
+}
+
+/// The word for "yesterday" in the language of the interface.
+fn yesterday_label(locale: DateLocale) -> &'static str {
+    match locale {
+        DateLocale::EnUs => "Yesterday",
+        DateLocale::EsEs => "Ayer",
+        DateLocale::ZhCn => "昨天",
     }
 }
 
@@ -250,8 +322,7 @@ pub fn format_chat_time(value: LocalTimestamp, now: LocalTimestamp, locale: Date
         return format_time_of_day(&value_civil, locale);
     }
     if same_day(&value_civil, &previous_day(&now_civil)) {
-        // port: the original hardcodes "Yesterday" here.
-        return "Yesterday".to_string();
+        return yesterday_label(locale).to_string();
     }
     let age = now.epoch_ms - value.epoch_ms;
     if age < 7 * 86_400_000 {
@@ -265,10 +336,10 @@ pub fn format_day(value: LocalTimestamp, now: LocalTimestamp, locale: DateLocale
     let value_civil = civil_from_epoch(value.epoch_ms, value.utc_offset_minutes);
     let now_civil = civil_from_epoch(now.epoch_ms, now.utc_offset_minutes);
     if same_day(&value_civil, &now_civil) {
-        return "Today".to_string();
+        return today_label(locale).to_string();
     }
     if same_day(&value_civil, &previous_day(&now_civil)) {
-        return "Yesterday".to_string();
+        return yesterday_label(locale).to_string();
     }
     format_day_long(&value_civil, locale)
 }

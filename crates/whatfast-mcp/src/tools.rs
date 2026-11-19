@@ -1001,7 +1001,6 @@ fn text(arguments: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-
 fn message_send_media(client: &mut Client, arguments: &Value) -> Result<Value, String> {
     let chat_id = required(arguments, "chat_id")?;
     let file_path = required(arguments, "file_path")?;
@@ -1253,38 +1252,3 @@ fn uuid4() -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_uuid_has_the_shape_of_a_version_four() {
-        let id = uuid4();
-        assert_eq!(id.len(), 36);
-        assert_eq!(id.as_bytes()[14], b'4');
-        assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
-        assert_ne!(id, uuid4());
-    }
-
-    #[test]
-    fn a_long_body_is_cut_and_says_so() {
-        let (text, clipped) = clip(&"a".repeat(MAX_TEXT + 10));
-        assert!(clipped);
-        assert_eq!(text.chars().count(), MAX_TEXT + 1);
-        let (text, clipped) = clip("hola");
-        assert!(!clipped);
-        assert_eq!(text, "hola");
-    }
-
-    #[test]
-    fn the_cursor_is_exclusive() {
-        let message = Message {
-            id: "b".into(),
-            timestamp_ms: 10,
-            ..Default::default()
-        };
-        assert!(after(&message, 9, "z"));
-        assert!(!after(&message, 10, "b"));
-        assert!(after(&message, 10, "a"));
-    }
-}

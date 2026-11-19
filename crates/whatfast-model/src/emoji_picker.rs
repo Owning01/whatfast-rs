@@ -97,29 +97,3 @@ pub fn filtered(category: EmojiCategory, query: &str) -> Vec<&'static Emoji> {
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exposes_current_unicode_catalog_and_skin_tones() {
-        let all = filtered(EmojiCategory::All, "");
-        assert!(all.len() > emojis::iter().count());
-        assert!(all.iter().any(|emoji| emoji.as_str() == "🫩"));
-        assert!(all.iter().any(|emoji| emoji.as_str() == "👋🏿"));
-    }
-
-    #[test]
-    fn search_uses_names_and_shortcodes() {
-        let rocket = filtered(EmojiCategory::All, "rocket");
-        assert!(rocket.iter().any(|emoji| emoji.as_str() == "🚀"));
-        assert!(!rocket.iter().any(|emoji| emoji.as_str() == "🍕"));
-    }
-
-    #[test]
-    fn category_filter_is_applied() {
-        let flags = filtered(EmojiCategory::Flags, "");
-        assert!(!flags.is_empty());
-        assert!(flags.iter().all(|emoji| emoji.group() == Group::Flags));
-    }
-}

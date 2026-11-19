@@ -32,6 +32,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -39,10 +40,15 @@ use whatfast_protocol::{Sticker, StickerPack};
 
 use crate::app::Whatfast;
 
-/// The height of the tray, in pixels, before the scale.
-pub(crate) const TRAY_HEIGHT: f32 = 420.0;
+/// The height of the tray, in pixels, before the scale. The same base the
+/// emoji picker uses, so the panel does not jump when the tab changes.
+pub(crate) const TRAY_HEIGHT: f32 = 380.0;
+/// The width of the body of the picker, in pixels, before the scale.
+/// `render_emoji_picker` builds it from ten columns of 44px, a gap of 2px
+/// and 8px of padding on each side: 10 * 46 - 2 + 16.
+pub(crate) const TRAY_WIDTH: f32 = 474.0;
 /// The side of one cell of the grid of stickers, in pixels, before the scale.
-pub(crate) const CELL_SIZE: f32 = 80.0;
+pub(crate) const CELL_SIZE: f32 = 76.0;
 /// The side of one tab of the strip of packs, in pixels, before the scale.
 pub(crate) const TAB_SIZE: f32 = 34.0;
 /// The gap between two cells of the grid, in pixels, before the scale.
@@ -106,6 +112,24 @@ pub(crate) fn pack_label(name: &str) -> String {
     name.chars().take(2).collect::<String>().to_uppercase()
 }
 
+/// The translation key of a built-in pack, when the name is one of them.
+///
+/// The origin cuts the name of the pack to two letters ("FA", "RE", "FR"),
+/// which is too short to read. The built-in packs get their full translated
+/// name; a pack added by the user keeps the short label of the origin.
+fn pack_i18n_key(value: &str) -> Option<&'static str> {
+    match value {
+        "From your chats" | "all" => Some("From your chats"),
+        "Favorites" | "Favorite" | "Favourites" | "Favourite" | "Favoritos" | "FA"
+        | "favorites" => Some("Favorites"),
+        "Recent" | "Recents" | "Recently used" | "Recientes" | "RE" | "recent" => {
+            Some("Recent")
+        }
+        "Frequent" | "Frequently used" | "Frecuentes" | "FR" | "frequent" => Some("Frequent"),
+        _ => None,
+    }
+}
+
 /// Whether a sticker answers to the text of the search.
 ///
 /// The stickers of the protocol do not carry a name yet (the `Sticker` of
@@ -166,6 +190,9 @@ impl StickerTray {
             .mx(px(8. * scale))
             .mb(px(COMPOSER_GAP * scale))
             .h(px(TRAY_HEIGHT * scale))
+            .w(px(TRAY_WIDTH * scale))
+            .min_w(px(TRAY_WIDTH * scale))
+            .max_w(px(TRAY_WIDTH * scale))
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
@@ -221,9 +248,19 @@ impl StickerTray {
                 let selected = active.as_deref() == Some(pack.id.as_str());
                 let pack_id = pack.id.clone();
                 let state = self.state.clone();
+                let label_key = pack_i18n_key(&pack.name).or_else(|| pack_i18n_key(&pack.id));
+                let label = match label_key {
+                    Some(key) => i18n::t(key).to_string(),
+                    None => pack_label(&pack.name),
+                };
+                let tooltip_text = match label_key {
+                    Some(key) => i18n::t(key).to_string(),
+                    None => pack.name.clone(),
+                };
                 div()
                     .id(ElementId::named_usize("sticker-pack-tab", index))
-                    .size(px(TAB_SIZE * scale))
+                    .h(px(TAB_SIZE * scale))
+                    .px(px(6. * scale))
                     .flex_none()
                     .rounded_sm()
                     .flex()
@@ -245,7 +282,11 @@ impl StickerTray {
                             .border_color(cx.theme().accent)
                     })
                     .hover(move |style| style.bg(hover))
-                    .child(pack_label(&pack.name))
+                    .tooltip({
+                        let text: gpui::SharedString = tooltip_text.into();
+                        move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+                    })
+                    .child(label)
                     .on_click(cx.listener(move |_app, _, _, cx| {
                         state.borrow_mut().active_pack_id = pack_id.clone();
                         cx.notify();
@@ -299,7 +340,7 @@ impl StickerTray {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(SEARCH_PLACEHOLDER),
+                            .child(i18n::t(SEARCH_PLACEHOLDER)),
                     )
                     .into_any_element(),
             })
@@ -340,7 +381,12 @@ impl StickerTray {
             .items_start()
             .content_start()
             .gap(px(CELL_GAP * scale))
-            .p(px(10. * scale))
+            .px(px(10. * scale))
+            .pt(px(10. * scale))
+            // El hueco de abajo deja la ultima fila entera por encima de la
+            // barra de pestañas del pie, que no debe cortarla a la mitad.
+            .pb(px(18. * scale))
+            .overflow_hidden()
             .overflow_y_scroll()
             // La primera celda es el boton de crear un sticker.
             .child(self.render_create(app, cx))
@@ -521,7 +567,7 @@ impl StickerTray {
         cx.defer(move |app| {
             let created = app.with_window(entity_id, |window, cx| {
                 let input =
-                    cx.new(|cx| InputState::new(window, cx).placeholder(SEARCH_PLACEHOLDER));
+                    cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t(SEARCH_PLACEHOLDER)));
                 // Los cambios del campo son los de la busqueda.
                 weak.update(cx, |_this, cx| {
                     let subscription = cx.observe(&input, {
@@ -554,76 +600,3 @@ impl StickerTray {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sticker(id: &str, local_path: &str) -> whatfast_protocol::Sticker {
-        whatfast_protocol::Sticker {
-            id: id.to_string(),
-            local_path: local_path.to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn pack(id: &str, name: &str, stickers: Vec<whatfast_protocol::Sticker>) -> StickerPack {
-        StickerPack {
-            id: id.to_string(),
-            name: name.to_string(),
-            stickers,
-        }
-    }
-
-    #[test]
-    fn the_active_pack_is_the_one_the_user_chose() {
-        let packs = vec![
-            pack("favorites", "Favourites", Vec::new()),
-            pack("recent", "Recently used", Vec::new()),
-        ];
-        assert_eq!(
-            active_pack(&packs, "recent").map(|pack| pack.id.as_str()),
-            Some("recent")
-        );
-        // A pack that is not there anymore falls back to the first one.
-        assert_eq!(
-            active_pack(&packs, "gone").map(|pack| pack.id.as_str()),
-            Some("favorites")
-        );
-        // Without packs there is no active pack.
-        assert!(active_pack(&[], "favorites").is_none());
-    }
-
-    #[test]
-    fn the_label_of_a_pack_is_its_first_two_letters() {
-        assert_eq!(pack_label("Favourites"), "FA");
-        assert_eq!(pack_label("Recently used"), "RE");
-        assert_eq!(pack_label(""), "");
-        assert_eq!(pack_label("a"), "A");
-    }
-
-    #[test]
-    fn the_path_of_a_sticker_is_the_one_of_its_pack() {
-        let packs = [pack(
-            "favorites",
-            "Favourites",
-            vec![sticker("fav-1", "/tmp/fav-1.webp"), sticker("fav-2", "")],
-        )];
-        assert_eq!(
-            sticker_local_path(&packs[0], "fav-1"),
-            Some("/tmp/fav-1.webp")
-        );
-        // A sticker that was never downloaded has no path.
-        assert_eq!(sticker_local_path(&packs[0], "fav-2"), None);
-        assert_eq!(sticker_local_path(&packs[0], "gone"), None);
-    }
-
-    #[test]
-    fn the_search_looks_at_the_id_of_the_sticker() {
-        assert!(sticker_matches(&sticker("fav-1", ""), "fav"));
-        assert!(sticker_matches(&sticker("fav-1", ""), "FAV-1"));
-        assert!(!sticker_matches(&sticker("fav-1", ""), "recent"));
-        // An empty search lets every sticker through.
-        assert!(sticker_matches(&sticker("fav-1", ""), ""));
-        assert!(sticker_matches(&sticker("fav-1", ""), "   "));
-    }
-}

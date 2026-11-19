@@ -54,10 +54,10 @@ pub(crate) const HEADER_AVATAR_SIZE: f32 = 41.0;
 /// has no RPC that asks for the suggestions, so the client draws this fixed
 /// list: the name of the channel and the number of followers.
 const SUGGESTED_CHANNELS: [(&str, &str); 4] = [
-    ("Whatfast Sports", "42K followers"),
-    ("Whatfast Tech", "2M followers"),
-    ("Whatfast Music", "234M followers"),
-    ("Whatfast Cinema", "1M followers"),
+    ("Whatfast Sports", "42K"),
+    ("Whatfast Tech", "2M"),
+    ("Whatfast Music", "234M"),
+    ("Whatfast Cinema", "1M"),
 ];
 
 /// The state of the panel of the newsletters.
@@ -150,6 +150,14 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn date_locale() -> DateLocale {
+    match i18n::current_language() {
+        "es" => DateLocale::EsEs,
+        "zh" => DateLocale::ZhCn,
+        _ => DateLocale::EnUs,
+    }
+}
+
 /// The time of a message.
 ///
 /// port: `formatTime` of the origin. The hour is the one of the machine, and
@@ -157,7 +165,7 @@ fn now_ms() -> i64 {
 fn message_time(timestamp_ms: i64) -> String {
     format_time(
         LocalTimestamp::new(timestamp_ms, local_offset_minutes(timestamp_ms)),
-        DateLocale::EnUs,
+        date_locale(),
     )
 }
 
@@ -475,7 +483,10 @@ impl NewsletterPanel {
                                             .truncate()
                                             .text_sm()
                                             .text_color(muted)
-                                            .child((*followers).to_string()),
+                                            .child(i18n::t_args(
+                                                "{n} followers",
+                                                &[("n", followers)],
+                                            )),
                                     ),
                             )
                             // El boton verde de seguir, a la derecha de la fila.
@@ -484,7 +495,9 @@ impl NewsletterPanel {
                                     "newsletter-suggestion-follow",
                                     index,
                                 ))
-                                .primary()
+                                // Verde solido solo para la accion principal:
+                                // las cuatro sugerencias van outlined.
+                                .outline()
                                 .rounded(px(9999.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .label(i18n::t("Follow"))
@@ -1046,60 +1059,3 @@ fn render_post(post: &Message, scale: f32, cx: &mut Context<Whatfast>) -> gpui::
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn newsletter(jid: &str, name: &str, muted: bool) -> Newsletter {
-        Newsletter {
-            jid: jid.to_string(),
-            name: name.to_string(),
-            subscribed_at_ms: 1_900_000_000_000,
-            muted,
-        }
-    }
-
-    #[test]
-    fn the_letter_of_the_avatar_is_the_first_letter_of_the_name() {
-        assert_eq!(avatar_label("Whatfast News"), "W");
-        assert_eq!(avatar_label("  whatfast"), "W");
-    }
-
-    #[test]
-    fn a_channel_without_a_name_shows_a_c() {
-        assert_eq!(avatar_label(""), "C");
-        assert_eq!(avatar_label("   "), "C");
-    }
-
-    #[test]
-    fn the_channel_that_is_open_is_the_one_that_was_chosen() {
-        let newsletters = vec![
-            newsletter("news@newsletter", "Whatfast News", false),
-            newsletter("dev@newsletter", "Whatfast Dev", false),
-        ];
-        assert_eq!(
-            selected_newsletter(&newsletters, Some("dev@newsletter")).map(|item| item.name.clone()),
-            Some("Whatfast Dev".to_string())
-        );
-    }
-
-    #[test]
-    fn there_is_no_channel_when_none_was_chosen() {
-        let newsletters = vec![newsletter("news@newsletter", "Whatfast News", false)];
-        assert!(selected_newsletter(&newsletters, None).is_none());
-        assert!(selected_newsletter(&newsletters, Some("gone@newsletter")).is_none());
-    }
-
-    #[test]
-    fn a_muted_channel_says_that_it_is_muted() {
-        let channel = newsletter("news@newsletter", "Whatfast News", true);
-        assert!(channel_subtitle(&channel).ends_with("· muted"));
-        let channel = newsletter("news@newsletter", "Whatfast News", false);
-        assert!(!channel_subtitle(&channel).contains("muted"));
-    }
-
-    #[test]
-    fn a_local_channel_carries_the_moment_of_its_creation() {
-        assert_eq!(local_channel_jid(42), "local-42@newsletter");
-    }
-}

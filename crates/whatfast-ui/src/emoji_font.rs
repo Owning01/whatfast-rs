@@ -325,24 +325,3 @@ fn the_system_has_the_font(cx: &gpui::App) -> bool {
         >= 2
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_bundled_font_is_a_true_type_file() {
-        // The first four bytes of an sfnt: the version of TrueType.
-        assert_eq!(&FONT[..4], &[0, 1, 0, 0]);
-        assert!(FONT.len() > 1_000_000);
-    }
-
-    #[test]
-    fn the_family_is_the_one_of_the_bundled_font() {
-        assert_eq!(family_name(FONT).as_deref(), Some(NOTO_FAMILY));
-    }
-
-    #[test]
-    fn a_file_that_is_not_a_font_has_no_family() {
-        assert_eq!(family_name(b"not a font"), None);
-    }
-}

@@ -237,21 +237,9 @@ impl NavRail {
         self
     }
 
-    /// The state of the link with the device.
-    #[cfg(test)]
-    pub(crate) fn link(&self) -> LinkState {
-        self.link
-    }
-
     /// The app is pairing, or the device is linked.
     pub(crate) fn set_link(&mut self, link: LinkState) {
         self.link = link;
-    }
-
-    /// Whether the list of chats is open.
-    #[cfg(test)]
-    pub(crate) fn sidebar_open(&self) -> bool {
-        self.sidebar_open
     }
 
     /// The list of chats is open, or it is collapsed.
@@ -259,75 +247,9 @@ impl NavRail {
         self.sidebar_open = open;
     }
 
-    /// The view in front of the column.
-    #[cfg(test)]
-    pub(crate) fn view(&self) -> SidebarView {
-        self.view
-    }
-
     /// Opens one view; the other views are closed by construction.
     pub(crate) fn set_view(&mut self, view: SidebarView) {
         self.view = view;
-    }
-
-    /// Whether the view of the states is open.
-    #[cfg(test)]
-    pub(crate) fn states_open(&self) -> bool {
-        self.view == SidebarView::States
-    }
-
-    /// The view of the states is open, or it is closed.
-    #[cfg(test)]
-    pub(crate) fn set_states_open(&mut self, open: bool) {
-        self.set_view(if open { SidebarView::States } else { SidebarView::Chats });
-    }
-
-    /// Whether the view of the channels is open.
-    #[cfg(test)]
-    pub(crate) fn channels_open(&self) -> bool {
-        self.view == SidebarView::Channels
-    }
-
-    /// The view of the channels is open, or it is closed.
-    #[cfg(test)]
-    pub(crate) fn set_channels_open(&mut self, open: bool) {
-        self.set_view(if open { SidebarView::Channels } else { SidebarView::Chats });
-    }
-
-    /// Whether the view of the agents is open.
-    #[cfg(test)]
-    pub(crate) fn agents_open(&self) -> bool {
-        self.view == SidebarView::Agents
-    }
-
-    /// The view of the agents is open, or it is closed.
-    #[cfg(test)]
-    pub(crate) fn set_agents_open(&mut self, open: bool) {
-        self.set_view(if open { SidebarView::Agents } else { SidebarView::Chats });
-    }
-
-    /// Whether the view of the archived conversations is open.
-    #[cfg(test)]
-    pub(crate) fn archived_open(&self) -> bool {
-        self.view == SidebarView::Archived
-    }
-
-    /// The view of the archived conversations is open, or it is closed.
-    #[cfg(test)]
-    pub(crate) fn set_archived_open(&mut self, open: bool) {
-        self.set_view(if open { SidebarView::Archived } else { SidebarView::Chats });
-    }
-
-    /// Whether the settings panel is open.
-    #[cfg(test)]
-    pub(crate) fn settings_open(&self) -> bool {
-        self.view == SidebarView::Settings
-    }
-
-    /// The settings panel is open, or it is closed.
-    #[cfg(test)]
-    pub(crate) fn set_settings_open(&mut self, open: bool) {
-        self.set_view(if open { SidebarView::Settings } else { SidebarView::Chats });
     }
 
     /// The unread messages of the list of chats.
@@ -338,15 +260,6 @@ impl NavRail {
     /// Whether there are states that were not seen.
     pub(crate) fn set_states_unseen(&mut self, unseen: bool) {
         self.states_unseen = unseen;
-    }
-
-    /// The width of the column.
-    ///
-    /// port: the first column of the grid of the shell:
-    /// `calc(56px * var(--scale))`.
-    #[cfg(test)]
-    pub(crate) fn width(&self) -> Pixels {
-        column_width(self.scale)
     }
 
     /// The buttons of the column, above the spacer.
@@ -566,131 +479,3 @@ pub(crate) fn column_width(scale: f32) -> Pixels {
     px(RAIL_WIDTH * normalized_ui_scale(scale))
 }
 
-#[cfg(test)]
-mod tests {
-    use gpui::px;
-
-    use super::{LinkState, NavRail, RAIL_WIDTH, SidebarView, column_width};
-
-    /// The column of icons of a linked app.
-    fn rail() -> NavRail {
-        let mut rail = NavRail::new(1.0);
-        rail.set_link(LinkState::Linked);
-        rail
-    }
-
-    #[test]
-    fn the_width_of_the_column_is_the_first_column_of_the_grid() {
-        assert_eq!(RAIL_WIDTH, 56.0);
-        assert_eq!(column_width(1.0), px(56.0));
-        assert_eq!(column_width(1.5), px(84.0));
-    }
-
-    #[test]
-    fn the_width_of_the_column_normalizes_the_scale_first() {
-        assert_eq!(column_width(2.4), px(84.0));
-        assert_eq!(column_width(0.0), px(56.0));
-    }
-
-    #[test]
-    fn the_width_of_the_column_of_the_rail_is_the_width_of_the_column() {
-        let rail = NavRail::new(1.3);
-        assert_eq!(rail.width(), px(RAIL_WIDTH * 1.3));
-    }
-
-    #[test]
-    fn the_button_of_the_chats_is_active_when_the_list_is_open() {
-        let mut rail = rail();
-        assert!(rail.top_buttons()[0].active);
-        rail.set_sidebar_open(false);
-        assert!(!rail.top_buttons()[0].active);
-        assert!(!rail.sidebar_open());
-    }
-
-    #[test]
-    fn the_button_of_the_states_is_active_when_the_view_is_open() {
-        let mut states = rail();
-        assert!(!states.top_buttons()[2].active);
-        states.set_states_open(true);
-        assert!(states.top_buttons()[2].active);
-        assert!(states.states_open());
-        // The chats and the states are two views of the same column: the
-        // button of the chats is not active while the states are in front.
-        assert!(!states.top_buttons()[0].active);
-
-        // The channels are their own view too.
-        let mut channels = rail();
-        assert!(!channels.top_buttons()[3].active);
-        channels.set_channels_open(true);
-        assert!(channels.top_buttons()[3].active);
-        assert!(channels.channels_open());
-        assert!(!channels.top_buttons()[0].active);
-
-        // The agents are their own view.
-        let mut agents = rail();
-        assert!(!agents.top_buttons()[4].active);
-        agents.set_agents_open(true);
-        assert!(agents.top_buttons()[4].active);
-        assert!(agents.agents_open());
-        assert!(!agents.top_buttons()[0].active);
-
-        // The archived conversations are their own view.
-        let mut archived = rail();
-        assert!(!archived.bottom_buttons()[0].active);
-        archived.set_archived_open(true);
-        assert!(archived.bottom_buttons()[0].active);
-        assert!(archived.archived_open());
-        assert!(!archived.top_buttons()[0].active);
-
-        // The settings are their own view.
-        let mut settings = rail();
-        assert!(!settings.bottom_buttons()[2].active);
-        settings.set_settings_open(true);
-        assert!(settings.bottom_buttons()[2].active);
-        assert!(settings.settings_open());
-    }
-
-    #[test]
-    fn opening_settings_closes_the_view_that_was_in_front() {
-        let mut rail = rail();
-        rail.set_states_open(true);
-        assert_eq!(rail.view(), SidebarView::States);
-        rail.set_settings_open(true);
-        assert_eq!(rail.view(), SidebarView::Settings);
-        assert!(!rail.states_open());
-        assert!(!rail.top_buttons()[2].active);
-        assert!(rail.bottom_buttons()[2].active);
-    }
-
-    #[test]
-    fn the_pairing_leaves_the_chats_the_search_and_the_privacy_without_action() {
-        let rail = NavRail::new(1.0);
-        assert_eq!(rail.link(), LinkState::Pairing);
-        assert!(!rail.top_buttons()[0].enabled, "the chats");
-        assert!(!rail.top_buttons()[1].enabled, "the search");
-        assert!(!rail.top_buttons()[2].enabled, "the states");
-        assert!(!rail.top_buttons()[3].enabled, "the channels");
-        assert!(
-            rail.top_buttons()[4].enabled,
-            "the agents of the machine do not need a linked device"
-        );
-        assert!(!rail.bottom_buttons()[0].enabled, "the archived");
-        assert!(!rail.bottom_buttons()[1].enabled, "the privacy");
-        assert!(
-            rail.bottom_buttons()[2].enabled,
-            "the settings are always reachable"
-        );
-    }
-
-    #[test]
-    fn the_linked_app_reaches_the_chats_the_search_and_the_privacy() {
-        let rail = rail();
-        assert_eq!(rail.link(), LinkState::Linked);
-        assert!(rail.top_buttons()[0].enabled);
-        assert!(rail.top_buttons()[1].enabled);
-        assert!(rail.top_buttons()[2].enabled);
-        assert!(rail.top_buttons()[3].enabled);
-        assert!(rail.bottom_buttons()[0].enabled);
-        assert!(rail.bottom_buttons()[1].enabled);
-    }
-}

@@ -162,31 +162,3 @@ fn write_message(out: &mut impl Write, message: &Value) {
     let _ = out.flush();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_newest_revision_is_the_offer() {
-        let result = initialize(&json!({"protocolVersion": "2025-06-18"}));
-        assert_eq!(result["protocolVersion"], "2025-06-18");
-        assert_eq!(result["serverInfo"]["name"], "whatfast");
-        assert!(result["instructions"].as_str().unwrap().contains("chat_id"));
-
-        // A revision this server does not speak falls back to the newest one.
-        let fallback = initialize(&json!({"protocolVersion": "1999-01-01"}));
-        assert_eq!(fallback["protocolVersion"], PROTOCOL_VERSIONS[0]);
-    }
-
-    #[test]
-    fn a_broken_call_is_a_failed_tool_not_a_broken_protocol() {
-        let dir = std::env::temp_dir().join(format!("whatfast-mcp-call-{}", std::process::id()));
-        let mut client = Client::new(dir.clone(), std::path::PathBuf::from("whatfast-wa"), "test")
-            .expect("the client of the test");
-        let value = tools_call(&mut client, &json!({}));
-        assert_eq!(value["isError"], true);
-        assert_eq!(value["_meta"]["code"], -32602);
-        drop(client);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}

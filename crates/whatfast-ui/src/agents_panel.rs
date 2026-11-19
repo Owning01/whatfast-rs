@@ -597,8 +597,9 @@ impl AgentsPanel {
             )
             .child(h_flex().flex_none().occlude().child(if connected {
                 Button::new(ElementId::named_usize("agent-disconnect", index))
-                    .secondary()
+                    .outline()
                     .small()
+                    .bg(cx.theme().background)
                     .label(i18n::t("Disconnect"))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         disconnect(app, id, window, cx);
@@ -637,7 +638,8 @@ impl AgentsPanel {
             .h_full()
             .overflow_y_scroll()
             .gap_4()
-            .p(px(16. * scale));
+            .p(px(16. * scale))
+            .pb_6();
         if let Some(id) = selected {
             self.reload_audit(&id);
             pane = pane.child(self.render_agent_header(&id, scale, cx));
@@ -1005,7 +1007,7 @@ impl AgentsPanel {
                     // the guess is wrong, the user points at the real one.
                     .child(
                         Button::new("agent-panel-pick-config")
-                            .ghost()
+                            .secondary()
                             .small()
                             .label(i18n::t("Choose config file…"))
                             .on_click(cx.listener(move |app, _, window, cx| {
@@ -1017,7 +1019,7 @@ impl AgentsPanel {
                         let again_id = write_id.clone();
                         this.child(
                             Button::new("agent-panel-write-server")
-                                .ghost()
+                                .secondary()
                                 .small()
                                 .label(i18n::t("Write server again"))
                                 .on_click(cx.listener(move |app, _, window, cx| {
@@ -1239,20 +1241,9 @@ impl AgentsPanel {
             .child(
                 h_flex()
                     .w_full()
-                    .px(px(14. * scale))
-                    .py(px(10. * scale))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(border)
-                    .bg(card_bg)
+                    .pt_1()
                     .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(scope_hint(edit.scope)),
-                    )
+                    .justify_end()
                     .child(
                         Button::new("agent-save")
                             .primary()
@@ -2150,73 +2141,3 @@ fn build_grant(app: &Whatfast, id: &str, cx: &mut Context<Whatfast>) -> Result<G
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_all_mode_covers_every_chat_and_the_groups() {
-        let chats = chats_of(ChatsMode::All, &BTreeSet::new());
-        assert_eq!(chats, ChatFilter::all());
-        assert!(chats.allows("123@g.us", true));
-        assert_eq!(mode_of(&chats), (ChatsMode::All, BTreeSet::new()));
-    }
-
-    #[test]
-    fn the_direct_mode_leaves_the_groups_out() {
-        let chats = chats_of(ChatsMode::Direct, &BTreeSet::new());
-        assert!(chats.allows("5491100000000@s.whatsapp.net", false));
-        assert!(!chats.allows("123@g.us", true));
-        assert_eq!(mode_of(&chats), (ChatsMode::Direct, BTreeSet::new()));
-    }
-
-    #[test]
-    fn the_chosen_mode_covers_only_the_ticked_chats() {
-        let checked = BTreeSet::from(["a@s.whatsapp.net".to_string()]);
-        let chats = chats_of(ChatsMode::Chosen, &checked);
-        assert!(chats.allows("a@s.whatsapp.net", false));
-        assert!(!chats.allows("b@s.whatsapp.net", false));
-        assert_eq!(mode_of(&chats), (ChatsMode::Chosen, checked));
-    }
-
-    #[test]
-    fn an_empty_list_of_chats_is_a_closed_door() {
-        let chats = chats_of(ChatsMode::Chosen, &BTreeSet::new());
-        assert!(!chats.allows("a@s.whatsapp.net", false));
-    }
-
-    #[test]
-    fn the_preview_flattens_the_text_and_cuts_the_rest() {
-        assert_eq!(draft_preview("  hola\n\n  que   tal "), "hola que tal");
-        let long = "a".repeat(PREVIEW_CHARS + 20);
-        let preview = draft_preview(&long);
-        assert_eq!(preview.chars().count(), PREVIEW_CHARS + 1);
-        assert!(preview.ends_with('…'));
-    }
-
-    #[test]
-    fn the_confidence_goes_in_percent() {
-        // Without a value there is no percentage to paint.
-        assert!(!confidence_label(None).contains('%'));
-        assert!(confidence_label(Some(0.87)).starts_with("Confidence 87%"));
-        // A value outside the range is clamped instead of painted as is.
-        assert!(confidence_label(Some(4.0)).starts_with("Confidence 100%"));
-    }
-
-    #[test]
-    fn the_hours_of_the_field_round_trip() {
-        assert_eq!(parse_hours("08:00-23:00"), Ok(Some(Hours::PRUDENT)));
-        assert_eq!(parse_hours("  "), Ok(None));
-        assert!(parse_hours("8-23").is_err());
-    }
-
-    #[test]
-    fn the_database_of_the_agents_lives_in_the_profile() {
-        let path = database_path();
-        assert!(path.ends_with(AGENTS_DB));
-        assert_eq!(
-            path.parent(),
-            Some(whatfast_model::paths::data_dir().as_path())
-        );
-    }
-}

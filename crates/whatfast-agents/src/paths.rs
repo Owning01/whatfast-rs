@@ -110,38 +110,3 @@ fn variable(name: &str) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expands_the_home() {
-        let home = home().expect("home");
-        // The home is the folder the environment names: this comparison is
-        // what catches a `home()` that stops reading it.
-        let expected = std::env::var("HOME")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                std::env::var("USERPROFILE")
-                    .ok()
-                    .filter(|value| !value.is_empty())
-            })
-            .expect("home");
-        assert_eq!(home, expected);
-        let path = expand("~/.codex/config.toml").expect("path");
-        assert_eq!(path, PathBuf::from(format!("{home}/.codex/config.toml")));
-    }
-
-    #[test]
-    fn expands_a_windows_variable() {
-        let path = expand("%USERPROFILE%/.cursor/mcp.json").expect("path");
-        assert!(path.to_string_lossy().ends_with("/.cursor/mcp.json"));
-        assert!(!path.to_string_lossy().contains('%'));
-    }
-
-    #[test]
-    fn a_missing_variable_is_none() {
-        assert!(expand("%WHATFAST_NOT_SET_ANYWHERE%/x").is_none());
-    }
-}

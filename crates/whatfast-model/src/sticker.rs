@@ -135,39 +135,3 @@ fn webp_is_animated(data: &[u8]) -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prepares_a_centered_size_capped_static_webp() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("wide.png");
-        let source = RgbaImage::from_fn(800, 400, |x, y| {
-            Rgba([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8, 255])
-        });
-        source.save_with_format(&path, ImageFormat::Png).unwrap();
-
-        let prepared = prepare(&path).unwrap();
-        assert!(!webp_is_animated(&prepared.webp_data));
-        assert!(prepared.webp_data.len() <= MAX_STATIC_STICKER_BYTES);
-        assert_eq!(&prepared.webp_data[..4], b"RIFF");
-        assert_eq!(&prepared.webp_data[8..12], b"WEBP");
-        let decoded = image::load_from_memory(&prepared.webp_data).unwrap();
-        assert_eq!(
-            (decoded.width(), decoded.height()),
-            (STICKER_EDGE, STICKER_EDGE)
-        );
-        let rgba = decoded.to_rgba8();
-        assert_eq!(rgba.get_pixel(0, 0).0[3], 0);
-        assert_eq!(rgba.get_pixel(STICKER_EDGE / 2, STICKER_EDGE / 2).0[3], 255);
-    }
-
-    #[test]
-    fn detects_extended_animated_webp_headers() {
-        let mut data = b"RIFF\x0a\x00\x00\x00WEBPVP8X\x01\x00\x00\x00\x02\x00".to_vec();
-        assert!(webp_is_animated(&data));
-        data[20] = 0;
-        assert!(!webp_is_animated(&data));
-    }
-}

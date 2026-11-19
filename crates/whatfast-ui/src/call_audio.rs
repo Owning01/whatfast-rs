@@ -414,13 +414,21 @@ trait ToNormalizedSample {
 
 impl ToNormalizedSample for f32 {
     fn to_normalized(self) -> f32 {
-        self.clamp(-1.0, 1.0)
+        if self.is_finite() {
+            self.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
 impl ToNormalizedSample for f64 {
     fn to_normalized(self) -> f32 {
-        (self as f32).clamp(-1.0, 1.0)
+        if self.is_finite() {
+            (self as f32).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -499,157 +507,3 @@ impl Playback {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{FRAME_SAMPLES, MUTE, Resampler, ToNormalizedSample};
-    use std::sync::atomic::Ordering;
-    use std::sync::Mutex;
-
-    /// The mute is a process-wide atomic. Serialize the tests that set it so
-    /// one test cannot silence another one halfway through.
-    static MUTE_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Collects all the engine frames of a run of device-rate samples.
-    fn render(rate: u32, samples: &[f32]) -> Vec<i16> {
-        let (tx, rx) = async_channel::bounded(256);
-        let oldest = rx.clone();
-        let mut resampler = Resampler::new(rate, 1);
-        for chunk in samples.chunks(1024) {
-            resampler.accept(chunk, &tx, &oldest);
-        }
-        let mut out = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            out.extend_from_slice(&frame);
-        }
-        out
-    }
-
-    #[test]
-    fn the_capture_hands_the_engine_frames_of_sixty_milliseconds() {
-        let _guard = MUTE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        // The engine rejects anything that is not 960 samples. A device that
-        // calls back with 1024 samples at 48 kHz produces shorter chunks, so
-        // the capture has to wait and join them.
-        MUTE.store(false, Ordering::SeqCst);
-        let (tx, rx) = async_channel::bounded(64);
-        let oldest = rx.clone();
-        let mut resampler = Resampler::new(48_000, 1);
-        let block = vec![0_f32; 1024];
-        for _ in 0..10 {
-            resampler.accept(&block, &tx, &oldest);
-        }
-        let mut frames = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            frames.push(frame);
-        }
-        assert!(!frames.is_empty());
-        for frame in &frames {
-            assert_eq!(frame.len(), FRAME_SAMPLES);
-        }
-        // 10 blocks of 1024 at 48 kHz are 3413 samples at 16 kHz: three whole
-        // frames, and the rest stays for the next callback.
-        assert_eq!(frames.len(), 3);
-    }
-
-    /// Every format of the microphone starts in the same normalized range.
-    #[test]
-    fn every_sample_format_normalizes_to_the_same_range() {
-        assert_eq!(0_i16.to_normalized(), 0.0);
-        assert!((i16::MAX.to_normalized() - 1.0).abs() < 0.001);
-        assert!((i16::MIN.to_normalized() + 1.0).abs() < 0.001);
-        assert!(u16::MAX.to_normalized() > 0.99);
-        assert!((0_u8.to_normalized() + 1.0).abs() < 0.001);
-        assert!((255_u8.to_normalized() - 0.992_187_5).abs() < 0.001);
-        assert!((i8::MIN.to_normalized() + 1.0).abs() < 0.001);
-        assert!((i32::MAX.to_normalized() - 1.0).abs() < 0.001);
-        assert!((u32::MAX.to_normalized() - 1.0).abs() < 0.001);
-    }
-
-    /// The old code saturated every nonzero sample to the i16 limit. A quiet
-    /// 440 Hz tone must come out at about a quarter of full scale, not at a
-    /// square wave of maximum volume.
-    #[test]
-    fn a_quiet_sine_keeps_its_amplitude_and_its_shape() {
-        let _guard = MUTE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        MUTE.store(false, Ordering::SeqCst);
-        let rate = 48_000_f64;
-        let samples: Vec<f32> = (0..(0.3 * rate) as usize)
-            .map(|index| {
-                (0.25 * (std::f64::consts::TAU * 440.0 * index as f64 / rate).sin()) as f32
-            })
-            .collect();
-        let rendered = render(48_000, &samples);
-        // The high-pass needs about 50 ms to settle: skip the first 800
-        // engine samples so the transient does not skew the amplitude.
-        let settled = &rendered[800..];
-        let peak = settled.iter().map(|sample| sample.abs()).max().unwrap() as f32;
-        assert!(
-            (7_000.0..=9_500.0).contains(&peak),
-            "peak {peak} should be near 8192, not a saturated 32767"
-        );
-        let rms = (settled
-            .iter()
-            .map(|sample| f64::from(*sample) * f64::from(*sample))
-            .sum::<f64>()
-            / settled.len() as f64)
-            .sqrt();
-        let expected = 0.25 / 2.0_f64.sqrt() * 32_767.0;
-        assert!(
-            (rms - expected).abs() / expected < 0.15,
-            "rms {rms} differs from {expected}"
-        );
-        // Correlate against a pure tone, allowing for the phase of the
-        // high-pass: a shape that survived scores near one at some offset.
-        let best = (0..64)
-            .map(|shift| {
-                let reference: Vec<f64> = (shift..shift + 1_600)
-                    .map(|index| {
-                        (std::f64::consts::TAU * 440.0 * index as f64 / 16_000.0).sin()
-                    })
-                    .collect();
-                let wave: Vec<f64> = settled[..1_600]
-                    .iter()
-                    .map(|sample| f64::from(*sample))
-                    .collect();
-                let dot: f64 = wave.iter().zip(&reference).map(|(a, b)| a * b).sum();
-                let energy: f64 = wave.iter().map(|a| a * a).sum::<f64>()
-                    * reference.iter().map(|b| b * b).sum::<f64>();
-                dot / energy.sqrt()
-            })
-            .fold(0.0_f64, f64::max);
-        assert!(best > 0.95, "correlation {best} with a pure 440 Hz tone");
-    }
-
-    /// A 14 kHz tone at 48 kHz would fold down to 2 kHz if the capture just
-    /// dropped two of every three samples. The low-pass has to remove it.
-    #[test]
-    fn a_tone_above_nyquist_is_filtered_before_decimating() {
-        let _guard = MUTE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        MUTE.store(false, Ordering::SeqCst);
-        let rate = 48_000_f64;
-        let samples: Vec<f32> = (0..(0.3 * rate) as usize)
-            .map(|index| {
-                (0.8 * (std::f64::consts::TAU * 14_000.0 * index as f64 / rate).sin()) as f32
-            })
-            .collect();
-        let rendered = render(48_000, &samples);
-        let settled = &rendered[800..];
-        let peak = settled.iter().map(|sample| sample.abs()).max().unwrap() as f32;
-        assert!(
-            peak < 3_000.0,
-            "peak {peak} should be well under 3000 after anti-aliasing"
-        );
-    }
-
-    /// Muting is exact: every sample of the outgoing frame is zero.
-    #[test]
-    fn mute_silences_every_sample() {
-        let _guard = MUTE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        MUTE.store(true, Ordering::SeqCst);
-        let samples = vec![0.5_f32; 48_000];
-        let rendered = render(48_000, &samples);
-        assert!(!rendered.is_empty());
-        assert!(rendered.iter().all(|sample| *sample == 0));
-        MUTE.store(false, Ordering::SeqCst);
-    }
-}

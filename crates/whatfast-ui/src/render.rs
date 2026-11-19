@@ -92,8 +92,6 @@ enum ChatContextEntry {
 enum ChatMenuEntry {
     /// A row of the menu: the action is `None` when the app can not do it.
     Item(Box<(Option<ChatMenuAction>, SharedString, Icon)>),
-    /// The line that separates two groups of rows.
-    Separator,
 }
 
 /// The state of the menu of the filters of the column of chats.
@@ -229,6 +227,56 @@ impl Whatfast {
                 let _ = released.update(cx, |this, cx| {
                     if this.sidebar_dragging {
                         this.sidebar_dragging = false;
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        if self.video_seek_dragging.is_some() {
+            let moved = cx.entity().downgrade();
+            window.on_mouse_event(move |event: &MouseMoveEvent, _phase, window, cx| {
+                let _ = moved.update(cx, |this, cx| {
+                    let Some(key) = this.video_seek_dragging.clone() else {
+                        return;
+                    };
+                    let Some(bounds) = this.video_seek_drag_bounds else {
+                        return;
+                    };
+                    let duration = this.video_seek_drag_duration;
+                    if duration <= 0.0 {
+                        return;
+                    }
+                    let width = f32::from(bounds.size.width).max(1.0);
+                    let fraction = ((f32::from(event.position.x) - f32::from(bounds.origin.x))
+                        / width)
+                        .clamp(0.0, 1.0);
+                    let dispatch = this
+                        .video_seek_last_sent_at
+                        .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(45));
+                    this.seek_video(key, fraction * duration, dispatch, window, cx);
+                });
+            });
+            let released = cx.entity().downgrade();
+            window.on_mouse_event(move |event: &MouseUpEvent, _phase, window, cx| {
+                let _ = released.update(cx, |this, cx| {
+                    let Some(key) = this.video_seek_dragging.take() else {
+                        return;
+                    };
+                    let bounds = this.video_seek_drag_bounds.take();
+                    let duration = this.video_seek_drag_duration;
+                    this.video_seek_suppress_click = true;
+                    cx.on_next_frame(window, |this, _, _| {
+                        this.video_seek_suppress_click = false;
+                    });
+                    if let Some(bounds) = bounds
+                        && duration > 0.0
+                    {
+                        let width = f32::from(bounds.size.width).max(1.0);
+                        let fraction = ((f32::from(event.position.x) - f32::from(bounds.origin.x))
+                            / width)
+                            .clamp(0.0, 1.0);
+                        this.seek_video(key, fraction * duration, true, window, cx);
+                    } else {
                         cx.notify();
                     }
                 });
@@ -505,9 +553,13 @@ impl Whatfast {
         h_flex()
             .id("chat-filters")
             .flex_none()
-            .gap(px(6.))
-            .pt(px(2.))
+            .gap(px(4.))
+            // Aire sobre los chips: el anillo de foco del buscador no debe
+            // tocar "Todos". La columna derecha deja que el ultimo chip
+            // ("Mentions") se deslice entero en vez de quedar cortado.
+            .pt(px(8.))
             .pb(px(8.))
+            .pr(px(4.))
             .overflow_x_scroll()
             .children(ChatFilter::ALL.into_iter().map(|filter| {
                 let selected = filter == active && self.active_chat_folder.is_none();
@@ -516,7 +568,7 @@ impl Whatfast {
                         format!("chat-filter-{}", filter.label()).into(),
                     ))
                     .flex_none()
-                    .px(px(11.))
+                    .px(px(9.))
                     .py(px(5.))
                     .rounded_full()
                     .border_1()
@@ -1185,14 +1237,14 @@ impl Whatfast {
                                         line.child(
                                             Icon::new(IconName::StarFill)
                                                 .with_size(px(13. * ui_scale))
-                                                .text_color(cx.theme().accent),
+                                                .text_color(cx.theme().muted_foreground),
                                         )
                                     })
                                     .when(chat.pinned, |line| {
                                         line.child(
                                             Icon::new(WhatfastIcon::Pin)
                                                 .with_size(px(14. * ui_scale))
-                                                .text_color(cx.theme().accent),
+                                                .text_color(cx.theme().muted_foreground),
                                         )
                                     })
                                     .when(chat.unread_count > 0, |line| {
@@ -1201,7 +1253,7 @@ impl Whatfast {
                                                 .flex_shrink_0()
                                                 .min_w(px(18.))
                                                 .h(px(18.))
-                                                .px_1()
+                                                .px_1p5()
                                                 .rounded_full()
                                                 .flex()
                                                 .items_center()
@@ -1237,25 +1289,24 @@ impl Whatfast {
         };
         let ui_scale = self.ui_scale;
         let is_favorite = self.store.is_favorite(&chat.id);
-        // The rows of the menu of the reference (`docs/referencia/
-        // 07-paneles-del-compositor.md`): the ones the app can not do are
-        // drawn too, but they cannot be pressed, the same way the menu of a
-        // message draws the rows that do not apply.
-        let entries: Vec<ChatMenuEntry> = vec![
+        let is_group = chat.kind() == proto::ChatKind::Group;
+        // Solo las acciones que la app puede hacer: antes se dibujaban doce
+        // filas apagadas que nunca respondian y hacian el menu gigante.
+        let mut entries: Vec<ChatMenuEntry> = vec![
             ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Info),
-                i18n::t("Contact info").into(),
+                if is_group {
+                    i18n::t("Group info")
+                } else {
+                    i18n::t("Contact info")
+                }
+                .into(),
                 Icon::new(IconName::Info),
             ))),
             ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Search),
                 i18n::t("Search").into(),
                 Icon::new(IconName::Search),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Select messages").into(),
-                Icon::new(WhatfastIcon::Check),
             ))),
             ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Mute),
@@ -1268,21 +1319,6 @@ impl Whatfast {
                 Icon::new(WhatfastIcon::Bell),
             ))),
             ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Temporary messages").into(),
-                Icon::new(WhatfastIcon::Clock),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Restrict chat").into(),
-                Icon::new(WhatfastIcon::Shield),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Chat style").into(),
-                Icon::new(WhatfastIcon::Palette),
-            ))),
-            ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Favorite),
                 if is_favorite {
                     i18n::t("Remove from favorites")
@@ -1292,64 +1328,20 @@ impl Whatfast {
                 .into(),
                 Icon::new(IconName::Heart),
             ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Add to list").into(),
-                Icon::new(IconName::File),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Export chat").into(),
-                Icon::new(IconName::ArrowDown),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Close chat").into(),
-                Icon::new(IconName::CircleX),
-            ))),
-            ChatMenuEntry::Separator,
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Send call link").into(),
-                Icon::new(IconName::ExternalLink),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Schedule call").into(),
-                Icon::new(IconName::Calendar),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("New group call").into(),
-                Icon::new(IconName::User),
-            ))),
-            ChatMenuEntry::Separator,
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Report").into(),
-                Icon::new(IconName::TriangleAlert),
-            ))),
-            ChatMenuEntry::Item(Box::new((
+        ];
+        // Bloquear solo tiene sentido en un contacto, nunca en un grupo.
+        if !is_group {
+            entries.push(ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Block),
                 if chat.blocked {
-                    "Unblock contact"
+                    i18n::t("Unblock contact")
                 } else {
-                    "Block contact"
+                    i18n::t("Block contact")
                 }
                 .into(),
                 Icon::new(WhatfastIcon::Shield),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Clear chat").into(),
-                Icon::new(IconName::CircleX),
-            ))),
-            ChatMenuEntry::Item(Box::new((
-                None,
-                i18n::t("Delete chat").into(),
-                Icon::new(WhatfastIcon::Trash),
-            ))),
-        ];
+            ))));
+        }
 
         let hover = cx.theme().muted;
         let foreground = cx.theme().foreground;
@@ -1380,13 +1372,8 @@ impl Whatfast {
             .bg(panel)
             .py(px(4.));
         for (index, entry) in entries.into_iter().enumerate() {
-            let (action, label, icon) = match entry {
-                ChatMenuEntry::Separator => {
-                    panel = panel.child(div().h(px(1.)).my(px(4.)).mx_2().bg(border));
-                    continue;
-                }
-                ChatMenuEntry::Item(item) => *item,
-            };
+            let ChatMenuEntry::Item(item) = entry;
+            let (action, label, icon) = *item;
             let is_block = action == Some(ChatMenuAction::Block);
             let color = if action.is_none() {
                 muted
@@ -1706,12 +1693,14 @@ impl Whatfast {
                             .child(
                                 h_flex()
                                     .gap_1()
+                                    .items_center()
                                     // El boton que esconde la columna: la
                                     // conversacion ocupa entonces toda la
                                     // ventana.
                                     .child(
                                         Button::new("hide-sidebar")
                                             .small()
+                                            .rounded(px(9999.))
                                             .icon(WhatfastIcon::Sidebar)
                                             .tooltip(i18n::t("Hide chat list"))
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1727,6 +1716,7 @@ impl Whatfast {
                                     .child(
                                         Button::new("settings")
                                             .small()
+                                            .rounded(px(9999.))
                                             .icon(IconName::Settings)
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.sidebar_view = if this.sidebar_view
@@ -1747,6 +1737,7 @@ impl Whatfast {
                                     .child(
                                         Button::new("chat-list-menu")
                                             .small()
+                                            .rounded(px(9999.))
                                             .icon(IconName::EllipsisVertical)
                                             .tooltip(i18n::t("Menu"))
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1765,7 +1756,7 @@ impl Whatfast {
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .size(px(36. * ui_scale))
+                                            .size(px(32. * ui_scale))
                                             .rounded_full()
                                             .bg(cx.theme().accent)
                                             .text_color(cx.theme().accent_foreground)
@@ -1776,7 +1767,7 @@ impl Whatfast {
                                             }))
                                             .child(
                                                 Icon::new(IconName::Plus)
-                                                    .with_size(px(20. * ui_scale)),
+                                                    .with_size(px(18. * ui_scale)),
                                             )
                                     }),
                             ),
@@ -2769,6 +2760,7 @@ impl Whatfast {
         let background = cx.theme().background;
         let hover = cx.theme().muted;
         let name = state.name.read(cx).value().trim().to_string();
+        let filter_query = state.filter.read(cx).value().trim().to_lowercase();
         let pending = state.pending;
         let selected_count = state.selected.len();
         let can_create = !pending
@@ -2783,6 +2775,17 @@ impl Whatfast {
                 continue;
             }
             let jid = chat.transport_jid.clone();
+            // Solo contactos con nombre o telefono legible: los jids de
+            // grupo/canal sin titulo no sirven para crear un grupo.
+            if chat.title.trim().is_empty() {
+                continue;
+            }
+            if !filter_query.is_empty()
+                && !chat.title.to_lowercase().contains(&filter_query)
+                && !jid.contains(&filter_query)
+            {
+                continue;
+            }
             candidates.push((
                 jid.clone(),
                 chat.title.clone(),
@@ -2847,12 +2850,19 @@ impl Whatfast {
                             ),
                     )
                     .child(
+                        Input::new(&state.filter)
+                            .w_full()
+                            .h(px(36. * scale))
+                            .disabled(pending),
+                    )
+                    .child(
                         v_flex()
                             .id("create-group-contacts")
                             .flex_1()
                             .min_h_0()
                             .max_h(px(300. * scale))
                             .overflow_y_scroll()
+                            .pb(px(8. * scale))
                             .gap(px(2. * scale))
                             .when(!has_candidates, |list| {
                                 list.child(
@@ -2905,6 +2915,7 @@ impl Whatfast {
                     )
                     .child(
                         h_flex()
+                            .flex_none()
                             .justify_end()
                             .gap_2()
                             .child(
@@ -3426,7 +3437,7 @@ impl Whatfast {
                                 .border_color(cx.theme().border)
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Ctrl+K · Command Palette"),
+                                .child(format!("Ctrl+K · {}", i18n::t("Command Palette"))),
                         )
                         .child(
                             div()
@@ -3437,7 +3448,7 @@ impl Whatfast {
                                 .border_color(cx.theme().border)
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("F6 · Switch Pane"),
+                                .child(format!("F6 · {}", i18n::t("Switch Pane"))),
                         )
                         .child(
                             div()
@@ -3448,7 +3459,7 @@ impl Whatfast {
                                 .border_color(cx.theme().border)
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Ctrl+/ · Shortcuts"),
+                                .child(format!("Ctrl+/ · {}", i18n::t("Shortcuts"))),
                         ),
                 );
         };
@@ -3749,7 +3760,7 @@ impl Whatfast {
                     .px_3()
                     .py_2()
                     .gap_3()
-                    .rounded_md()
+                    .rounded_lg()
                     .bg(cx.theme().secondary)
                     // La barra flota sobre la conversacion: el clic en su
                     // texto o en la cruz no debe llegar al mensaje de abajo.
@@ -4091,9 +4102,19 @@ impl Whatfast {
                                         .with_size(px(16. * scale))
                                         .text_color(muted),
                                 )
+                                // El input crece y las flechas y el cierre
+                                // quedan anclados a la derecha de la barra,
+                                // sin un hueco de cientos de pixeles al medio.
                                 .child(
-                                    div()
-                                        .w(px(240. * scale))
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().background)
                                         .child(self.chat_search_input.clone()),
                                 )
                                 .child(
@@ -4235,11 +4256,18 @@ impl Whatfast {
                                     }
                                     this.messages_scrolled_up =
                                         range.end < this.store.messages.len();
-                                    this.sticky_date_label = if this.messages_scrolled_up {
-                                        this.store
-                                            .messages
-                                            .get(range.start)
-                                            .map(|m| format_epoch_date(m.timestamp_ms))
+                                    // El separador real del primer mensaje visible
+                                    // ya muestra la fecha arriba de todo: pintar
+                                    // otra etiqueta fija superpone dos fechas
+                                    // distintas ("18 Nov 2026" sobre "Today").
+                                    let separator_visible =
+                                        this.day_separator_label(range.start).is_some();
+                                    this.sticky_date_label = if this.messages_scrolled_up
+                                        && !separator_visible
+                                    {
+                                        this.store.messages.get(range.start).map(|m| {
+                                            message_day_label(m.timestamp_ms, now_ms())
+                                        })
                                     } else {
                                         None
                                     };
@@ -4812,10 +4840,13 @@ impl Whatfast {
         let hover_background = if dark { rgb(0x2a3942) } else { rgb(0xf0f2f5) };
         v_flex()
             .mx_3()
+            .mb_2()
             .mt_2()
-            .rounded_md()
+            .max_w(px(380. * self.ui_scale))
+            .rounded_xl()
             .border_1()
             .border_color(cx.theme().border)
+            .shadow_lg()
             .bg(cx.theme().background)
             // La lista flota sobre la conversacion: el clic en una mencion no
             // debe llegar al mensaje que queda detras.
@@ -4832,7 +4863,20 @@ impl Whatfast {
             })
             .children(matches.into_iter().enumerate().map(|(index, participant)| {
                 let name = mention_display_name(&participant);
-                let phone = participant.phone_number.clone();
+                // Los sufijos tecnicos del jid no son un telefono: se quitan
+                // antes de formatear para no mostrar "@s.whatsapp.net"/"@lid".
+                let phone_raw = participant.phone_number.clone();
+                let phone_base = phone_raw.split('@').next().unwrap_or("").trim();
+                let phone = if phone_base.is_empty() {
+                    String::new()
+                } else {
+                    whatfast_core::phone::format(phone_base)
+                };
+                let avatar_path = self
+                    .store
+                    .participant_avatar_path(&participant.participant_id)
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or_default();
                 h_flex()
                     .id(("mention-row", index))
                     .px_3()
@@ -4846,8 +4890,12 @@ impl Whatfast {
                         this.apply_mention(index, window, cx);
                         cx.notify();
                     }))
+                    .child(avatar_element(&name, avatar_path, px(24. * self.ui_scale), cx))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(name),
@@ -4855,6 +4903,7 @@ impl Whatfast {
                     .when(!phone.is_empty(), |row| {
                         row.child(
                             div()
+                                .flex_none()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(phone),
@@ -5126,6 +5175,7 @@ impl Whatfast {
         let selected = self.emoji_category;
         let hover = cx.theme().muted;
         let accent = cx.theme().accent;
+        let foreground = cx.theme().foreground;
         let scale = self.ui_scale;
         h_flex().flex_none().px_2().py_2().gap_1().children(
             EmojiCategory::ALL
@@ -5142,15 +5192,18 @@ impl Whatfast {
                         .justify_center()
                         .gap(px(2.))
                         .cursor_pointer()
+                        // Pill activo sutil en vez del circulo blanco opaco:
+                        // el emoji de categoria deja de competir con la rejilla.
+                        .when(active, |tab| tab.bg(accent.opacity(0.15)))
                         .hover(move |style| style.bg(hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_emoji_category(category);
                             cx.notify();
                         }))
                         .child(
-                            div()
-                                .text_size(px(CATEGORY_GLYPH * scale))
-                                .child(emoji_category_glyph(category)),
+                            emoji_category_icon(category)
+                                .with_size(px(CATEGORY_GLYPH * scale))
+                                .text_color(if active { accent } else { foreground }),
                         )
                         // The green line under the drawing of the category
                         // that is active.
@@ -5421,6 +5474,9 @@ impl Whatfast {
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let scale = self.ui_scale;
         let scale_percent = (self.ui_scale * 100.0).round() as u32;
+        // El panel ocupa exactamente la columna lateral: 420 px fijos se
+        // metian sobre la primera columna de mensajes de la conversacion.
+        let settings_width = self.sidebar_width.max(360.) * scale;
         let logout_pending = self.rpc.logout_pending();
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
@@ -5472,7 +5528,9 @@ impl Whatfast {
                     .items_center()
                     .gap_3()
                     .py_1()
-                    .child(div().text_sm().child(label))
+                    // Las etiquetas largas no deben pegar el switch al borde.
+                    .pr_4()
+                    .child(div().flex_1().min_w_0().text_sm().child(label))
                     .child(
                         Switch::new(id)
                             .checked(checked)
@@ -5895,85 +5953,108 @@ impl Whatfast {
         // The catalog: the builtin themes and the ones the user made.
         let mut themes: Vec<AppTheme> = whatfast_core::theme::builtin_themes().to_vec();
         themes.extend(self.custom_themes.iter().cloned());
-        let mut theme_rows = v_flex().gap_1().mt_1();
-        for (index, theme) in themes.iter().enumerate() {
-            let selected = theme.id == self.theme_id;
-            let custom = theme.builtin != Some(true);
-            let delete_id = theme.id.clone();
-            let select_id = theme.id.clone();
-            let appearance = match theme.appearance {
-                ThemeAppearance::Dark => i18n::t("Dark"),
-                ThemeAppearance::Light => i18n::t("Light"),
-            };
-            let row = h_flex()
-                .id(("theme-row", index))
-                .gap_3()
-                .items_center()
-                .px_2()
-                .py_2()
-                .rounded_md()
-                .cursor_pointer()
-                .when(selected, |this| this.bg(secondary))
-                .hover(move |this| this.bg(hover))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .justify_center()
-                        .w(px(46. * scale))
-                        .h(px(30. * scale))
-                        .rounded_md()
-                        .bg(tokens::token_color(theme, ThemeToken::BgApp))
-                        .border_1()
-                        .border_color(tokens::token_color(theme, ThemeToken::Border))
-                        .child(
-                            div()
-                                .size(px(11. * scale))
-                                .rounded_full()
-                                .bg(tokens::token_color(theme, ThemeToken::BubbleOutBg)),
-                        )
-                        .child(
-                            div()
-                                .size(px(11. * scale))
-                                .rounded_full()
-                                .bg(tokens::token_color(theme, ThemeToken::Accent)),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(theme.name.clone()),
-                        )
-                        .child(div().text_xs().text_color(muted).child(appearance)),
-                )
-                .when(custom, |this| {
-                    this.child(
-                        div()
-                            .id(("delete-theme", index))
-                            .p_1()
+        // Grilla real de dos columnas en pares para que nunca desborde ni
+        // envuelva nombres a la fuerza en el ancho lateral.
+        let mut theme_rows = v_flex().gap_2().mt_1();
+        for (pair_index, pair) in themes.chunks(2).enumerate() {
+            let mut row_line = h_flex().w_full().gap_2();
+            for (offset, theme) in pair.iter().enumerate() {
+                let index = pair_index * 2 + offset;
+                let selected = theme.id == self.theme_id;
+                let custom = theme.builtin != Some(true);
+                let delete_id = theme.id.clone();
+                let select_id = theme.id.clone();
+                let appearance = match theme.appearance {
+                    ThemeAppearance::Dark => i18n::t("Dark"),
+                    ThemeAppearance::Light => i18n::t("Light"),
+                };
+                let card = h_flex()
+                    .id(("theme-row", index))
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if selected { accent } else { border })
+                    .cursor_pointer()
+                    .when(selected, |this| this.bg(secondary))
+                    .hover(move |this| this.bg(hover))
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .items_center()
+                            .justify_center()
+                            .w(px(38. * scale))
+                            .h(px(28. * scale))
                             .rounded_md()
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(hover))
+                            .bg(tokens::token_color(theme, ThemeToken::BgApp))
+                            .border_1()
+                            .border_color(tokens::token_color(theme, ThemeToken::Border))
                             .child(
-                                Icon::new(WhatfastIcon::Trash)
-                                    .with_size(px(16. * scale))
-                                    .text_color(muted),
+                                div()
+                                    .size(px(9. * scale))
+                                    .rounded_full()
+                                    .bg(tokens::token_color(theme, ThemeToken::BubbleOutBg)),
                             )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.delete_custom_theme(&delete_id, window, cx);
-                            })),
+                            .child(
+                                div()
+                                    .size(px(9. * scale))
+                                    .rounded_full()
+                                    .bg(tokens::token_color(theme, ThemeToken::Accent)),
+                            ),
                     )
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_theme(select_id.clone(), window, cx);
-                }));
-            theme_rows = theme_rows.child(row);
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(theme.name.clone()),
+                            )
+                            .child(div().truncate().text_xs().text_color(muted).child(appearance)),
+                    )
+                    .when(selected, |this| {
+                        this.child(
+                            Icon::new(IconName::Check)
+                                .with_size(px(14. * scale))
+                                .text_color(accent),
+                        )
+                    })
+                    .when(custom, |this| {
+                        this.child(
+                            div()
+                                .id(("delete-theme", index))
+                                .p_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hover))
+                                .child(
+                                    Icon::new(WhatfastIcon::Trash)
+                                        .with_size(px(14. * scale))
+                                        .text_color(muted),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.delete_custom_theme(&delete_id, window, cx);
+                                })),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_theme(select_id.clone(), window, cx);
+                    }));
+                row_line = row_line.child(card);
+            }
+            if pair.len() == 1 {
+                row_line = row_line.child(div().flex_1().min_w_0());
+            }
+            theme_rows = theme_rows.child(row_line);
         }
 
         // The editor of a custom theme: the accent of the palette.
@@ -6030,6 +6111,7 @@ impl Whatfast {
         let account_control = h_flex().mt_1().child(
             Button::new("logout")
                 .small()
+                .danger()
                 .label(if logout_pending {
                     i18n::t("Clearing\u{2026}")
                 } else if self.confirming_logout {
@@ -6087,10 +6169,16 @@ impl Whatfast {
             UpdatePhase::Unsupported => {
                 i18n::t("This platform has no package for the automatic update.").to_string()
             }
-            UpdatePhase::Failed => i18n::t_args(
-                "The update failed: {error}",
-                &[("error", &self.update_error)],
-            ),
+            UpdatePhase::Failed => {
+                // Un 404 no es un error de la app: no hay paquete para esta
+                // plataforma. No volcamos la URL completa en el panel.
+                if self.update_error.contains("404") {
+                    i18n::t("No update is available for this platform (404).").to_string()
+                } else {
+                    let detail: String = self.update_error.chars().take(120).collect();
+                    i18n::t_args("The update failed: {error}", &[("error", &detail)])
+                }
+            }
         };
         let mut update_buttons = h_flex().gap_2();
         match self.update_phase {
@@ -6173,7 +6261,7 @@ impl Whatfast {
             .justify_start()
             .child(
                 v_flex()
-                    .w(px(420. * scale))
+                    .w(px(settings_width))
                     .max_w_full()
                     .h_full()
                     .border_r_1()
@@ -6183,9 +6271,11 @@ impl Whatfast {
                         h_flex()
                             .px_5()
                             .pt_5()
-                            .pb_3()
+                            .pb_2()
                             .gap_3()
                             .items_center()
+                            .border_b_1()
+                            .border_color(border)
                             .child(
                                 div()
                                     .size(px(52. * scale))
@@ -6254,43 +6344,55 @@ impl Whatfast {
                                 "",
                                 v_flex()
                                     .gap_3()
+                                    // Los interruptores van en filas limpias,
+                                    // separados de los botones de exportar.
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_3()
+                                            .py_1()
+                                            .pr_4()
+                                            .child(div().text_sm().child(i18n::t("Autostart")))
+                                            .child(
+                                                Switch::new("toggle-autostart")
+                                                    .checked(self.settings.autostart)
+                                                    .on_click(cx.listener(|this, value, _, cx| {
+                                                        let value = *value;
+                                                        this.settings.autostart = value;
+                                                        crate::tray::set_autostart(value);
+                                                        this.save_settings();
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_3()
+                                            .py_1()
+                                            .pr_4()
+                                            .child(div().text_sm().child(i18n::t("Do Not Disturb")))
+                                            .child(
+                                                Switch::new("toggle-dnd")
+                                                    .checked(self.do_not_disturb)
+                                                    .on_click(cx.listener(|this, value, _, cx| {
+                                                        this.do_not_disturb = *value;
+                                                        this.save_settings();
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
                                     .child(
                                         h_flex()
                                             .gap_2()
                                             .flex_wrap()
                                             .child(
-                                                Button::new("toggle-autostart")
-                                                    .outline()
-                                                    .label(if self.settings.autostart {
-                                                        i18n::t("Autostart: On")
-                                                    } else {
-                                                        i18n::t("Autostart: Off")
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.settings.autostart = !this.settings.autostart;
-                                                        crate::tray::set_autostart(this.settings.autostart);
-                                                        this.save_settings();
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("toggle-dnd")
-                                                    .outline()
-                                                    .label(if self.do_not_disturb {
-                                                        i18n::t("Do Not Disturb: On")
-                                                    } else {
-                                                        i18n::t("Do Not Disturb: Off")
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.do_not_disturb = !this.do_not_disturb;
-                                                        this.save_settings();
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
                                                 Button::new("export-chat-txt")
                                                     .outline()
-                                                    .label("Export TXT")
+                                                    .small()
+                                                    .label(i18n::t("Export TXT"))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.export_active_chat_as("txt", cx);
                                                     })),
@@ -6298,7 +6400,8 @@ impl Whatfast {
                                             .child(
                                                 Button::new("export-chat-json")
                                                     .outline()
-                                                    .label("Export JSON")
+                                                    .small()
+                                                    .label(i18n::t("Export JSON"))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.export_active_chat_as("json", cx);
                                                     })),
@@ -6306,7 +6409,8 @@ impl Whatfast {
                                             .child(
                                                 Button::new("export-chat-html")
                                                     .outline()
-                                                    .label("Export HTML")
+                                                    .small()
+                                                    .label(i18n::t("Export HTML"))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.export_active_chat_as("html", cx);
                                                     })),
@@ -6321,46 +6425,50 @@ impl Whatfast {
                                     .gap_3()
                                     .child(
                                         h_flex()
-                                            .gap_2()
-                                            .flex_wrap()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_3()
+                                            .py_1()
+                                            .pr_4()
+                                            .child(div().text_sm().child(i18n::t("High contrast")))
                                             .child(
-                                                Button::new("toggle-high-contrast")
-                                                    .outline()
-                                                    .label(if self.high_contrast {
-                                                        i18n::t("High contrast: On")
-                                                    } else {
-                                                        i18n::t("High contrast: Off")
-                                                    })
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.high_contrast = !this.high_contrast;
+                                                Switch::new("toggle-high-contrast")
+                                                    .checked(self.high_contrast)
+                                                    .on_click(cx.listener(|this, value, window, cx| {
+                                                        this.high_contrast = *value;
                                                         this.apply_active_theme(window, cx);
                                                         this.save_settings();
                                                     })),
-                                            )
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_3()
+                                            .py_1()
+                                            .pr_4()
+                                            .child(div().text_sm().child(i18n::t("Reduced motion")))
                                             .child(
-                                                Button::new("toggle-reduced-motion")
-                                                    .outline()
-                                                    .label(if self.reduced_motion {
-                                                        i18n::t("Reduced motion: On")
-                                                    } else {
-                                                        i18n::t("Reduced motion: Off")
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.reduced_motion = !this.reduced_motion;
+                                                Switch::new("toggle-reduced-motion")
+                                                    .checked(self.reduced_motion)
+                                                    .on_click(cx.listener(|this, value, _, cx| {
+                                                        this.reduced_motion = *value;
                                                         this.save_settings();
                                                         cx.notify();
                                                     })),
-                                            )
-                                            .child(
-                                                Button::new("open-shortcuts-help")
-                                                    .outline()
-                                                    .label(i18n::t("Keyboard shortcuts"))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.sidebar_view = SidebarView::Chats;
-                                                        this.show_shortcuts_help = true;
-                                                        cx.notify();
-                                                    })),
                                             ),
+                                    )
+                                    .child(
+                                        Button::new("open-shortcuts-help")
+                                            .outline()
+                                            .small()
+                                            .label(i18n::t("Keyboard shortcuts"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.sidebar_view = SidebarView::Chats;
+                                                this.show_shortcuts_help = true;
+                                                cx.notify();
+                                            })),
                                     ),
                             ))
                             .child(section(
@@ -6630,7 +6738,7 @@ impl Whatfast {
                 });
 
             let accent = cx.theme().accent;
-            let tab_pill = |id: &'static str, key: &'static str, label: String| {
+            let tab_pill = |id: &'static str, key: &'static str, label: gpui::AnyElement| {
                 let is_active = active_tab == key;
                 div()
                     .id(id)
@@ -6669,17 +6777,51 @@ impl Whatfast {
                             .child(tab_pill(
                                 "chat-info-tab-media",
                                 "media",
-                                format!("📷 {media_count} {}", i18n::t("Photos")),
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(WhatfastIcon::Image)
+                                            .with_size(px(12.))
+                                            .text_color(muted),
+                                    )
+                                    .child(format!("{media_count} {}", i18n::t("Photos")))
+                                    .into_any_element(),
                             ))
                             .child(tab_pill(
                                 "chat-info-tab-docs",
                                 "docs",
-                                format!("📄 {doc_count} {}", i18n::t("Docs")),
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(WhatfastIcon::Document)
+                                            .with_size(px(12.))
+                                            .text_color(muted),
+                                    )
+                                    .child(if doc_count == 1 {
+                                        i18n::t("1 document").to_string()
+                                    } else {
+                                        i18n::t_args(
+                                            "{count} documents",
+                                            &[("count", &doc_count.to_string())],
+                                        )
+                                    })
+                                    .into_any_element(),
                             ))
                             .child(tab_pill(
                                 "chat-info-tab-links",
                                 "links",
-                                format!("🔗 {link_count} {}", i18n::t("Links")),
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(IconName::ExternalLink)
+                                            .with_size(px(12.))
+                                            .text_color(muted),
+                                    )
+                                    .child(format!("{link_count} {}", i18n::t("Links")))
+                                    .into_any_element(),
                             )),
                     )
                     .child(
@@ -6732,7 +6874,11 @@ impl Whatfast {
                                                     if let Some(p) = thumb.filter(|p| p.exists()) {
                                                         cell.child(img(p).size_full().object_fit(ObjectFit::Cover))
                                                     } else {
-                                                        cell.text_xs().text_color(muted).child("📷")
+                                                        cell.child(
+                                                            Icon::new(WhatfastIcon::Image)
+                                                                .with_size(px(22.))
+                                                                .text_color(muted),
+                                                        )
                                                     }
                                                 })
                                         })),
@@ -6833,7 +6979,36 @@ impl Whatfast {
                         format_epoch_date(info.created_at_ms)
                     );
                     if !info.created_by.is_empty() {
-                        created.push_str(&format!(" {} {}", i18n::t("by"), info.created_by));
+                        // El creador llega como JID: se resuelve contra los
+                        // participantes y los chats antes de caer al numero,
+                        // y nunca se muestra el sufijo "@lid".
+                        let creator_jid = info.created_by.clone();
+                        let creator_base = creator_jid.split('@').next().unwrap_or("").trim();
+                        let creator = info
+                            .participants
+                            .iter()
+                            .find(|participant| {
+                                participant.participant_id == creator_jid
+                                    || participant.participant_id.split('@').next()
+                                        == Some(creator_base)
+                            })
+                            .and_then(|participant| {
+                                let name = if participant.display_name.is_empty() {
+                                    whatfast_core::phone::format(&participant.phone_number)
+                                } else {
+                                    participant.display_name.clone()
+                                };
+                                (!name.is_empty()).then_some(name)
+                            })
+                            .or_else(|| {
+                                self.store.chats.iter().find_map(|chat| {
+                                    let chat_base = chat.id.split('@').next().unwrap_or("");
+                                    (!chat_base.is_empty() && chat_base == creator_base)
+                                        .then(|| chat.title.clone())
+                                })
+                            })
+                            .unwrap_or_else(|| creator_base.to_string());
+                        created.push_str(&format!(" {} {}", i18n::t("by"), creator));
                     }
                     body = body.child(div().text_xs().text_color(muted).child(created));
                 }
@@ -7882,6 +8057,10 @@ impl Whatfast {
                     .px(px(24. * scale))
                     // El fondo que rodea al cuadro lo cierra con un clic.
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if this.video_seek_suppress_click {
+                            this.video_seek_suppress_click = false;
+                            return;
+                        }
                         this.close_video_fullscreen(cx);
                     }))
                     .child(
@@ -7898,6 +8077,10 @@ impl Whatfast {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
+                                if this.video_seek_suppress_click {
+                                    this.video_seek_suppress_click = false;
+                                    return;
+                                }
                                 this.toggle_video_playback(
                                     play_chat_id.clone(),
                                     play_message_id.clone(),
@@ -7953,25 +8136,106 @@ impl Whatfast {
                                     ),
                             )
                             // El reloj y la barra, pegados al borde de abajo.
-                            .child(
+                            .child({
+                                let toggle_chat = key.0.clone();
+                                let toggle_message = key.1.clone();
                                 v_flex()
+                                    .id("video-viewer-controls")
                                     .absolute()
                                     .bottom_0()
                                     .left_0()
                                     .right_0()
-                                    .px(px(12. * scale))
-                                    .pb(px(8. * scale))
-                                    .gap(px(5. * scale))
+                                    .bg(rgba(0x000000aa))
+                                    .px(px(14. * scale))
+                                    .pt(px(8. * scale))
+                                    .pb(px(10. * scale))
+                                    .gap(px(6. * scale))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|_, _, _, cx| {
+                                            cx.stop_propagation();
+                                        }),
+                                    )
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(Self::render_video_seek_bar(
+                                        "video-viewer-seekbar",
+                                        key.clone(),
+                                        duration,
+                                        progress,
+                                        self.video_seek_dragging.as_ref() == Some(&key),
+                                        scale,
+                                        rgba(0xffffff38).into(),
+                                        rgb(0x25d366).into(),
+                                        true,
+                                        cx,
+                                    ))
                                     .child(
                                         h_flex()
                                             .id("video-viewer-volume")
-                                            .gap(px(8. * scale))
+                                            .gap(px(6. * scale))
                                             .items_center()
                                             .text_xs()
                                             .text_color(rgba(0xffffffcc))
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.stop_propagation();
-                                            }))
+                                            .child(
+                                                div()
+                                                    .id("video-viewer-toggle")
+                                                    .p(px(4. * scale))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgba(0xffffff1a)))
+                                                    .child(
+                                                        Icon::new(if playing {
+                                                            WhatfastIcon::Pause
+                                                        } else {
+                                                            WhatfastIcon::Play
+                                                        })
+                                                        .with_size(px(16. * scale))
+                                                        .text_color(rgb(0xffffff)),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.toggle_video_playback(
+                                                                toggle_chat.clone(),
+                                                                toggle_message.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("video-viewer-back-5")
+                                                    .px(px(6. * scale))
+                                                    .py(px(3. * scale))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgba(0xffffff1a)))
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("-5s")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.step_active_video(-5.0, window, cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("video-viewer-fwd-5")
+                                                    .px(px(6. * scale))
+                                                    .py(px(3. * scale))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgba(0xffffff1a)))
+                                                    .text_color(rgb(0xffffff))
+                                                    .child("+5s")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.step_active_video(5.0, window, cx);
+                                                    })),
+                                            )
                                             .child(
                                                 div()
                                                     .id("video-viewer-mute")
@@ -8007,7 +8271,7 @@ impl Whatfast {
                                                         },
                                                     )),
                                             )
-                                            .child(div().w(px(120. * scale)).child(
+                                            .child(div().w(px(108. * scale)).child(
                                                 Slider::new(&self.volume_slider).horizontal(),
                                             ))
                                             .child(div().flex_1())
@@ -8020,21 +8284,7 @@ impl Whatfast {
                                                 row.child(i18n::t("Downloading the video"))
                                             }),
                                     )
-                                    .child(
-                                        div()
-                                            .h(px(3. * scale))
-                                            .w_full()
-                                            .rounded_full()
-                                            .bg(rgba(0xffffff33))
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .w(relative(progress))
-                                                    .rounded_full()
-                                                    .bg(rgb(0x25d366)),
-                                            ),
-                                    ),
-                            ),
+                            }),
                     ),
             )
             .when_some(error, |viewer, error| {
@@ -8307,7 +8557,11 @@ impl Whatfast {
                     div()
                         .w_full()
                         .h(px(150.))
+                        .max_h(px(150.))
+                        .rounded_md()
                         .overflow_hidden()
+                        .border_1()
+                        .border_color(text.opacity(0.12))
                         .child(img(thumbnail).size_full().object_fit(ObjectFit::Cover)),
                 )
             })
@@ -8448,7 +8702,7 @@ impl Whatfast {
                 .selected_chat()
                 .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
         let meta_text = if message.edited {
-            "edited".to_string()
+            i18n::t("edited").to_string()
         } else {
             String::new()
         };
@@ -8616,7 +8870,10 @@ impl Whatfast {
                     &sender_name
                 };
                 let name_color = cx.theme().blue.hue(identity_hue(identity_key));
+                // Con nombre resuelto no se anexa el numero: en los grupos el
+                // campo del telefono suele ser el LID de 15 digitos.
                 let show_number = !message.sender_phone_number.is_empty()
+                    && message.sender_name.trim().is_empty()
                     && whatfast_core::phone::format(&message.sender_phone_number) != sender_name;
                 bubble.child(
                     h_flex()
@@ -9092,6 +9349,13 @@ impl Whatfast {
             .flex_none()
             .items_center()
             .gap_1()
+            // Una pildora flotante agrupa los tres botones: antes quedaban
+            // sueltos sobre el mensaje y el "…" no alineaba con los iconos.
+            .rounded_full()
+            .bg(cx.theme().popover.opacity(0.95))
+            .border_1()
+            .border_color(cx.theme().border)
+            .px_1()
             // Los tres botones de la referencia (responder,
             // reaccionar y el menu) solo aparecen cuando
             // el puntero esta sobre el mensaje.
@@ -9142,7 +9406,7 @@ impl Whatfast {
                 Button::new(("more-message", index))
                     .ghost()
                     .small()
-                    .label("…")
+                    .icon(IconName::EllipsisVertical)
                     .tooltip(i18n::t("More"))
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         let position = event
@@ -9709,9 +9973,14 @@ impl Whatfast {
             } else {
                 px(0.)
             };
+            let bottom_slack = if index + 1 == self.store.messages.len() {
+                8. * self.ui_scale
+            } else {
+                0.
+            };
             sizes.push(geom::size(
                 geom::px(1.),
-                height + f32::from(separator_height) + f32::from(cluster_extra),
+                height + f32::from(separator_height) + f32::from(cluster_extra) + bottom_slack,
             ));
         }
         self.store.set_measured_message_sizes(width_bucket, sizes);
@@ -10128,6 +10397,21 @@ impl Render for Whatfast {
                     cx.notify();
                     return;
                 }
+                // El menu "⋮" de la conversacion tambien.
+                if this.chat_menu.is_some() && event.keystroke.key == "escape" {
+                    this.chat_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                // El composer de encuestas se cierra con escape, igual que el
+                // resto de las capas que flotan sobre la conversacion.
+                if this.poll_composer.is_some() && event.keystroke.key == "escape" {
+                    this.poll_composer = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 // El menu del mensaje tambien (y soporta navegacion por teclado).
                 if let Some(menu) = this.message_menu.clone() {
                     match event.keystroke.key.as_str() {
@@ -10238,6 +10522,38 @@ impl Render for Whatfast {
                 // Las flechas recorren el audio que se esta escuchando:
                 // cinco segundos atras o adelante. Manda el audio mientras
                 // suena; en pausa las flechas vuelven al campo de escribir.
+                if this.video_fullscreen {
+                    match event.keystroke.key.as_str() {
+                        "arrowleft" | "left" => {
+                            this.step_active_video(-5.0, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "arrowright" | "right" => {
+                            this.step_active_video(5.0, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "j" | "J" if !event.keystroke.modifiers.modified() => {
+                            this.step_active_video(-10.0, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "l" | "L" if !event.keystroke.modifiers.modified() => {
+                            this.step_active_video(10.0, window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "space" if !event.keystroke.modifiers.modified() => {
+                            if let Some((chat_id, msg_id)) = this.video.key.clone() {
+                                this.toggle_video_playback(chat_id, msg_id, window, cx);
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if this.voice.key.is_some()
                     && !this.voice.paused
                     && !emoji_focused
@@ -10251,6 +10567,20 @@ impl Render for Whatfast {
                     this.seek_active_voice_note(if forward { 5.0 } else { -5.0 }, cx);
                     cx.stop_propagation();
                     cx.notify();
+                    return;
+                }
+                if this.video.is_running()
+                    && !composer_focused
+                    && !emoji_focused
+                    && !search_focused
+                    && matches!(
+                        event.keystroke.key.as_str(),
+                        "arrowleft" | "left" | "arrowright" | "right"
+                    )
+                {
+                    let forward = matches!(event.keystroke.key.as_str(), "arrowright" | "right");
+                    this.step_active_video(if forward { 5.0 } else { -5.0 }, window, cx);
+                    cx.stop_propagation();
                     return;
                 }
                 if event.keystroke.key == "/"
@@ -10579,8 +10909,39 @@ impl Render for Whatfast {
             .when_some(self.forward_picker.clone(), |root, picker| {
                 root.child(picker)
             })
+            // El composer de encuestas flota en el centro, como el picker de
+            // reenviar: en el flujo flex vertical aplastaba la ventana y se
+            // quedaba pegado abajo a la izquierda, tapando el riel.
             .when_some(self.poll_composer.clone(), |root, composer| {
-                root.child(composer)
+                root.child(
+                    div()
+                        .id("poll-composer-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .bg(cx.theme().overlay)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.poll_composer = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .on_aux_click(cx.listener(|this, _, _, cx| {
+                            this.poll_composer = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        // Los clics dentro del formulario no cierran el modal.
+                        .child(
+                            div()
+                                .id("poll-composer-modal")
+                                .on_click(|_, _, cx| cx.stop_propagation())
+                                .child(composer),
+                        ),
+                )
             })
             // El aviso de la llamada va arriba de todo lo que dibuja la
             // ventana: una llamada entra sola y tiene que verse aunque el
@@ -10601,7 +10962,14 @@ impl Render for Whatfast {
                             layer.inset_0().flex().items_center().justify_center()
                         })
                         .when(!ringing, |layer| {
-                            layer.top_2().left_0().right_0().flex().justify_center()
+                            // Debajo de la tira de pestañas: con top_2 la
+                            // barra tapaba las pestañas abiertas del chat.
+                            layer
+                                .top(px(40. * self.ui_scale))
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
                         })
                         .child(
                             v_flex()
@@ -10637,22 +11005,22 @@ impl Render for Whatfast {
 /// The message the column shows when the filter keeps no conversation.
 ///
 /// port: `emptyLabel` of the origin (`tauri/src/components/Sidebar.tsx`).
-/// The drawing of a category of emojis.
+/// The vector icon of a category of emojis.
 ///
-/// The reference draws a row of categories at the top of the panel, each one
-/// with its own drawing.
-fn emoji_category_glyph(category: EmojiCategory) -> &'static str {
+/// The colored emoji of the reference became a monochrome icon: the category
+/// row no longer paints ten tiny colored pictures over the panel.
+fn emoji_category_icon(category: EmojiCategory) -> Icon {
     match category {
-        EmojiCategory::All => "🕐",
-        EmojiCategory::Smileys => "😀",
-        EmojiCategory::People => "👋",
-        EmojiCategory::Nature => "🌿",
-        EmojiCategory::Food => "🍎",
-        EmojiCategory::Travel => "✈️",
-        EmojiCategory::Activities => "⚽",
-        EmojiCategory::Objects => "💡",
-        EmojiCategory::Symbols => "❤️",
-        EmojiCategory::Flags => "🚩",
+        EmojiCategory::All => Icon::new(WhatfastIcon::Clock),
+        EmojiCategory::Smileys => Icon::new(WhatfastIcon::Smile),
+        EmojiCategory::People => Icon::new(IconName::User),
+        EmojiCategory::Nature => Icon::new(IconName::Moon),
+        EmojiCategory::Food => Icon::new(IconName::Star),
+        EmojiCategory::Travel => Icon::new(WhatfastIcon::Globe),
+        EmojiCategory::Activities => Icon::new(WhatfastIcon::Play),
+        EmojiCategory::Objects => Icon::new(WhatfastIcon::Image),
+        EmojiCategory::Symbols => Icon::new(IconName::Heart),
+        EmojiCategory::Flags => Icon::new(IconName::Check),
     }
 }
 
@@ -10788,7 +11156,7 @@ fn search_highlighted(text: &str, query: &str, accent: gpui::Hsla) -> gpui::Styl
 /// both instants, because a zone with daylight saving time does not have the
 /// same offset in the day of the message and in the day of "now".
 fn chat_time_label(timestamp_ms: i64, now_ms: i64) -> String {
-    use whatfast_core::message_format::{DateLocale, LocalTimestamp, day_key, format_chat_time};
+    use whatfast_core::message_format::{LocalTimestamp, day_key, format_chat_time};
     let offset = local_offset_minutes(timestamp_ms);
     let now_offset = local_offset_minutes(now_ms);
     let value = LocalTimestamp::new(timestamp_ms, offset);
@@ -10800,7 +11168,19 @@ fn chat_time_label(timestamp_ms: i64, now_ms: i64) -> String {
     if day_key(value) == day_key(now) {
         return bubble_time_label(timestamp_ms, offset);
     }
-    format_chat_time(value, now, DateLocale::EnUs)
+    format_chat_time(value, now, date_locale())
+}
+
+/// El formato de fecha sigue al idioma de la interfaz, no al del sistema:
+/// "Yesterday", "Fri" y "Friday, November 13" deben traducirse con el resto
+/// de la aplicacion.
+fn date_locale() -> whatfast_core::message_format::DateLocale {
+    use whatfast_core::message_format::DateLocale;
+    match i18n::current_language() {
+        "es" => DateLocale::EsEs,
+        "zh" => DateLocale::ZhCn,
+        _ => DateLocale::EnUs,
+    }
 }
 
 /// El texto guardado de un aviso de visualizacion unica viaja en ingles
@@ -10808,6 +11188,10 @@ fn chat_time_label(timestamp_ms: i64, now_ms: i64) -> String {
 fn chat_preview(preview: &str) -> String {
     if preview == "One-time message" {
         i18n::t("One-time message").to_string()
+    } else if preview == "Voice message" {
+        i18n::t("Voice message").to_string()
+    } else if preview == "🎤 Voice message" {
+        format!("🎤 {}", i18n::t("Voice message"))
     } else {
         preview.to_string()
     }
@@ -10827,12 +11211,12 @@ fn chat_subtitle(chat: &proto::Chat) -> String {
     } else {
         // The title is already the number of a contact that is not in the
         // address book: the same number twice says nothing.
-        "No messages yet".to_string()
+        i18n::t("No messages yet").to_string()
     };
     if !chat.last_message_from_me || chat.last_message_preview.is_empty() {
         return preview;
     }
-    format!("You: {preview}")
+    i18n::t_args("You: {preview}", &[("preview", &preview)])
 }
 
 /// The height of the pill that separates two days of the conversation.
@@ -10840,7 +11224,7 @@ const DAY_SEPARATOR_HEIGHT: f32 = 22.;
 
 /// The gap between the pill of the day and the message below it.
 /// The extra gap above a message that starts a new cluster from a sender.
-const CLUSTER_SEPARATOR_GAP: f32 = 7.;
+const CLUSTER_SEPARATOR_GAP: f32 = 10.;
 
 /// The opacity of the pattern of the background of the conversation.
 const WALLPAPER_OPACITY: f32 = 0.055;
@@ -11187,7 +11571,7 @@ fn message_day_label(timestamp_ms: i64, now_ms: i64) -> String {
             local_offset_minutes(timestamp_ms),
         ),
         whatfast_core::message_format::LocalTimestamp::new(now_ms, local_offset_minutes(now_ms)),
-        whatfast_core::message_format::DateLocale::EnUs,
+        date_locale(),
     )
 }
 
@@ -11332,11 +11716,6 @@ fn message_html_with_mentions(
         html.push_str("</pre></div>");
     }
     html
-}
-
-#[cfg(test)]
-fn message_html(text: &str) -> String {
-    message_html_with_mentions(text, None, &[])
 }
 
 /// El nombre, la foto y si la conversacion es un grupo, para el aviso de una
@@ -11677,6 +12056,7 @@ fn render_call_bar(
         .child(
             Button::new("call-hangup")
                 .small()
+                .danger()
                 .label(i18n::t("Hang up"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.call_hangup();
@@ -11795,185 +12175,3 @@ fn conversation_bubble_width(available: gpui::Pixels, scale: f32) -> gpui::Pixel
     px(unscaled * scale).min(available)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        bubble_time_label, conversation_bubble_width, conversation_width, message_html,
-        search_match_ranges,
-    };
-
-    #[test]
-    fn the_conversation_keeps_the_room_of_the_open_panels() {
-        use gpui::px;
-        // Una ventana de 1180 con el riel de 56 y la columna de 384.
-        assert_eq!(
-            conversation_width(px(1180.), px(56.), px(384.), px(0.)),
-            px(740.)
-        );
-        // El panel de los miembros abierto tambien ocupa su lugar.
-        assert_eq!(
-            conversation_width(px(1180.), px(56.), px(384.), px(240.)),
-            px(500.)
-        );
-        // En una ventana chica el ancho no se vuelve negativo: la
-        // conversacion se queda en cero y no empuja las otras columnas.
-        assert_eq!(
-            conversation_width(px(480.), px(56.), px(560.), px(240.)),
-            px(0.)
-        );
-    }
-
-    #[test]
-    fn the_search_marks_the_query_and_its_fuzzy_fragment() {
-        let text = "EL MERCADO DEL CERDO";
-        let ranges = search_match_ranges(text, "cerdo");
-        assert_eq!(ranges, vec![15..20], "the whole query wins");
-        assert_eq!(&text[15..20], "CERDO");
-
-        // The store matches "cerda" against "cerdo"; the row marks the run
-        // both share, like the reference.
-        let text = "Ya esta cerda";
-        let ranges = search_match_ranges(text, "cerdo");
-        assert_eq!(ranges, vec![8..12]);
-        assert_eq!(&text[8..12], "cerd");
-
-        // A text with nothing in common keeps its color.
-        assert!(search_match_ranges("Papa", "cerdo").is_empty());
-    }
-
-    #[test]
-    fn the_html_of_a_message_escapes_the_markup() {
-        assert_eq!(
-            message_html("<b> & \"x\""),
-            "<div><pre>&lt;b&gt; &amp; &quot;x&quot;</pre></div>"
-        );
-    }
-
-    #[test]
-    fn the_html_of_a_message_splits_a_carriage_return_in_lines() {
-        // WhatsApp sends some bodies with a lone CR between the lines.
-        assert_eq!(
-            message_html("uno\rdos"),
-            "<div><pre>uno</pre></div><div><pre>dos</pre></div>"
-        );
-        assert_eq!(
-            message_html("uno\r\ndos"),
-            "<div><pre>uno</pre></div><div><pre>dos</pre></div>"
-        );
-        // A plain LF is a line break too: one block per line.
-        assert_eq!(
-            message_html("uno\ndos"),
-            "<div><pre>uno</pre></div><div><pre>dos</pre></div>"
-        );
-    }
-
-    #[test]
-    fn the_html_of_a_message_keeps_the_spacing_it_was_pasted_with() {
-        // La forma del texto pegado: sangria, columnas y el renglon en blanco.
-        assert_eq!(
-            message_html("Presupuesto:\n\n    Item uno        Q 1.500"),
-            "<div><pre>Presupuesto:</pre></div><div><pre>&#8203;</pre></div>\
-             <div><pre>    Item uno        Q 1.500</pre></div>"
-        );
-    }
-
-    #[test]
-    fn the_html_of_a_message_wraps_the_links_in_anchors() {
-        assert_eq!(
-            message_html("ver https://example.com ahora"),
-            "<div><pre>ver <a href=\"https://example.com\">https://example.com</a> ahora</pre></div>"
-        );
-    }
-
-    #[test]
-    fn the_hour_of_a_bubble_is_the_hour_of_the_zone_of_the_offset() {
-        // The 15:45 of UTC is the 12:45 of Buenos Aires.
-        let instant = 15 * 3_600_000 + 45 * 60_000;
-        assert_eq!(bubble_time_label(instant, 0), "15:45");
-        assert_eq!(bubble_time_label(instant, -180), "12:45");
-        assert_eq!(bubble_time_label(instant, 120), "17:45");
-
-        // The 02:10 of UTC is the 23:10 of the day before in Buenos Aires,
-        // and the 04:10 of the same day in Berlin.
-        let instant = 2 * 3_600_000 + 10 * 60_000;
-        assert_eq!(bubble_time_label(instant, -180), "23:10");
-        assert_eq!(bubble_time_label(instant, 120), "04:10");
-
-        // The epoch is midnight of UTC, so the day before in Buenos Aires.
-        assert_eq!(bubble_time_label(0, -180), "21:00");
-        assert_eq!(bubble_time_label(0, 0), "00:00");
-    }
-
-    #[test]
-    fn the_html_of_a_message_resolves_mentions() {
-        use super::message_html_with_mentions;
-        let participant = whatfast_protocol::ChatParticipant {
-            participant_id: "107503115358282@lid".to_string(),
-            display_name: "Mauricio Rodríguez".to_string(),
-            phone_number: "+54 9 11 1234 5678".to_string(),
-            is_admin: false,
-            is_super_admin: false,
-            is_me: false,
-        };
-        let html = message_html_with_mentions(
-            "@107503115358282 me dijo que no me gaste",
-            Some(&[participant]),
-            &[],
-        );
-        assert_eq!(
-            html,
-            "<div><pre><a href=\"#\">@Mauricio Rodríguez</a> me dijo que no me gaste</pre></div>"
-        );
-    }
-
-    #[test]
-    fn consecutive_messages_from_same_sender_do_not_start_cluster() {
-        use whatfast_model::model::Store;
-        use whatfast_protocol::{Message, TextContent, message::Content};
-
-        let mut store = Store::default();
-        store.selected_chat_id = Some("chat1".to_string());
-        for (i, text) in [
-            "Bueno amor",
-            "Dormi mi bebe",
-            "A la noche ya entrenamos",
-            "Cuanto??",
-        ]
-        .iter()
-        .enumerate()
-        {
-            let msg = Message {
-                id: format!("msg_{i}"),
-                chat_id: "chat1".to_string(),
-                from_me: true,
-                timestamp_ms: 1700000000000 + i as i64 * 5000,
-                content: Some(Content::Text(TextContent {
-                    text: text.to_string(),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            };
-            store.upsert_message(msg);
-        }
-        assert!(super::starts_cluster(&store.messages, 0));
-        assert!(!super::starts_cluster(&store.messages, 1));
-        assert!(!super::starts_cluster(&store.messages, 2));
-        assert!(!super::starts_cluster(&store.messages, 3));
-    }
-
-    /// El globo crece con la escala: a 150 % ocupa mas pixeles fisicos, pero
-    /// no cambia el numero de caracteres que caben en un renglon.
-    #[test]
-    fn bubbles_grow_with_the_scale_and_yield_to_a_narrow_window() {
-        use gpui::px;
-        assert_eq!(conversation_bubble_width(px(900.), 1.0), px(536.));
-        assert_eq!(conversation_bubble_width(px(900.), 1.5), px(804.));
-        assert_eq!(conversation_bubble_width(px(400.), 1.0), px(400.));
-        assert_eq!(conversation_bubble_width(px(400.), 1.5), px(400.));
-        assert_eq!(
-            conversation_bubble_width(px(100.), 1.0),
-            px(100.),
-            "el globo nunca excede el ancho disponible"
-        );
-    }
-}

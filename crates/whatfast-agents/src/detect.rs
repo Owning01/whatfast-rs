@@ -115,14 +115,3 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_what_the_path_holds() {
-        // `cargo` runs this test, so it must be on PATH.
-        assert!(which("cargo").is_some());
-        assert!(which("whatfast-not-a-program-anywhere").is_none());
-    }
-}

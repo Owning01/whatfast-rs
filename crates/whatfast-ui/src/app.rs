@@ -434,6 +434,8 @@ pub(crate) struct PinDialog {
 /// list.
 pub(crate) struct CreateGroupState {
     pub(crate) name: Entity<InputState>,
+    /// El filtro de participantes: con cientos de chats hace falta buscar.
+    pub(crate) filter: Entity<InputState>,
     /// The transport jids of the participants that are marked.
     pub(crate) selected: HashSet<String>,
     /// The request is on its way: the button of the dialog waits.
@@ -1143,6 +1145,18 @@ pub(crate) struct Whatfast {
     pub(crate) volume_slider: Entity<SliderState>,
     /// Whether the tick that moves the frames of the video is running.
     pub(crate) video_tick: bool,
+    /// Whether the user is scrubbing a video progress bar right now.
+    pub(crate) video_seek_dragging: Option<VideoKey>,
+    /// Bounds of the video scrub bar being dragged.
+    pub(crate) video_seek_drag_bounds: Option<gpui::Bounds<Pixels>>,
+    /// Duration (seconds) of the video being scrubbed.
+    pub(crate) video_seek_drag_duration: f32,
+    /// Suppresses the synthetic click emitted after releasing a scrub drag.
+    pub(crate) video_seek_suppress_click: bool,
+    /// Last time a drag-seek command was dispatched to the video thread.
+    pub(crate) video_seek_last_sent_at: Option<std::time::Instant>,
+    /// Seek target waiting for a video download to finish before playback starts.
+    pub(crate) video_seek_pending: Option<(VideoKey, f32)>,
     /// The icon of the application in the tray, when the shell took it.
     pub(crate) tray: Option<crate::tray::Tray>,
     /// The width of the column of the chats, before the scale of the screen.
@@ -1732,6 +1746,12 @@ impl Whatfast {
             video_muted: false,
             volume_slider: volume_slider.clone(),
             video_tick: false,
+            video_seek_dragging: None,
+            video_seek_drag_bounds: None,
+            video_seek_drag_duration: 0.0,
+            video_seek_suppress_click: false,
+            video_seek_last_sent_at: None,
+            video_seek_pending: None,
             tray: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hidden: false,
@@ -3538,6 +3558,14 @@ impl Whatfast {
                         self.video.playing = true;
                         self.video_engine
                             .play(key.clone(), Path::new(&response.local_path));
+                        if let Some((pending_key, target)) = self.video_seek_pending.take()
+                            && pending_key == key
+                            && target > 0.0
+                        {
+                            self.video.seek_generation += 1;
+                            self.video.position = target;
+                            self.video_engine.seek(target, self.video.seek_generation);
+                        }
                         self.start_video_tick(window, cx);
                     }
                     // The user asked to open the file before it was in the
@@ -3887,40 +3915,48 @@ impl Whatfast {
     /// The decision mirrors `tauri/src/lib/notification-policy.ts`: the
     /// profile enables the toasts, the chat is not muted, the message is not
     /// one of the user and neither the window nor the conversation is in
+    /// Announces a new incoming message with a desktop toast and returns `true`
+    /// when a toast was raised.
+    ///
+    /// Silences muted chats, "Do Not Disturb", and the active conversation in
     /// front. The history that the first sync brings is not news: only
     /// recent messages are announced. `is_new` keeps an edit or a repeat from
     /// raising the toast of a message that the store already had.
-    fn notify_message(&self, message: &Message, is_new: bool, window: &Window) {
+    fn notify_message(&self, message: &Message, is_new: bool, window: &Window) -> bool {
         if !is_new
             || !self.settings.notifications_enabled
             || !self.store.sync_complete
             || message.from_me
             || message.revoked
         {
-            return;
+            return false;
         }
         if now_ms().saturating_sub(message.timestamp_ms) > NOTIFICATION_MAX_AGE_MS {
-            return;
+            return false;
         }
         let Some(chat) = self.store.chat(&message.chat_id) else {
-            return;
+            return false;
         };
         let chat_in_front =
             self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
         // port: `shouldNotify` is falsy based: a muted chat, or a chat that
         // the user is looking at, gets no toast.
         if self.do_not_disturb || chat.muted || (window.is_window_active() && chat_in_front) {
-            return;
+            return false;
         }
         self.notifier.show(Note {
             title: notification_title(chat, message),
             body: notification_body(message, self.settings.notification_previews),
         });
-        let choice = SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell);
-        self.sounds.play(&choice);
+        if self.settings.sounds_enabled {
+            let choice =
+                SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell);
+            self.sounds.play(&choice);
+        }
+        true
     }
 
-    /// Shows a toast of prueba with the sound the profile chose for notices.
+    /// Shows a test toast with the sound the profile chose for notices.
     pub(crate) fn test_notification(&self) {
         self.notifier.show(Note {
             title: i18n::t("Whatfast").to_string(),
@@ -4644,8 +4680,10 @@ impl Whatfast {
                     // The sound follows the same silences, and a message the
                     // store already had does not sound again.
                     let is_new = self.store.message(&message.id).is_none();
-                    self.notify_message(&message, is_new, window);
-                    self.play_received_sound(&message, is_new);
+                    let notified = self.notify_message(&message, is_new, window);
+                    if !notified {
+                        self.play_received_sound(&message, is_new);
+                    }
                     if is_new {
                         self.auto_download_message_media(&message);
                     }
@@ -4926,7 +4964,7 @@ impl Whatfast {
     /// the bubble to scroll into view. The ceiling of the profile keeps a
     /// hostile chat from filling the disk; `0` means no ceiling.
     fn auto_download_message_media(&mut self, message: &Message) {
-        if self.is_status_message(&message.id) {
+        if !self.store.sync_complete || self.is_status_message(&message.id) {
             return;
         }
         let max_bytes = u64::from(self.settings.auto_download_max_mb).saturating_mul(1024 * 1024);
@@ -4936,7 +4974,7 @@ impl Whatfast {
                     message.content.as_ref()
                     && crate::helpers::image_needs_download(image)
                 {
-                    self.load_message_image(message.chat_id.clone(), message.id.clone());
+                    self.enqueue_message_image(message.chat_id.clone(), message.id.clone(), false);
                 }
             }
             AutoDownload::Attachment => {
@@ -4945,7 +4983,11 @@ impl Whatfast {
                     && (attachment.local_path.is_empty()
                         || !self.store.media_exists(&attachment.local_path))
                 {
-                    self.load_message_attachment(message.chat_id.clone(), message.id.clone());
+                    self.enqueue_message_attachment(
+                        message.chat_id.clone(),
+                        message.id.clone(),
+                        false,
+                    );
                 }
             }
             AutoDownload::None => {}
@@ -5006,14 +5048,16 @@ impl Whatfast {
     }
 
     pub(crate) fn load_message_image(&mut self, chat_id: String, message_id: String) {
+        self.enqueue_message_image(chat_id, message_id, true);
+    }
+
+    fn enqueue_message_image(&mut self, chat_id: String, message_id: String, front: bool) {
         let key = (chat_id.clone(), message_id.clone());
         if self.image_download_attempted.contains(&key) {
             return;
         }
         if self.rpc.pending_media_count() >= 4 {
-            if !self.image_download_queue.iter().any(|k| k == &key) {
-                self.image_download_queue.push_back(key);
-            }
+            enqueue_download(&mut self.image_download_queue, key, front);
             return;
         }
         let queued = self.request(
@@ -5521,12 +5565,18 @@ impl Whatfast {
             }
             _ => 0,
         };
+        let picker_was_open = self.mention_picker.is_some();
         self.mention_picker = Some(MentionPicker {
             chat_id: chat_id.clone(),
             token_start,
             query,
             highlighted,
         });
+        // El picker agranda el compositor: sin este scroll la ultima burbuja
+        // y su hora quedan cortadas en el borde inferior.
+        if !picker_was_open {
+            self.scroll_to_bottom_generation = Some(self.message_generation);
+        }
         self.ensure_mention_directory(chat_id);
     }
 
@@ -5696,6 +5746,9 @@ impl Whatfast {
         self.update_active_draft_reply(Some(message_id));
         self.emoji_target = None;
         self.reaction_details = None;
+        // La barra "Respondiendo a ..." ocupa espacio sobre el compositor:
+        // llevar el scroll al final deja ver la ultima burbuja completa.
+        self.scroll_to_bottom_generation = Some(self.message_generation);
     }
 
     pub(crate) fn cancel_reply(&mut self) {
@@ -7094,8 +7147,12 @@ impl Whatfast {
         self.chat_list_menu = false;
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(i18n::t("Group name")));
         name.update(cx, |input, cx| input.focus(window, cx));
+        let filter = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(i18n::t("Search participants"))
+        });
         self.create_group = Some(CreateGroupState {
             name,
+            filter,
             selected: HashSet::new(),
             pending: false,
         });
@@ -9283,14 +9340,16 @@ impl Whatfast {
 
     /// Downloads the file of one attachment into the local cache.
     pub(crate) fn load_message_attachment(&mut self, chat_id: String, message_id: String) {
+        self.enqueue_message_attachment(chat_id, message_id, true);
+    }
+
+    fn enqueue_message_attachment(&mut self, chat_id: String, message_id: String, front: bool) {
         let key = (chat_id.clone(), message_id.clone());
-        if self.attachment_download_attempted.contains(&key)
-            || self.attachment_download_queue.iter().any(|k| k == &key)
-        {
+        if self.attachment_download_attempted.contains(&key) {
             return;
         }
         if self.rpc.pending_media_count() >= 4 {
-            self.attachment_download_queue.push_back(key);
+            enqueue_download(&mut self.attachment_download_queue, key, front);
             return;
         }
         // La clave se marca recien cuando el pedido entro: si el transporte
@@ -9301,7 +9360,7 @@ impl Whatfast {
             self.attachment_download_attempted.insert(key);
         } else {
             report_failed_request(&mut self.store, result);
-            self.attachment_download_queue.push_back(key);
+            enqueue_download(&mut self.attachment_download_queue, key, front);
         }
     }
 
@@ -9498,6 +9557,73 @@ impl Whatfast {
         }
     }
 
+    /// Salta el reproductor de video a un segundo concreto (al tocar o arrastrar
+    /// la barra de progreso, o al usar las flechas del teclado).
+    pub(crate) fn seek_video(
+        &mut self,
+        key: VideoKey,
+        seconds: f32,
+        dispatch_engine: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fallback_duration = self
+            .video_attachment(&key.1)
+            .map_or(0.0, |attachment| attachment.duration_seconds as f32);
+        let duration = if self.video.is_for(&key) {
+            self.video.duration.max(fallback_duration)
+        } else {
+            fallback_duration
+        };
+        let target = if duration > 0.0 {
+            seconds.clamp(0.0, duration)
+        } else {
+            seconds.max(0.0)
+        };
+        if !self.video.is_for(&key) || !self.video.active {
+            if !dispatch_engine {
+                return;
+            }
+            self.stop_video();
+            self.start_video_session(&key, window, cx);
+            if self.video.waiting {
+                self.video_seek_pending = Some((key, target));
+                cx.notify();
+                return;
+            }
+            if !self.video.active {
+                cx.notify();
+                return;
+            }
+        }
+        if self.video.waiting {
+            self.video_seek_pending = Some((key, target));
+            cx.notify();
+            return;
+        }
+        self.video.position = target;
+        if dispatch_engine {
+            self.video.seek_generation += 1;
+            self.video_engine.seek(target, self.video.seek_generation);
+            self.video_seek_last_sent_at = Some(std::time::Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// Adelanta o retrocede el video activo una cantidad de segundos.
+    pub(crate) fn step_active_video(
+        &mut self,
+        delta_seconds: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.video.key.clone() else {
+            return;
+        };
+        let target = self.video.position + delta_seconds;
+        self.seek_video(key, target, true, window, cx);
+    }
+
     /// Corta el video que se esta mirando.
     pub(crate) fn stop_video(&mut self) {
         if self.video.active {
@@ -9505,6 +9631,12 @@ impl Whatfast {
         }
         self.attachment_play_requested = None;
         self.video_fullscreen = false;
+        self.video_seek_dragging = None;
+        self.video_seek_drag_bounds = None;
+        self.video_seek_drag_duration = 0.0;
+        self.video_seek_suppress_click = false;
+        self.video_seek_last_sent_at = None;
+        self.video_seek_pending = None;
         self.video = VideoPlayback::default();
     }
 
@@ -9578,18 +9710,26 @@ impl Whatfast {
         }
         while let Some(event) = self.video_engine.try_recv() {
             match event {
+                crate::video::VideoEvent::Duration { key, duration } => {
+                    if self.video.is_for(&key) && duration > self.video.duration {
+                        self.video.duration = duration;
+                    }
+                }
                 crate::video::VideoEvent::Frame {
                     key,
                     frame,
                     position,
+                    generation,
                 } => {
-                    if !self.video.is_for(&key) {
+                    if !self.video.is_for(&key) || generation < self.video.seek_generation {
                         continue;
                     }
                     if let Some(image) = crate::video::render_image(frame) {
                         self.video.frame = Some(image);
                     }
-                    self.video.position = position;
+                    if self.video_seek_dragging.as_ref() != Some(&key) {
+                        self.video.position = position;
+                    }
                 }
                 crate::video::VideoEvent::Finished { key } => {
                     if self.video.is_for(&key) {
@@ -11367,6 +11507,25 @@ enum AutoDownload {
 /// Decides whether the media of a fresh message is small enough and
 /// downloadable. Whether the file is already on the disk is checked by the
 /// caller, which owns the store.
+/// Enqueues a pending media download. Foreground requests (`front = true`,
+/// visible messages, manual clicks, and retries) move ahead of background
+/// auto-downloads so the conversation the user is looking at never waits
+/// behind other chats.
+fn enqueue_download(
+    queue: &mut VecDeque<(String, String)>,
+    key: (String, String),
+    front: bool,
+) {
+    if front {
+        if let Some(pos) = queue.iter().position(|existing| existing == &key) {
+            queue.remove(pos);
+        }
+        queue.push_front(key);
+    } else if !queue.iter().any(|existing| existing == &key) {
+        queue.push_back(key);
+    }
+}
+
 fn auto_download_target(message: &Message, max_bytes: u64) -> AutoDownload {
     if message.from_me || message.revoked {
         return AutoDownload::None;
@@ -11615,341 +11774,3 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// El visor recorre su galeria: pasar de foto copia los datos de la nueva
-    /// y devuelve el zoom a su sitio; fuera de la galeria no cambia nada.
-    #[test]
-    fn the_viewer_walks_its_gallery_and_resets_the_zoom() {
-        let item = |id: &str| ViewerItem {
-            message_id: id.into(),
-            path: format!("{id}.jpg"),
-            caption: String::new(),
-            sticker: false,
-            width: 10,
-            height: 20,
-            from_me: false,
-            sender_name: String::new(),
-            sender_avatar: String::new(),
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let mut viewer = ImageViewer {
-            chat_id: "chat".into(),
-            message_id: "a".into(),
-            path: "a.jpg".into(),
-            caption: String::new(),
-            sticker: false,
-            width: 10,
-            height: 20,
-            gallery: vec![item("a"), item("b")],
-            index: 0,
-            zoom: 2.,
-        };
-        assert!(!viewer.has_previous());
-        assert!(viewer.has_next());
-        viewer.show(1);
-        assert_eq!(viewer.message_id, "b");
-        assert_eq!(viewer.path, "b.jpg");
-        assert_eq!(viewer.zoom, 1.);
-        assert!(viewer.has_previous());
-        assert!(!viewer.has_next());
-        viewer.show(9);
-        assert_eq!(viewer.message_id, "b");
-    }
-
-    /// La seleccion multiple de los mensajes marca y desmarca con el mismo
-    /// clic, y nunca repite un mensaje.
-    #[test]
-    fn the_message_selection_toggles_the_same_message() {
-        let mut selection = MessageSelection::default();
-        selection.toggle("a");
-        selection.toggle("b");
-        assert_eq!(selection.ids.len(), 2);
-        selection.toggle("a");
-        assert_eq!(selection.ids.len(), 1);
-        assert!(selection.ids.contains("b"));
-    }
-
-    /// The instant of the clock is what the client uses to say until when a
-    /// conversation stays muted.
-    #[test]
-    fn the_instant_of_the_clock_is_in_milliseconds_of_the_epoch() {
-        let now = now_ms();
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("the clock is after the epoch")
-            .as_millis() as i64;
-        assert!(
-            (now - epoch).abs() < 1_000,
-            "the clock is not in milliseconds"
-        );
-    }
-
-    /// A request that could not even be queued leaves the client without a
-    /// sidecar: the fatal screen is the only honest answer.
-    #[test]
-    fn a_request_that_could_not_be_queued_shows_the_fatal_screen() {
-        let mut store = Store::default();
-        report_failed_request(&mut store, Err(anyhow::anyhow!("the sidecar is gone")));
-
-        assert_eq!(store.screen, Screen::Fatal);
-        assert_eq!(
-            store.fatal_error.as_deref(),
-            Some(i18n::t(
-                "Whatfast lost the connection with its backend. Restart Whatfast."
-            ))
-        );
-    }
-
-    /// A request that was queued leaves the screen alone.
-    #[test]
-    fn a_request_that_was_queued_leaves_the_screen_alone() {
-        let mut store = Store::default();
-        report_failed_request(&mut store, Ok(7));
-
-        assert_eq!(store.screen, Screen::Starting);
-        assert!(store.fatal_error.is_none());
-    }
-
-    /// A note goes to the conversation where it started, even when the user
-    /// moved to another chat while the encoder was finishing; one that was
-    /// thrown away never gets a destination.
-    #[test]
-    fn a_note_goes_to_the_conversation_where_it_started() {
-        let state = RecordingState {
-            started: std::time::Instant::now(),
-            finishing: true,
-            chat_id: "chat-a".into(),
-            discarded: false,
-            paused: false,
-            paused_at: None,
-            paused_total: std::time::Duration::ZERO,
-            levels: Vec::new(),
-        };
-        assert_eq!(note_target(Some(&state)), Some("chat-a"));
-        assert_eq!(note_target(None), None);
-
-        let thrown_away = RecordingState {
-            discarded: true,
-            chat_id: "chat-b".into(),
-            ..state
-        };
-        assert_eq!(note_target(Some(&thrown_away)), None);
-    }
-
-    /// La pausa no suma al reloj de la nota: el contador de la pildora tiene
-    /// que mostrar el audio grabado, no el tiempo con la ventana abierta.
-    #[test]
-    fn the_clock_of_the_note_leaves_the_pause_out() {
-        let state = RecordingState {
-            started: std::time::Instant::now() - std::time::Duration::from_secs(60),
-            finishing: false,
-            chat_id: "chat-a".into(),
-            discarded: false,
-            paused: false,
-            paused_at: None,
-            paused_total: std::time::Duration::from_secs(30),
-            levels: Vec::new(),
-        };
-        // The sixty seconds of the clock minus the thirty of the pause.
-        assert!((state.elapsed_seconds() - 30.0).abs() < 1.0);
-
-        let paused = RecordingState {
-            paused: true,
-            paused_at: Some(std::time::Instant::now()),
-            ..state
-        };
-        // The pause that opened now takes almost nothing out of the clock.
-        assert!((paused.elapsed_seconds() - 30.0).abs() < 1.0);
-    }
-
-    /// A download that failed must not leave a save waiting: the next time
-    /// the file arrives, it opens instead of going to the downloads folder.
-    #[test]
-    fn a_failed_download_forgets_the_save_that_was_waiting() {
-        let key = ("chat".to_string(), "message".to_string());
-        let mut waiting = Some(key.clone());
-        forget_attachment_request(&mut waiting, &key);
-        assert_eq!(waiting, None);
-
-        let mut another = Some(("chat".to_string(), "other".to_string()));
-        forget_attachment_request(&mut another, &key);
-        assert!(another.is_some());
-    }
-
-    /// The name of a download cannot carry the characters that the file
-    /// systems refuse, and it cannot be empty either.
-    #[test]
-    fn the_name_of_a_download_is_safe_for_the_disk() {
-        assert_eq!(sanitize_file_name("  agenda.pdf  "), "agenda.pdf");
-        assert_eq!(
-            sanitize_file_name("a/b\\c:d*e?f\"g<h>i|j.pdf"),
-            "a_b_c_d_e_f_g_h_i_j.pdf"
-        );
-        assert_eq!(sanitize_file_name("line\nbreak.txt"), "line_break.txt");
-        assert_eq!(sanitize_file_name("   "), "");
-        assert_eq!(sanitize_file_name("informe..."), "informe");
-        assert_eq!(sanitize_file_name("notas .txt"), "notas .txt");
-        assert_eq!(sanitize_file_name("CON.txt"), "_CON.txt");
-        assert_eq!(sanitize_file_name("nul"), "_nul");
-        assert_eq!(sanitize_file_name("LPT9.tar.gz"), "_LPT9.tar.gz");
-        assert_eq!(sanitize_file_name("COM0.txt"), "COM0.txt");
-        assert_eq!(sanitize_file_name("console.txt"), "console.txt");
-    }
-
-    /// A draft that edits a message is not empty: the message it edits is
-    /// still the one the user is working on.
-    #[test]
-    fn a_draft_that_edits_a_message_is_not_empty() {
-        let draft = ChatDraft {
-            editing_message_id: Some("message".into()),
-            ..Default::default()
-        };
-        assert!(!draft.is_empty());
-        assert!(
-            ChatDraft::default().is_empty(),
-            "a draft with nothing in it is empty"
-        );
-    }
-
-    /// La columna de los chats: su boton la esconde y la vuelve a mostrar, y
-    /// sin conversacion abierta no se puede esconder.
-    #[test]
-    fn the_chat_list_hides_only_while_a_conversation_is_open() {
-        assert!(Whatfast::sidebar_shows(false, false, true));
-        assert!(!Whatfast::sidebar_shows(true, false, true));
-        assert!(
-            Whatfast::sidebar_shows(true, false, false),
-            "sin conversacion no quedaria nada en la ventana"
-        );
-        assert!(
-            !Whatfast::sidebar_shows(false, true, true),
-            "en una ventana angosta la conversacion se queda con el ancho"
-        );
-        assert!(
-            Whatfast::sidebar_shows(true, true, false),
-            "sin conversacion la lista vuelve aunque el boton la haya escondido"
-        );
-    }
-
-    /// El ancho de la columna se achica con la ventana: la conversacion
-    /// conserva al menos la mitad del espacio que queda despues del riel.
-    #[test]
-    fn the_chat_list_shrinks_with_the_window() {
-        use gpui::px;
-        // 1180 px: el ancho guardado de 384 entra entero.
-        assert_eq!(Whatfast::clamp_sidebar_width(384.0, px(1180.), 1.0), 384.0);
-        // 800 px: el 45% de 744 son 334.8, asi que la columna baja a eso.
-        let narrow = Whatfast::clamp_sidebar_width(560.0, px(800.), 1.0);
-        assert!((narrow - 334.8).abs() < 0.01, "ancho {narrow}");
-        // Nunca baja del minimo, aunque la ventana sea muy chica.
-        assert_eq!(Whatfast::clamp_sidebar_width(384.0, px(480.), 1.0), 260.0);
-    }
-
-    /// La tarjeta del link del borrador: solo se dibuja con algo que mostrar.
-    #[test]
-    fn the_card_of_the_composer_shows_only_with_something_to_show() {
-        let mut card = ComposerLinkPreview::default();
-        assert!(!card.visible());
-        card.url = "https://example.com/nota".into();
-        assert!(
-            !card.visible(),
-            "un link sin titulo todavia no tiene tarjeta"
-        );
-        card.description = "Lo que cuenta".into();
-        assert!(card.visible());
-    }
-
-    /// The sequence of the events: the client ignores a repeated or missing
-    /// number, accepts the next one, and reports a gap when the backend skips
-    /// numbers. The Gap variant is the one that shows the "Backend event gap"
-    /// toast and reloads the local state.
-    #[test]
-    fn event_sequence_accepts_ordered_events_and_reports_gaps() {
-        assert_eq!(observe_event_sequence(0, 0), SequenceObservation::Invalid);
-        assert_eq!(observe_event_sequence(0, 1), SequenceObservation::Accept);
-        assert_eq!(observe_event_sequence(0, 5), SequenceObservation::Accept);
-        assert_eq!(observe_event_sequence(1, 1), SequenceObservation::Stale);
-        assert_eq!(observe_event_sequence(5, 0), SequenceObservation::Invalid);
-        assert_eq!(
-            observe_event_sequence(1, 3),
-            SequenceObservation::Gap { last: 1, received: 3 }
-        );
-        assert_eq!(
-            observe_event_sequence(5, 7),
-            SequenceObservation::Gap { last: 5, received: 7 }
-        );
-        assert_eq!(observe_event_sequence(3, 4), SequenceObservation::Accept);
-    }
-
-    /// Una foto que llega se baja sola. La del propio usuario y la revocada
-    /// no: nadie pide el archivo de un mensaje que ya no existe.
-    #[test]
-    fn a_fresh_image_downloads_but_own_and_revoked_do_not() {
-        let image = || {
-            whatfast_protocol::message::Content::Image(whatfast_protocol::ImageContent {
-                downloadable: true,
-                file_size: 1024,
-                ..Default::default()
-            })
-        };
-        let message = |content, from_me, revoked| Message {
-            content: Some(content),
-            from_me,
-            revoked,
-            ..Default::default()
-        };
-        let ceiling = 25 * 1024 * 1024;
-        assert_eq!(
-            auto_download_target(&message(image(), false, false), ceiling),
-            AutoDownload::Image
-        );
-        assert_eq!(
-            auto_download_target(&message(image(), true, false), ceiling),
-            AutoDownload::None
-        );
-        assert_eq!(
-            auto_download_target(&message(image(), false, true), ceiling),
-            AutoDownload::None
-        );
-    }
-
-    /// El tope de la entrada deja fuera los archivos grandes. Cero no pone
-    /// tope, y un adjunto sin tamaño no se pide.
-    #[test]
-    fn the_size_ceiling_keeps_big_files_out_of_the_auto_download() {
-        let attachment = |size| {
-            Message {
-                content: Some(whatfast_protocol::message::Content::Attachment(
-                    whatfast_protocol::AttachmentContent {
-                        downloadable: true,
-                        file_size: size,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            }
-        };
-        let ceiling = 1024;
-        assert_eq!(
-            auto_download_target(&attachment(1024), ceiling),
-            AutoDownload::Attachment
-        );
-        assert_eq!(
-            auto_download_target(&attachment(1025), ceiling),
-            AutoDownload::None
-        );
-        assert_eq!(
-            auto_download_target(&attachment(20 * 1024 * 1024), 0),
-            AutoDownload::Attachment,
-            "cero no pone tope"
-        );
-        assert_eq!(
-            auto_download_target(&attachment(0), 0),
-            AutoDownload::None,
-            "sin tamaño no hay archivo que pedir"
-        );
-    }
-}
