@@ -125,6 +125,12 @@ pub(crate) enum MessageAction {
     /// Start the multiple selection with this message marked, so the user can
     /// delete, copy or forward several messages in one step.
     SelectMessages,
+    /// Save the picture of the message in the downloads folder.
+    Download,
+    /// Ask for a name and a folder before saving the picture.
+    SaveAs,
+    /// Save every picture of the album this message belongs to.
+    DownloadGroup,
 }
 
 /// The vector icon at the left of a row of the menu of a message.
@@ -139,6 +145,9 @@ fn message_menu_icon(action: MessageAction) -> Icon {
         MessageAction::Pin | MessageAction::Unpin => Icon::new(WhatfastIcon::Pin),
         MessageAction::Star | MessageAction::Unstar => Icon::new(IconName::Star),
         MessageAction::SelectMessages => Icon::new(IconName::Check),
+        MessageAction::Download
+        | MessageAction::SaveAs
+        | MessageAction::DownloadGroup => Icon::new(WhatfastIcon::Download),
     }
 }
 
@@ -188,6 +197,9 @@ pub(crate) struct MessageMenu {
     /// The message carries a picture that can be copied: a downloaded image,
     /// its thumbnail, or the preview that came with the message.
     copy_image: bool,
+    /// Cuantas fotos consecutivas hay en el album de este mensaje: tres o mas
+    /// habilitan "Download all".
+    album_size: usize,
     /// The message can still be edited.
     editable: bool,
     /// The message is pinned in the conversation.
@@ -246,6 +258,7 @@ impl std::fmt::Debug for MessageMenu {
             .field("has_content", &self.has_content)
             .field("has_text", &self.has_text)
             .field("copy_image", &self.copy_image)
+            .field("album_size", &self.album_size)
             .field("editable", &self.editable)
             .field("pinned", &self.pinned)
             .field("starred", &self.starred)
@@ -267,6 +280,7 @@ impl MessageMenu {
         starred: bool,
         now_ms: i64,
         scale: f32,
+        album_size: usize,
     ) -> Self {
         // port: the oracle computes `editable` with the content of the
         // message, its own flag and the window of twenty minutes.
@@ -297,6 +311,7 @@ impl MessageMenu {
             // caption of a picture and the name of a file too.
             has_text: !text.is_empty(),
             copy_image,
+            album_size,
             text,
             editable,
             pinned,
@@ -458,6 +473,24 @@ impl MessageMenu {
                 danger: false,
             },
             MessageMenuItem {
+                action: MessageAction::Download,
+                label: "Download",
+                enabled: self.copy_image,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::SaveAs,
+                label: "Save as…",
+                enabled: self.copy_image,
+                danger: false,
+            },
+            MessageMenuItem {
+                action: MessageAction::DownloadGroup,
+                label: "Download all",
+                enabled: self.copy_image && self.album_size >= 3,
+                danger: false,
+            },
+            MessageMenuItem {
                 action: MessageAction::Translate,
                 label: "Translate",
                 enabled: self.has_text,
@@ -518,6 +551,9 @@ impl MessageMenu {
             | MessageAction::Unpin
             | MessageAction::Star
             | MessageAction::Unstar
+            | MessageAction::Download
+            | MessageAction::SaveAs
+            | MessageAction::DownloadGroup
             | MessageAction::DeleteForEveryone => item.enabled,
             _ => true,
         })

@@ -769,6 +769,11 @@
     "Reduced motion": "减少动态效果",
     "No update is available for this platform (404).": "此平台暂无可用更新 (404)。",
     "You: {preview}": "我：{preview}",
-    "ZIP file": "ZIP 文件"
+    "ZIP file": "ZIP 文件",
+    "Download all": "全部下载",
+    "Download all ({n})": "下载全部（{n}）",
+    "Downloading {done}/{total} photos…": "正在下载 {done}/{total} 张照片…",
+    "Saved {total} photos to {folder}": "已将 {total} 张照片保存到 {folder}",
+    "Some photos could not be downloaded": "部分照片下载失败"
   }
 }

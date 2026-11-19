@@ -42,7 +42,8 @@ use whatfast_model::{
     emoji_picker::{EmojiCategory, filtered as filter_emojis},
     favorites,
     model::{
-        CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, message_text, reactions_for_emoji,
+        CHAT_PAGE_SIZE, ChatFilter, MESSAGE_PAGE_SIZE, Screen, Store, image_row_path,
+        image_viewer_path, message_text, reactions_for_emoji,
     },
     settings::{self, ChatBackground, Density, Settings},
     starred, sticker,
@@ -337,6 +338,9 @@ pub(crate) struct ImageViewer {
     pub(crate) index: usize,
     /// The zoom of the picture over its natural fit.
     pub(crate) zoom: f32,
+    /// Los ids de las fotos del album de la foto abierta. Si hay tres o mas,
+    /// el menu del visor ofrece guardarlas todas de una vez.
+    pub(crate) album_ids: Vec<String>,
 }
 
 impl ImageViewer {
@@ -369,6 +373,22 @@ impl ImageViewer {
     pub(crate) fn has_next(&self) -> bool {
         self.index + 1 < self.gallery.len()
     }
+}
+
+/// Una foto que se pidio guardar antes de que su archivo estuviera en disco.
+struct PendingImageSave {
+    directory: PathBuf,
+    suggested_name: String,
+    batch_id: String,
+}
+
+/// El estado de una pulsacion de "guardar todo": cuantas fotos se copiaron y
+/// en que carpeta, para escribir un solo aviso al final.
+struct ImageSaveBatch {
+    total: usize,
+    done: usize,
+    failed: usize,
+    directory: PathBuf,
 }
 
 /// The multiple selection of the chat list: the menu of the column picks
@@ -1179,6 +1199,16 @@ pub(crate) struct Whatfast {
     /// The multiple selection of the messages of the open conversation,
     /// while the mode is on.
     pub(crate) message_selection: Option<MessageSelection>,
+    /// La lista virtual ya no va mensaje a mensaje: tres o mas fotos
+    /// consecutivas ocupan una sola fila. Esta proyeccion se reconstruye en
+    /// cada dibujo y la usan tambien los desplazamientos.
+    pub(crate) display_rows: Vec<crate::render::ChatDisplayRow>,
+    /// Los tamaños de esas filas, en el mismo orden que `display_rows`.
+    pub(crate) display_sizes: Rc<Vec<gpui::Size<Pixels>>>,
+    /// Fotos cuyo archivo aun no estaba en disco cuando se pidio guardar.
+    pending_image_saves: HashMap<(String, String), PendingImageSave>,
+    /// Grupos de descarga en curso: uno por pulsacion de "guardar todo".
+    image_save_batches: HashMap<String, ImageSaveBatch>,
     /// Whether the window is covered by the PIN of the app lock.
     pub(crate) locked: bool,
     /// The digits of the PIN written in the lock screen.
@@ -1762,6 +1792,10 @@ impl Whatfast {
             create_group: None,
             selection: None,
             message_selection: None,
+            display_rows: Vec::new(),
+            display_sizes: Rc::new(Vec::new()),
+            pending_image_saves: HashMap::new(),
+            image_save_batches: HashMap::new(),
             locked,
             pin_buffer: String::new(),
             lock_error: None,
@@ -2842,8 +2876,9 @@ impl Whatfast {
                     .is_some_and(|content| {
                         matches!(content, whatfast_protocol::message::Content::Image(image) if image.sticker)
                     });
+                let image_key = (chat_id.clone(), message_id.clone());
                 self.image_failures.insert(
-                    (chat_id.clone(), message_id.clone()),
+                    image_key.clone(),
                     if sticker && error.retryable {
                         i18n::t("Couldn't load sticker · Click to retry").into()
                     } else if sticker {
@@ -2854,6 +2889,9 @@ impl Whatfast {
                         i18n::t("Photo is no longer available").into()
                     },
                 );
+                if let Some(pending) = self.pending_image_saves.remove(&image_key) {
+                    self.finish_image_save(&pending.batch_id, false, cx);
+                }
                 self.pump_image_download_queue();
                 return;
             }
@@ -3370,13 +3408,36 @@ impl Whatfast {
                     self.image_failures.insert(key, label.into());
                 } else {
                     self.image_failures.remove(&key);
+                    let image_path = image.image_path.clone();
+                    let thumbnail_path = image.thumbnail_path.clone();
                     self.store.set_message_image_paths(
                         &chat_id,
                         &message_id,
-                        image.image_path,
-                        image.thumbnail_path,
+                        image_path.clone(),
+                        thumbnail_path.clone(),
                     );
                     self.pump_image_download_queue();
+                    // La llegada del archivo tambien resuelve una peticion de
+                    // guardado que estaba esperando la descarga.
+                    if let Some(pending) = self.pending_image_saves.remove(&key) {
+                        let source = if !image_path.is_empty() {
+                            image_path
+                        } else {
+                            thumbnail_path
+                        };
+                        if !source.is_empty() && Path::new(&source).is_file() {
+                            self.copy_image_for_batch(
+                                PathBuf::from(source),
+                                pending.directory,
+                                pending.suggested_name,
+                                pending.batch_id,
+                                window,
+                                cx,
+                            );
+                        } else {
+                            self.finish_image_save(&pending.batch_id, false, cx);
+                        }
+                    }
                 }
             }
             (
@@ -5146,6 +5207,8 @@ impl Whatfast {
                 item.sender_avatar = avatar.clone();
             }
         }
+        let album_ids =
+            crate::render::album_ids_for_message(&self.store.messages, &message_id);
         let mut viewer = ImageViewer {
             chat_id,
             message_id,
@@ -5157,6 +5220,7 @@ impl Whatfast {
             gallery,
             index: 0,
             zoom: 1.,
+            album_ids,
         };
         viewer.show(index);
         self.open_image_viewer(viewer);
@@ -5757,12 +5821,12 @@ impl Whatfast {
     }
 
     pub(crate) fn scroll_to_message(&mut self, message_id: &str) {
-        if let Some(index) = self
-            .store
-            .messages
-            .iter()
-            .position(|message| message.id == message_id)
-        {
+        // `scroll_to_item` cuenta filas de la lista virtual, no mensajes: una
+        // foto dentro de un album de tres o mas esta en la fila del album.
+        if let Some(index) = crate::render::display_index_for_message(
+            &self.store.messages,
+            message_id,
+        ) {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
@@ -10018,6 +10082,284 @@ impl Whatfast {
         .detach();
     }
 
+    /// Guarda una sola foto del mensaje. `always_prompt` fuerza el dialogo de
+    /// "Guardar como", que es lo que pide la accion del mismo nombre.
+    pub(crate) fn save_message_image(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        always_prompt: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_image_album(vec![(chat_id, message_id)], always_prompt, window, cx);
+    }
+
+    /// Guarda todas las fotos de un album con una sola carpeta y un solo
+    /// aviso de progreso.
+    pub(crate) fn save_image_album(
+        &mut self,
+        keys: Vec<(String, String)>,
+        always_prompt: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if keys.is_empty() {
+            return;
+        }
+        let batch_id = Uuid::new_v4().to_string();
+        self.image_save_batches.insert(
+            batch_id.clone(),
+            ImageSaveBatch {
+                total: keys.len(),
+                done: 0,
+                failed: 0,
+                directory: PathBuf::new(),
+            },
+        );
+        self.report_image_save_progress(0, keys.len());
+        let configured = self.settings.download_dir.trim().to_string();
+        if !configured.is_empty() && !always_prompt {
+            let directory = PathBuf::from(configured);
+            self.begin_image_album_save(keys, directory, batch_id, window, cx);
+            return;
+        }
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(i18n::t("Choose the folder for the downloads").into()),
+        });
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let directory = selected
+                .await
+                .ok()
+                .and_then(|paths| paths.ok())
+                .flatten()
+                .and_then(|mut paths| paths.pop());
+            window
+                .update(|window, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Some(directory) = directory {
+                            this.begin_image_album_save(keys, directory, batch_id, window, cx);
+                        } else {
+                            // El usuario cancelo el dialogo: no queda ningun
+                            // aviso de descarga colgado.
+                            this.image_save_batches.remove(&batch_id);
+                            this.store.toast_info = None;
+                        }
+                        cx.notify();
+                    })
+                    .ok()
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Copia las fotos que ya estan en disco y pide las que no estan.
+    fn begin_image_album_save(
+        &mut self,
+        keys: Vec<(String, String)>,
+        directory: PathBuf,
+        batch_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(batch) = self.image_save_batches.get_mut(&batch_id) {
+            batch.directory = directory.clone();
+        }
+        for (chat_id, message_id) in keys {
+            let Some(message) = self.store.message(&message_id).cloned() else {
+                self.finish_image_save(&batch_id, false, cx);
+                continue;
+            };
+            let Some(image) = message.content.as_ref().and_then(|content| match content {
+                whatfast_protocol::message::Content::Image(image) => Some(image.clone()),
+                _ => None,
+            }) else {
+                self.finish_image_save(&batch_id, false, cx);
+                continue;
+            };
+            let viewer_path = image_viewer_path(&image);
+            let row_path = image_row_path(&image);
+            let source = if !viewer_path.is_empty() && self.store.media_exists(viewer_path) {
+                viewer_path.to_string()
+            } else if !row_path.is_empty() && self.store.media_exists(row_path) {
+                row_path.to_string()
+            } else {
+                String::new()
+            };
+            let caption = message_text(&message).trim();
+            let stem = if caption.is_empty() {
+                "photo".to_string()
+            } else {
+                let cleaned = sanitize_file_name(&caption.chars().take(60).collect::<String>());
+                if cleaned.is_empty() {
+                    "photo".to_string()
+                } else {
+                    cleaned
+                }
+            };
+            let raw_path = if viewer_path.is_empty() { row_path } else { viewer_path };
+            let extension = Path::new(raw_path)
+                .extension()
+                .map(|extension| extension.to_string_lossy().into_owned())
+                .filter(|extension| !extension.is_empty())
+                .unwrap_or_else(|| "jpg".to_string());
+            let suggested_name = format!("{stem}.{extension}");
+            if !source.is_empty() && Path::new(&source).is_file() {
+                self.copy_image_for_batch(
+                    PathBuf::from(source),
+                    directory.clone(),
+                    suggested_name,
+                    batch_id.clone(),
+                    window,
+                    cx,
+                );
+            } else {
+                let key = (chat_id.clone(), message_id.clone());
+                self.pending_image_saves.insert(
+                    key.clone(),
+                    PendingImageSave {
+                        directory: directory.clone(),
+                        suggested_name,
+                        batch_id: batch_id.clone(),
+                    },
+                );
+                self.image_failures.remove(&key);
+                self.image_download_attempted.remove(&key);
+                self.load_message_image(chat_id, message_id);
+            }
+        }
+    }
+
+    /// Copia una foto en segundo plano, sin repetir un nombre existente, y avisa
+    /// al grupo al que pertenece cuando termina.
+    fn copy_image_for_batch(
+        &mut self,
+        source: PathBuf,
+        directory: PathBuf,
+        suggested_name: String,
+        batch_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut name = sanitize_file_name(&suggested_name);
+        if name.is_empty() {
+            name = source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "photo.jpg".to_string());
+        }
+        if Path::new(&name).extension().is_none()
+            && let Some(extension) = source.extension()
+            && !extension.is_empty()
+        {
+            name.push('.');
+            name.push_str(&extension.to_string_lossy());
+        }
+        let stem = Path::new(&name)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        let extension = Path::new(&name)
+            .extension()
+            .map(|extension| format!(".{}", extension.to_string_lossy()))
+            .unwrap_or_default();
+        let copy = cx.background_spawn(async move {
+            let mut counter = 1;
+            let mut last_error = None;
+            for _ in 0..3 {
+                let mut destination = directory.join(&name);
+                while destination.exists() {
+                    destination = directory.join(format!("{stem} ({counter}){extension}"));
+                    counter += 1;
+                }
+                let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
+                let result = std::fs::copy(&source, &partial)
+                    .and_then(|_| std::fs::rename(&partial, &destination));
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&partial);
+                }
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(last_error.unwrap_or_else(|| std::io::Error::other("the name stayed taken")))
+        });
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, window| {
+            let result = copy.await;
+            window
+                .update(|_window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.finish_image_save(&batch_id, result.is_ok(), cx);
+                        cx.notify();
+                    })
+                    .ok()
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    /// Cuenta una foto del grupo y escribe el aviso final cuando llega la
+    /// ultima.
+    fn finish_image_save(&mut self, batch_id: &str, success: bool, cx: &mut Context<Self>) {
+        let (total, done, failed, directory, finished) = {
+            let Some(batch) = self.image_save_batches.get_mut(batch_id) else {
+                return;
+            };
+            if success {
+                batch.done += 1;
+            } else {
+                batch.failed += 1;
+            }
+            let done = batch.done + batch.failed;
+            (
+                batch.total,
+                done,
+                batch.failed,
+                batch.directory.clone(),
+                done >= batch.total,
+            )
+        };
+        if !finished {
+            self.report_image_save_progress(done, total);
+            return;
+        }
+        self.image_save_batches.remove(batch_id);
+        if failed == 0 {
+            self.store.toast_error = None;
+            self.store.toast_info = Some(i18n::t_args(
+                "Saved {total} photos to {folder}",
+                &[
+                    ("total", &total.to_string()),
+                    ("folder", &directory.display().to_string()),
+                ],
+            ));
+        } else {
+            self.store.toast_info = None;
+            self.store.toast_error = Some(i18n::t("Some photos could not be downloaded").into());
+        }
+        self.clear_toast_info_later(cx);
+        cx.notify();
+    }
+
+    fn report_image_save_progress(&mut self, done: usize, total: usize) {
+        self.store.toast_error = None;
+        self.store.toast_info = Some(i18n::t_args(
+            "Downloading {done}/{total} photos…",
+            &[("done", &done.to_string()), ("total", &total.to_string())],
+        ));
+    }
+
     /// Takes the green notice out after a moment.
     pub(crate) fn clear_toast_info_later(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -11095,10 +11437,18 @@ impl Whatfast {
         };
         let pinned = self.store.message_is_pinned(&chat_id, &message_id);
         let starred = self.store.message_is_starred(&chat_id, &message_id);
+        let album_size = {
+            let messages = &self.store.messages;
+            crate::render::photo_albums(messages)
+                .iter()
+                .find(|row| row.matches_id(messages, &message_id))
+                .map(|row| row.len())
+                .unwrap_or(1)
+        };
         let scale = self.ui_scale;
         let view = cx.entity();
         let menu = cx.new(|_| {
-            MessageMenu::new(chat_id, &message, pinned, starred, now_ms(), scale)
+            MessageMenu::new(chat_id, &message, pinned, starred, now_ms(), scale, album_size)
                 .at(position)
                 .on_action(move |action, window, cx| {
                     view.update(cx, |this, cx| {
@@ -11150,6 +11500,18 @@ impl Whatfast {
                     Some(ConfirmDeleteMessage::single(message_id, true));
             }
             MessageAction::Copy => self.copy_message(message_id, text, cx),
+            MessageAction::Download => {
+                self.save_message_image(chat_id, message_id, false, window, cx)
+            }
+            MessageAction::SaveAs => self.save_message_image(chat_id, message_id, true, window, cx),
+            MessageAction::DownloadGroup => {
+                let ids = crate::render::album_ids_for_message(&self.store.messages, &message_id);
+                let keys = ids
+                    .into_iter()
+                    .map(|id| (chat_id.clone(), id))
+                    .collect::<Vec<_>>();
+                self.save_image_album(keys, false, window, cx);
+            }
             MessageAction::Translate => self.translate_message(message_id, text, cx),
             MessageAction::Pin => self.set_message_pin(message_id, true),
             MessageAction::Unpin => self.set_message_pin(message_id, false),

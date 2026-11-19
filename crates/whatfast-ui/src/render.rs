@@ -80,6 +80,200 @@ use crate::text::{is_safe_web_url, link_preview_host, mention_display_name, spli
 use crate::tokens;
 use crate::ubicaciones;
 
+/// Ancho maximo de la burbuja de un album, antes de la escala.
+const ALBUM_MAX_WIDTH: f32 = 336.;
+/// Hueco entre celdas de la rejilla de un album, antes de la escala.
+const ALBUM_GAP: f32 = 3.;
+/// Alto de la celda ancha de un album de tres fotos.
+const ALBUM_THREE_TOP: f32 = 172.;
+/// Alto de cada celda de la fila de abajo de un album de tres fotos.
+const ALBUM_THREE_BOTTOM: f32 = 136.;
+/// Alto de cada celda de un album de cuatro o mas fotos.
+const ALBUM_FOUR_CELL: f32 = 156.;
+
+/// Una fila de la lista virtual de la conversacion.
+///
+/// Una foto suelta ocupa su fila, igual que antes. Tres o mas fotos
+/// consecutivas del mismo remitente se juntan en una sola burbuja con
+/// rejilla: cada foto conserva su id, sus reacciones y su descarga, solo
+/// cambia el dibujo.
+#[derive(Clone, Debug)]
+pub(crate) enum ChatDisplayRow {
+    Single(usize),
+    PhotoAlbum { indices: Vec<usize> },
+}
+
+impl ChatDisplayRow {
+    /// El indice del primer mensaje de la fila: manda la fecha y el cluster.
+    pub(crate) fn first_message_index(&self) -> usize {
+        match self {
+            Self::Single(index) => *index,
+            Self::PhotoAlbum { indices } => indices[0],
+        }
+    }
+
+    /// Si la fila contiene el mensaje con ese id.
+    pub(crate) fn matches_id(&self, messages: &[proto::Message], message_id: &str) -> bool {
+        match self {
+            Self::Single(index) => messages
+                .get(*index)
+                .is_some_and(|message| message.id == message_id),
+            Self::PhotoAlbum { indices } => indices.iter().any(|&index| {
+                messages
+                    .get(index)
+                    .is_some_and(|message| message.id == message_id)
+            }),
+        }
+    }
+
+    /// El numero de fotos de la fila: uno en una burbuja suelta.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::PhotoAlbum { indices } => indices.len(),
+        }
+    }
+}
+
+/// El epigrafe que cuenta como unico titulo del album.
+fn album_caption(message: &proto::Message) -> &str {
+    attachments::bubble_text(message)
+}
+
+/// Si el mensaje puede entrar en un album de fotos.
+fn is_album_photo(message: &proto::Message) -> bool {
+    !message.revoked
+        && !is_view_once_message(message)
+        && matches!(
+            &message.content,
+            Some(proto::message::Content::Image(image)) if !image.sticker
+        )
+}
+
+/// Si una foto puede seguir a la anterior en el mismo album.
+fn album_continues(messages: &[proto::Message], previous: usize, current: usize) -> bool {
+    current > 0 && previous + 1 == current && !starts_cluster(messages, current)
+}
+
+/// Proyecta los mensajes en filas de la lista virtual.
+///
+/// Solo agrupa cuando hay tres fotos o mas: una o dos fotos consecutivas se
+/// dibujan como burbujas sueltas, igual que en WhatsApp. La cadena se corta
+/// con un cambio de remitente, de dia, con una cita propia o con un segundo
+/// epigrafe distinto.
+pub(crate) fn photo_albums(messages: &[proto::Message]) -> Vec<ChatDisplayRow> {
+    let mut rows = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        if !is_album_photo(&messages[index]) {
+            rows.push(ChatDisplayRow::Single(index));
+            index += 1;
+            continue;
+        }
+        let mut run = vec![index];
+        let mut caption = album_caption(&messages[index]);
+        let mut cursor = index + 1;
+        while cursor < messages.len()
+            && is_album_photo(&messages[cursor])
+            && album_continues(messages, run[run.len() - 1], cursor)
+            && messages[cursor].reply_to_message_id.is_empty()
+        {
+            let candidate = album_caption(&messages[cursor]);
+            if !candidate.is_empty() && !caption.is_empty() && candidate != caption {
+                break;
+            }
+            if !candidate.is_empty() && caption.is_empty() {
+                caption = candidate;
+            }
+            run.push(cursor);
+            cursor += 1;
+        }
+        let run_len = run.len();
+        if run_len >= 3 {
+            rows.push(ChatDisplayRow::PhotoAlbum { indices: run });
+        } else {
+            for message_index in run {
+                rows.push(ChatDisplayRow::Single(message_index));
+            }
+        }
+        index += run_len;
+    }
+    rows
+}
+
+/// La fila de la lista virtual donde esta un mensaje.
+pub(crate) fn display_index_for_message(
+    messages: &[proto::Message],
+    message_id: &str,
+) -> Option<usize> {
+    photo_albums(messages)
+        .iter()
+        .position(|row| row.matches_id(messages, message_id))
+}
+
+/// Los ids de las fotos del album al que pertenece un mensaje.
+pub(crate) fn album_ids_for_message(
+    messages: &[proto::Message],
+    message_id: &str,
+) -> Vec<String> {
+    photo_albums(messages)
+        .iter()
+        .find(|row| row.matches_id(messages, message_id))
+        .map(|row| match row {
+            ChatDisplayRow::Single(index) => messages
+                .get(*index)
+                .map(|message| vec![message.id.clone()])
+                .unwrap_or_default(),
+            ChatDisplayRow::PhotoAlbum { indices } => indices
+                .iter()
+                .filter_map(|&index| messages.get(index).map(|message| message.id.clone()))
+                .collect(),
+        })
+        .unwrap_or_default()
+}
+
+/// El alto de la rejilla de un album, antes de la escala.
+fn album_grid_height(count: usize, scale: f32) -> Pixels {
+    if count == 3 {
+        px((ALBUM_THREE_TOP + ALBUM_GAP + ALBUM_THREE_BOTTOM) * scale)
+    } else {
+        px((ALBUM_FOUR_CELL * 2. + ALBUM_GAP) * scale)
+    }
+}
+
+/// Una reaccion agregada de todas las fotos del album.
+#[derive(Clone)]
+struct AlbumReaction {
+    emoji: String,
+    count: usize,
+    from_me: bool,
+    message_id: String,
+}
+
+/// Suma las reacciones de todas las fotos del album por emoji.
+fn album_reactions(messages: &[proto::Message], indices: &[usize]) -> Vec<AlbumReaction> {
+    let mut reactions: Vec<AlbumReaction> = Vec::new();
+    for &index in indices {
+        let Some(message) = messages.get(index) else {
+            continue;
+        };
+        for count in reaction_counts(message) {
+            if let Some(existing) = reactions.iter_mut().find(|item| item.emoji == count.emoji) {
+                existing.count += count.count;
+                existing.from_me |= count.from_me;
+            } else {
+                reactions.push(AlbumReaction {
+                    emoji: count.emoji.to_string(),
+                    count: count.count,
+                    from_me: count.from_me,
+                    message_id: message.id.clone(),
+                });
+            }
+        }
+    }
+    reactions
+}
+
 /// One entry of the menu of a row of the list of conversations.
 enum ChatContextEntry {
     /// An action of the menu, with its text and its icon.
@@ -3501,14 +3695,15 @@ impl Whatfast {
         let wallpaper = (!self.battery_saver)
             .then(|| self.conversation_wallpaper(wallpaper_width, wallpaper_height, cx));
         self.measure_message_heights(wrap_width, cx.theme().font_size, window);
-        let sizes = self.store.message_sizes();
+        self.rebuild_display_rows(bubble_width, wrap_width, cx.theme().font_size, window);
+        let sizes = self.display_sizes.clone();
         if let Some(generation) = self.scroll_to_bottom_generation.take() {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             let item_count = sizes.len();
             cx.on_next_frame(window, move |this, _, cx| {
                 if item_count > 0
                     && this.message_generation == generation
-                    && this.store.messages.len() == item_count
+                    && this.display_rows.len() == item_count
                 {
                     this.message_scroll
                         .scroll_to_item(item_count.saturating_sub(1), ScrollStrategy::Bottom);
@@ -3517,36 +3712,25 @@ impl Whatfast {
             });
         }
         if let Some((anchor_id, old_offset)) = self.pending_prepend_anchor.take()
-            && let Some(anchor_index) = self
-                .store
-                .messages
-                .iter()
-                .position(|message| message.id == anchor_id)
+            && let Some(anchor_index) =
+                display_index_for_message(&self.store.messages, &anchor_id)
         {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             let inserted_height = sizes[..anchor_index]
                 .iter()
-                .fold(px(0.), |height, size| height + px(size.height) + px(8.));
+                .fold(px(0.), |height, size| height + size.height + px(8.));
             self.message_scroll
                 .set_offset(point(old_offset.x, old_offset.y - inserted_height));
         }
         if let Some(target_id) = self.pending_search_scroll_id.take()
-            && let Some(index) = self
-                .store
-                .messages
-                .iter()
-                .position(|message| message.id == target_id)
+            && let Some(index) = display_index_for_message(&self.store.messages, &target_id)
         {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
         if let Some(target_id) = self.pending_top_scroll_id.take()
-            && let Some(index) = self
-                .store
-                .messages
-                .iter()
-                .position(|message| message.id == target_id)
+            && let Some(index) = display_index_for_message(&self.store.messages, &target_id)
         {
             self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
@@ -3882,7 +4066,7 @@ impl Whatfast {
         let list_sizes = Rc::new(
             sizes
                 .iter()
-                .map(|entry| size(px(entry.width), px(entry.height)))
+                .map(|entry| size(entry.width, entry.height))
                 .collect::<Vec<_>>(),
         );
         v_flex()
@@ -4194,9 +4378,24 @@ impl Whatfast {
                                 "messages",
                                 list_sizes,
                                 move |this, range: Range<usize>, _window, cx| {
-                                    let visible_images = range
+                                    // La lista cuenta filas, no mensajes: un
+                                    // album visible descarga las fotos de
+                                    // todas sus celdas.
+                                    let mut indices = Vec::new();
+                                    for row in range
                                         .clone()
-                                        .filter_map(|index| this.store.messages.get(index))
+                                        .filter_map(|di| this.display_rows.get(di))
+                                    {
+                                        match row {
+                                            ChatDisplayRow::Single(index) => indices.push(*index),
+                                            ChatDisplayRow::PhotoAlbum { indices: album } => {
+                                                indices.extend_from_slice(album)
+                                            }
+                                        }
+                                    }
+                                    let visible_images = indices
+                                        .iter()
+                                        .filter_map(|&index| this.store.messages.get(index))
                                         .filter_map(|message| match message.content.as_ref() {
                                             Some(proto::message::Content::Image(image))
                                                 if image_needs_download(image) =>
@@ -4213,9 +4412,9 @@ impl Whatfast {
                                     // their own: without the file the bubble
                                     // cannot draw the player and falls back to
                                     // the card with the text "Voice message".
-                                    let visible_audios = range
-                                        .clone()
-                                        .filter_map(|index| this.store.messages.get(index))
+                                    let visible_audios = indices
+                                        .iter()
+                                        .filter_map(|&index| this.store.messages.get(index))
                                         .filter_map(|message| match message.content.as_ref() {
                                             Some(proto::message::Content::Attachment(
                                                 attachment,
@@ -4236,9 +4435,9 @@ impl Whatfast {
                                         .selected_chat()
                                         .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
                                     {
-                                        let participants = range
-                                            .clone()
-                                            .filter_map(|index| this.store.messages.get(index))
+                                        let participants = indices
+                                            .iter()
+                                            .filter_map(|&index| this.store.messages.get(index))
                                             .filter(|message| {
                                                 !message.from_me
                                                     && message.sender_avatar_path.is_empty()
@@ -4254,33 +4453,45 @@ impl Whatfast {
                                             this.load_participant_avatar(participant_id);
                                         }
                                     }
-                                    this.messages_scrolled_up =
-                                        range.end < this.store.messages.len();
+                                    this.messages_scrolled_up = range.end < this.display_rows.len();
+                                    let first_index = this
+                                        .display_rows
+                                        .get(range.start)
+                                        .map(ChatDisplayRow::first_message_index)
+                                        .unwrap_or(0);
                                     // El separador real del primer mensaje visible
                                     // ya muestra la fecha arriba de todo: pintar
                                     // otra etiqueta fija superpone dos fechas
                                     // distintas ("18 Nov 2026" sobre "Today").
                                     let separator_visible =
-                                        this.day_separator_label(range.start).is_some();
+                                        this.day_separator_label(first_index).is_some();
                                     this.sticky_date_label = if this.messages_scrolled_up
                                         && !separator_visible
                                     {
-                                        this.store.messages.get(range.start).map(|m| {
+                                        this.store.messages.get(first_index).map(|m| {
                                             message_day_label(m.timestamp_ms, now_ms())
                                         })
                                     } else {
                                         None
                                     };
-                                    if range.end == this.store.messages.len()
+                                    if range.end == this.display_rows.len()
                                         && (this.store.has_newer_messages
                                             || this.store.newer_activity)
                                     {
                                         this.load_newer_messages();
-                                    } else if range.end == this.store.messages.len() {
+                                    } else if range.end == this.display_rows.len() {
                                         this.mark_read();
                                     }
                                     range
-                                        .map(|index| this.render_message(index, bubble_width, cx))
+                                        .map(|di| match this.display_rows.get(di) {
+                                            Some(ChatDisplayRow::Single(index)) => {
+                                                this.render_message(*index, bubble_width, cx)
+                                            }
+                                            Some(ChatDisplayRow::PhotoAlbum { indices }) => {
+                                                this.render_photo_album(indices, bubble_width, cx)
+                                            }
+                                            None => div(),
+                                        })
                                         .collect()
                                 },
                             )
@@ -7526,6 +7737,27 @@ impl Whatfast {
                     )
                     .child(
                         viewer_icon_button(
+                            ("viewer-download", index),
+                            Icon::new(WhatfastIcon::Download),
+                            scale,
+                        )
+                        .on_click(cx.listener({
+                            let chat_id = chat_id.clone();
+                            let message_id = message_id.clone();
+                            move |this, _, window, cx| {
+                                this.save_message_image(
+                                    chat_id.clone(),
+                                    message_id.clone(),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(
+                        viewer_icon_button(
                             ("viewer-reply", index),
                             Icon::new(WhatfastIcon::Reply),
                             scale,
@@ -8316,7 +8548,8 @@ impl Whatfast {
         let message_id = viewer.message_id.clone();
         let path = viewer.path.clone();
         let width = px(248. * scale);
-        let height = px((7. * 36. + 16.) * scale);
+        let rows = if viewer.album_ids.len() >= 3 { 8 } else { 7 };
+        let height = px((rows as f32 * 36. + 16.) * scale);
         let viewport = window.viewport_size();
         let left = menu
             .position
@@ -8445,6 +8678,32 @@ impl Whatfast {
                             cx.notify();
                         })),
                     )
+                    .when(viewer.album_ids.len() >= 3, |menu| {
+                        let group_ids = viewer.album_ids.clone();
+                        let group_chat = chat_id.clone();
+                        menu.child(
+                            image_menu_row(
+                                ("image-menu-download-group", 0),
+                                Icon::new(WhatfastIcon::Download),
+                                i18n::t_args(
+                                    "Download all ({n})",
+                                    &[("n", &viewer.album_ids.len().to_string())],
+                                ),
+                                hover,
+                                scale,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let keys = group_ids
+                                    .clone()
+                                    .into_iter()
+                                    .map(|id| (group_chat.clone(), id))
+                                    .collect::<Vec<_>>();
+                                this.save_image_album(keys, false, window, cx);
+                                this.image_context_menu = None;
+                                cx.notify();
+                            })),
+                        )
+                    })
                     .child(
                         image_menu_row(
                             ("image-menu-search", 0),
@@ -9516,6 +9775,512 @@ impl Whatfast {
             })
     }
 
+    /// Una celda de la rejilla del album. Mantiene el id del mensaje para
+    /// abrir esa foto en el visor, guardarla sola y abrir su menu.
+    fn render_album_cell(
+        &self,
+        index: usize,
+        height: Pixels,
+        overlay: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let scale = self.ui_scale;
+        let message = &self.store.messages[index];
+        let image = match message.content.as_ref() {
+            Some(proto::message::Content::Image(image)) => image.clone(),
+            _ => return div().id(("album-cell-empty", index)).h(height),
+        };
+        let row_path = image_row_path(&image).to_string();
+        let viewer_path = image_viewer_path(&image).to_string();
+        let image_path = image_source_candidates(&image, &row_path, &viewer_path)
+            .into_iter()
+            .find(|path| !path.is_empty() && self.store.media_exists(path))
+            .unwrap_or_default()
+            .to_string();
+        let has_image = !image_path.is_empty();
+        let chat_id = message.chat_id.clone();
+        let message_id = message.id.clone();
+        let view_chat_id = chat_id.clone();
+        let view_message_id = message_id.clone();
+        let menu_message_id = message_id.clone();
+        let save_chat_id = chat_id.clone();
+        let save_message_id = message_id.clone();
+        let cell_group = format!("album-cell-{}", message.id);
+        let fit = if image.sticker {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
+        div()
+            .id(("album-cell", index))
+            .h(height)
+            .relative()
+            .overflow_hidden()
+            .rounded_sm()
+            .group(cell_group.clone())
+            .when(has_image, |cell| {
+                cell.child(
+                    img(PathBuf::from(image_path))
+                        .id(("album-cell-image", index))
+                        .size_full()
+                        .object_fit(fit),
+                )
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_chat_image(view_chat_id.clone(), view_message_id.clone());
+                    cx.notify();
+                }))
+            })
+            .when(!has_image, |cell| {
+                cell.bg(cx.theme().secondary).child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(i18n::t("Loading the photo…")),
+                )
+            })
+            .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !event.is_secondary() {
+                    return;
+                }
+                let position = event
+                    .mouse_position()
+                    .unwrap_or_else(|| window.mouse_position());
+                this.open_message_menu(menu_message_id.clone(), position, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id(("album-cell-download", index))
+                    .absolute()
+                    .top(px(6. * scale))
+                    .right(px(6. * scale))
+                    .size(px(28. * scale))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(0x1c1c1ce6))
+                    .text_color(rgb(0xffffff))
+                    .opacity(0.)
+                    .group_hover(cell_group, |style| style.opacity(1.))
+                    .cursor_pointer()
+                    .child(Icon::new(WhatfastIcon::Download).with_size(px(15. * scale)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.save_message_image(save_chat_id.clone(), save_message_id.clone(), false, window, cx);
+                        cx.notify();
+                    })),
+            )
+            .when_some(overlay, |cell, label| {
+                cell.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(0x00000088))
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xffffff))
+                                .child(label),
+                        ),
+                )
+            })
+    }
+
+    /// Tres o mas fotos consecutivas en una sola burbuja con rejilla.
+    fn render_photo_album(
+        &self,
+        indices: &[usize],
+        bubble_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let scale = self.ui_scale;
+        let album_width = bubble_width.min(px(ALBUM_MAX_WIDTH * scale));
+        let caption_width = (album_width - px(16. * scale)).max(px(60.));
+        let first_index = indices[0];
+        let first = &self.store.messages[first_index];
+        let last = &self.store.messages[indices[indices.len() - 1]];
+        let chat_id = first.chat_id.clone();
+        let from_me = first.from_me;
+        let group_incoming = !from_me
+            && self
+                .store
+                .selected_chat()
+                .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        let caption = indices
+            .iter()
+            .find_map(|&index| {
+                let text = album_caption(&self.store.messages[index]);
+                (!text.is_empty()).then(|| text.to_string())
+            })
+            .unwrap_or_default();
+        let reactions = album_reactions(&self.store.messages, indices);
+        let selecting = self.message_selection.is_some();
+        let checked = indices.iter().all(|&index| {
+            self.message_selection
+                .as_ref()
+                .is_some_and(|selection| selection.ids.contains(&self.store.messages[index].id))
+        });
+        let (bubble_in, bubble_out) = tokens::bubble_colors(&self.active_theme());
+        let bubble_color: gpui::Hsla = if from_me {
+            gpui::Hsla::from(bubble_out)
+        } else {
+            gpui::Hsla::from(bubble_in)
+        };
+        let time_label =
+            bubble_time_label(last.timestamp_ms, local_offset_minutes(last.timestamp_ms));
+        let status_glyph = if from_me {
+            message_status_glyph(last.status())
+        } else {
+            None
+        };
+        let status_color = match status_glyph {
+            Some(StatusGlyph::Read) => {
+                if cx.theme().is_dark() {
+                    rgb(0x53bdeb).into()
+                } else {
+                    rgb(0x34b7f1).into()
+                }
+            }
+            Some(StatusGlyph::Failed) => cx.theme().danger,
+            _ => cx.theme().muted_foreground,
+        };
+        let starred = indices.iter().any(|&index| {
+            let message = &self.store.messages[index];
+            self.store.message_is_starred(&message.chat_id, &message.id)
+        });
+        let meta_text = if last.edited {
+            i18n::t("edited").to_string()
+        } else {
+            String::new()
+        };
+        let all_ids = indices
+            .iter()
+            .filter_map(|&index| self.store.messages.get(index).map(|m| m.id.clone()))
+            .collect::<Vec<_>>();
+        let menu_message_id = last.id.clone();
+        let pill_chat_id = chat_id.clone();
+        let pill_ids = all_ids.clone();
+        let selection_ids = all_ids.clone();
+        let reaction_chat_id = chat_id.clone();
+        let own_reaction_background: gpui::Hsla = if cx.theme().is_dark() {
+            rgb(0x164e3d).into()
+        } else {
+            rgb(0xd9fdd3).into()
+        };
+
+        let grid = if indices.len() == 3 {
+            let bottom_h = px(ALBUM_THREE_BOTTOM * scale);
+            v_flex()
+                .w_full()
+                .gap(px(ALBUM_GAP * scale))
+                .child(
+                    self.render_album_cell(indices[0], px(ALBUM_THREE_TOP * scale), None, cx)
+                        .w_full(),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(ALBUM_GAP * scale))
+                        .child(self.render_album_cell(indices[1], bottom_h, None, cx).flex_1())
+                        .child(self.render_album_cell(indices[2], bottom_h, None, cx).flex_1()),
+                )
+                .into_any_element()
+        } else {
+            let cell_h = px(ALBUM_FOUR_CELL * scale);
+            v_flex()
+                .w_full()
+                .gap(px(ALBUM_GAP * scale))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(ALBUM_GAP * scale))
+                        .child(self.render_album_cell(indices[0], cell_h, None, cx).flex_1())
+                        .child(self.render_album_cell(indices[1], cell_h, None, cx).flex_1()),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(ALBUM_GAP * scale))
+                        .child(self.render_album_cell(indices[2], cell_h, None, cx).flex_1())
+                        .child(
+                            self.render_album_cell(
+                                indices[3],
+                                cell_h,
+                                Some(format!("+{}", indices.len() - 4)),
+                                cx,
+                            )
+                            .flex_1(),
+                        ),
+                )
+                .into_any_element()
+        };
+
+        let bubble = v_flex()
+            .id(("message-bubble", first_index))
+            .w(album_width)
+            .max_w_full()
+            .relative()
+            .when(from_me, |bubble| bubble.self_end())
+            .when(!from_me, |bubble| bubble.self_start())
+            .rounded_lg()
+            .gap(px(4. * scale))
+            .py(self.album_vertical_padding(first_index))
+            .bg(bubble_color)
+            .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !event.is_secondary() {
+                    return;
+                }
+                let position = event
+                    .mouse_position()
+                    .unwrap_or_else(|| window.mouse_position());
+                this.open_message_menu(menu_message_id.clone(), position, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .when(group_incoming, |bubble| {
+                let name = if !first.sender_name.trim().is_empty() {
+                    first.sender_name.trim().to_string()
+                } else if !first.sender_phone_number.trim().is_empty() {
+                    whatfast_core::phone::format(first.sender_phone_number.trim())
+                } else if !first.sender_id.trim().is_empty() {
+                    first.sender_id.split('@').next().unwrap_or("").to_string()
+                } else {
+                    i18n::t("Unknown contact").to_string()
+                };
+                let identity_key = if first.sender_id.is_empty() {
+                    name.as_str()
+                } else {
+                    first.sender_id.as_str()
+                };
+                bubble.child(
+                    h_flex()
+                        .h(px(22. * scale))
+                        .items_baseline()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().blue.hue(identity_hue(identity_key)))
+                                .child(name),
+                        ),
+                )
+            })
+            .child(grid)
+            .when(!caption.is_empty(), |bubble| {
+                bubble.child(
+                    div().w_full().px(px(8. * scale)).child(
+                        self.render_linkified_text(
+                            &format!("album-caption-{}", first.id),
+                            &caption,
+                            caption_width,
+                        ),
+                    ),
+                )
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(18. * scale))
+                    .px(px(8. * scale))
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        Button::new(("album-download", first_index))
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(WhatfastIcon::Download))
+                            .label(i18n::t_args(
+                                "Download all ({n})",
+                                &[("n", &indices.len().to_string())],
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let keys = pill_ids
+                                    .clone()
+                                    .into_iter()
+                                    .map(|id| (pill_chat_id.clone(), id))
+                                    .collect::<Vec<_>>();
+                                this.save_image_album(keys, false, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(3. * scale))
+                            .when(starred, |row| {
+                                row.child(
+                                    Icon::new(IconName::StarFill)
+                                        .with_size(px(11. * scale))
+                                        .text_color(cx.theme().accent),
+                                )
+                            })
+                            .when(!meta_text.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(meta_text.clone()),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(time_label.clone()),
+                            )
+                            .when_some(status_glyph, |row, glyph| {
+                                row.child(status_tick(glyph, status_color, scale))
+                            }),
+                    ),
+            )
+            .when(!reactions.is_empty(), |bubble| {
+                bubble.child(
+                    h_flex()
+                        .h(px(30. * scale))
+                        .px(px(8. * scale))
+                        .gap_1()
+                        .children(reactions.iter().enumerate().map(|(chip_index, reaction)| {
+                            let emoji = reaction.emoji.clone();
+                            let label = if reaction.count <= 1 {
+                                emoji.clone()
+                            } else {
+                                format!("{emoji} {}", reaction.count)
+                            };
+                            let mine = reaction.from_me;
+                            let click_chat = reaction_chat_id.clone();
+                            let click_message = reaction.message_id.clone();
+                            let click_emoji = emoji.clone();
+                            div()
+                                .id(format!("album-reaction-{first_index}-{chip_index}"))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(if mine {
+                                    cx.theme().accent
+                                } else {
+                                    cx.theme().border
+                                })
+                                .bg(if mine {
+                                    own_reaction_background
+                                } else {
+                                    cx.theme().secondary
+                                })
+                                .cursor_pointer()
+                                .text_xs()
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.click_reaction_chip(
+                                        click_chat.clone(),
+                                        click_message.clone(),
+                                        click_emoji.clone(),
+                                        mine,
+                                        cx,
+                                    );
+                                    cx.notify();
+                                }))
+                        })),
+                )
+            });
+
+        v_flex()
+            .w_full()
+            .when(
+                first_index > 0
+                    && self.starts_cluster(first_index)
+                    && !self.starts_a_day(first_index),
+                |col| col.pt(px(CLUSTER_SEPARATOR_GAP * scale)),
+            )
+            .when_some(self.day_separator_label(first_index), |column, label| {
+                column.child(
+                    div().flex().justify_center().py_2().child(
+                        div()
+                            .h(px(DAY_SEPARATOR_HEIGHT))
+                            .px_3()
+                            .items_center()
+                            .rounded_full()
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label),
+                    ),
+                )
+            })
+            .child({
+                let row = h_flex()
+                    .w_full()
+                    .items_center()
+                    .when(from_me, |row| row.justify_end())
+                    .when(!from_me, |row| row.justify_start())
+                    .when(checked, |row| {
+                        row.rounded_md().bg(cx.theme().accent.opacity(0.12))
+                    })
+                    .when(selecting, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .mr_2()
+                                .size(px(22. * scale))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(if checked {
+                                    cx.theme().accent
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .bg(if checked {
+                                    cx.theme().accent
+                                } else {
+                                    gpui::transparent_black()
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(checked, |box_| {
+                                    box_.child(
+                                        Icon::new(IconName::Check)
+                                            .with_size(px(13. * scale))
+                                            .text_color(cx.theme().accent_foreground),
+                                    )
+                                }),
+                        )
+                    });
+                row.child(
+                    div()
+                        .relative()
+                        .child(bubble)
+                        .when(selecting, |wrapper| {
+                            wrapper.child(
+                                div()
+                                    .id(("message-selection", first_index))
+                                    .absolute()
+                                    .inset_0()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        for id in selection_ids.clone() {
+                                            this.toggle_message_selection(id, cx);
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+            })
+    }
+
     /// El aviso de WhatsApp para un mensaje de visualizacion unica: el
     /// telefono retiene el contenido y el dispositivo vinculado solo puede
     /// avisar que llego.
@@ -9709,6 +10474,158 @@ impl Whatfast {
 
     /// The height of every message, measured with the text system of the
     /// window and cached by the width bucket of the bubble.
+    /// El relleno vertical de la burbuja del album. Igual en la medida y en
+    /// el dibujo: si difieren, la fila siguiente se pinta encima.
+    fn album_vertical_padding(&self, first_index: usize) -> Pixels {
+        let scale = self.ui_scale;
+        let starts_cluster = self.starts_cluster(first_index);
+        if self.density == Density::Compact {
+            px((if starts_cluster { 6. } else { 4. }) * scale)
+        } else {
+            px((if starts_cluster { 10. } else { 7. }) * scale)
+        }
+    }
+
+    /// Mide la burbuja que dibuja `render_photo_album` con las mismas sumas.
+    fn measure_album_height(
+        &self,
+        indices: &[usize],
+        bubble_width: Pixels,
+        font_size: Pixels,
+        window: &mut Window,
+    ) -> Pixels {
+        let scale = self.ui_scale;
+        let album_width = bubble_width.min(px(ALBUM_MAX_WIDTH * scale));
+        let caption_width = (album_width - px(16. * scale)).max(px(60.));
+        let first = &self.store.messages[indices[0]];
+        let group_incoming = !first.from_me
+            && self
+                .store
+                .selected_chat()
+                .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        let caption = indices.iter().find_map(|&index| {
+            let text = album_caption(&self.store.messages[index]);
+            (!text.is_empty()).then(|| text.to_string())
+        });
+        let caption_height = caption
+            .as_deref()
+            .map(|text| {
+                let shared: SharedString = text.into();
+                let run = window.text_style().to_run(text.len());
+                window
+                    .text_system()
+                    .shape_text(shared, font_size, &[run], Some(caption_width), None)
+                    .map(|lines| {
+                        lines.iter().fold(px(0.), |height, line| {
+                            height + line.size(window.line_height()).height
+                        })
+                    })
+                    .unwrap_or_else(|_| window.line_height())
+            })
+            .unwrap_or(px(0.));
+        let reactions = album_reactions(&self.store.messages, indices);
+        let mut blocks = 2; // la rejilla y la fila del pie
+        if group_incoming {
+            blocks += 1;
+        }
+        if caption_height > px(0.) {
+            blocks += 1;
+        }
+        if !reactions.is_empty() {
+            blocks += 1;
+        }
+        let gaps = px(4. * scale * (blocks - 1) as f32);
+        let padding = self.album_vertical_padding(indices[0]) * 2.;
+        let header_height = if group_incoming {
+            px(22. * scale)
+        } else {
+            px(0.)
+        };
+        let reactions_height = if reactions.is_empty() {
+            px(0.)
+        } else {
+            px(30. * scale)
+        };
+        header_height
+            + album_grid_height(indices.len(), scale)
+            + caption_height
+            + px(18. * scale)
+            + reactions_height
+            + gaps
+            + padding
+    }
+
+    /// Reconstruye la proyeccion de filas y sus tamaños en cada dibujo.
+    fn rebuild_display_rows(
+        &mut self,
+        bubble_width: Pixels,
+        wrap_width: Pixels,
+        font_size: Pixels,
+        window: &mut Window,
+    ) {
+        let rows = photo_albums(&self.store.messages);
+        let width_bucket = (wrap_width / px(8.)).round() as i32;
+        let sizes = self.store.message_sizes();
+        let scale = self.ui_scale;
+        let mut display_sizes = Vec::with_capacity(rows.len());
+        for (display_index, row) in rows.iter().enumerate() {
+            let first = row.first_message_index();
+            let separator_height = if self.starts_a_day(first) {
+                let pad = if self.density == Density::Compact {
+                    8.
+                } else {
+                    16.
+                };
+                px((DAY_SEPARATOR_HEIGHT + pad) * scale)
+            } else {
+                px(0.)
+            };
+            let cluster_extra = if first > 0
+                && self.starts_cluster(first)
+                && !self.starts_a_day(first)
+            {
+                px(CLUSTER_SEPARATOR_GAP * scale)
+            } else {
+                px(0.)
+            };
+            let bottom_slack = if display_index + 1 == rows.len() {
+                px(8. * scale)
+            } else {
+                px(0.)
+            };
+            let base = match row {
+                ChatDisplayRow::Single(index) => sizes
+                    .get(*index)
+                    .map(|entry| entry.height)
+                    .unwrap_or(0.),
+                ChatDisplayRow::PhotoAlbum { indices } => {
+                    let key = format!(
+                        "album:{}:{}",
+                        self.store.messages[indices[0]].id,
+                        indices.len()
+                    );
+                    if let Some(height) = self.store.cached_message_height(&key, width_bucket) {
+                        height
+                    } else {
+                        let height =
+                            f32::from(self.measure_album_height(indices, bubble_width, font_size, window));
+                        self.store.cache_message_height(key.clone(), width_bucket, height);
+                        height
+                    }
+                }
+            };
+            display_sizes.push(size(
+                px(1.),
+                px(base)
+                    + separator_height
+                    + cluster_extra
+                    + bottom_slack,
+            ));
+        }
+        self.display_sizes = Rc::new(display_sizes);
+        self.display_rows = rows;
+    }
+
     fn measure_message_heights(
         &mut self,
         wrap_width: Pixels,
@@ -11314,10 +12231,11 @@ fn viewer_arrow_button(
 fn image_menu_row(
     id: (&'static str, usize),
     icon: Icon,
-    label: &'static str,
+    label: impl Into<SharedString>,
     hover: gpui::Rgba,
     scale: f32,
 ) -> gpui::Stateful<gpui::Div> {
+    let label: SharedString = label.into();
     h_flex()
         .id(id)
         .h(px(36. * scale))

@@ -799,6 +799,11 @@
     "Reduced motion": "Movimiento reducido",
     "No update is available for this platform (404).": "No hay una actualización disponible para esta plataforma (404).",
     "You: {preview}": "Vos: {preview}",
-    "ZIP file": "Archivo ZIP"
+    "ZIP file": "Archivo ZIP",
+    "Download all": "Descargar todo",
+    "Download all ({n})": "Descargar todo ({n})",
+    "Downloading {done}/{total} photos…": "Descargando {done}/{total} fotos…",
+    "Saved {total} photos to {folder}": "Se guardaron {total} fotos en {carpeta}",
+    "Some photos could not be downloaded": "Algunas fotos no se pudieron descargar"
   }
 }
