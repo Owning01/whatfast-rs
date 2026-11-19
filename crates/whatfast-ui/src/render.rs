@@ -13093,3 +13093,113 @@ fn conversation_bubble_width(available: gpui::Pixels, scale: f32) -> gpui::Pixel
     px(unscaled * scale).min(available)
 }
 
+#[cfg(test)]
+mod album_tests {
+    use super::*;
+
+    fn photo(
+        id: &str,
+        timestamp_ms: i64,
+        from_me: bool,
+        sender_id: &str,
+        caption: &str,
+    ) -> proto::Message {
+        let mut message = proto::Message::default();
+        message.id = id.to_string();
+        message.chat_id = "chat".to_string();
+        message.sender_id = sender_id.to_string();
+        message.from_me = from_me;
+        message.timestamp_ms = timestamp_ms;
+        message.content = Some(proto::message::Content::Image(proto::ImageContent {
+            caption: caption.to_string(),
+            ..Default::default()
+        }));
+        message
+    }
+
+    fn sizes(rows: &[ChatDisplayRow]) -> Vec<usize> {
+        rows.iter().map(ChatDisplayRow::len).collect()
+    }
+
+    #[test]
+    fn three_consecutive_photos_form_one_album() {
+        let messages = vec![
+            photo("a", 1_000, false, "u1", ""),
+            photo("b", 2_000, false, "u1", ""),
+            photo("c", 3_000, false, "u1", ""),
+        ];
+        let rows = photo_albums(&messages);
+        assert_eq!(sizes(&rows), vec![3]);
+        assert!(matches!(
+            &rows[0],
+            ChatDisplayRow::PhotoAlbum { indices } if indices == &[0, 1, 2]
+        ));
+    }
+
+    #[test]
+    fn one_or_two_photos_stay_individual() {
+        for count in [1, 2] {
+            let messages = (0..count)
+                .map(|index| {
+                    photo(
+                        &format!("m{index}"),
+                        (index + 1) as i64 * 1_000,
+                        false,
+                        "u1",
+                        "",
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(sizes(&photo_albums(&messages)), vec![1; count]);
+        }
+    }
+
+    #[test]
+    fn change_of_sender_breaks_the_album() {
+        let messages = vec![
+            photo("a", 1_000, false, "u1", ""),
+            photo("b", 2_000, false, "u1", ""),
+            photo("c", 3_000, false, "u2", ""),
+            photo("d", 4_000, false, "u2", ""),
+        ];
+        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn quote_and_long_gap_and_second_caption_break_the_album() {
+        let mut quoted = photo("c", 3_000, false, "u1", "");
+        quoted.reply_to_message_id = "x".to_string();
+        let messages = vec![
+            photo("a", 1_000, false, "u1", ""),
+            photo("b", 2_000, false, "u1", ""),
+            quoted,
+        ];
+        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
+
+        let messages = vec![
+            photo("a", 1_000, false, "u1", ""),
+            photo("b", 2_000, false, "u1", ""),
+            photo("c", 200_000, false, "u1", ""),
+        ];
+        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
+
+        let messages = vec![
+            photo("a", 1_000, false, "u1", "one"),
+            photo("b", 2_000, false, "u1", ""),
+            photo("c", 3_000, false, "u1", "two"),
+        ];
+        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn scroll_and_group_helpers_find_photos_inside_an_album() {
+        let messages = vec![
+            photo("a", 1_000, false, "u1", ""),
+            photo("b", 2_000, false, "u1", ""),
+            photo("c", 3_000, false, "u1", ""),
+        ];
+        assert_eq!(display_index_for_message(&messages, "b"), Some(0));
+        assert_eq!(album_ids_for_message(&messages, "c"), vec!["a", "b", "c"]);
+    }
+}
+
