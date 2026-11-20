@@ -197,6 +197,9 @@ pub(crate) struct MessageMenu {
     /// The message carries a picture that can be copied: a downloaded image,
     /// its thumbnail, or the preview that came with the message.
     copy_image: bool,
+    /// La foto se puede guardar: ya esta en disco o el backend todavia la
+    /// puede descargar. El menu no depende de que la miniatura haya llegado.
+    can_download: bool,
     /// Cuantas fotos consecutivas hay en el album de este mensaje: tres o mas
     /// habilitan "Download all".
     album_size: usize,
@@ -258,6 +261,7 @@ impl std::fmt::Debug for MessageMenu {
             .field("has_content", &self.has_content)
             .field("has_text", &self.has_text)
             .field("copy_image", &self.copy_image)
+            .field("can_download", &self.can_download)
             .field("album_size", &self.album_size)
             .field("editable", &self.editable)
             .field("pinned", &self.pinned)
@@ -300,6 +304,17 @@ impl MessageMenu {
                         || !image.thumbnail_path.is_empty()
                         || !image.jpeg_thumbnail.is_empty()
             );
+        // Guardar no necesita la miniatura: si el archivo no esta, la accion
+        // lo pide al backend y escribe el archivo cuando llega.
+        let can_download = !message.revoked
+            && matches!(
+                &message.content,
+                Some(whatfast_protocol::message::Content::Image(image))
+                    if image.downloadable
+                        || !image.local_path.is_empty()
+                        || !image.thumbnail_path.is_empty()
+                        || !image.jpeg_thumbnail.is_empty()
+            );
         Self {
             chat_id: chat_id.into(),
             message_id: message.id.clone(),
@@ -311,6 +326,7 @@ impl MessageMenu {
             // caption of a picture and the name of a file too.
             has_text: !text.is_empty(),
             copy_image,
+            can_download,
             album_size,
             text,
             editable,
@@ -475,19 +491,19 @@ impl MessageMenu {
             MessageMenuItem {
                 action: MessageAction::Download,
                 label: "Download",
-                enabled: self.copy_image,
+                enabled: self.can_download,
                 danger: false,
             },
             MessageMenuItem {
                 action: MessageAction::SaveAs,
                 label: "Save as…",
-                enabled: self.copy_image,
+                enabled: self.can_download,
                 danger: false,
             },
             MessageMenuItem {
                 action: MessageAction::DownloadGroup,
                 label: "Download all",
-                enabled: self.copy_image && self.album_size >= 3,
+                enabled: self.can_download && self.album_size >= 3,
                 danger: false,
             },
             MessageMenuItem {

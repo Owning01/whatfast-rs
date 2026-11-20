@@ -3426,10 +3426,12 @@ impl Whatfast {
                             thumbnail_path
                         };
                         if !source.is_empty() && Path::new(&source).is_file() {
+                            let suggested_name =
+                                with_source_extension(&pending.suggested_name, Path::new(&source));
                             self.copy_image_for_batch(
                                 PathBuf::from(source),
                                 pending.directory,
-                                pending.suggested_name,
+                                suggested_name,
                                 pending.batch_id,
                                 window,
                                 cx,
@@ -5228,6 +5230,7 @@ impl Whatfast {
 
     /// Moves the viewer to the previous or the next picture of the gallery.
     pub(crate) fn step_image_viewer(&mut self, forward: bool) {
+        let messages = &self.store.messages;
         let Some(viewer) = self.image_viewer.as_mut() else {
             return;
         };
@@ -5237,6 +5240,9 @@ impl Whatfast {
             viewer.index.saturating_sub(1)
         };
         viewer.show(target);
+        // El album se recalcula con la foto que quedo en pantalla: si no, el
+        // menu del visor seguia ofreciendo el grupo de la foto anterior.
+        viewer.album_ids = crate::render::album_ids_for_message(messages, &viewer.message_id);
     }
 
     /// Zooms the picture of the viewer over its natural fit.
@@ -10203,12 +10209,18 @@ impl Whatfast {
                 }
             };
             let raw_path = if viewer_path.is_empty() { row_path } else { viewer_path };
+            // La extension es la del archivo en disco. Si la foto todavia no
+            // se descargo no hay formato que copiar, y el nombre queda sin
+            // extension: `copy_image_for_batch` le pone la del archivo que
+            // llegue, sea PNG, WebP o JPEG.
             let extension = Path::new(raw_path)
                 .extension()
                 .map(|extension| extension.to_string_lossy().into_owned())
-                .filter(|extension| !extension.is_empty())
-                .unwrap_or_else(|| "jpg".to_string());
-            let suggested_name = format!("{stem}.{extension}");
+                .filter(|extension| !extension.is_empty());
+            let suggested_name = match extension {
+                Some(extension) => format!("{stem}.{extension}"),
+                None => stem,
+            };
             if !source.is_empty() && Path::new(&source).is_file() {
                 self.copy_image_for_batch(
                     PathBuf::from(source),
@@ -10269,29 +10281,24 @@ impl Whatfast {
             .map(|extension| format!(".{}", extension.to_string_lossy()))
             .unwrap_or_default();
         let copy = cx.background_spawn(async move {
-            let mut counter = 1;
-            let mut last_error = None;
-            for _ in 0..3 {
-                let mut destination = directory.join(&name);
-                while destination.exists() {
-                    destination = directory.join(format!("{stem} ({counter}){extension}"));
-                    counter += 1;
-                }
-                let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
-                let result = std::fs::copy(&source, &partial)
-                    .and_then(|_| std::fs::rename(&partial, &destination));
-                if result.is_err() {
-                    let _ = std::fs::remove_file(&partial);
-                }
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        last_error = Some(error);
-                    }
-                    Err(error) => return Err(error),
-                }
+            // El nombre se reserva con `create_new`, que es atomico: dos hilos
+            // del mismo album que llegan con "photo.jpg" no pueden crear el
+            // mismo archivo. En Windows `rename` sobrescribe el destino, asi
+            // que comprobar `exists()` antes de copiar perdia fotos.
+            let destination = match reserve_destination(&directory, &stem, &extension) {
+                Ok(path) => path,
+                Err(error) => return Err(error),
+            };
+            let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
+            let result = std::fs::copy(&source, &partial)
+                .and_then(|_| std::fs::rename(&partial, &destination));
+            if result.is_err() {
+                let _ = std::fs::remove_file(&partial);
+                // El destino lo creo esta copia: se borra para no dejar un
+                // archivo vacio con el nombre de la foto.
+                let _ = std::fs::remove_file(&destination);
             }
-            Err(last_error.unwrap_or_else(|| std::io::Error::other("the name stayed taken")))
+            result
         });
         let view = cx.entity().downgrade();
         cx.spawn_in(window, async move |_, window| {
@@ -12136,3 +12143,54 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+/// Reserva un nombre libre en la carpeta sin carrera entre hilos.
+///
+/// `create_new` crea el archivo o falla con `AlreadyExists`, y esa decision es
+/// atomica en los tres sistemas: dos copias del mismo album nunca eligen el
+/// mismo destino. El archivo vacio queda como reserva hasta que el `rename` de
+/// la copia lo reemplaza; si la copia falla, el llamador lo borra.
+fn reserve_destination(
+    directory: &Path,
+    stem: &str,
+    extension: &str,
+) -> std::io::Result<PathBuf> {
+    let mut counter = 1;
+    loop {
+        let candidate = if counter == 1 {
+            directory.join(format!("{stem}{extension}"))
+        } else {
+            directory.join(format!("{stem} ({counter}){extension}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                counter += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Cambia la extension provisoria de un nombre por la del archivo que llego.
+///
+/// Una foto que se guarda antes de estar descargada no tiene formato todavia:
+/// el nombre se prepara con el de la ruta final, que puede ser un `.webp` o un
+/// `.png` aunque la miniatura sea JPEG.
+fn with_source_extension(name: &str, source: &Path) -> String {
+    let Some(extension) = source.extension().filter(|extension| !extension.is_empty()) else {
+        return name.to_string();
+    };
+    let stem = Path::new(name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "photo".to_string());
+    format!("{stem}.{}", extension.to_string_lossy())
+}

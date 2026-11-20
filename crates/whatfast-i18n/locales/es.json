@@ -803,7 +803,7 @@
     "Download all": "Descargar todo",
     "Download all ({n})": "Descargar todo ({n})",
     "Downloading {done}/{total} photos…": "Descargando {done}/{total} fotos…",
-    "Saved {total} photos to {folder}": "Se guardaron {total} fotos en {carpeta}",
+    "Saved {total} photos to {folder}": "Se guardaron {total} fotos en {folder}",
     "Some photos could not be downloaded": "Algunas fotos no se pudieron descargar"
   }
 }

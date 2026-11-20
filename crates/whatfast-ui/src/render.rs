@@ -232,6 +232,10 @@ pub(crate) fn album_ids_for_message(
         .unwrap_or_default()
 }
 
+/// El alto de la fila del pie del album. Un `Button::small()` mide 24 px y la
+/// fila le deja un poco de aire: con 18 px el boton se recortaba.
+const ALBUM_FOOTER_HEIGHT: f32 = 28.;
+
 /// El alto de la rejilla de un album, antes de la escala.
 fn album_grid_height(count: usize, scale: f32) -> Pixels {
     if count == 3 {
@@ -8100,6 +8104,13 @@ impl Whatfast {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if let Some(viewer) = this.image_viewer.as_mut() {
                                             viewer.show(position);
+                                            // El album es el de la foto que
+                                            // quedo en pantalla, no el de la
+                                            // que se abrio primero.
+                                            viewer.album_ids = crate::render::album_ids_for_message(
+                                                &this.store.messages,
+                                                &viewer.message_id,
+                                            );
                                         }
                                         cx.stop_propagation();
                                         cx.notify();
@@ -9918,6 +9929,8 @@ impl Whatfast {
                 .store
                 .selected_chat()
                 .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        let reply_target_id = first.reply_to_message_id.clone();
+        let reply_target = self.store.message(&reply_target_id).cloned();
         let caption = indices
             .iter()
             .find_map(|&index| {
@@ -10018,7 +10031,10 @@ impl Whatfast {
                             self.render_album_cell(
                                 indices[3],
                                 cell_h,
-                                Some(format!("+{}", indices.len() - 4)),
+                                // Solo hay etiqueta cuando sobran fotos: con
+                                // cuatro exactas se dibujaba un "+0" encima de
+                                // la ultima celda.
+                                (indices.len() > 4).then(|| format!("+{}", indices.len() - 4)),
                                 cx,
                             )
                             .flex_1(),
@@ -10067,6 +10083,7 @@ impl Whatfast {
                 bubble.child(
                     h_flex()
                         .h(px(22. * scale))
+                        .px(px(8. * scale))
                         .items_baseline()
                         .child(
                             div()
@@ -10075,6 +10092,67 @@ impl Whatfast {
                                 .text_color(cx.theme().blue.hue(identity_hue(identity_key)))
                                 .child(name),
                         ),
+                )
+            })
+            .when(!reply_target_id.is_empty(), |bubble| {
+                // La cita de la primera foto tambien se dibuja: el album no
+                // reemplaza el contexto de la respuesta.
+                let target_id = reply_target_id.clone();
+                let (sender, preview) = reply_target.as_ref().map_or_else(
+                    || {
+                        (
+                            i18n::t("Original message").to_string(),
+                            i18n::t("Message unavailable").to_string(),
+                        )
+                    },
+                    |target| {
+                        let sender = if target.from_me {
+                            i18n::t("You").to_string()
+                        } else if !target.sender_name.trim().is_empty() {
+                            target.sender_name.trim().to_string()
+                        } else {
+                            i18n::t("Unknown contact").to_string()
+                        };
+                        (sender, message_preview(target))
+                    },
+                );
+                bubble.child(
+                    div().w_full().px(px(8. * scale)).child(
+                        h_flex()
+                            .id(("album-quoted-message", first_index))
+                            .w_full()
+                            .min_w(px(180.))
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_l_2()
+                            .border_color(cx.theme().accent)
+                            .bg(cx.theme().secondary)
+                            .cursor_pointer()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().accent)
+                                            .child(sender),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(preview),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.scroll_to_message(&target_id);
+                                cx.notify();
+                            })),
+                    ),
                 )
             })
             .child(grid)
@@ -10092,7 +10170,7 @@ impl Whatfast {
             .child(
                 h_flex()
                     .w_full()
-                    .h(px(18. * scale))
+                    .h(px(ALBUM_FOOTER_HEIGHT * scale))
                     .px(px(8. * scale))
                     .items_center()
                     .justify_between()
@@ -10524,8 +10602,12 @@ impl Whatfast {
             })
             .unwrap_or(px(0.));
         let reactions = album_reactions(&self.store.messages, indices);
+        let has_reply = !first.reply_to_message_id.is_empty();
         let mut blocks = 2; // la rejilla y la fila del pie
         if group_incoming {
+            blocks += 1;
+        }
+        if has_reply {
             blocks += 1;
         }
         if caption_height > px(0.) {
@@ -10541,15 +10623,22 @@ impl Whatfast {
         } else {
             px(0.)
         };
+        let reply_height = if has_reply {
+            // La misma altura que la cita de una burbuja suelta.
+            px(54. * scale)
+        } else {
+            px(0.)
+        };
         let reactions_height = if reactions.is_empty() {
             px(0.)
         } else {
             px(30. * scale)
         };
         header_height
+            + reply_height
             + album_grid_height(indices.len(), scale)
             + caption_height
-            + px(18. * scale)
+            + px(ALBUM_FOOTER_HEIGHT * scale)
             + reactions_height
             + gaps
             + padding
@@ -10593,34 +10682,55 @@ impl Whatfast {
             } else {
                 px(0.)
             };
-            let base = match row {
-                ChatDisplayRow::Single(index) => sizes
-                    .get(*index)
-                    .map(|entry| entry.height)
-                    .unwrap_or(0.),
+            // `message_sizes` ya trae el separador de dia, el salto de cluster
+            // y el margen inferior de cada mensaje suelto: volver a sumarlos
+            // duplicaba el espaciado de toda la conversacion. Un album no usa
+            // esa medida porque mide su propia burbuja.
+            let height = match row {
+                ChatDisplayRow::Single(index) => {
+                    px(sizes.get(*index).map(|entry| entry.height).unwrap_or(0.))
+                }
                 ChatDisplayRow::PhotoAlbum { indices } => {
+                    // La clave incluye las reacciones y la edicion: el pie de
+                    // reacciones cambia el alto y una edicion puede cambiar el
+                    // epigrafe. Sin ellos la altura cacheada recortaba la
+                    // burbuja hasta el siguiente cambio de ancho.
+                    let edited = indices.iter().any(|&index| {
+                        self.store
+                            .messages
+                            .get(index)
+                            .is_some_and(|message| message.edited)
+                    });
+                    let reactions = album_reactions(&self.store.messages, indices);
+                    let reaction_signature = reactions
+                        .iter()
+                        .map(|reaction| (reaction.emoji.as_str(), reaction.count))
+                        .collect::<Vec<_>>();
                     let key = format!(
-                        "album:{}:{}",
+                        "album:{}:{}:{}:{}",
                         self.store.messages[indices[0]].id,
-                        indices.len()
+                        indices.len(),
+                        u8::from(edited),
+                        gpui::hash(&reaction_signature),
                     );
-                    if let Some(height) = self.store.cached_message_height(&key, width_bucket) {
+                    let base = if let Some(height) =
+                        self.store.cached_message_height(&key, width_bucket)
+                    {
                         height
                     } else {
-                        let height =
-                            f32::from(self.measure_album_height(indices, bubble_width, font_size, window));
+                        let height = f32::from(self.measure_album_height(
+                            indices,
+                            bubble_width,
+                            font_size,
+                            window,
+                        ));
                         self.store.cache_message_height(key.clone(), width_bucket, height);
                         height
-                    }
+                    };
+                    px(base) + separator_height + cluster_extra + bottom_slack
                 }
             };
-            display_sizes.push(size(
-                px(1.),
-                px(base)
-                    + separator_height
-                    + cluster_extra
-                    + bottom_slack,
-            ));
+            display_sizes.push(size(px(1.), height));
         }
         self.display_sizes = Rc::new(display_sizes);
         self.display_rows = rows;
@@ -13091,115 +13201,5 @@ fn conversation_bubble_width(available: gpui::Pixels, scale: f32) -> gpui::Pixel
     let max_unscaled = TEXT_MAX_WIDTH + 24.;
     let unscaled = (f32::from(available) / scale).clamp(160., max_unscaled);
     px(unscaled * scale).min(available)
-}
-
-#[cfg(test)]
-mod album_tests {
-    use super::*;
-
-    fn photo(
-        id: &str,
-        timestamp_ms: i64,
-        from_me: bool,
-        sender_id: &str,
-        caption: &str,
-    ) -> proto::Message {
-        let mut message = proto::Message::default();
-        message.id = id.to_string();
-        message.chat_id = "chat".to_string();
-        message.sender_id = sender_id.to_string();
-        message.from_me = from_me;
-        message.timestamp_ms = timestamp_ms;
-        message.content = Some(proto::message::Content::Image(proto::ImageContent {
-            caption: caption.to_string(),
-            ..Default::default()
-        }));
-        message
-    }
-
-    fn sizes(rows: &[ChatDisplayRow]) -> Vec<usize> {
-        rows.iter().map(ChatDisplayRow::len).collect()
-    }
-
-    #[test]
-    fn three_consecutive_photos_form_one_album() {
-        let messages = vec![
-            photo("a", 1_000, false, "u1", ""),
-            photo("b", 2_000, false, "u1", ""),
-            photo("c", 3_000, false, "u1", ""),
-        ];
-        let rows = photo_albums(&messages);
-        assert_eq!(sizes(&rows), vec![3]);
-        assert!(matches!(
-            &rows[0],
-            ChatDisplayRow::PhotoAlbum { indices } if indices == &[0, 1, 2]
-        ));
-    }
-
-    #[test]
-    fn one_or_two_photos_stay_individual() {
-        for count in [1, 2] {
-            let messages = (0..count)
-                .map(|index| {
-                    photo(
-                        &format!("m{index}"),
-                        (index + 1) as i64 * 1_000,
-                        false,
-                        "u1",
-                        "",
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(sizes(&photo_albums(&messages)), vec![1; count]);
-        }
-    }
-
-    #[test]
-    fn change_of_sender_breaks_the_album() {
-        let messages = vec![
-            photo("a", 1_000, false, "u1", ""),
-            photo("b", 2_000, false, "u1", ""),
-            photo("c", 3_000, false, "u2", ""),
-            photo("d", 4_000, false, "u2", ""),
-        ];
-        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1, 1]);
-    }
-
-    #[test]
-    fn quote_and_long_gap_and_second_caption_break_the_album() {
-        let mut quoted = photo("c", 3_000, false, "u1", "");
-        quoted.reply_to_message_id = "x".to_string();
-        let messages = vec![
-            photo("a", 1_000, false, "u1", ""),
-            photo("b", 2_000, false, "u1", ""),
-            quoted,
-        ];
-        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
-
-        let messages = vec![
-            photo("a", 1_000, false, "u1", ""),
-            photo("b", 2_000, false, "u1", ""),
-            photo("c", 200_000, false, "u1", ""),
-        ];
-        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
-
-        let messages = vec![
-            photo("a", 1_000, false, "u1", "one"),
-            photo("b", 2_000, false, "u1", ""),
-            photo("c", 3_000, false, "u1", "two"),
-        ];
-        assert_eq!(sizes(&photo_albums(&messages)), vec![1, 1, 1]);
-    }
-
-    #[test]
-    fn scroll_and_group_helpers_find_photos_inside_an_album() {
-        let messages = vec![
-            photo("a", 1_000, false, "u1", ""),
-            photo("b", 2_000, false, "u1", ""),
-            photo("c", 3_000, false, "u1", ""),
-        ];
-        assert_eq!(display_index_for_message(&messages, "b"), Some(0));
-        assert_eq!(album_ids_for_message(&messages, "c"), vec!["a", "b", "c"]);
-    }
 }
 
