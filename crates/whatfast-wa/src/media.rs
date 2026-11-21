@@ -187,6 +187,25 @@ pub struct MediaKind {
     pub animated: bool,
 }
 
+/// The text the local row of an outgoing attachment keeps when the file has
+/// no caption of its own.
+///
+/// port: `attachmentFallback`. The chat list and the bubble read this column,
+/// so an empty name shows as an empty message until the echo arrives.
+fn attachment_fallback(kind: &str, caption: &str, file_name: &str, voice: bool) -> String {
+    if !caption.is_empty() {
+        return caption.to_owned();
+    }
+    match kind {
+        "document" if !file_name.is_empty() => file_name.to_owned(),
+        "document" => "📄 Document".into(),
+        "video" => "🎬 Video".into(),
+        "audio" if voice => "🎤 Voice message".into(),
+        "audio" => "🎵 Audio".into(),
+        _ => "Attachment".into(),
+    }
+}
+
 /// Uploads, sends, stores, and answers one media message. The shared body
 /// of every media send.
 #[expect(clippy::too_many_arguments)]
@@ -214,7 +233,12 @@ async fn deliver_media(
         chat_jid: chat_id.to_owned(),
         transport_jid: chat_id.to_owned(),
         sender_jid: crate::send::own_sender_jid(session),
-        text: String::new(),
+        text: attachment_fallback(
+            media.kind,
+            &media.caption,
+            &media.file_name,
+            media.voice,
+        ),
         timestamp: db::now_ms(),
         from_me: true,
         kind: media.kind.to_owned(),
@@ -355,6 +379,545 @@ fn is_ogg_opus(bytes: &[u8]) -> bool {
             .any(|window| window == b"OpusHead")
 }
 
+/// What an outgoing file says about itself, read from its own bytes.
+///
+/// port: `outgoingMediaMetadata` of the oracle. Every value comes from
+/// parsing the file: none of them is guessed.
+#[derive(Clone, Copy, Debug, Default)]
+struct OutgoingMediaMetadata {
+    duration_seconds: u32,
+    width: u32,
+    height: u32,
+    animated: bool,
+}
+
+/// The mime of an outgoing attachment, by its first bytes.
+///
+/// port: `detectAttachmentMIME`. A `.wav` is `audio/wav`, not `audio/ogg`,
+/// because the receiving side decrypts and decodes the blob with the mime the
+/// message declares. A generic stream falls back to the extension, and a
+/// document keeps its real type so WhatsApp shows the right icon.
+fn detect_attachment_mime(header: &[u8], path: &str, kind: &str) -> String {
+    let mut detected = match header.first_chunk::<12>() {
+        Some([0x89, b'P', b'N', b'G', ..]) => "image/png",
+        Some([0xFF, 0xD8, 0xFF, ..]) => "image/jpeg",
+        Some([b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P']) => "image/webp",
+        Some([b'G', b'I', b'F', b'8', ..]) => "image/gif",
+        _ => "",
+    }
+    .to_owned();
+    if detected.is_empty() {
+        if header.starts_with(b"OggS") {
+            detected = "audio/ogg".into();
+        } else if header.len() >= 12 && &header[4..8] == b"ftyp" {
+            detected = if kind == "audio" {
+                "audio/mp4"
+            } else {
+                "video/mp4"
+            }
+            .into();
+        } else if header.len() >= 4 && header[..4] == [0x1a, 0x45, 0xdf, 0xa3] {
+            detected = if kind == "audio" {
+                "audio/webm"
+            } else {
+                "video/webm"
+            }
+            .into();
+        } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WAVE" {
+            detected = "audio/wav".into();
+        } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"AVI " {
+            detected = "video/x-msvideo".into();
+        } else if header.starts_with(b"ID3") || header.starts_with(&[0xFF, 0xFB]) {
+            detected = "audio/mpeg".into();
+        } else if header.starts_with(b"%PDF") {
+            detected = "application/pdf".into();
+        } else if header.starts_with(b"PK\x03\x04") {
+            detected = "application/zip".into();
+        }
+    }
+    if detected.is_empty() || detected == "application/octet-stream" {
+        detected = mime_by_extension(path);
+    }
+    if detected.is_empty() {
+        "application/octet-stream".into()
+    } else {
+        detected
+    }
+}
+
+/// The mime a common extension names, used when the bytes are generic.
+///
+/// port: the `mime.TypeByExtension` fallback of `detectAttachmentMIME`.
+fn mime_by_extension(path: &str) -> String {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match extension.as_str() {
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "rar" => "application/vnd.rar",
+        "7z" => "application/x-7z-compressed",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "apk" => "application/vnd.android.package-archive",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "mp4" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "",
+    };
+    mime.to_owned()
+}
+
+/// Reads what an outgoing audio or video says about itself.
+///
+/// port: `probeOutgoingMedia`. The duration of a voice note and the size of a
+/// video are what the receiving client uses to draw the bubble; a message
+/// without them is accepted by the server and never lands well on the phone.
+fn probe_outgoing_media(path: &str) -> OutgoingMediaMetadata {
+    let mut metadata = OutgoingMediaMetadata::default();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return metadata;
+    };
+    let mut header = vec![0_u8; 64 * 1024];
+    let read = std::io::Read::read(&mut file, &mut header).unwrap_or(0);
+    header.truncate(read);
+    let header = header.as_slice();
+    if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WAVE" {
+        metadata.duration_seconds = probe_wav(header);
+    } else if header.starts_with(b"OggS") {
+        metadata.duration_seconds = probe_ogg(path);
+    } else if header.len() >= 8 && &header[4..8] == b"ftyp" {
+        metadata = probe_iso_bmff(path);
+    } else if header.starts_with(b"ID3") || header.starts_with(&[0xFF, 0xFB]) {
+        metadata.duration_seconds = probe_mp3(path);
+    } else if header.len() >= 10 && (&header[..6] == b"GIF87a" || &header[..6] == b"GIF89a") {
+        let width = u16::from_le_bytes([header[6], header[7]]) as u32;
+        let height = u16::from_le_bytes([header[8], header[9]]) as u32;
+        metadata.width = width;
+        metadata.height = height;
+        metadata.animated = std::fs::metadata(path)
+            .map(|meta| meta.len() <= 64 * 1024 * 1024)
+            .unwrap_or(false)
+            && std::fs::read(path)
+                .map(|bytes| gif_frame_count(&bytes) > 1)
+                .unwrap_or(false);
+    } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        let (width, height) = webp_dimensions(header);
+        metadata.width = width;
+        metadata.height = height;
+        metadata.animated = header
+            .windows(4)
+            .any(|window| window == b"ANIM" || window == b"ANMF");
+    }
+    if metadata.duration_seconds == 0 && metadata.width == 0 && metadata.height == 0 {
+        let (width, height, seconds) = probe_with_ffprobe(path);
+        metadata.width = width;
+        metadata.height = height;
+        metadata.duration_seconds = seconds;
+    }
+    metadata
+}
+
+/// The duration of a RIFF WAVE file, from its `fmt ` byte rate and its
+/// `data` size.
+///
+/// port: `probeWAV`.
+fn probe_wav(header: &[u8]) -> u32 {
+    if header.len() < 12 {
+        return 0;
+    }
+    let mut byte_rate = 0_u32;
+    let mut data_size = 0_u32;
+    let mut offset = 12_usize;
+    while offset + 8 <= header.len() {
+        let kind = &header[offset..offset + 4];
+        let size = u32::from_le_bytes([
+            header[offset + 4],
+            header[offset + 5],
+            header[offset + 6],
+            header[offset + 7],
+        ]) as usize;
+        let payload = offset + 8;
+        match kind {
+            b"fmt " if payload + 12 <= header.len() => {
+                byte_rate = u32::from_le_bytes([
+                    header[payload + 8],
+                    header[payload + 9],
+                    header[payload + 10],
+                    header[payload + 11],
+                ]);
+            }
+            b"data" => data_size = size as u32,
+            _ => {}
+        }
+        if size > header.len().saturating_sub(payload) {
+            break;
+        }
+        offset = payload + size + size % 2;
+    }
+    data_size.checked_div(byte_rate).unwrap_or(0)
+}
+
+/// The duration of an Ogg stream, from the granule position of its last page.
+///
+/// port: `probeOgg`. Opus granules always count samples at 48 kHz.
+fn probe_ogg(path: &str) -> u32 {
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut sample_rate = 0_u32;
+    let mut last_granule = -1_i64;
+    loop {
+        let mut page = [0_u8; 27];
+        if reader.read_exact(&mut page).is_err() {
+            break;
+        }
+        if &page[..4] != b"OggS" {
+            break;
+        }
+        let granule = i64::from_le_bytes([
+            page[6], page[7], page[8], page[9], page[10], page[11], page[12], page[13],
+        ]);
+        let segments = page[26] as usize;
+        let mut table = vec![0_u8; segments];
+        if reader.read_exact(&mut table).is_err() {
+            break;
+        }
+        let payload_size: usize = table.iter().map(|size| *size as usize).sum();
+        if sample_rate == 0 {
+            let mut payload = vec![0_u8; payload_size];
+            if reader.read_exact(&mut payload).is_err() {
+                break;
+            }
+            sample_rate = ogg_sample_rate(&payload);
+        } else if std::io::copy(&mut (&mut reader).take(payload_size as u64), &mut std::io::sink())
+            .is_err()
+        {
+            break;
+        }
+        if granule >= 0 {
+            last_granule = granule;
+        }
+    }
+    if sample_rate == 0 || last_granule <= 0 {
+        return 0;
+    }
+    ((last_granule as u64 + sample_rate as u64 / 2) / sample_rate as u64) as u32
+}
+
+/// The sample rate of the codec identification header of an Ogg stream.
+///
+/// port: `oggSampleRate`.
+fn ogg_sample_rate(payload: &[u8]) -> u32 {
+    if payload.windows(8).any(|window| window == b"OpusHead") {
+        return 48_000;
+    }
+    if let Some(index) = payload.windows(6).position(|window| window == b"vorbis")
+        && payload.len() >= index + 16
+    {
+        return u32::from_le_bytes([
+            payload[index + 12],
+            payload[index + 13],
+            payload[index + 14],
+            payload[index + 15],
+        ]);
+    }
+    0
+}
+
+/// The duration and the size of an ISO base media file (`mp4`, `m4a`, `mov`),
+/// from its `mvhd` and its first video track.
+///
+/// port: `probeISOBMPF` and `readISOMovie`.
+fn probe_iso_bmff(path: &str) -> OutgoingMediaMetadata {
+    // Un video de WhatsApp no pasa de unos pocos megabytes. La lectura del
+    // archivo entero se corta para no cargar un adjunto de 2 GiB en memoria:
+    // el que supera el tope queda con la metadata de `ffprobe`.
+    if std::fs::metadata(path)
+        .map(|meta| meta.len() > 256 * 1024 * 1024)
+        .unwrap_or(true)
+    {
+        return OutgoingMediaMetadata::default();
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return OutgoingMediaMetadata::default();
+    };
+    let mut metadata = OutgoingMediaMetadata::default();
+    walk_iso_boxes(&bytes, &mut metadata);
+    metadata
+}
+
+fn walk_iso_boxes(bytes: &[u8], metadata: &mut OutgoingMediaMetadata) {
+    let mut offset = 0_usize;
+    while offset + 8 <= bytes.len() {
+        let size = u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        let kind = &bytes[offset + 4..offset + 8];
+        let header = if size == 1 {
+            16
+        } else if size == 0 {
+            bytes.len() - offset
+        } else {
+            8
+        };
+        if size < header || offset + header > bytes.len() {
+            break;
+        }
+        let body_start = offset + header;
+        let body_end = if size == 0 {
+            bytes.len()
+        } else {
+            (offset + size).min(bytes.len())
+        };
+        let body = &bytes[body_start..body_end];
+        match kind {
+            b"moov" => walk_iso_boxes(body, metadata),
+            b"mvhd" => {
+                if let Some(duration) = iso_mvhd_duration(body)
+                    && duration > 0
+                {
+                    metadata.duration_seconds = duration;
+                }
+            }
+            b"trak" => {
+                let (width, height) = iso_track_size(body);
+                if width > 0 {
+                    metadata.width = width;
+                }
+                if height > 0 {
+                    metadata.height = height;
+                }
+                walk_iso_boxes(body, metadata);
+            }
+            _ => {}
+        }
+        if size == 0 {
+            break;
+        }
+        offset += size;
+    }
+}
+
+fn iso_mvhd_duration(payload: &[u8]) -> Option<u32> {
+    let (timescale, duration) = if payload.first() == Some(&1) {
+        if payload.len() < 32 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes([
+            payload[20], payload[21], payload[22], payload[23],
+        ]);
+        let duration = u64::from_be_bytes([
+            payload[24], payload[25], payload[26], payload[27], payload[28], payload[29],
+            payload[30], payload[31],
+        ]);
+        (timescale, duration)
+    } else {
+        if payload.len() < 20 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes([
+            payload[12], payload[13], payload[14], payload[15],
+        ]);
+        let duration = u32::from_be_bytes([
+            payload[16], payload[17], payload[18], payload[19],
+        ]) as u64;
+        (timescale, duration)
+    };
+    if timescale == 0 {
+        return None;
+    }
+    Some(((duration + timescale as u64 / 2) / timescale as u64) as u32)
+}
+
+fn iso_track_size(trak: &[u8]) -> (u32, u32) {
+    let mut width = 0_u32;
+    let mut height = 0_u32;
+    let mut offset = 0_usize;
+    while offset + 8 <= trak.len() {
+        let size = u32::from_be_bytes([
+            trak[offset],
+            trak[offset + 1],
+            trak[offset + 2],
+            trak[offset + 3],
+        ]) as usize;
+        let kind = &trak[offset + 4..offset + 8];
+        if size < 8 || offset + size > trak.len() {
+            break;
+        }
+        let body = &trak[offset + 8..offset + size];
+        if kind == b"tkhd" && body.len() >= 84 {
+            // The track header carries the display size in its last eight
+            // bytes as 16.16 fixed point numbers.
+            let width_fixed = u32::from_be_bytes([
+                body[body.len() - 8],
+                body[body.len() - 7],
+                body[body.len() - 6],
+                body[body.len() - 5],
+            ]);
+            let height_fixed = u32::from_be_bytes([
+                body[body.len() - 4],
+                body[body.len() - 3],
+                body[body.len() - 2],
+                body[body.len() - 1],
+            ]);
+            width = width_fixed >> 16;
+            height = height_fixed >> 16;
+        }
+        offset += size;
+    }
+    (width, height)
+}
+
+/// The duration of an MPEG audio file, from its frame headers.
+///
+/// port: the `audio/mpeg` branch of the oracle: a constant bit rate file is
+/// walked frame by frame, and the size of the first frame gives the bit rate.
+fn probe_mp3(path: &str) -> u32 {
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    let mut offset = 0_usize;
+    if bytes.starts_with(b"ID3") && bytes.len() >= 10 {
+        let size = ((bytes[6] as usize & 0x7f) << 21)
+            | ((bytes[7] as usize & 0x7f) << 14)
+            | ((bytes[8] as usize & 0x7f) << 7)
+            | (bytes[9] as usize & 0x7f);
+        offset = 10 + size;
+    }
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] == 0xFF && bytes[offset + 1] & 0xE0 == 0xE0 {
+            break;
+        }
+        offset += 1;
+    }
+    if offset + 4 > bytes.len() {
+        return 0;
+    }
+    let header = u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]);
+    let bitrate_index = ((header >> 12) & 0xF) as usize;
+    let sample_rate_index = ((header >> 10) & 0x3) as usize;
+    let padding = ((header >> 9) & 0x1) as u64;
+    // MPEG 1 layer III bit rates and sample rates.
+    let bitrates = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+    ];
+    let sample_rates = [44_100_u64, 48_000, 32_000, 0];
+    let bitrate = bitrates.get(bitrate_index).copied().unwrap_or(0) as u64;
+    let sample_rate = sample_rates.get(sample_rate_index).copied().unwrap_or(0);
+    if bitrate == 0 || sample_rate == 0 {
+        return 0;
+    }
+    let frame_size = 144 * bitrate * 1000 / sample_rate + padding;
+    if frame_size == 0 {
+        return 0;
+    }
+    let audio_bytes = bytes.len().saturating_sub(offset) as u64;
+    let frames = audio_bytes / frame_size;
+    let samples = frames * 1152;
+    (samples / sample_rate) as u32
+}
+
+/// Counts the image descriptors of a GIF without decoding a frame.
+///
+/// port: `gifFrameCount`.
+fn gif_frame_count(bytes: &[u8]) -> usize {
+    let mut frames = 0_usize;
+    let mut index = 13_usize;
+    if let Some(flags) = bytes.get(10)
+        && flags & 0x80 != 0
+    {
+        index += 3 * (1 << ((flags & 0x07) + 1));
+    }
+    while index < bytes.len() {
+        match bytes[index] {
+            0x2C => {
+                frames += 1;
+                if index + 10 > bytes.len() {
+                    break;
+                }
+                let flags = bytes[index + 9];
+                index += 10;
+                if flags & 0x80 != 0 {
+                    index += 3 * (1 << ((flags & 0x07) + 1));
+                }
+                index += 1;
+                while index < bytes.len() {
+                    let size = bytes[index] as usize;
+                    index += 1;
+                    if size == 0 {
+                        break;
+                    }
+                    index += size;
+                }
+            }
+            0x21 => {
+                index += 2;
+                while index < bytes.len() {
+                    let size = bytes[index] as usize;
+                    index += 1;
+                    if size == 0 {
+                        break;
+                    }
+                    index += size;
+                }
+            }
+            0x3B => break,
+            _ => index += 1,
+        }
+    }
+    frames
+}
+
+/// Whether the upload answered every piece of metadata the message needs.
+///
+/// port: `validUploadResponse`. A short answer would carry a wrong length or
+/// an empty key, and the receiving client would never decrypt the blob.
+fn valid_upload_response(
+    response: &whatsapp_rust::upload::UploadResponse,
+    expected_size: u64,
+) -> bool {
+    response.file_length == expected_size
+        && !response.url.is_empty()
+        && !response.direct_path.is_empty()
+        && response.media_key.len() == 32
+        && response.file_sha256.len() == 32
+        && response.file_enc_sha256.len() == 32
+}
+
 /// The pixel size of a PNG, JPEG, GIF or WebP; unknown or truncated formats
 /// answer zero and the caller refuses the upload.
 pub(crate) fn sniff_dimensions(bytes: &[u8], mime: &str) -> (u32, u32) {
@@ -485,7 +1048,45 @@ pub async fn send_attachment(
             false,
         ));
     }
-    if upload_size(file_path).await? > MAX_MEDIA_BYTES {
+    if voice_note && kind != whatfast_protocol::AttachmentKind::Audio {
+        return Err((
+            "invalid_argument".into(),
+            "voice notes must be audio attachments".into(),
+            false,
+        ));
+    }
+    // port: `openAttachmentSource`. The bridge of the oracle refuses a
+    // relative path because the sidecar may run from another directory, and
+    // a name the receiving phone cannot render.
+    if !std::path::Path::new(file_path).is_absolute() {
+        return Err((
+            "invalid_argument".into(),
+            "attachment path must be absolute".into(),
+            false,
+        ));
+    }
+    let path = std::path::Path::new(file_path);
+    let Some(file_name) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && name.len() <= 255)
+    else {
+        return Err((
+            "invalid_argument".into(),
+            "attachment file name is invalid".into(),
+            false,
+        ));
+    };
+    let file_name = file_name.to_owned();
+    let size = upload_size(file_path).await?;
+    if size == 0 {
+        return Err((
+            "invalid_argument".into(),
+            "attachment must be a regular file between 1 byte and 2 GiB".into(),
+            false,
+        ));
+    }
+    if size > MAX_MEDIA_BYTES {
         return Err((
             "failed_precondition".into(),
             "attachment exceeds the 2 GiB upload limit".into(),
@@ -493,30 +1094,44 @@ pub async fn send_attachment(
         ));
     }
     let bytes = read_upload(file_path, "attachment").await?;
-    let file_name = std::path::Path::new(file_path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (media_type, wire_kind, mime) = match kind {
-        whatfast_protocol::AttachmentKind::Video => (
-            MediaType::Video,
-            "video",
-            sniff_mime(&bytes).replace("application/octet-stream", "video/mp4"),
-        ),
-        whatfast_protocol::AttachmentKind::Audio => (
-            MediaType::Audio,
-            "audio",
-            sniff_mime(&bytes).replace("application/octet-stream", "audio/ogg"),
-        ),
-        _ => (MediaType::Document, "document", sniff_mime(&bytes)),
+    let (media_type, wire_kind) = match kind {
+        whatfast_protocol::AttachmentKind::Video => (MediaType::Video, "video"),
+        whatfast_protocol::AttachmentKind::Audio => (MediaType::Audio, "audio"),
+        _ => (MediaType::Document, "document"),
     };
-    if voice_note && wire_kind == "audio" && !is_ogg_opus(&bytes) {
+    let mut mime = detect_attachment_mime(&bytes[..bytes.len().min(512)], file_path, wire_kind);
+    if wire_kind == "video" && !mime.starts_with("video/") {
         return Err((
             "invalid_argument".into(),
-            "voice notes must contain Ogg Opus data".into(),
+            format!("video attachment has content type {mime}"),
             false,
         ));
     }
+    if wire_kind == "audio" {
+        if !mime.starts_with("audio/") {
+            return Err((
+                "invalid_argument".into(),
+                format!("audio attachment has content type {mime}"),
+                false,
+            ));
+        }
+        if voice_note {
+            if !is_ogg_opus(&bytes) {
+                return Err((
+                    "invalid_argument".into(),
+                    "voice notes must contain Ogg Opus data".into(),
+                    false,
+                ));
+            }
+            // port: the oracle pins the codec in the mime of a voice note;
+            // without it the phone leaves the note unplayed.
+            mime = "audio/ogg; codecs=opus".into();
+        }
+    }
+    // The duration and the display size come from the file itself: a voice
+    // note without `seconds` and a video without its size land on the phone
+    // as an empty bubble.
+    let metadata = probe_outgoing_media(file_path);
     let fingerprint = format!(
         "{wire_kind}\u{0}{caption}\u{0}{file_name}\u{0}{}",
         hash_hex(&bytes)
@@ -532,6 +1147,13 @@ pub async fn send_attachment(
         .upload(bytes, media_type, UploadOptions::new())
         .await
         .map_err(|error| ("upload_failed".into(), format!("{error}"), true))?;
+    if !valid_upload_response(&response, size) {
+        return Err((
+            "upload_failed".into(),
+            "WhatsApp returned incomplete attachment upload metadata".into(),
+            true,
+        ));
+    }
 
     let mut message = wa::Message::default();
     match wire_kind {
@@ -545,10 +1167,10 @@ pub async fn send_attachment(
             video.file_sha256 = Some(response.file_sha256.to_vec());
             video.file_enc_sha256 = Some(response.file_enc_sha256.to_vec());
             video.file_length = Some(response.file_length);
-            let (w, h, dur) = probe_video_metadata(file_path);
-            video.width = w;
-            video.height = h;
-            video.seconds = dur;
+            video.width = Some(metadata.width);
+            video.height = Some(metadata.height);
+            video.seconds = Some(metadata.duration_seconds);
+            video.gif_playback = Some(metadata.animated);
             if let Some(context) = context.clone() {
                 video.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
             }
@@ -563,6 +1185,9 @@ pub async fn send_attachment(
             audio.file_sha256 = Some(response.file_sha256.to_vec());
             audio.file_enc_sha256 = Some(response.file_enc_sha256.to_vec());
             audio.file_length = Some(response.file_length);
+            // El campo va presente aunque valga cero: el telefono dibuja la
+            // nota con el, y ausente la deja sin reproducir.
+            audio.seconds = Some(metadata.duration_seconds);
             audio.ptt = Some(voice_note);
             if let Some(context) = context.clone() {
                 audio.context_info = whatsapp_rust::waproto::buffa::MessageField::some(context);
@@ -596,7 +1221,7 @@ pub async fn send_attachment(
         MediaKind {
             kind: wire_kind,
             caption: caption.to_owned(),
-            mime,
+            mime: mime.clone(),
             file_name,
             local_path: file_path.to_owned(),
             direct_path: response.direct_path.clone(),
@@ -604,17 +1229,27 @@ pub async fn send_attachment(
             file_sha256: response.file_sha256.to_vec(),
             file_enc_sha256: response.file_enc_sha256.to_vec(),
             size: response.file_length,
-            width: 0,
-            height: 0,
-            duration: 0,
+            width: metadata.width,
+            height: metadata.height,
+            duration: metadata.duration_seconds,
             voice: voice_note && wire_kind == "audio",
-            animated: false,
+            animated: metadata.animated,
         },
         reply_to_message_id,
         reply_to_chat_id,
         &fingerprint,
     )
     .await
+    .inspect(|row| {
+        tracing::info!(
+            "attachment {} sent as {}: mime={mime} size={size} seconds={} {}x{}",
+            row.id,
+            wire_kind,
+            metadata.duration_seconds,
+            metadata.width,
+            metadata.height
+        );
+    })
 }
 
 /// The sticker path: an already-made WebP the desktop picked or made.
@@ -761,8 +1396,14 @@ fn cache_extension(mime: &str, file_name: &str) -> String {
     }
 }
 
-/// Probes video dimensions (width, height) and duration (seconds) using ffprobe if available.
-fn probe_video_metadata(file_path: &str) -> (Option<u32>, Option<u32>, Option<u32>) {
+/// Reads the duration and the size of a media file with `ffprobe`, when the
+/// system has it.
+///
+/// The parsers of [`probe_outgoing_media`] cover the formats WhatsApp sends
+/// without external tools. This is the fallback for a container they do not
+/// read (a Matroska video, for instance): an absent `ffprobe` answers nothing
+/// and the message goes out with the metadata the file did carry.
+fn probe_with_ffprobe(file_path: &str) -> (u32, u32, u32) {
     let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -777,10 +1418,10 @@ fn probe_video_metadata(file_path: &str) -> (Option<u32>, Option<u32>, Option<u3
         ])
         .output();
     let Ok(output) = output else {
-        return (None, None, None);
+        return (0, 0, 0);
     };
     if !output.status.success() {
-        return (None, None, None);
+        return (0, 0, 0);
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = text
@@ -788,12 +1429,13 @@ fn probe_video_metadata(file_path: &str) -> (Option<u32>, Option<u32>, Option<u3
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    let width = lines.first().and_then(|w| w.parse::<u32>().ok());
-    let height = lines.get(1).and_then(|h| h.parse::<u32>().ok());
+    let width = lines.first().and_then(|w| w.parse::<u32>().ok()).unwrap_or(0);
+    let height = lines.get(1).and_then(|h| h.parse::<u32>().ok()).unwrap_or(0);
     let seconds = lines
         .get(2)
         .and_then(|d| d.parse::<f64>().ok())
-        .map(|s| s.round() as u32);
+        .map(|s| s.round() as u32)
+        .unwrap_or(0);
     (width, height, seconds)
 }
 

@@ -88,6 +88,18 @@ const DETAILS_SIZE: f32 = 11.5;
 /// of eleven and a half pixels.
 const ERROR_SIZE: f32 = 11.5;
 
+/// El alto del reproductor de un audio enviado como archivo, antes de la
+/// escala. El circulo de 38 px mas el relleno de los lados.
+const AUDIO_FILE_HEIGHT: f32 = 58.;
+
+/// El circulo de reproducir de un audio enviado como archivo, antes de la
+/// escala.
+const AUDIO_FILE_ICON: f32 = 38.;
+
+/// El naranja con el que se marcan los audios que no son notas de voz: el
+/// reproductor se distingue asi del de la nota grabada por el microfono.
+const AUDIO_FILE_ACCENT: u32 = 0xf59c3d;
+
 /// El alto de la fila de los datos del video, antes de la escala.
 const VIDEO_META_HEIGHT: f32 = 40.;
 
@@ -129,6 +141,39 @@ fn is_playable_voice_note(store: &Store, attachment: &proto::AttachmentContent) 
     attachment.voice_note
         && !attachment.local_path.is_empty()
         && store.media_exists(&attachment.local_path)
+}
+
+/// Whether an audio sent as a file can play here.
+///
+/// A `.wav`, an `.mp3` or any other audio reaches the app with `voice_note`
+/// false: it is not a note recorded with the microphone. It still decodes
+/// with the same player, but the bubble must not draw the note of a recording.
+///
+/// The sender may attach the file as an audio or as a document; both carry
+/// sound, so the format decides. The ones the decoder of the app cannot open
+/// (an `.amr` of a phone, for instance) keep the plain card with the download
+/// arrow.
+fn is_playable_audio_file(store: &Store, attachment: &proto::AttachmentContent) -> bool {
+    if attachment.voice_note
+        || attachment.local_path.is_empty()
+        || !store.media_exists(&attachment.local_path)
+    {
+        return false;
+    }
+    let mime = attachment.mime_type.to_ascii_lowercase();
+    let name = attachment.file_name.to_ascii_lowercase();
+    let audio = attachment.kind == "audio" || mime.starts_with("audio/");
+    let decodable = mime.starts_with("audio/ogg")
+        || mime.starts_with("audio/wav")
+        || mime.starts_with("audio/x-wav")
+        || mime.starts_with("audio/mpeg")
+        || mime.starts_with("audio/mp4")
+        || mime.starts_with("audio/flac")
+        || mime.starts_with("audio/vorbis")
+        || [".wav", ".mp3", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".mp4"]
+            .iter()
+            .any(|extension| name.ends_with(extension));
+    audio && decodable
 }
 
 /// Whether an audio still has to be asked for: the file is not on the disk,
@@ -320,6 +365,10 @@ impl Whatfast {
         if is_playable_voice_note(&self.store, attachment) {
             return voice_note_height(self.ui_scale);
         }
+        // Un audio enviado como archivo mide su propio reproductor.
+        if is_playable_audio_file(&self.store, attachment) {
+            return px(AUDIO_FILE_HEIGHT * self.ui_scale);
+        }
         // El video se mira en su caja, con los mandos debajo.
         if crate::video::is_video(attachment) {
             return video_height(attachment, self.ui_scale);
@@ -384,6 +433,8 @@ impl Whatfast {
         let seek_chat = message.chat_id.clone();
         let seek_message = message.id.clone();
         let seek_path = attachment.local_path.clone();
+        let save_chat = message.chat_id.clone();
+        let save_message = message.id.clone();
         let bars = wave.len().max(1);
 
         h_flex()
@@ -442,6 +493,7 @@ impl Whatfast {
                     .id(("voice-wave", index))
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .items_center()
                     .h_full()
                     .cursor_pointer()
@@ -493,6 +545,189 @@ impl Whatfast {
                     .text_size(px(DETAILS_SIZE * scale))
                     .text_color(rest_color)
                     .child(format_clock(if on { position } else { duration })),
+            )
+            // La nota tambien se guarda: el archivo que llego por WhatsApp se
+            // baja al disco con el boton, sin abrir otro programa.
+            .child(
+                div()
+                    .id(("voice-save", index))
+                    .flex_none()
+                    .p(px(4.0 * scale))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(played_color.opacity(0.10)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.save_message_attachment(
+                            save_chat.clone(),
+                            save_message.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(
+                        Icon::new(WhatfastIcon::Download)
+                            .with_size(px(DOWNLOAD_SIZE * scale))
+                            .text_color(rest_color),
+                    ),
+            )
+    }
+
+    /// El reproductor de un audio enviado como archivo, no como nota de voz.
+    ///
+    /// El circulo naranja y el nombre del archivo lo distinguen de la nota
+    /// grabada por el microfono. Usa el mismo motor de sonido: el archivo no
+    /// sale al reproductor del sistema.
+    pub(crate) fn render_audio_file(
+        &self,
+        index: usize,
+        message: &proto::Message,
+        attachment: &proto::AttachmentContent,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let scale = self.ui_scale;
+        let key = (message.chat_id.clone(), message.id.clone());
+        let on = self.voice.is_on(&key);
+        let playing = on && !self.voice.paused;
+        let position = if on { self.voice.position() } else { 0.0 };
+        // El decodificador sabe la duracion real del archivo; la cabecera solo
+        // la propone.
+        let duration = if on && self.voice.duration > 0.0 {
+            self.voice.duration
+        } else {
+            attachment.duration_seconds as f32
+        };
+        let progress = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let name = attachment_name(attachment);
+        let accent: gpui::Hsla = rgb(AUDIO_FILE_ACCENT).into();
+        let track = cx.theme().foreground.alpha(0.12);
+        let muted = cx.theme().muted_foreground;
+        let bars = 24usize;
+        let played = (progress * bars as f32).floor() as usize;
+
+        let play_chat = message.chat_id.clone();
+        let play_message = message.id.clone();
+        let play_path = attachment.local_path.clone();
+        let save_chat = message.chat_id.clone();
+        let save_message = message.id.clone();
+
+        h_flex()
+            .w(px(CARD_WIDTH * scale))
+            .max_w_full()
+            .min_w_0()
+            .h(px(AUDIO_FILE_HEIGHT * scale))
+            .items_center()
+            .gap(px(10. * scale))
+            .px(px(10. * scale))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(accent.alpha(0.10))
+            .child(
+                div()
+                    .id(("audio-file-play", index))
+                    .flex_none()
+                    .size(px(AUDIO_FILE_ICON * scale))
+                    .rounded_full()
+                    .bg(accent)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_voice_note(&play_chat, &play_message, &play_path, window, cx);
+                    }))
+                    .child(
+                        Icon::new(if playing {
+                            WhatfastIcon::Pause
+                        } else {
+                            WhatfastIcon::Play
+                        })
+                        .with_size(px(20. * scale))
+                        .text_color(gpui::white()),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4. * scale))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(NAME_SIZE * scale))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6. * scale))
+                            .child(
+                                h_flex()
+                                    .id(("audio-file-seek", index))
+                                    .flex_1()
+                                    .h(px(5. * scale))
+                                    .gap(px(1. * scale))
+                                    .cursor_pointer()
+                                    .children((0..bars).map(|bar| {
+                                        let seek_chat = message.chat_id.clone();
+                                        let seek_message = message.id.clone();
+                                        let seek_path = attachment.local_path.clone();
+                                        let seconds = duration * bar as f32 / bars as f32;
+                                        div()
+                                            .id(format!("audio-file-bar-{index}-{bar}"))
+                                            .flex_1()
+                                            .h_full()
+                                            .rounded_full()
+                                            .bg(if bar < played { accent } else { track })
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.seek_voice_note(
+                                                    &seek_chat,
+                                                    &seek_message,
+                                                    &seek_path,
+                                                    seconds,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }))
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(DETAILS_SIZE * scale))
+                                    .text_color(muted)
+                                    .child(format_clock(if on { position } else { duration })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("audio-file-save", index))
+                    .flex_none()
+                    .p(px(4. * scale))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.save_message_attachment(
+                            save_chat.clone(),
+                            save_message.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(
+                        Icon::new(WhatfastIcon::Download)
+                            .with_size(px(DOWNLOAD_SIZE * scale))
+                            .text_color(muted),
+                    ),
             )
     }
 
@@ -976,6 +1211,11 @@ impl Whatfast {
         // como en la referencia, y no en el programa del sistema.
         if is_playable_voice_note(&self.store, attachment) {
             return self.render_voice_note(index, message, attachment, cx);
+        }
+        // Un audio enviado como archivo se escucha en su reproductor naranja,
+        // que tambien lo guarda en el disco.
+        if is_playable_audio_file(&self.store, attachment) {
+            return self.render_audio_file(index, message, attachment, cx);
         }
         // El video se mira en la burbuja, con su reproductor: el archivo no
         // sale al programa del sistema.
