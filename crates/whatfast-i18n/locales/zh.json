@@ -6,6 +6,9 @@
   "strings": {
     "Play sounds": "播放声音",
     "Sound when a message arrives": "收到消息时播放声音",
+    "Sound of this chat": "此聊天的声音",
+    "Follow the profile": "跟随个人设置",
+    "Current": "当前",
     "Sound when I send a message": "发送消息时播放声音",
     "Sounds": "声音",
     "The sounds of the messages that arrive and leave.": "收到和发出消息时的声音。",
@@ -491,6 +494,7 @@
     "States / Channels / Agents / Archived": "动态 / 频道 / 代理 / 已归档",
     "Status": "状态",
     "Status deleted": "状态已删除",
+    "Status unavailable": "状态不可用",
     "Status updates muted for contact": "已静音该联系人的动态",
     "Sticker": "贴纸",
     "Sticker download timed out · Click to retry": "贴纸下载超时 · 点击重试",

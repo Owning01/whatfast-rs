@@ -681,11 +681,23 @@ fn best_start(
 pub(crate) fn decode(path: &Path) -> anyhow::Result<DecodedAudio> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("the file {} could not be read", path.display()))?;
-    if bytes.starts_with(b"OggS") {
+    // Ogg is not only Opus: a `.ogg` sent as a file is often Vorbis, which
+    // `rodio` decodes. Sending every `OggS` to the Opus decoder made those
+    // files fail with "the Ogg stream does not carry Opus".
+    if bytes.starts_with(b"OggS") && ogg_is_opus(&bytes) {
         decode_ogg_opus(&bytes)
     } else {
         decode_with_rodio(Cursor::new(bytes))
     }
+}
+
+/// Whether the first packet of an Ogg stream is an Opus header.
+fn ogg_is_opus(bytes: &[u8]) -> bool {
+    ogg::PacketReader::new(Cursor::new(bytes.to_vec()))
+        .read_packet()
+        .ok()
+        .flatten()
+        .is_some_and(|packet| packet.data.starts_with(b"OpusHead"))
 }
 
 /// The path of the Ogg Opus: the header of the codec gives the channels and

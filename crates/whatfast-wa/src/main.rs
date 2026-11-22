@@ -186,6 +186,17 @@ fn run() -> Result<ExitCode, Failure> {
         Ok(recovered) => tracing::info!("{recovered} messages recovered from opaque payloads"),
         Err(error) => tracing::warn!("opaque message recovery failed: {error}"),
     }
+    // A profile that went through a LID to phone-number merge can keep chats
+    // whose preview is empty: the rows moved to the winner but its pointer
+    // was never recomputed. Healing them at start puts those chats back in
+    // date order instead of at the bottom of the list.
+    match chats_db.repair_empty_chat_pointers() {
+        Ok(0) => {}
+        Ok(repaired) => {
+            tracing::info!("{repaired} chats recovered their last message pointer")
+        }
+        Err(error) => tracing::warn!("the chat pointers could not be repaired: {error}"),
+    }
     let code = runtime.block_on(serve(data_dir, chats_db, args.stdio, args.idle_exit));
     // The lock outlives the runtime teardown on purpose: releasing it before
     // the store flushes would invite a successor onto a hot database.

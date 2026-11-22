@@ -148,8 +148,12 @@ pub(crate) const DARK_GREEN: u32 = 0x075e54;
 pub(crate) const PANEL: u32 = 0xf7faf9;
 /// How many emoji the picker shows per row.
 pub(crate) const EMOJI_COLUMNS: usize = 9;
-/// How often a participant's avatar is downloaded again.
-pub(crate) const PARTICIPANT_AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
+/// How often an avatar that the account does not have is asked again.
+///
+/// A chat or a participant without a photo answers with an empty path. Asking
+/// again on the next frame turned that answer into a request loop, so the
+/// marker that stops the asking is released by this timer instead.
+pub(crate) const AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
 
 /// How long a read confirmation waits after a failure before trying again.
 /// The receipt is what marks the chat read on the phone: losing it because
@@ -632,6 +636,18 @@ pub(crate) struct ChatMenu {
     pub(crate) position: Point<Pixels>,
 }
 
+/// The picker of the sound of one conversation.
+///
+/// The rows are the built-ins, the file of the user and silence, plus the
+/// one that clears the choice and follows the profile again. It opens from
+/// the menu of the options of the chat, where the mute lives.
+pub(crate) struct ChatSoundMenu {
+    /// The conversation the sound is of.
+    pub(crate) chat_id: String,
+    /// Where the picker opens, in pixels of the window.
+    pub(crate) position: Point<Pixels>,
+}
+
 /// The actions of the menu of the options of a conversation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChatMenuAction {
@@ -641,6 +657,8 @@ pub(crate) enum ChatMenuAction {
     Search,
     /// Mutes or unmutes the conversation.
     Mute,
+    /// Picks the sound of the messages that arrive in the conversation.
+    Sound,
     /// Marks the conversation as a favorite, or takes the mark away.
     Favorite,
     /// Blocks or unblocks the contact.
@@ -1019,6 +1037,8 @@ pub(crate) struct Whatfast {
     pub(crate) chat_info: Option<ChatInfoState>,
     pub(crate) chat_context_menu: Option<ChatContextMenu>,
     pub(crate) chat_menu: Option<ChatMenu>,
+    /// The picker of the sound of one conversation, opened from its menu.
+    pub(crate) chat_sound_menu: Option<ChatSoundMenu>,
     pub(crate) mention_picker: Option<MentionPicker>,
     pub(crate) mention_directories: HashMap<String, Vec<ChatParticipant>>,
     pub(crate) mention_directory_pending: HashSet<String>,
@@ -1686,6 +1706,7 @@ impl Whatfast {
             chat_info: None,
             chat_context_menu: None,
             chat_menu: None,
+            chat_sound_menu: None,
             mention_picker: None,
             mention_directories: HashMap::new(),
             mention_directory_pending: HashSet::new(),
@@ -2353,6 +2374,7 @@ impl Whatfast {
                         key.clone(),
                         i18n::t("Downloading the file timed out · Click to retry").into(),
                     );
+                    self.store.invalidate_height(&message_id);
                     self.fail_waiting_video(
                         &key,
                         i18n::t("Downloading the file timed out · Click to retry"),
@@ -3078,6 +3100,7 @@ impl Whatfast {
                         i18n::t("That file is no longer available").into()
                     },
                 );
+                self.store.invalidate_height(message_id);
                 self.fail_waiting_video(
                     &key,
                     if error.retryable {
@@ -3197,6 +3220,13 @@ impl Whatfast {
                 // la pantalla sigue en arranque hasta que la cuenta diga si
                 // hay un dispositivo vinculado o no.
                 let has_chats = !page.chats.is_empty();
+                // Una cuenta que ya tiene conversaciones guardadas no esta en
+                // su primera importacion: los sonidos y los avisos de los
+                // mensajes quedan listos aunque WhatsApp no mande historia en
+                // este arranque.
+                if has_chats && !self.store.sync_active {
+                    self.store.mark_sync_ready();
+                }
                 self.store.replace_chat_page(
                     &cursor,
                     page.chats,
@@ -3300,12 +3330,32 @@ impl Whatfast {
             (PendingRequest::Avatar { chat_id }, rpc_response::Result::GetChatAvatar(avatar))
                 if avatar.chat_id == chat_id =>
             {
+                let missing = avatar.avatar_path.is_empty();
                 self.store.set_chat_avatar(&chat_id, avatar.avatar_path);
                 self.avatar_retries.remove(&chat_id);
-                // El avatar es una foto local: si el backend vuelve a mandar
-                // el chat sin ella, la app la pide de nuevo (el origen hace
-                // lo mismo cuando el camino del avatar viene vacio).
-                self.avatar_attempted.remove(&chat_id);
+                if missing {
+                    // Una cuenta sin foto contesta vacio, y el cuadro que
+                    // pinta el placeholder vuelve a pedir la foto. Soltar el
+                    // marcador en el acto dejaba la ventana pidiendo el
+                    // avatar a cada cuadro: 90 peticiones por segundo y el
+                    // nucleo a tope mientras el chat sin foto estaba
+                    // abierto. Se vuelve a pedir sola dentro de un rato, como
+                    // la de un participante.
+                    cx.spawn(async move |this, cx| {
+                        Timer::after(AVATAR_REFRESH).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.avatar_attempted.remove(&chat_id);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                } else {
+                    // El avatar es una foto local: si el backend vuelve a
+                    // mandar el chat sin ella, la app la pide de nuevo (el
+                    // origen hace lo mismo cuando el camino del avatar viene
+                    // vacio).
+                    self.avatar_attempted.remove(&chat_id);
+                }
             }
             (
                 PendingRequest::ParticipantAvatar { participant_id },
@@ -3316,7 +3366,7 @@ impl Whatfast {
                 self.avatar_retries
                     .remove(&format!("participant:{participant_id}"));
                 cx.spawn(async move |this, cx| {
-                    Timer::after(PARTICIPANT_AVATAR_REFRESH).await;
+                    Timer::after(AVATAR_REFRESH).await;
                     let _ = this.update(cx, |this, cx| {
                         this.participant_avatar_attempted.remove(&participant_id);
                         cx.notify();
@@ -3634,6 +3684,7 @@ impl Whatfast {
                     }
                     self.attachment_failures
                         .insert(key, i18n::t("That file is no longer available").into());
+                    self.store.invalidate_height(&message_id);
                 } else {
                     self.attachment_failures.remove(&key);
                     self.store.set_message_attachment_path(
@@ -4043,8 +4094,15 @@ impl Whatfast {
             body: notification_body(message, self.settings.notification_previews),
         });
         if self.settings.sounds_enabled {
-            let choice =
-                SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell);
+            // A conversation with its own sound plays that one here too: the
+            // toast is silent and this is the only noise the user hears.
+            let choice = self
+                .settings
+                .chat_sound(&chat.id)
+                .and_then(SoundChoice::parse)
+                .unwrap_or_else(|| {
+                    SoundChoice::from_setting(&self.settings.sound_notification, BuiltinSound::Bell)
+                });
             self.sounds.play(&choice);
         }
         true
@@ -4087,7 +4145,15 @@ impl Whatfast {
         if !incoming.plays(NOTIFICATION_MAX_AGE_MS) {
             return;
         }
-        let choice = SoundChoice::from_setting(&self.settings.sound_received, BuiltinSound::Pop);
+        // The conversation may have a sound of its own; without one it keeps
+        // the sound of the profile.
+        let choice = self
+            .settings
+            .chat_sound(&chat.id)
+            .and_then(SoundChoice::parse)
+            .unwrap_or_else(|| {
+                SoundChoice::from_setting(&self.settings.sound_received, BuiltinSound::Pop)
+            });
         self.sounds.play(&choice);
     }
 
@@ -4185,6 +4251,83 @@ impl Whatfast {
                     view.update(cx, |this, cx| {
                         let value = SoundChoice::File(path).encode();
                         this.set_sound(event, value, cx);
+                    });
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Picks the sound of the messages that arrive in one conversation.
+    ///
+    /// `None` clears the choice, so the chat follows the sound of the
+    /// profile again. The value uses the encoding of the profile, and the
+    /// choice is heard once before the next message arrives.
+    pub(crate) fn set_chat_sound(
+        &mut self,
+        chat_id: String,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.set_chat_sound(&chat_id, value);
+        self.chat_sound_menu = None;
+        if self.settings.sounds_enabled {
+            let choice = self
+                .settings
+                .chat_sound(&chat_id)
+                .and_then(SoundChoice::parse)
+                .unwrap_or_else(|| {
+                    SoundChoice::from_setting(&self.settings.sound_received, BuiltinSound::Pop)
+                });
+            self.sounds.play(&choice);
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Asks for a sound file of the system and uses it for one conversation.
+    pub(crate) fn choose_chat_sound_file(
+        &mut self,
+        chat_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(i18n::t("Choose a sound").into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let chosen = match selected.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let reason = error.to_string();
+                    window
+                        .update(|_, cx| {
+                            view.update(cx, |this, cx| {
+                                this.store.toast_error = Some(i18n::t_args(
+                                    "The file selector could not be opened: {error}",
+                                    &[("error", reason.as_str())],
+                                ));
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    None
+                }
+                Err(_) => None,
+            };
+            let Some(path) = chosen else {
+                return;
+            };
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        let value = SoundChoice::File(path).encode();
+                        this.set_chat_sound(chat_id, Some(value), cx);
                     });
                 })
                 .ok();
@@ -7024,6 +7167,12 @@ impl Whatfast {
         cx.notify();
     }
 
+    /// Closes the picker of the sound of a conversation.
+    pub(crate) fn close_chat_sound_menu(&mut self, cx: &mut Context<Self>) {
+        self.chat_sound_menu = None;
+        cx.notify();
+    }
+
     /// Runs one action of the menu of the options of a conversation.
     pub(crate) fn run_chat_menu_action(
         &mut self,
@@ -7032,6 +7181,7 @@ impl Whatfast {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let menu_position = self.chat_menu.as_ref().map(|menu| menu.position);
         self.chat_menu = None;
         match action {
             ChatMenuAction::Info => {
@@ -7043,6 +7193,14 @@ impl Whatfast {
             ChatMenuAction::Mute => {
                 let muted = self.store.chat(&chat_id).is_some_and(|chat| !chat.muted);
                 self.set_chat_muted(chat_id, muted, None);
+            }
+            ChatMenuAction::Sound => {
+                // The picker opens where the menu was: the row that the user
+                // pressed is gone with the menu.
+                self.chat_sound_menu = Some(ChatSoundMenu {
+                    chat_id,
+                    position: menu_position.unwrap_or_default(),
+                });
             }
             ChatMenuAction::Favorite => self.toggle_favorite(chat_id, cx),
             ChatMenuAction::Block => {
@@ -9130,19 +9288,41 @@ impl Whatfast {
             self.store.toast_error = Some(i18n::t("Reconnect to WhatsApp before sending").into());
             return;
         }
+        // A file answers the message the composer was quoting, like a text
+        // does. Without this the reply bar stayed on and the quote was lost.
+        let reply_to_message_id = if self.store.selected_chat_id.as_deref()
+            == Some(chat_id.as_str())
+        {
+            self.replying_to_message_id.clone()
+        } else {
+            None
+        };
         self.store.toast_error = None;
         report_failed_request(
             &mut self.store,
             self.rpc.request_send_attachment(OutgoingAttachment {
                 client_message_id: Uuid::new_v4().to_string(),
-                chat_id,
+                chat_id: chat_id.clone(),
                 file_path: path.to_string_lossy().into_owned(),
                 kind,
                 caption,
-                reply_to_message_id: String::new(),
+                reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
                 voice_note,
+                reply_to_chat_id: String::new(),
             }),
         );
+        if let Some(draft) = self.chat_drafts.get_mut(&chat_id) {
+            draft.reply_to_message_id = None;
+            if draft.is_empty() {
+                self.chat_drafts.remove(&chat_id);
+            }
+            self.drafts_dirty = true;
+        }
+        if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+            && self.replying_to_message_id == reply_to_message_id
+        {
+            self.replying_to_message_id = None;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -9472,6 +9652,7 @@ impl Whatfast {
     pub(crate) fn retry_message_attachment(&mut self, chat_id: String, message_id: String) {
         let key = (chat_id.clone(), message_id.clone());
         self.attachment_failures.remove(&key);
+        self.store.invalidate_height(&message_id);
         self.attachment_download_attempted.remove(&key);
         self.store
             .set_message_attachment_path(&chat_id, &message_id, String::new());
@@ -9622,6 +9803,7 @@ impl Whatfast {
         if !already_downloading {
             self.attachment_failures.remove(key);
             self.attachment_download_attempted.remove(key);
+            self.store.invalidate_height(&key.1);
             self.load_message_attachment(key.0.clone(), key.1.clone());
         }
     }
@@ -9878,6 +10060,7 @@ impl Whatfast {
         // A download that failed before is asked again.
         if self.attachment_failures.remove(&key).is_some() {
             self.attachment_download_attempted.remove(&key);
+            self.store.invalidate_height(&message_id);
         }
         let Some(attachment) = self.message_attachment(&message_id) else {
             // The message has no attachment: there is nothing to open.
@@ -9935,6 +10118,7 @@ impl Whatfast {
             .set_message_attachment_path(&chat_id, &message_id, String::new());
         self.attachment_failures.remove(&key);
         self.attachment_download_attempted.remove(&key);
+        self.store.invalidate_height(&message_id);
         self.attachment_save_requested = Some(key);
         self.load_message_attachment(chat_id, message_id);
         cx.notify();
@@ -10060,36 +10244,24 @@ impl Whatfast {
         let source = source.to_path_buf();
         let directory = directory.to_path_buf();
         let copy = cx.background_spawn(async move {
-            // Three tries cover the double click: the second copy finds the
-            // name taken by the first one and only changes the number.
-            let mut counter = 1;
-            let mut last_error = None;
-            for _ in 0..3 {
-                let mut destination = directory.join(&name);
-                while destination.exists() {
-                    destination = directory.join(format!("{stem} ({counter}){extension}"));
-                    counter += 1;
-                }
-                // A copy that dies halfway leaves a `.part` file, never half
-                // of the destination: the rename is the instant that makes
-                // the file visible in the folder.
-                let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
-                let result = std::fs::copy(&source, &partial)
-                    .and_then(|_| std::fs::rename(&partial, &destination));
-                if result.is_err() {
-                    let _ = std::fs::remove_file(&partial);
-                }
-                match result {
-                    Ok(()) => return Ok(destination),
-                    // Another copy of the same file won the name: the loop
-                    // picks the next one.
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        last_error = Some(error);
-                    }
-                    Err(error) => return Err(error),
-                }
+            // The name is reserved with `create_new`, which is atomic: two
+            // files with the same name saved at once cannot pick the same
+            // destination. In Windows `rename` replaces the target, so
+            // checking `exists()` and then copying silently lost one.
+            let destination = reserve_destination(&directory, &stem, &extension)?;
+            // A copy that dies halfway leaves a `.part` file, never half
+            // of the destination: the rename is the instant that makes
+            // the file visible in the folder.
+            let partial = directory.join(format!(".whatfast-{}.part", uuid::Uuid::new_v4()));
+            let result = std::fs::copy(&source, &partial)
+                .and_then(|_| std::fs::rename(&partial, &destination));
+            if result.is_err() {
+                let _ = std::fs::remove_file(&partial);
+                // The destination was created by this copy: removing it
+                // keeps the folder free of empty files after a failure.
+                let _ = std::fs::remove_file(&destination);
             }
-            Err(last_error.unwrap_or_else(|| std::io::Error::other("the name stayed taken")))
+            result.map(|_| destination)
         });
         let view = cx.entity().downgrade();
         cx.spawn_in(window, async move |_, window| {
@@ -10726,12 +10898,16 @@ impl Whatfast {
     /// port: the origin marks the message as revoked before the answer
     /// arrives, and puts it back when the backend refuses.
     pub(crate) fn delete_message(&mut self, message_id: String, delete_for_everyone: bool) {
-        let Some(chat_id) = self.store.selected_chat_id.clone() else {
-            return;
-        };
+        // The chat of the message, not the one selected now: a delete that
+        // finishes after the user switched conversations used to revoke the
+        // row in the wrong chat and leave the real one untouched.
         let Some(message) = self.store.message(&message_id).cloned() else {
             return;
         };
+        let chat_id = message.chat_id.clone();
+        if chat_id.is_empty() {
+            return;
+        }
         if delete_for_everyone && !message.from_me {
             self.store.toast_error =
                 Some(i18n::t("Only your own messages can be deleted for everyone").into());

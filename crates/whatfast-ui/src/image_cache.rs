@@ -130,6 +130,11 @@ pub(crate) struct BoundedImageCache {
     lru: BTreeMap<u64, u64>,
     /// Keys whose future has not resolved yet, keeping `in_flight()` O(1) and `settle()` O(in_flight).
     loading: HashSet<u64>,
+    /// The keys whose last decode failed, and when. A missing file is a
+    /// broken decode; retrying it on every draw kept the window painting
+    /// forever, and the note that the file may arrive later still holds: the
+    /// retry waits a second instead of the next frame.
+    failed: HashMap<u64, std::time::Instant>,
     clock: u64,
     bytes: usize,
     max_bytes: usize,
@@ -137,12 +142,19 @@ pub(crate) struct BoundedImageCache {
     battery_saver: bool,
 }
 
+/// How long a failed decode waits before the cache tries the file again.
+const FAILED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The most failed keys the cache remembers at once.
+const MAX_FAILED: usize = 512;
+
 impl BoundedImageCache {
     pub(crate) fn new(cx: &mut App) -> Entity<Self> {
         let cache = cx.new(|_| Self {
             entries: HashMap::new(),
             lru: BTreeMap::new(),
             loading: HashSet::new(),
+            failed: HashMap::new(),
             clock: 0,
             bytes: 0,
             max_bytes: MAX_BYTES,
@@ -159,6 +171,7 @@ impl BoundedImageCache {
             }
             cache.lru.clear();
             cache.loading.clear();
+            cache.failed.clear();
             cache.bytes = 0;
             cache.sync_stats();
         })
@@ -277,13 +290,28 @@ impl ImageCache for BoundedImageCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let key = hash(resource);
         self.settle();
+        if self
+            .failed
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < FAILED_RETRY)
+        {
+            // The file was not there a moment ago: the next draw does not
+            // start another decode that fails the same way.
+            STAT_MISSES.fetch_add(1, Ordering::Relaxed);
+            self.sync_stats();
+            return None;
+        }
         let mut failed_decode = false;
         let loaded = if let Some(entry) = self.entries.get_mut(&key) {
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
             let result = entry.item.get();
             // A broken or missing file must not be cached forever: the next
-            // draw retries, after the file has maybe been downloaded.
+            // draw retries after `FAILED_RETRY`, once the file has maybe
+            // been downloaded.
             failed_decode = matches!(result, Some(Err(_)));
+            if matches!(result, Some(Ok(_))) {
+                self.failed.remove(&key);
+            }
             result
         } else {
             STAT_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -326,8 +354,12 @@ impl ImageCache for BoundedImageCache {
             let view = window.current_view();
             window
                 .spawn(cx, async move |cx| {
-                    _ = task.await;
-                    cx.on_next_frame(move |_, cx| cx.notify(view));
+                    // A decode that failed has nothing to paint: asking for
+                    // the next frame here was the loop that kept the window
+                    // drawing while a file stayed missing.
+                    if task.await.is_ok() {
+                        cx.on_next_frame(move |_, cx| cx.notify(view));
+                    }
                 })
                 .detach();
             None
@@ -336,6 +368,11 @@ impl ImageCache for BoundedImageCache {
             self.entries.remove(&key);
             self.lru.retain(|_, hash| *hash != key);
             self.loading.remove(&key);
+            self.failed.insert(key, std::time::Instant::now());
+            if self.failed.len() > MAX_FAILED {
+                self.failed
+                    .retain(|_, at| at.elapsed() < FAILED_RETRY);
+            }
         }
         self.touch(key);
         self.evict(key, window, cx);

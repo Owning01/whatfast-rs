@@ -202,6 +202,7 @@ fn wire_content(
                 // list, not a caption.
                 caption: normalize_newlines(&if message.kind == "audio"
                     || message.kind == "video"
+                    || message.kind == "document"
                 {
                     message.media_caption.clone()
                 } else if message.media_caption.is_empty() {

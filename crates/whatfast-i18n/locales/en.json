@@ -6,6 +6,9 @@
   "strings": {
     "Play sounds": "Play sounds",
     "Sound when a message arrives": "Sound when a message arrives",
+    "Sound of this chat": "Sound of this chat",
+    "Follow the profile": "Follow the profile",
+    "Current": "Current",
     "Sound when I send a message": "Sound when I send a message",
     "Sounds": "Sounds",
     "The sounds of the messages that arrive and leave.": "The sounds of the messages that arrive and leave.",
@@ -488,6 +491,7 @@
     "States / Channels / Agents / Archived": "States / Channels / Agents / Archived",
     "Status": "Status",
     "Status deleted": "Status deleted",
+    "Status unavailable": "Status unavailable",
     "Status updates muted for contact": "Status updates muted for contact",
     "Sticker": "Sticker",
     "Sticker download timed out · Click to retry": "Sticker download timed out · Click to retry",

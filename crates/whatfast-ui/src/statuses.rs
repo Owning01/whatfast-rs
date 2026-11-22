@@ -981,7 +981,7 @@ impl StatusStrip {
                                                     .cursor_pointer()
                                                     .hover(|s| s.opacity(0.85))
                                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                                        open_viewer(app, &state_v, own_idx, "me@s.whatsapp.net", cx);
+                                                        open_viewer(app, &state_v, own_idx, "me@s.whatsapp.net", None, cx);
                                                     }))
                                                     .child(i18n::t("View status")),
                                             )
@@ -1093,7 +1093,7 @@ impl StatusStrip {
                     .child(div().text_xs().text_color(muted).child(time)),
             )
             .on_click(cx.listener(move |app, _, _, cx| {
-                open_viewer(app, &state, index, &sender, cx);
+                open_viewer(app, &state, index, &sender, None, cx);
             }))
     }
 
@@ -1126,7 +1126,7 @@ impl StatusStrip {
                     g.sender_id == "me@s.whatsapp.net"
                         || g.messages.iter().any(|m| m.from_me)
                 }) {
-                    open_viewer(app, &state, own_index, "me@s.whatsapp.net", cx);
+                    open_viewer(app, &state, own_index, "me@s.whatsapp.net", None, cx);
                 } else {
                     choose_photo_status(window, cx);
                 }
@@ -1210,7 +1210,7 @@ impl StatusStrip {
             )
             .child(avatar_element(&label, avatar_path, px(inner), cx))
             .on_click(cx.listener(move |app, _, _, cx| {
-                open_viewer(app, &state, index, &sender, cx);
+                open_viewer(app, &state, index, &sender, None, cx);
             }))
     }
 
@@ -2235,7 +2235,7 @@ pub(crate) fn open_status_of(app: &mut Whatfast, chat: &Chat, cx: &mut Context<W
         (index, sender)
     };
     let state = app.status_strip.state.clone();
-    open_viewer(app, &state, index, &sender, cx);
+    open_viewer(app, &state, index, &sender, None, cx);
     true
 }
 
@@ -2441,11 +2441,12 @@ fn open_viewer(
     state: &Rc<RefCell<StatusStripState>>,
     group_index: usize,
     sender_id: &str,
+    initial_message: Option<usize>,
     cx: &mut Context<Whatfast>,
 ) {
     let group = app.store.statuses().get(group_index);
     let newest = group.map(newest_status_ms).unwrap_or_default();
-    let initial_message_index = {
+    let initial_message_index = initial_message.unwrap_or_else(|| {
         let inner = state.borrow();
         if let Some(group) = group {
             if let Some(last_seen) = inner.seen.get(sender_id) {
@@ -2461,7 +2462,12 @@ fn open_viewer(
         } else {
             0
         }
-    };
+    });
+    // The group may have changed between the quote and the click (a status
+    // expired): the index has to point inside the list the viewer draws.
+    let initial_message_index = group
+        .map(|group| initial_message_index.min(group.messages.len().saturating_sub(1)))
+        .unwrap_or(0);
     let generation = {
         let mut inner = state.borrow_mut();
         inner.generation += 1;
@@ -2481,6 +2487,42 @@ fn open_viewer(
     preload_viewer_media(app, state);
     cx.notify();
     spawn_advance(state, generation, cx);
+}
+
+/// Opens the viewer of the status that a quoted message answers.
+///
+/// A reply to a status lives in the direct chat, but the status itself lives
+/// in the strip of the profile: this finds its group and its place there.
+/// When the status expired, the row already says "Status unavailable".
+pub(crate) fn open_status_message(
+    app: &mut Whatfast,
+    message_id: &str,
+    cx: &mut Context<Whatfast>,
+) {
+    let found = {
+        let groups = app.store.statuses();
+        groups.iter().enumerate().find_map(|(group_index, group)| {
+            group
+                .messages
+                .iter()
+                .position(|message| message.id == message_id)
+                .map(|message_index| (group_index, group.sender_id.clone(), message_index))
+        })
+    };
+    let Some((group_index, sender_id, message_index)) = found else {
+        app.store.toast_info = Some(i18n::t("Status unavailable").into());
+        cx.notify();
+        return;
+    };
+    let state = app.status_strip.state.clone();
+    open_viewer(
+        app,
+        &state,
+        group_index,
+        &sender_id,
+        Some(message_index),
+        cx,
+    );
 }
 
 /// Moves the viewer to the next or to the previous status.

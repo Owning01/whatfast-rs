@@ -16,6 +16,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // GPUI pinta el arbol con llamadas anidadas de decenas de marcos por
+    // nivel. En debug, la pila por defecto de Windows (1 MB) se agota al
+    // abrir Ajustes y la app muere con "has overflowed its stack". Zed pide
+    // la misma pila en su crate principal por el mismo motivo.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/stack:{}", 8 * 1024 * 1024);
+    }
     match embed_resource::compile("assets/icon.rc", embed_resource::NONE).manifest_optional() {
         Ok(()) => {}
         Err(error) => {

@@ -155,6 +155,161 @@ fn album_continues(messages: &[proto::Message], previous: usize, current: usize)
     current > 0 && previous + 1 == current && !starts_cluster(messages, current)
 }
 
+/// Si el mensaje es el contenedor de un album del historial.
+///
+/// WhatsApp manda un `albumMessage` ("Album (N items)") y las fotos como
+/// mensajes aparte: el contenedor no se dibuja, igual que en el telefono. La
+/// fila solo se oculta cuando sus fotos llegaron; si no, queda como aviso.
+fn is_album_placeholder(message: &proto::Message) -> bool {
+    matches!(
+        message.content.as_ref(),
+        Some(proto::message::Content::Unsupported(unsupported))
+            if unsupported.type_name == "album"
+    )
+}
+
+/// Si el contenedor tiene al menos una foto cerca en el tiempo.
+fn album_placeholder_has_children(messages: &[proto::Message], index: usize) -> bool {
+    let Some(album) = messages.get(index) else {
+        return false;
+    };
+    let is_child = |candidate: &proto::Message| {
+        candidate.from_me == album.from_me
+            && (album.from_me || candidate.sender_id == album.sender_id)
+            && match candidate.content.as_ref() {
+                Some(proto::message::Content::Image(image)) => !image.sticker,
+                Some(proto::message::Content::Attachment(attachment)) => {
+                    attachment.kind == "video"
+                }
+                _ => false,
+            }
+    };
+    // Los mensajes estan ordenados por fecha: la busqueda se corta al salir
+    // de la ventana en la que WhatsApp entrega las fotos del album.
+    const WINDOW_MS: i64 = 15_000;
+    let mut cursor = index + 1;
+    while let Some(candidate) = messages.get(cursor) {
+        if candidate.timestamp_ms - album.timestamp_ms > WINDOW_MS {
+            break;
+        }
+        if is_child(candidate) {
+            return true;
+        }
+        cursor += 1;
+    }
+    let mut cursor = index;
+    while let Some(previous) = cursor.checked_sub(1).and_then(|at| messages.get(at)) {
+        cursor -= 1;
+        if album.timestamp_ms - previous.timestamp_ms > WINDOW_MS {
+            break;
+        }
+        if is_child(previous) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the message answers one of the statuses of the profile.
+///
+/// A status reply lives in the direct chat, but its quote names the special
+/// conversation: without this the bubble only said "Message unavailable".
+fn answers_a_status(message: &proto::Message, statuses_chat_id: &str) -> bool {
+    !message.reply_to_message_id.is_empty()
+        && (message.reply_to_chat_id == "status@broadcast"
+            || (!statuses_chat_id.is_empty() && message.reply_to_chat_id == statuses_chat_id))
+}
+
+/// The status a reply names, when the strip of the profile still has it.
+fn status_message<'a>(
+    groups: &'a [proto::StatusGroup],
+    message_id: &str,
+) -> Option<&'a proto::Message> {
+    groups
+        .iter()
+        .flat_map(|group| group.messages.iter())
+        .find(|message| message.id == message_id)
+}
+
+/// The line under the "Status" header of a quoted status.
+///
+/// The caption when the status has one; otherwise the kind, so a reply to a
+/// photo does not say the generic "Media message".
+fn status_preview(message: &proto::Message) -> String {
+    let generic = message_preview(message);
+    if generic != "Media message" {
+        return generic;
+    }
+    match message.content.as_ref() {
+        Some(proto::message::Content::Image(_)) => i18n::t("Photo").to_string(),
+        Some(proto::message::Content::Attachment(attachment)) if attachment.kind == "video" => {
+            i18n::t("Video").to_string()
+        }
+        Some(proto::message::Content::Attachment(attachment)) if attachment.kind == "audio" => {
+            if attachment.voice_note {
+                i18n::t("Voice message").to_string()
+            } else {
+                i18n::t("Audio").to_string()
+            }
+        }
+        Some(proto::message::Content::Attachment(_)) => i18n::t("Document").to_string(),
+        _ => generic,
+    }
+}
+
+/// The small picture of a quoted message: the downloaded file when it is on
+/// the disk, the JPEG that came with the message otherwise. A status that was
+/// never opened still carries that thumbnail.
+fn reply_thumbnail(
+    store: &whatfast_model::model::Store,
+    target: &proto::Message,
+    edge: f32,
+) -> Option<gpui::AnyElement> {
+    let (path, jpeg) = match target.content.as_ref() {
+        Some(proto::message::Content::Image(image)) => {
+            let row = image_row_path(image);
+            let viewer = image_viewer_path(image);
+            let path = image_source_candidates(image, row, viewer)
+                .into_iter()
+                .find(|path| !path.is_empty() && store.media_exists(path))
+                .map(PathBuf::from);
+            (path, image.jpeg_thumbnail.as_slice())
+        }
+        Some(proto::message::Content::Attachment(attachment)) => {
+            let path = (attachment.kind == "image"
+                && !attachment.local_path.is_empty()
+                && store.media_exists(&attachment.local_path))
+            .then(|| PathBuf::from(&attachment.local_path));
+            (path, &[][..])
+        }
+        _ => return None,
+    };
+    if let Some(path) = path {
+        return Some(
+            img(path)
+                .size(px(edge))
+                .flex_none()
+                .rounded_sm()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+        );
+    }
+    if jpeg.is_empty() {
+        return None;
+    }
+    Some(
+        img(Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Jpeg,
+            jpeg.to_vec(),
+        )))
+        .size(px(edge))
+        .flex_none()
+        .rounded_sm()
+        .object_fit(ObjectFit::Cover)
+        .into_any_element(),
+    )
+}
+
 /// Proyecta los mensajes en filas de la lista virtual.
 ///
 /// Solo agrupa cuando hay tres fotos o mas: una o dos fotos consecutivas se
@@ -166,6 +321,15 @@ pub(crate) fn photo_albums(messages: &[proto::Message]) -> Vec<ChatDisplayRow> {
     let mut index = 0;
     while index < messages.len() {
         if !is_album_photo(&messages[index]) {
+            // The container of an album is not a bubble: its photos are the
+            // message. Hiding it also keeps its row under the photos instead
+            // of above them.
+            if is_album_placeholder(&messages[index])
+                && album_placeholder_has_children(messages, index)
+            {
+                index += 1;
+                continue;
+            }
             rows.push(ChatDisplayRow::Single(index));
             index += 1;
             continue;
@@ -235,7 +399,6 @@ pub(crate) fn album_ids_for_message(
 /// El alto de la fila del pie del album. Un `Button::small()` mide 24 px y la
 /// fila le deja un poco de aire: con 18 px el boton se recortaba.
 const ALBUM_FOOTER_HEIGHT: f32 = 28.;
-
 /// El alto de la rejilla de un album, antes de la escala.
 fn album_grid_height(count: usize, scale: f32) -> Pixels {
     if count == 3 {
@@ -1517,6 +1680,11 @@ impl Whatfast {
                 Icon::new(WhatfastIcon::Bell),
             ))),
             ChatMenuEntry::Item(Box::new((
+                Some(ChatMenuAction::Sound),
+                i18n::t("Sound of this chat").into(),
+                Icon::new(WhatfastIcon::Volume),
+            ))),
+            ChatMenuEntry::Item(Box::new((
                 Some(ChatMenuAction::Favorite),
                 if is_favorite {
                     i18n::t("Remove from favorites")
@@ -1619,6 +1787,166 @@ impl Whatfast {
             }))
             .on_aux_click(cx.listener(|this, _, _, cx| {
                 this.close_chat_menu(cx);
+                cx.stop_propagation();
+            }))
+            .child(panel.absolute().left(left).top(top))
+    }
+
+    /// The picker of the sound of one conversation.
+    ///
+    /// It opens from the menu of the options of the chat. The first row
+    /// clears the choice and follows the sound of the profile; the built-ins
+    /// and silence come next, and the last row opens a file of the user. The
+    /// choice plays once when it is picked, so the user hears it before the
+    /// next message.
+    fn render_chat_sound_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let Some(menu) = self.chat_sound_menu.as_ref() else {
+            return div().id("chat-sound-menu-empty");
+        };
+        let Some(chat) = self.store.chat(&menu.chat_id).cloned() else {
+            return div().id("chat-sound-menu-empty");
+        };
+        let ui_scale = self.ui_scale;
+        let chosen_value = self.settings.chat_sound(&chat.id).map(str::to_string);
+        let chosen = chosen_value.as_deref().and_then(SoundChoice::parse);
+        let chat_id = chat.id.clone();
+
+        let foreground = cx.theme().foreground;
+        let accent = cx.theme().accent;
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().muted;
+        let panel_color = cx.theme().popover;
+        let border = cx.theme().muted_foreground.opacity(0.22);
+        let width = px(240. * ui_scale);
+        let viewport = window.viewport_size();
+        let left = menu
+            .position
+            .x
+            .min(viewport.width - width - px(8.))
+            .max(px(8.));
+        let top = menu
+            .position
+            .y
+            .min(viewport.height - px(80.))
+            .max(px(8.));
+
+        // The row of one choice: the label, the value it stores and whether
+        // it is the one the chat has now.
+        let mut choices: Vec<(String, String, Option<String>, bool)> = Vec::new();
+        choices.push((
+            i18n::t("Follow the profile").to_string(),
+            "default".to_string(),
+            None,
+            chosen_value.is_none(),
+        ));
+        for builtin in BuiltinSound::ALL {
+            let value = SoundChoice::Builtin(builtin).encode();
+            choices.push((
+                i18n::t(builtin_label(builtin)).to_string(),
+                format!("builtin-{}", builtin.id()),
+                Some(value),
+                chosen == Some(SoundChoice::Builtin(builtin)),
+            ));
+        }
+        choices.push((
+            i18n::t("No sound").to_string(),
+            "none".to_string(),
+            Some("none".to_string()),
+            chosen == Some(SoundChoice::None),
+        ));
+
+        let mut rows = v_flex()
+            .id("chat-sound-rows")
+            .max_h(viewport.height - px(24.))
+            .overflow_y_scroll();
+        for (label, key, value, active) in choices {
+            let color = if active { accent } else { foreground };
+            let row = h_flex()
+                .id(SharedString::from(format!("chat-sound-{key}")))
+                .w_full()
+                .px_3()
+                .py(px(8.))
+                .gap_3()
+                .items_center()
+                .text_sm()
+                .text_color(color)
+                .when(active, |row| row.font_weight(FontWeight::SEMIBOLD))
+                .child(
+                    div().w(px(16. * ui_scale)).flex_none().when(active, |slot| {
+                        slot.child(Icon::new(IconName::Check).with_size(px(14. * ui_scale)).text_color(color))
+                    }),
+                )
+                .child(div().flex_1().truncate().child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .when(active, |hint| hint.text_color(accent))
+                        .child(if active {
+                            i18n::t("Current").to_string()
+                        } else {
+                            String::new()
+                        }),
+                );
+            let chat_id = chat_id.clone();
+            rows = rows.child(row.cursor_pointer().hover(move |style| style.bg(hover)).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.set_chat_sound(chat_id.clone(), value.clone(), cx);
+                }),
+            ));
+        }
+
+        // The file of the user: the name it has, or the invitation to pick.
+        let file_label = chosen
+            .as_ref()
+            .and_then(SoundChoice::file_name)
+            .unwrap_or_else(|| i18n::t("Choose a file…").to_string());
+        let file_active = matches!(chosen, Some(SoundChoice::File(_)));
+        let color = if file_active { accent } else { foreground };
+        let chat_id_for_file = chat.id.clone();
+        rows = rows.child(
+            h_flex()
+                .id("chat-sound-file")
+                .w_full()
+                .px_3()
+                .py(px(8.))
+                .gap_3()
+                .items_center()
+                .text_sm()
+                .text_color(color)
+                .child(div().w(px(16. * ui_scale)).flex_none())
+                .child(div().flex_1().truncate().child(file_label))
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.choose_chat_sound_file(chat_id_for_file.clone(), window, cx);
+                })),
+        );
+
+        let panel = v_flex()
+            .w(width)
+            .max_h(viewport.height - px(24.))
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(panel_color)
+            .py(px(4.))
+            .child(rows);
+        // El fondo que cierra el menu con cualquier clic fuera de el.
+        div()
+            .id("chat-sound-backdrop")
+            .absolute()
+            .inset_0()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_sound_menu(cx);
+                cx.stop_propagation();
+            }))
+            .on_aux_click(cx.listener(|this, _, _, cx| {
+                this.close_chat_sound_menu(cx);
                 cx.stop_propagation();
             }))
             .child(panel.absolute().left(left).top(top))
@@ -3819,6 +4147,11 @@ impl Whatfast {
         };
         let identity_line = typing_line.unwrap_or(subtitle);
         let reply_context = self.replying_to_message_id.as_deref().map(|message_id| {
+            // A status is not in the open thread: the bar says it is one and
+            // shows its caption (or its kind) when the strip still has it.
+            if let Some(message) = status_message(self.store.statuses(), message_id) {
+                return (i18n::t("Status").to_string(), status_preview(message));
+            }
             self.store.message(message_id).map_or_else(
                 || {
                     (
@@ -8925,7 +9258,20 @@ impl Whatfast {
         let text_width = px((f32::from(bubble_width) - 24. * self.ui_scale).max(80.));
         let reaction_chips = reaction_counts(message);
         let reply_target_id = message.reply_to_message_id.clone();
-        let reply_target = self.store.message(&reply_target_id).cloned();
+        // A status is not in the open thread: the reply still names it, and
+        // the strip of the profile is where its preview lives.
+        let status_reply = answers_a_status(message, self.store.statuses_chat_id());
+        let reply_target = self
+            .store
+            .message(&reply_target_id)
+            .cloned()
+            .or_else(|| {
+                if status_reply {
+                    status_message(self.store.statuses(), &reply_target_id).cloned()
+                } else {
+                    None
+                }
+            });
         let reply_count = self.store.reply_count(&message.id);
         let first_reply_id = self.store.first_reply_id(&message.id).map(str::to_owned);
         let chat_id = message.chat_id.clone();
@@ -9170,47 +9516,39 @@ impl Whatfast {
             })
             .when(!reply_target_id.is_empty(), |bubble| {
                 let target_id = reply_target_id.clone();
-                let (sender, preview) = reply_target.as_ref().map_or_else(
-                    || {
-                        (
-                            i18n::t("Original message").to_string(),
-                            i18n::t("Message unavailable").to_string(),
-                        )
-                    },
-                    |target| {
-                        let sender = if target.from_me {
-                            i18n::t("You").to_string()
-                        } else if !target.sender_name.trim().is_empty() {
-                            target.sender_name.trim().to_string()
-                        } else {
-                            i18n::t("Unknown contact").to_string()
-                        };
-                        (sender, message_preview(target))
-                    },
-                );
-                let reply_thumb: Option<PathBuf> = reply_target.as_ref().and_then(|target| {
-                    match target.content.as_ref() {
-                        Some(proto::message::Content::Image(image)) => {
-                            let row = image_row_path(image);
-                            let viewer = image_viewer_path(image);
-                            image_source_candidates(image, row, viewer)
-                                .into_iter()
-                                .find(|p| !p.is_empty() && self.store.media_exists(p))
-                                .map(PathBuf::from)
-                        }
-                        Some(proto::message::Content::Attachment(att)) => {
-                            if att.kind == "image"
-                                && !att.local_path.is_empty()
-                                && self.store.media_exists(&att.local_path)
-                            {
-                                Some(PathBuf::from(&att.local_path))
+                let (sender, preview) = if status_reply {
+                    // The header says the answer was to a status; the line
+                    // under it is the status itself, or that it is gone.
+                    (
+                        i18n::t("Status").to_string(),
+                        reply_target
+                            .as_ref()
+                            .map(status_preview)
+                            .unwrap_or_else(|| i18n::t("Status unavailable").to_string()),
+                    )
+                } else {
+                    reply_target.as_ref().map_or_else(
+                        || {
+                            (
+                                i18n::t("Original message").to_string(),
+                                i18n::t("Message unavailable").to_string(),
+                            )
+                        },
+                        |target| {
+                            let sender = if target.from_me {
+                                i18n::t("You").to_string()
+                            } else if !target.sender_name.trim().is_empty() {
+                                target.sender_name.trim().to_string()
                             } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                });
+                                i18n::t("Unknown contact").to_string()
+                            };
+                            (sender, message_preview(target))
+                        },
+                    )
+                };
+                let reply_thumb = reply_target
+                    .as_ref()
+                    .and_then(|target| reply_thumbnail(&self.store, target, 38. * self.ui_scale));
                 bubble.child(
                     h_flex()
                         .id(("quoted-message", index))
@@ -9246,16 +9584,16 @@ impl Whatfast {
                                 ),
                         )
                         .when_some(reply_thumb, |quote, thumb| {
-                            quote.child(
-                                img(thumb)
-                                    .size(px(38. * self.ui_scale))
-                                    .flex_none()
-                                    .rounded_sm()
-                                    .object_fit(ObjectFit::Cover),
-                            )
+                            quote.child(thumb)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.scroll_to_message(&target_id);
+                            if status_reply {
+                                // Tapping the quote opens the status it
+                                // answers, when it is still in the strip.
+                                crate::statuses::open_status_message(this, &target_id, cx);
+                            } else {
+                                this.scroll_to_message(&target_id);
+                            }
                             cx.notify();
                         })),
                 )
@@ -11901,6 +12239,9 @@ impl Render for Whatfast {
             })
             .when(self.chat_menu.is_some(), |root| {
                 root.child(self.render_chat_menu(window, cx))
+            })
+            .when(self.chat_sound_menu.is_some(), |root| {
+                root.child(self.render_chat_sound_menu(window, cx))
             })
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))

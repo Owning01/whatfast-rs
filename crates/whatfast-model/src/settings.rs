@@ -127,6 +127,10 @@ pub struct Settings {
     /// The sound of a toast that appears. Same encoding as `sound_received`;
     /// `none` keeps the toast silent.
     pub sound_notification: String,
+    /// The sound of a message that arrives in one conversation, when the
+    /// user asked for one. A chat without an entry plays `sound_received`.
+    #[serde(default)]
+    pub chat_sounds: Vec<ChatSound>,
     /// The directory of "Save to folder"; empty asks every time.
     pub download_dir: String,
     /// Whether the chat list stays beside the conversation even on narrow
@@ -211,6 +215,21 @@ fn default_auto_download_max_mb() -> u32 {
     25
 }
 
+/// The sound that the user picked for one conversation.
+///
+/// The sound uses the encoding of the profile: `builtin:<id>`, `file:<path>`
+/// or `none` for silence. A conversation without an entry follows the sound
+/// of the profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSound {
+    /// The conversation the sound belongs to.
+    #[serde(default)]
+    pub chat_id: String,
+    /// The sound, with the encoding of `sound_received`.
+    #[serde(default)]
+    pub sound: String,
+}
+
 /// A custom folder of conversations shown in the chat filter bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatFolder {
@@ -249,6 +268,7 @@ impl Default for Settings {
             // A softer bell for the popup, different from the one of the chat
             // message: the two sounds tell the user what just happened.
             sound_notification: "builtin:bell".to_string(),
+            chat_sounds: Vec::new(),
             download_dir: String::new(),
             split_view: false,
             battery_saver: false,
@@ -329,6 +349,33 @@ impl Settings {
     /// The width of the bubbles, or `None` for the one of the reference.
     pub fn bubble_width(&self) -> Option<f32> {
         (self.bubble_width >= 0.0).then_some(self.bubble_width)
+    }
+
+    /// The sound that one conversation has, when the user picked one.
+    ///
+    /// `None` means the conversation follows `sound_received`.
+    pub fn chat_sound(&self, chat_id: &str) -> Option<&str> {
+        self.chat_sounds
+            .iter()
+            .find(|entry| entry.chat_id == chat_id)
+            .map(|entry| entry.sound.as_str())
+    }
+
+    /// Sets or clears the sound of one conversation.
+    ///
+    /// An empty value removes the entry, so the chat follows the profile
+    /// again; a value replaces the previous one.
+    pub fn set_chat_sound(&mut self, chat_id: &str, sound: Option<String>) {
+        let sound = sound.map(|value| value.trim().to_string());
+        self.chat_sounds.retain(|entry| entry.chat_id != chat_id);
+        if let Some(sound) = sound
+            && !sound.is_empty()
+        {
+            self.chat_sounds.push(ChatSound {
+                chat_id: chat_id.to_string(),
+                sound,
+            });
+        }
     }
 }
 

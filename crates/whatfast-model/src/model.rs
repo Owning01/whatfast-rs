@@ -338,11 +338,21 @@ impl Store {
         // event with `complete = false` (a second batch, a retry) used to
         // take the window back to "importing" and never finish.
         if complete {
-            self.sync_active = false;
-            self.sync_complete = true;
+            self.mark_sync_ready();
         } else if !self.sync_complete {
             self.sync_active = true;
         }
+    }
+
+    /// Marks the initial import as done.
+    ///
+    /// The sounds and the toasts of the messages wait for this mark. A
+    /// resumed account never receives the history again, so waiting for the
+    /// `complete` event of a chunk leaves them silent forever: the caller
+    /// marks the sync ready when the account already has its conversations.
+    pub fn mark_sync_ready(&mut self) {
+        self.sync_active = false;
+        self.sync_complete = true;
     }
 
     pub fn message(&self, id: &str) -> Option<&whatfast_protocol::Message> {
@@ -912,6 +922,14 @@ impl Store {
         {
             return false;
         }
+        // The status panel and the first sync tell the same fact: a phase of
+        // complete is the mark that the sounds and the toasts wait for. The
+        // status arrives on its own (`GetSyncStatus`, `SyncStatusChanged`),
+        // so a sync that completed in a previous run does not leave the
+        // window waiting for a chunk that never comes.
+        if status.phase == whatfast_protocol::SyncPhase::Complete as i32 {
+            self.mark_sync_ready();
+        }
         self.sync_status = Some(status);
         true
     }
@@ -1168,6 +1186,10 @@ impl Store {
             return updated;
         }
         attachment.local_path = path;
+        // A voice note changes shape when its file arrives: it was a card
+        // with a download arrow and becomes a player. The cached height
+        // belonged to the other shape and left a gap under the bubble.
+        self.invalidate_message_height(message_id);
         true
     }
 
@@ -1320,6 +1342,16 @@ impl Store {
             heights.remove(id);
         }
         self.measured_width_bucket = None;
+    }
+
+    /// Drops the cached height of one message.
+    ///
+    /// The paint depends on state that lives outside the row (a download that
+    /// failed, a player that replaced a card); after that state changes the
+    /// next frame has to measure the bubble again or the row keeps the height
+    /// of the previous shape and overlaps its neighbour.
+    pub fn invalidate_height(&mut self, message_id: &str) {
+        self.invalidate_message_height(message_id);
     }
 
     /// Sorts the conversations of the sidebar again.

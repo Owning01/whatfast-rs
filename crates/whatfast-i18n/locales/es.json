@@ -6,6 +6,9 @@
   "strings": {
     "Play sounds": "Reproducir sonidos",
     "Sound when a message arrives": "Sonido al recibir un mensaje",
+    "Sound of this chat": "Sonido de este chat",
+    "Follow the profile": "Usar el del perfil",
+    "Current": "Actual",
     "Sound when I send a message": "Sonido al enviar un mensaje",
     "Sounds": "Sonidos",
     "The sounds of the messages that arrive and leave.": "Los sonidos de los mensajes que llegan y salen.",
@@ -509,6 +512,7 @@
     "States / Channels / Agents / Archived": "Estados / Canales / Agentes / Archivados",
     "Status": "Estado",
     "Status deleted": "Estado eliminado",
+    "Status unavailable": "Estado no disponible",
     "Status updates muted for contact": "Estados silenciados para este contacto",
     "Sticker": "Sticker",
     "Sticker download timed out · Click to retry": "La descarga del sticker tardó demasiado · Toca para reintentar",

@@ -651,13 +651,15 @@ fn ogg_sample_rate(payload: &[u8]) -> u32 {
         return 48_000;
     }
     if let Some(index) = payload.windows(6).position(|window| window == b"vorbis")
-        && payload.len() >= index + 16
+        && payload.len() >= index + 15
     {
+        // After "vorbis" come the version (4 bytes), the channels (1 byte)
+        // and then the sample rate: it starts 11 bytes after the marker.
         return u32::from_le_bytes([
+            payload[index + 11],
             payload[index + 12],
             payload[index + 13],
             payload[index + 14],
-            payload[index + 15],
         ]);
     }
     0
@@ -1143,8 +1145,14 @@ pub async fn send_attachment(
     }
     // The duration and the display size come from the file itself: a voice
     // note without `seconds` and a video without its size land on the phone
-    // as an empty bubble.
-    let metadata = probe_outgoing_media(file_path);
+    // as an empty bubble. A document has neither, and probing it read whole
+    // files and ran `ffprobe` for nothing: a PDF of 200 MB froze the bridge
+    // while every other request waited.
+    let metadata = if wire_kind == "audio" || wire_kind == "video" {
+        probe_outgoing_media(file_path)
+    } else {
+        OutgoingMediaMetadata::default()
+    };
     let fingerprint = format!(
         "{wire_kind}\u{0}{caption}\u{0}{file_name}\u{0}{}",
         hash_hex(&bytes)

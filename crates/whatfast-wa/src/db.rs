@@ -1986,6 +1986,31 @@ impl Store {
         self.write(|conn| Self::refresh_chat_pointer_in(conn, jid))
     }
 
+    /// Recomputes the pointer of every chat that has messages but no preview.
+    ///
+    /// A LID to phone-number merge copies the rows into the winner without
+    /// going through the writer that maintains `last_message_*`; those chats
+    /// ended at the bottom of the sidebar with an empty preview. The pass is
+    /// cheap and runs at start, so a profile written by an older build heals
+    /// without the user pressing the repair button.
+    pub fn repair_empty_chat_pointers(&self) -> rusqlite::Result<usize> {
+        self.write(|conn| {
+            let jids = {
+                let mut statement = conn.prepare(
+                    "SELECT jid FROM chats
+                     WHERE (last_message_at=0 OR last_message_id='')
+                       AND EXISTS (SELECT 1 FROM messages WHERE chat_jid=chats.jid)",
+                )?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for jid in &jids {
+                Self::refresh_chat_pointer_in(conn, jid)?;
+            }
+            Ok(jids.len())
+        })
+    }
+
     /// The pointer of one chat, on a connection the caller already holds.
     ///
     /// A revoked row is never the preview: the four subqueries skip it and

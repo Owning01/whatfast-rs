@@ -492,6 +492,8 @@ pub(crate) struct OutgoingAttachment {
     pub(crate) kind: whatfast_protocol::AttachmentKind,
     pub(crate) caption: String,
     pub(crate) reply_to_message_id: String,
+    /// The conversation holding the quoted message, when it is not this one.
+    pub(crate) reply_to_chat_id: String,
     /// True for a voice note, which cannot carry a caption.
     pub(crate) voice_note: bool,
 }
@@ -647,7 +649,7 @@ impl RpcClient {
                 caption: attachment.caption,
                 reply_to_message_id: attachment.reply_to_message_id,
                 voice_note: attachment.voice_note,
-                reply_to_chat_id: String::new(),
+                reply_to_chat_id: attachment.reply_to_chat_id,
             }),
             PendingRequest::SendAttachment { chat_id },
         )
