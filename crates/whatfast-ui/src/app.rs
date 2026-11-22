@@ -4082,6 +4082,11 @@ impl Whatfast {
         let Some(chat) = self.store.chat(&message.chat_id) else {
             return false;
         };
+        // The states are not a conversation: they live in their own strip and
+        // do not ring the desktop.
+        if self.is_status_chat(chat) {
+            return false;
+        }
         let chat_in_front =
             self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
         // port: `shouldNotify` is falsy based: a muted chat, or a chat that
@@ -4132,6 +4137,11 @@ impl Whatfast {
         let Some(chat) = self.store.chat(&message.chat_id) else {
             return;
         };
+        // A status does not sound either: the strip shows it when the user
+        // opens it, the same way the phone stays quiet.
+        if self.is_status_chat(chat) {
+            return;
+        }
         let incoming = IncomingSound {
             enabled: self.settings.sounds_enabled,
             ready: self.store.sync_complete,
@@ -4871,7 +4881,13 @@ impl Whatfast {
             }
             Some(backend_event::Event::ChatUpserted(upsert)) => {
                 if let Some(chat) = upsert.chat {
-                    self.store.upsert_chat(chat);
+                    // El chat del broadcast de los estados no es una
+                    // conversacion: su vista es la tira. Si entra al store,
+                    // aparece en la lista con el titulo "status" y suma un
+                    // no leido que nadie lee.
+                    if !self.is_status_chat(&chat) {
+                        self.store.upsert_chat(chat);
+                    }
                 }
             }
             Some(backend_event::Event::ChatMerged(merge)) => {
@@ -5201,7 +5217,10 @@ impl Whatfast {
     /// the bubble to scroll into view. The ceiling of the profile keeps a
     /// hostile chat from filling the disk; `0` means no ceiling.
     fn auto_download_message_media(&mut self, message: &Message) {
-        if !self.store.sync_complete || self.is_status_message(&message.id) {
+        if !self.store.sync_complete
+            || self.is_status_message(&message.id)
+            || self.is_status_chat_id(&message.chat_id)
+        {
             return;
         }
         let max_bytes = u64::from(self.settings.auto_download_max_mb).saturating_mul(1024 * 1024);
@@ -7248,7 +7267,7 @@ impl Whatfast {
             .store
             .chats
             .iter()
-            .filter(|chat| chat.unread_count > 0)
+            .filter(|chat| chat.unread_count > 0 && !self.is_status_chat(chat))
             .map(|chat| chat.id.clone())
             .collect();
         if unread.is_empty() {
@@ -9659,6 +9678,24 @@ impl Whatfast {
         self.load_message_attachment(chat_id, message_id);
     }
 
+    /// Whether the conversation is the broadcast of the states.
+    ///
+    /// The states live in their own strip, but the backend announces their
+    /// chat like any other: without this filter a status that arrives raises
+    /// a toast titled "status" and grows a counter that the list never shows.
+    fn is_status_chat(&self, chat: &whatfast_protocol::Chat) -> bool {
+        let statuses = self.store.statuses_chat_id();
+        chat.id == "status@broadcast"
+            || chat.transport_jid == "status@broadcast"
+            || (!statuses.is_empty() && chat.id == statuses)
+    }
+
+    /// The same test for the identifier of a message.
+    fn is_status_chat_id(&self, chat_id: &str) -> bool {
+        let statuses = self.store.statuses_chat_id();
+        chat_id == "status@broadcast" || (!statuses.is_empty() && chat_id == statuses)
+    }
+
     /// Whether the message is one of the statuses of the profile.
     fn is_status_message(&self, message_id: &str) -> bool {
         self.store
@@ -11370,11 +11407,13 @@ impl Whatfast {
         let view = self.sidebar_view;
         // Los no leidos de la lista y los estados sin ver: los dos datos que
         // la referencia pinta como el circulo del numero y el punto verde.
+        // El estado no es una conversacion y su contador crece solo: sumarlo
+        // dejaba un numero que la lista nunca baja.
         let unread: u32 = self
             .store
             .chats
             .iter()
-            .filter(|chat| !chat.archived)
+            .filter(|chat| !chat.archived && !self.is_status_chat(chat))
             .map(|chat| chat.unread_count)
             .sum();
         let states_unseen = {
