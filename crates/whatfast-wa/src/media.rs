@@ -11,10 +11,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use wacore::download::{Downloadable, MediaType};
 use whatsapp_rust::Jid;
-use whatsapp_rust::download::{DownloadLimits, DownloadParams};
+use whatsapp_rust::download::{DownloadLimits, DownloadParams, DownloadWriter};
 use whatsapp_rust::upload::UploadOptions;
 use whatsapp_rust::waproto::whatsapp as wa;
 
@@ -25,6 +26,13 @@ use crate::session::Session;
 
 /// The download ceiling, the same 2 GiB the Go sidecar enforced.
 const MAX_MEDIA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// How often a running download checks that bytes are still arriving.
+const DOWNLOAD_PROGRESS_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A download that receives nothing for this long is abandoned, so a dead
+/// connection cannot keep the request loop waiting.
+const DOWNLOAD_STALL_MS: i64 = 45_000;
 
 /// The outgoing image ceiling (`maxImageBytes`) and the safe decode bounds
 /// `safeImageConfig` enforced before an upload.
@@ -300,16 +308,21 @@ async fn deliver_media(
             );
             ("send_failed".into(), format!("{error}"), true)
         })?;
-    store
-        .set_message_status(
-            chat_id,
-            &row.id,
-            whatfast_protocol::MessageStatus::Sent as i64,
-        )
-        .map_err(internal)?;
+    // The upload and the stanza are done; a failure to write the status back
+    // is not a failed send. Returning an error here made the desktop offer
+    // the file again, and the phone got it twice.
+    if let Err(error) = store.set_message_status(
+        chat_id,
+        &row.id,
+        whatfast_protocol::MessageStatus::Sent as i64,
+    ) {
+        tracing::error!(chat = %chat_id, id = %row.id, %error, "the sent status could not be stored");
+    }
     let mut row = row;
     row.status = whatfast_protocol::MessageStatus::Sent as i64;
-    refresh_chat_pointer(store, chat_id).map_err(internal)?;
+    if let Err(error) = refresh_chat_pointer(store, chat_id) {
+        tracing::error!(chat = %chat_id, %error, "the chat pointer could not be refreshed");
+    }
     Ok(row)
 }
 
@@ -1536,16 +1549,64 @@ impl MediaSource {
     }
 }
 
-/// Downloads one message's media into the cache and answers the file path.
+/// A file writer that records when it last received bytes.
 ///
-/// A message whose file is already cached answers it straight away; the
-/// download decrypts straight into a temporary file that is renamed into
-/// place, so a failed attempt never leaves a half file behind the final
-/// name.
+/// The download thread writes through it, so the wait in
+/// [`fetch_message_media`] can tell a slow transfer from a dead one.
+struct WatchedFile {
+    file: std::fs::File,
+    last_write_ms: Arc<AtomicI64>,
+}
+
+impl std::io::Write for WatchedFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.file.write(buffer)?;
+        if written > 0 {
+            self.last_write_ms.store(db::now_ms(), Ordering::Relaxed);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for WatchedFile {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+impl DownloadWriter for WatchedFile {
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+}
+
+/// The media descriptor of one row.
 ///
-/// The Go sidecar also recovered expired CDN references through app-state
-/// before retrying; this port answers an honest `not_found` instead until
-/// that wave lands.
+/// An older build saved a photo, a video or an audio with its kind and an
+/// empty descriptor: the envelope with the URL and the key stayed inside
+/// `payload`, so the download could never start. The row is decoded once
+/// here and written back, so the file downloads and the bubble keeps the
+/// size and the embedded preview.
+fn media_source(store: &Arc<Store>, row: &MessageRow) -> Option<MediaSource> {
+    let source = MediaSource::of(row);
+    if source
+        .as_ref()
+        .is_some_and(|source| !source.direct_path.is_empty())
+    {
+        return source;
+    }
+    let mut hydrated = row.clone();
+    if !crate::ingest::hydrate_from_payload(&mut hydrated) {
+        return source;
+    }
+    let _ = store.insert_message(&hydrated);
+    MediaSource::of(&hydrated).or(source)
+}
+
 pub(crate) async fn fetch_message_media(
     session: &Session,
     store: &Arc<Store>,
@@ -1561,7 +1622,7 @@ pub(crate) async fn fetch_message_media(
         return Err(("not_found".into(), "attachment was deleted".into(), false));
     }
     let chat_id = row.chat_jid.clone();
-    let source = MediaSource::of(&row).ok_or_else(|| {
+    let source = media_source(store, &row).ok_or_else(|| {
         (
             "invalid_argument".into(),
             "message is not an attachment".into(),
@@ -1629,7 +1690,8 @@ pub(crate) async fn fetch_message_media(
         ".media-{}.tmp",
         hash_hex(cache.to_string_lossy().as_bytes())
     ));
-    let download = async {
+    let last_write = Arc::new(std::sync::atomic::AtomicI64::new(db::now_ms()));
+    let mut download = Box::pin(async {
         let file = std::fs::File::create(&temporary).map_err(|error| {
             (
                 "internal".into(),
@@ -1637,10 +1699,16 @@ pub(crate) async fn fetch_message_media(
                 false,
             )
         })?;
-        // The writer travels by value and comes back inside the result.
-        let file = session
+        // The writer travels by value and comes back inside the result. It
+        // also says when the last byte arrived, so a silent connection stops
+        // the wait instead of holding the loop.
+        let writer = WatchedFile {
+            file,
+            last_write_ms: last_write.clone(),
+        };
+        let writer = session
             .client
-            .download_to_writer(&params, file, DownloadLimits::default())
+            .download_to_writer(&params, writer, DownloadLimits::default())
             .await
             .map_err(|error| {
                 (
@@ -1649,6 +1717,7 @@ pub(crate) async fn fetch_message_media(
                     true,
                 )
             })?;
+        let file = writer.file;
         // Flushing a large file waits on the disk: it runs off the async
         // thread, or the bridge stops answering until the write lands.
         tokio::task::spawn_blocking(move || file.sync_all())
@@ -1668,8 +1737,34 @@ pub(crate) async fn fetch_message_media(
                 )
             })?;
         Ok(())
+    });
+    // A transfer that stops receiving bytes used to hold the request loop
+    // until the HTTPS stack gave up: the log kept a `GetMessageAttachment`
+    // of ten minutes, and every other answer waited behind it. The poll
+    // ends the wait at the first long silence, and the next open retries.
+    let finished = loop {
+        tokio::select! {
+            done = &mut download => break Some(done),
+            _ = tokio::time::sleep(DOWNLOAD_PROGRESS_POLL) => {
+                let idle = db::now_ms().saturating_sub(last_write.load(Ordering::Relaxed));
+                if idle >= DOWNLOAD_STALL_MS {
+                    break None;
+                }
+            }
+        }
     };
-    if let Err(error) = download.await {
+    let Some(finished) = finished else {
+        let _ = std::fs::remove_file(&temporary);
+        return Err((
+            "unavailable".into(),
+            format!(
+                "the download received no data for {} seconds",
+                DOWNLOAD_STALL_MS / 1000
+            ),
+            true,
+        ));
+    };
+    if let Err(error) = finished {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }

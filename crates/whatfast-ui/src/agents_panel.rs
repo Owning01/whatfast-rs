@@ -372,16 +372,31 @@ impl AgentsPanel {
 
     /// Records that a draft is on its way to the backend. The row changes to
     /// `sending` on disk too, so a second approval cannot send it again.
-    pub(crate) fn mark_sending(&self, chat_id: &str, text: &str, draft_id: i64) {
+    ///
+    /// The Send button of the tray is the approval of the draft, and the
+    /// state machine does not let `proposed` jump to `sending`: the row goes
+    /// through `approved` first. Without that step the write answered
+    /// `false`, the row stayed `proposed`, and the tray offered it again
+    /// every few seconds for a second, duplicated send.
+    pub(crate) fn mark_sending(&self, chat_id: &str, text: &str, draft_id: i64) -> bool {
         let db = self.state.borrow().db.clone();
-        if let Some(db) = db
-            && let Err(error) = db.set_draft_state(draft_id, DraftState::Sending)
-        {
-            self.fail(i18n::t_args(
-                "The drawer of the agents could not be written: {error}",
-                &[("error", crate::helpers::user_error(&error))],
-            ));
-            return;
+        if let Some(db) = db {
+            let moved = db
+                .set_draft_state(draft_id, DraftState::Approved)
+                .and_then(|_| db.set_draft_state(draft_id, DraftState::Sending));
+            match moved {
+                Ok(true) => {}
+                // The row is already on its way, or it is closed: this click
+                // must not send it a second time.
+                Ok(false) => return false,
+                Err(error) => {
+                    self.fail(i18n::t_args(
+                        "The drawer of the agents could not be written: {error}",
+                        &[("error", crate::helpers::user_error(&error))],
+                    ));
+                    return false;
+                }
+            }
         }
         let mut state = self.state.borrow_mut();
         state.sends.retain(|send| send.draft_id != draft_id);
@@ -392,6 +407,7 @@ impl AgentsPanel {
         });
         state.error = None;
         state.notice = None;
+        true
     }
 
     /// Closes the row of a draft with the answer of the backend.

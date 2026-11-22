@@ -1390,7 +1390,6 @@ impl Whatfast {
                 // Enter is decided in the subscription: the input has no
                 // setter for this and the setting changes at runtime.
                 .submit_on_enter(false)
-                .clean_on_escape()
         });
         let images = crate::image_cache::BoundedImageCache::new(cx);
         images.update(cx, |cache, _| cache.set_battery_saver(battery_saver));
@@ -2099,14 +2098,21 @@ impl Whatfast {
                         .is_some_and(|content| {
                             matches!(content, whatfast_protocol::message::Content::Image(image) if image.sticker)
                         });
+                    let key = (chat_id, message_id);
                     self.image_failures.insert(
-                        (chat_id, message_id),
+                        key.clone(),
                         if sticker {
                             i18n::t("Sticker download timed out · Click to retry").into()
                         } else {
                             i18n::t("Photo download timed out · Click to retry").into()
                         },
                     );
+                    // A save that was waiting for this download never
+                    // reaches the copy step: closing it keeps the batch from
+                    // showing "Downloading N/M" for the rest of the session.
+                    if let Some(pending) = self.pending_image_saves.remove(&key) {
+                        self.finish_image_save(&pending.batch_id, false, cx);
+                    }
                     self.pump_image_download_queue();
                 }
                 PendingRequest::Search { generation, .. }
@@ -2352,6 +2358,16 @@ impl Whatfast {
                         i18n::t("Downloading the file timed out · Click to retry"),
                     );
                     self.pump_image_download_queue();
+                }
+                PendingRequest::ChatMedia { chat_id, category } => {
+                    // The media tab of the chat info must not spin forever
+                    // when the list fails or takes too long.
+                    if let Some(state) = self.chat_info.as_mut()
+                        && state.chat_id == *chat_id
+                        && state.media_tab == *category
+                    {
+                        state.media_loading = false;
+                    }
                 }
                 PendingRequest::AgentAsk { .. } => {
                     self.quick_ask
@@ -3035,6 +3051,15 @@ impl Whatfast {
             if let PendingRequest::Newsletters = &pending {
                 self.newsletters_loading = false;
             }
+            if let PendingRequest::ChatMedia { chat_id, category } = &pending
+                && let Some(state) = self.chat_info.as_mut()
+                && state.chat_id == *chat_id
+                && state.media_tab == *category
+            {
+                // A list that failed stops the spinner: the tab shows what it
+                // already had instead of waiting forever.
+                state.media_loading = false;
+            }
             if let PendingRequest::MessageAttachment {
                 chat_id,
                 message_id,
@@ -3405,7 +3430,13 @@ impl Whatfast {
                     } else {
                         i18n::t("Photo is no longer available")
                     };
-                    self.image_failures.insert(key, label.into());
+                    self.image_failures.insert(key.clone(), label.into());
+                    // The save that was waiting for this photo cannot copy
+                    // it: closing the batch here keeps the toast from saying
+                    // "Downloading N/M" forever.
+                    if let Some(pending) = self.pending_image_saves.remove(&key) {
+                        self.finish_image_save(&pending.batch_id, false, cx);
+                    }
                 } else {
                     self.image_failures.remove(&key);
                     let image_path = image.image_path.clone();
@@ -8385,17 +8416,19 @@ impl Whatfast {
     /// writes a text. The tray keeps the row it closes and takes the answer in
     /// [`Whatfast::handle_response`], so a failure marks the draft and leaves
     /// the field of the message alone.
-    pub(crate) fn send_agent_draft(&mut self, draft_id: i64, chat_id: String, text: String) {
+    pub(crate) fn send_agent_draft(&mut self, draft_id: i64, chat_id: String, text: String) -> bool {
         if self.store.connection != ConnectionState::Connected {
             self.agents_panel
                 .fail(i18n::t("Reconnect to WhatsApp before sending").into());
-            return;
+            return false;
         }
         if let Err(error) = validate_text_message(&text) {
             self.agents_panel.fail(error);
-            return;
+            return false;
         }
-        self.agents_panel.mark_sending(&chat_id, &text, draft_id);
+        if !self.agents_panel.mark_sending(&chat_id, &text, draft_id) {
+            return false;
+        }
         self.request(
             rpc_request::Request::SendText(whatfast_protocol::SendTextRequest {
                 client_message_id: Uuid::new_v4().to_string(),
@@ -8413,6 +8446,7 @@ impl Whatfast {
                 draft_id: Some(draft_id),
             },
         );
+        true
     }
 
     /// Opens the fast mode of the chat: a question about the conversation.

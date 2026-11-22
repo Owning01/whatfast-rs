@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use wacore::types::events::{
-    ChatPresenceUpdate, DeleteMessageForMeUpdate, Event, InboundMessage, Receipt, UnavailableType,
-    UndecryptableMessage,
+    ChatPresenceUpdate, DeleteMessageForMeUpdate, Event, InboundMessage, Receipt, ServerAck,
+    UnavailableType, UndecryptableMessage,
 };
 use wacore::types::message::{MessageInfo, StanzaMessageType};
 use wacore::types::presence::{ChatActivity, ReceiptType};
@@ -1346,6 +1346,47 @@ fn recovered_bubble(content: &Content) -> bool {
             && !content.text.trim().is_empty())
 }
 
+/// Fills the media columns of one row from the envelope kept in `payload`.
+///
+/// Before the envelopes were peeled, a photo, a video or an audio landed as a
+/// row with the right kind and an empty descriptor: the download could never
+/// start because nothing knew the URL or the key. The payload still carries
+/// them, so one message can repair itself when it is asked for.
+///
+/// It answers whether the row changed. A row whose payload is not a message,
+/// or that carries no media descriptor, is left untouched.
+pub(crate) fn hydrate_from_payload(row: &mut MessageRow) -> bool {
+    if row.payload.is_empty() {
+        return false;
+    }
+    let Ok(message) = whatsapp_rust::waproto::codec::message_decode(&row.payload) else {
+        return false;
+    };
+    let classified = classify(&message, "");
+    if !recovered_bubble(&classified) {
+        return false;
+    }
+    let before = (
+        row.image_direct_path.clone(),
+        row.image_media_key.clone(),
+        row.media_direct_path.clone(),
+        row.media_media_key.clone(),
+        row.media_file_name.clone(),
+    );
+    if row.kind != classified.kind {
+        row.kind = classified.kind.clone();
+    }
+    apply_content(row, &classified);
+    before
+        != (
+            row.image_direct_path.clone(),
+            row.image_media_key.clone(),
+            row.media_direct_path.clone(),
+            row.media_media_key.clone(),
+            row.media_file_name.clone(),
+        )
+}
+
 /// Rewrites the rows an older build stored as an opaque envelope.
 ///
 /// Before the envelopes were peeled, a photo of an album, a status shared in
@@ -1766,6 +1807,56 @@ pub fn receipt_status(kind: &ReceiptType) -> Option<MessageStatus> {
     }
 }
 
+/// Applies the server's answer to one sent stanza.
+///
+/// The library reports a plain ack and a nack through the same event; only
+/// the nack changes anything here. The message was already marked `Sent` when
+/// the stanza left, so a rejection has to be written back or the bubble lies
+/// forever.
+pub fn store_server_ack(
+    store: &Store,
+    ack: &ServerAck,
+) -> rusqlite::Result<Vec<BackendEvent>> {
+    // Every stanza class is acked: a receipt or a presence nack says nothing
+    // about a message.
+    if ack
+        .class
+        .as_deref()
+        .is_some_and(|class| class != "message")
+    {
+        return Ok(Vec::new());
+    }
+    let Some(error) = ack.error.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let Some(row) = store.message_by_id(&ack.id)? else {
+        return Ok(Vec::new());
+    };
+    if !row.from_me || row.revoked {
+        return Ok(Vec::new());
+    }
+    tracing::warn!(
+        id = %ack.id,
+        chat = %row.chat_jid,
+        kind = %row.kind,
+        %error,
+        "WhatsApp rejected the message"
+    );
+    store.set_message_status(
+        &row.chat_jid,
+        &row.id,
+        MessageStatus::Failed as i64,
+    )?;
+    // The desktop paints the red badge from the event: re-read the row so the
+    // bubble carries the stored status and not the one of the copy in hand.
+    let fresh = store.message(&row.chat_jid, &row.id)?;
+    Ok(fresh
+        .as_ref()
+        .map(message_upserted)
+        .into_iter()
+        .collect())
+}
+
 /// Applies a receipt to the store and answers with the wire event.
 ///
 /// The Go emitted one `receipt` event per referenced id after a successful
@@ -1955,8 +2046,14 @@ pub fn apply_event(
                 }
                 // An edit or a revoke merges into an existing row and the
                 // desktop still has to hear about it, like the Go's reducer
-                // announced every applied message.
-                events.push(message_upserted(&message));
+                // announced every applied message. The row read back carries
+                // the stored timestamp, the reactions and the status: the
+                // incoming copy has the event time and would move the bubble
+                // to the end of the thread and drop its reactions.
+                match store.message(&message.chat_jid, &message.id) {
+                    Ok(Some(fresh)) => events.push(message_upserted(&fresh)),
+                    _ => events.push(message_upserted(&message)),
+                }
             }
             (events, Vec::new())
         }
@@ -1976,6 +2073,18 @@ pub fn apply_event(
                 {
                     tracing::error!(%journal, "the receipt could not be journaled");
                 }
+                (Vec::new(), Vec::new())
+            }
+        },
+        // The server acknowledges every stanza it receives, and a nack is the
+        // only signal that a message it accepted was then rejected (479, 429,
+        // an invalid stanza). Without this arm the bubble kept the check of a
+        // message that never left, which is how a file the phone never
+        // received could look sent for weeks.
+        Event::ServerAck(ack) => match store_server_ack(store, ack) {
+            Ok(events) => (events, Vec::new()),
+            Err(error) => {
+                tracing::error!(%error, id = %ack.id, "the server ack could not be stored");
                 (Vec::new(), Vec::new())
             }
         },

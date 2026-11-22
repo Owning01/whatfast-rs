@@ -89,8 +89,12 @@ pub(crate) fn hidden(count: usize) -> usize {
 /// ones of [`Whatfast::send_agent_draft`]. The row leaves the band right away:
 /// the answer of the backend closes it in `agents.db`.
 pub(crate) fn send(app: &mut Whatfast, draft_id: i64, chat_id: String, text: String) {
-    app.send_agent_draft(draft_id, chat_id, text);
-    forget(app, draft_id);
+    // The row only leaves the band when the request was really queued: a
+    // refused send (offline, empty text, a row already on its way) leaves it
+    // in place, so the user sees the draft and the reason.
+    if app.send_agent_draft(draft_id, chat_id, text) {
+        forget(app, draft_id);
+    }
 }
 
 /// Puts the text of a draft in the composer and drops the draft.

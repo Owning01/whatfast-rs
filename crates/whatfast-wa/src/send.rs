@@ -448,11 +448,16 @@ pub async fn send_text(
         })?;
     let mut row = row;
     row.status = MessageStatus::Sent as i64;
-    store
-        .set_message_status(&request.chat_id, &row.id, MessageStatus::Sent as i64)
-        .map_err(internal)?;
-    store.refresh_chat_pointer(&request.chat_id)
-        .map_err(|error| ("internal".into(), format!("{error}"), false))?;
+    // The stanza already left: a bookkeeping failure is not a failed send, and
+    // answering an error here made the desktop restore the draft and send the
+    // same message twice.
+    if let Err(error) = store.set_message_status(&request.chat_id, &row.id, MessageStatus::Sent as i64)
+    {
+        tracing::error!(chat = %request.chat_id, id = %row.id, %error, "the sent status could not be stored");
+    }
+    if let Err(error) = store.refresh_chat_pointer(&request.chat_id) {
+        tracing::error!(chat = %request.chat_id, %error, "the chat pointer could not be refreshed");
+    }
     Ok(row)
 }
 

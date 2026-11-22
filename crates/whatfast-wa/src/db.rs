@@ -1115,6 +1115,25 @@ impl Store {
         Ok(Some(message))
     }
 
+    /// One stored message by its id alone, with its reactions. A stanza ack
+    /// names the message and not the chat, so this is the lookup the server
+    /// answer needs.
+    pub fn message_by_id(&self, message_id: &str) -> rusqlite::Result<Option<MessageRow>> {
+        let message = self.read(|conn| {
+            conn.query_row(
+                &format!("{MESSAGE_SELECT} WHERE m.id=?1 AND m.kind<>'reaction' LIMIT 1"),
+                params![message_id],
+                message_from_row,
+            )
+            .optional()
+        })?;
+        let Some(mut message) = message else {
+            return Ok(None);
+        };
+        self.read(|conn| attach_reactions(conn, std::slice::from_mut(&mut message)))?;
+        Ok(Some(message))
+    }
+
     /// Folds the child half of an HD upload into the message it belongs to.
     ///
     /// The child is not a message: its file replaces the one of the parent

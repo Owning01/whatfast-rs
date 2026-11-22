@@ -483,7 +483,7 @@ mod linux_tray {
             let mut root_props = HashMap::new();
             root_props.insert(
                 "children-display".to_string(),
-                OwnedValue::from(Value::from("submenu")),
+                OwnedValue::try_from(Value::from("submenu")).expect("menu property"),
             );
             (1, (0, root_props, vec![open_item, quit_item]))
         }
