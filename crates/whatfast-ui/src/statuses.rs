@@ -893,6 +893,12 @@ impl StatusStrip {
     ) -> gpui::Stateful<gpui::Div> {
         let scale = app.ui_scale;
         self.ensure_loaded(app, cx);
+        // La galeria: todos los estados de todos los autores a la vez, uno
+        // debajo del otro por autor. La lista de siempre queda a un
+        // interruptor de distancia, en la configuracion.
+        if app.settings.statuses_gallery {
+            return self.render_gallery(app, cx);
+        }
         let groups = app.store.statuses();
         let muted = cx.theme().muted_foreground;
 
@@ -1033,6 +1039,347 @@ impl StatusStrip {
         }
 
         list
+    }
+
+    /// The view of the statuses as a gallery.
+    ///
+    /// The list of the strip spends one row per contact; this view spends one
+    /// row per author with every status of that author on it, side by side,
+    /// so the whole strip reads at once like an album. The media is fetched
+    /// when the view turns on (`Whatfast::download_status_media`), and each
+    /// card paints the embedded preview until the file lands.
+    fn render_gallery(
+        &self,
+        app: &Whatfast,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let scale = app.ui_scale;
+        let muted = cx.theme().muted_foreground;
+        let groups = app.store.statuses();
+        let mut page = v_flex()
+            .id("status-gallery")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(14. * scale))
+            .px(px(16. * scale))
+            .py(px(14. * scale));
+        let mut shown = 0usize;
+        for (group_index, group) in groups.iter().enumerate() {
+            if app.settings.muted_status_senders.contains(&group.sender_id) {
+                continue;
+            }
+            if group.messages.is_empty() {
+                continue;
+            }
+            shown += 1;
+            page = page.child(self.render_gallery_row(app, group, group_index, scale, cx));
+        }
+        if shown == 0 {
+            page = page.child(
+                v_flex()
+                    .items_center()
+                    .justify_center()
+                    .py(px(60. * scale))
+                    .gap(px(10. * scale))
+                    .child(
+                        Icon::new(WhatfastIcon::Status)
+                            .with_size(px(34. * scale))
+                            .text_color(muted),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(i18n::t("No statuses yet")),
+                    ),
+            );
+        }
+        page
+    }
+
+    /// One author of the gallery: the header with the photo and the name,
+    /// and every status of that author below, all visible at once.
+    fn render_gallery_row(
+        &self,
+        app: &Whatfast,
+        group: &StatusGroup,
+        group_index: usize,
+        scale: f32,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Div {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let accent = cx.theme().accent;
+        let avatar_path = sender_avatar(app, group);
+        let own = group.sender_id == "me@s.whatsapp.net"
+            || group.messages.iter().any(|message| message.from_me);
+        let label = if own {
+            i18n::t("My status").to_string()
+        } else {
+            sender_label(group)
+        };
+        let newest = group
+            .messages
+            .last()
+            .map(|message| status_time(message.timestamp_ms, now_ms()))
+            .unwrap_or_default();
+        let unseen = has_unseen(&self.state.borrow(), group);
+        let sender = group.sender_id.clone();
+        let state = self.state.clone();
+        let mut cards = h_flex()
+            .w_full()
+            .flex_wrap()
+            .gap(px(10. * scale))
+            .items_start();
+        for (message_index, message) in group.messages.iter().enumerate() {
+            cards = cards.child(self.render_gallery_card(
+                app,
+                message,
+                group,
+                (group_index, message_index),
+                unseen,
+                cx,
+            ));
+        }
+        v_flex()
+            .w_full()
+            .gap(px(8. * scale))
+            .pb(px(12. * scale))
+            .border_b_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .id(ElementId::Name(
+                        format!("status-gallery-author-{}", group_index).into(),
+                    ))
+                    .items_center()
+                    .gap(px(10. * scale))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        open_viewer(app, &state, group_index, &sender, None, cx);
+                    }))
+                    .child(avatar_element(
+                        &label,
+                        &avatar_path,
+                        px(34. * scale),
+                        cx,
+                    ))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(6. * scale))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .truncate()
+                                            .child(label),
+                                    )
+                                    .when(unseen, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .size(px(7. * scale))
+                                                .rounded_full()
+                                                .bg(accent),
+                                        )
+                                    }),
+                            )
+                            .child(div().text_xs().text_color(muted).child(newest)),
+                    ),
+            )
+            .child(cards)
+    }
+
+    /// One status of the gallery: the photo, the video or the text on a card
+    /// the size of a phone, with the hour at the bottom.
+    fn render_gallery_card(
+        &self,
+        app: &Whatfast,
+        message: &Message,
+        group: &StatusGroup,
+        position: (usize, usize),
+        unseen: bool,
+        cx: &mut Context<Whatfast>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (group_index, message_index) = position;
+        let scale = app.ui_scale;
+        let border = cx.theme().border;
+        let accent = cx.theme().accent;
+        let secondary = cx.theme().secondary;
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().muted;
+        let state = self.state.clone();
+        let sender = group.sender_id.clone();
+        let width = 146. * scale;
+        let height = 228. * scale;
+        let id = format!("status-card-{}", message.id);
+        let mut card = div()
+            .id(ElementId::Name(id.into()))
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h(px(height))
+            .rounded_lg()
+            .overflow_hidden()
+            .border_1()
+            .border_color(if unseen { accent } else { border })
+            .bg(secondary)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |app, _, _, cx| {
+                open_viewer(
+                    app,
+                    &state,
+                    group_index,
+                    &sender,
+                    Some(message_index),
+                    cx,
+                );
+            }));
+        let mut painted = false;
+        if let Some(Content::Image(image)) = &message.content {
+            let path = if !image.local_path.is_empty()
+                && app.store.media_exists(&image.local_path)
+            {
+                Some(PathBuf::from(&image.local_path))
+            } else if !image.thumbnail_path.is_empty()
+                && app.store.media_exists(&image.thumbnail_path)
+            {
+                Some(PathBuf::from(&image.thumbnail_path))
+            } else {
+                None
+            };
+            if let Some(path) = path {
+                card = card.child(
+                    img(path)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                );
+                painted = true;
+            } else if !image.jpeg_thumbnail.is_empty() {
+                let thumbnail = std::sync::Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Jpeg,
+                    image.jpeg_thumbnail.clone(),
+                ));
+                card = card.child(
+                    img(thumbnail)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                );
+                painted = true;
+            }
+            if painted && !image.caption.trim().is_empty() {
+                card = card.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(24. * scale))
+                        .px(px(8. * scale))
+                        .py(px(4. * scale))
+                        .bg(rgba(0x00000066))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgba(0xffffffff))
+                                .line_clamp(2)
+                                .child(image.caption.clone()),
+                        ),
+                );
+            }
+        }
+        let is_video = matches!(
+            &message.content,
+            Some(Content::Attachment(attachment)) if crate::video::is_video(attachment)
+        );
+        if !painted && is_video {
+            card = card.child(
+                v_flex()
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8. * scale))
+                    .child(
+                        Icon::new(WhatfastIcon::Play)
+                            .with_size(px(34. * scale))
+                            .text_color(rgba(0xffffffff)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(0xffffffcc))
+                            .child(i18n::t("Video")),
+                    ),
+            );
+            painted = true;
+        }
+        if !painted {
+            let label = match message.content.as_ref() {
+                Some(Content::Text(text)) => text.text.clone(),
+                Some(Content::Attachment(attachment)) if attachment.kind == "audio" => {
+                    i18n::t("Audio").to_string()
+                }
+                Some(Content::Attachment(_)) => i18n::t("Document").to_string(),
+                _ => i18n::t("Photo").to_string(),
+            };
+            let text_status = matches!(message.content, Some(Content::Text(_)));
+            card = card.child(
+                v_flex()
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .p(px(10. * scale))
+                    .when(!text_status, |body| body.gap(px(8. * scale)))
+                    .when(!text_status, |body| {
+                        body.child(
+                            Icon::new(WhatfastIcon::Image)
+                                .with_size(px(30. * scale))
+                                .text_color(muted),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(if text_status {
+                                cx.theme().foreground
+                            } else {
+                                muted
+                            })
+                            .text_center()
+                            .line_clamp(8)
+                            .child(label),
+                    ),
+            );
+        }
+        card.child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .px(px(8. * scale))
+                .py(px(3. * scale))
+                .bg(rgba(0x00000088))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(0xffffffff))
+                        .child(status_hour(message.timestamp_ms)),
+                ),
+        )
     }
 
     /// The row of one contact in the view of the states.

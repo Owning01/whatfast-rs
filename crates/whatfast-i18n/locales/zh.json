@@ -4,6 +4,11 @@
     "name": "中文"
   },
   "strings": {
+    "Statuses": "状态",
+    "How the statuses of the contacts are shown.": "联系人的状态如何显示。",
+    "Show all statuses as a gallery": "以画廊方式显示所有状态",
+    "Every contact gets a row with all of their statuses, and the photos are downloaded to show them together.": "每个联系人占一行，显示其全部状态；照片会下载下来一起显示。",
+    "No statuses yet": "暂无状态",
     "Play sounds": "播放声音",
     "Sound when a message arrives": "收到消息时播放声音",
     "Sound of this chat": "此聊天的声音",

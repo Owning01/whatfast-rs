@@ -4,6 +4,11 @@
     "name": "Español"
   },
   "strings": {
+    "Statuses": "Estados",
+    "How the statuses of the contacts are shown.": "Cómo se muestran los estados de los contactos.",
+    "Show all statuses as a gallery": "Mostrar todos los estados como galería",
+    "Every contact gets a row with all of their statuses, and the photos are downloaded to show them together.": "Cada contacto tiene una fila con todos sus estados, y las fotos se descargan para verlas juntas.",
+    "No statuses yet": "Todavía no hay estados",
     "Play sounds": "Reproducir sonidos",
     "Sound when a message arrives": "Sonido al recibir un mensaje",
     "Sound of this chat": "Sonido de este chat",

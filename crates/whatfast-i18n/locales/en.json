@@ -4,6 +4,11 @@
     "name": "English"
   },
   "strings": {
+    "Statuses": "Statuses",
+    "How the statuses of the contacts are shown.": "How the statuses of the contacts are shown.",
+    "Show all statuses as a gallery": "Show all statuses as a gallery",
+    "Every contact gets a row with all of their statuses, and the photos are downloaded to show them together.": "Every contact gets a row with all of their statuses, and the photos are downloaded to show them together.",
+    "No statuses yet": "No statuses yet",
     "Play sounds": "Play sounds",
     "Sound when a message arrives": "Sound when a message arrives",
     "Sound of this chat": "Sound of this chat",

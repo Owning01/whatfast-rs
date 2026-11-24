@@ -199,6 +199,10 @@ pub struct Settings {
     /// Senders whose statuses are muted from the active strip.
     #[serde(default)]
     pub muted_status_senders: Vec<String>,
+    /// Whether the view of the statuses draws every status of every contact
+    /// as a gallery, one row per author, instead of one row per contact.
+    #[serde(default)]
+    pub statuses_gallery: bool,
     /// Accessibility: increases contrast for borders, muted text, and focus rings.
     #[serde(default)]
     pub high_contrast: bool,
@@ -294,6 +298,7 @@ impl Default for Settings {
             skip_auto_download_metered: true,
             proxy_url: String::new(),
             muted_status_senders: Vec::new(),
+            statuses_gallery: false,
             high_contrast: false,
             reduced_motion: false,
         }

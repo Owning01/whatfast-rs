@@ -3902,6 +3902,11 @@ impl Whatfast {
                 for sender in senders {
                     self.load_participant_avatar(sender);
                 }
+                // With the gallery on, the statuses that just arrived are
+                // fetched now: the cards show them all together.
+                if self.settings.statuses_gallery {
+                    self.download_status_media();
+                }
                 cx.notify();
             }
             (
@@ -6453,6 +6458,61 @@ impl Whatfast {
         }
         self.save_settings();
         cx.notify();
+    }
+
+    /// Whether the view of the statuses shows the gallery of every author.
+    ///
+    /// Turning it on fetches the media of the statuses already in the store:
+    /// the gallery paints all of them together, so the photos have to be on
+    /// disk before the cards ask for them.
+    pub(crate) fn set_statuses_gallery(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.statuses_gallery == enabled {
+            return;
+        }
+        self.settings.statuses_gallery = enabled;
+        self.save_settings();
+        if enabled {
+            self.download_status_media();
+        }
+        cx.notify();
+    }
+
+    /// Asks for the photo or the video of every status that is not on disk.
+    ///
+    /// The viewer already fetches the one it shows; the gallery shows every
+    /// status of every author at once, so this fetches the whole strip. The
+    /// queue of the client caps the requests in flight and the cards paint
+    /// the embedded preview until each file lands.
+    pub(crate) fn download_status_media(&mut self) {
+        let pending: Vec<(String, String, bool)> = self
+            .store
+            .statuses()
+            .iter()
+            .flat_map(|group| group.messages.iter())
+            .filter_map(|message| match message.content.as_ref() {
+                Some(whatfast_protocol::message::Content::Image(image))
+                    if image.local_path.is_empty()
+                        || !self.store.media_exists(&image.local_path) =>
+                {
+                    Some((message.chat_id.clone(), message.id.clone(), false))
+                }
+                Some(whatfast_protocol::message::Content::Attachment(attachment))
+                    if crate::video::is_video(attachment)
+                        && (attachment.local_path.is_empty()
+                            || !self.store.media_exists(&attachment.local_path)) =>
+                {
+                    Some((message.chat_id.clone(), message.id.clone(), true))
+                }
+                _ => None,
+            })
+            .collect();
+        for (chat_id, message_id, video) in pending {
+            if video {
+                self.load_message_attachment(chat_id, message_id);
+            } else {
+                self.load_message_image(chat_id, message_id);
+            }
+        }
     }
 
     /// Sets whether the app asks for a newer release when it starts.

@@ -4160,14 +4160,7 @@ impl Whatfast {
                     )
                 },
                 |message| {
-                    let sender = if message.from_me {
-                        i18n::t("You").to_string()
-                    } else if message.sender_name.trim().is_empty() {
-                        i18n::t("Unknown contact").to_string()
-                    } else {
-                        message.sender_name.trim().to_string()
-                    };
-                    (sender, message_preview(message))
+                    (self.quoted_author_name(message), message_preview(message))
                 },
             )
         });
@@ -5016,26 +5009,33 @@ impl Whatfast {
                                 footer.child(self.render_recording_pill(cx))
                             })
                             .when(!recording_active, |footer| {
+                                // La misma capsula de la pildora del audio:
+                                // fondo propio, radio grande, sombra y los
+                                // botones adentro. Antes el campo era una caja
+                                // `input` y el boton de mandar quedaba afuera,
+                                // con otra forma.
+                                let pill_background = if cx.theme().mode.is_dark() {
+                                    gpui::Hsla::from(rgb(0x1f2c33))
+                                } else {
+                                    gpui::Hsla::from(rgb(0xffffff))
+                                };
                                 footer.child(
-                                    // The pill of the message: the clip, the
-                                    // emoji and the text. The button of
-                                    // sending goes apart, in its own round
-                                    // button, the same way the reference
-                                    // draws it.
                                     h_flex()
                                         .p_2()
-                                        .gap_2()
-                                        .items_end()
+                                        .w_full()
+                                        .justify_center()
                                         .child(
                                             h_flex()
-                                                .flex_1()
-                                                .min_h(px(42. * self.ui_scale))
-                                                .rounded_lg()
-                                                .bg(cx.theme().input)
-                                                .px_2()
-                                                .py_1()
-                                                .gap_1()
+                                                .id("composer-pill")
+                                                .w_full()
+                                                .min_h(px(48. * self.ui_scale))
+                                                .px(px(8. * self.ui_scale))
+                                                .py(px(3. * self.ui_scale))
+                                                .gap(px(6. * self.ui_scale))
                                                 .items_end()
+                                                .rounded(px(24. * self.ui_scale))
+                                                .bg(pill_background)
+                                                .shadow_lg()
                                                 .child(self.attachment_bar.clone())
                                                 .child(
                                                     Button::new("emoji-picker")
@@ -5043,23 +5043,25 @@ impl Whatfast {
                                                         .icon(WhatfastIcon::Smile)
                                                         .tooltip(i18n::t("Emoji"))
                                                         .disabled(!connected)
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.toggle_composer_emoji();
-                                                            cx.notify();
-                                                        })),
+                                                        .on_click(cx.listener(
+                                                            |this, _, _, cx| {
+                                                                this.toggle_composer_emoji();
+                                                                cx.notify();
+                                                            },
+                                                        )),
                                                 )
                                                 .child(
                                                     Input::new(&self.composer)
                                                         .appearance(false)
                                                         .disabled(!connected)
                                                         .flex_1(),
-                                                ),
-                                        )
-                                        .child(self.render_composer_send(
-                                            composer_has_content,
-                                            connected,
-                                            cx,
-                                        )),
+                                                )
+                                                .child(self.render_composer_send(
+                                                    composer_has_content,
+                                                    connected,
+                                                    cx,
+                                                )),
+                                        ),
                                 )
                             }),
                     ),
@@ -6254,6 +6256,20 @@ impl Whatfast {
                 "Shift+Enter adds a line. With this off, Ctrl+Enter sends.",
             )));
 
+        // Los estados: la tira de siempre o la galeria con todos a la vez.
+        let statuses_control = v_flex()
+            .mt_1()
+            .child(toggle(
+                "statuses-gallery",
+                i18n::t("Show all statuses as a gallery"),
+                self.settings.statuses_gallery,
+                false,
+                Whatfast::set_statuses_gallery,
+            ))
+            .child(div().text_xs().text_color(muted).child(i18n::t(
+                "Every contact gets a row with all of their statuses, and the photos are downloaded to show them together.",
+            )));
+
         // The notifications: the system toasts.
         let notifications_control = v_flex()
             .mt_1()
@@ -7036,6 +7052,12 @@ impl Whatfast {
                                 i18n::t("Chats"),
                                 i18n::t("How the composer sends a message."),
                                 chats_control,
+                            ))
+                            .child(section(
+                                WhatfastIcon::Status,
+                                i18n::t("Statuses"),
+                                i18n::t("How the statuses of the contacts are shown."),
+                                statuses_control,
                             ))
                             .child(section(
                                 WhatfastIcon::Bell,
@@ -9208,6 +9230,61 @@ impl Whatfast {
             })
     }
 
+    /// The name of the author of a quoted message.
+    ///
+    /// The backend does not send the name of the sender in every row, so the
+    /// quote used to fall to "Unknown contact" even in a direct chat. The
+    /// name walks the same fallbacks as the header of a group: the sender
+    /// name, the phone, the participant of the group, the chat of the sender
+    /// and, for a direct chat, the title of the conversation itself. The
+    /// identifier only appears when there is nothing else.
+    fn quoted_author_name(&self, target: &proto::Message) -> String {
+        if target.from_me {
+            return i18n::t("You").to_string();
+        }
+        if !target.sender_name.trim().is_empty() {
+            return target.sender_name.trim().to_string();
+        }
+        if !target.sender_phone_number.trim().is_empty() {
+            return whatfast_core::phone::format(target.sender_phone_number.trim());
+        }
+        if let Some(participant) = self
+            .mention_directories
+            .get(&target.chat_id)
+            .and_then(|members| {
+                members.iter().find(|member| {
+                    member.participant_id == target.sender_id
+                        || (!member.phone_number.is_empty()
+                            && target.sender_id.starts_with(&member.phone_number))
+                        || (!member.participant_id.is_empty()
+                            && target.sender_id.split('@').next()
+                                == member.participant_id.split('@').next())
+                })
+            })
+        {
+            return crate::text::mention_display_name(participant);
+        }
+        if let Some(chat) = self.store.chats.iter().find(|chat| {
+            let chat_id = chat.id.split('@').next().unwrap_or("");
+            let sender_id = target.sender_id.split('@').next().unwrap_or("");
+            !chat_id.is_empty() && chat_id == sender_id
+        }) {
+            return chat.title.clone();
+        }
+        // A direct chat names its author with its own title: the row of the
+        // message does not need to repeat the name of the contact.
+        if let Some(chat) = self.store.chat(&target.chat_id)
+            && chat.kind() == proto::ChatKind::Direct
+            && !chat.title.trim().is_empty()
+        {
+            return chat.title.trim().to_string();
+        }
+        if !target.sender_id.trim().is_empty() {
+            return target.sender_id.split('@').next().unwrap_or("").to_string();
+        }
+        i18n::t("Unknown contact").to_string()
+    }
+
     fn render_message(
         &self,
         index: usize,
@@ -9535,14 +9612,7 @@ impl Whatfast {
                             )
                         },
                         |target| {
-                            let sender = if target.from_me {
-                                i18n::t("You").to_string()
-                            } else if !target.sender_name.trim().is_empty() {
-                                target.sender_name.trim().to_string()
-                            } else {
-                                i18n::t("Unknown contact").to_string()
-                            };
-                            (sender, message_preview(target))
+                            (self.quoted_author_name(target), message_preview(target))
                         },
                     )
                 };
@@ -10404,15 +10474,7 @@ impl Whatfast {
                 cx.notify();
             }))
             .when(group_incoming, |bubble| {
-                let name = if !first.sender_name.trim().is_empty() {
-                    first.sender_name.trim().to_string()
-                } else if !first.sender_phone_number.trim().is_empty() {
-                    whatfast_core::phone::format(first.sender_phone_number.trim())
-                } else if !first.sender_id.trim().is_empty() {
-                    first.sender_id.split('@').next().unwrap_or("").to_string()
-                } else {
-                    i18n::t("Unknown contact").to_string()
-                };
+                let name = self.quoted_author_name(first);
                 let identity_key = if first.sender_id.is_empty() {
                     name.as_str()
                 } else {
@@ -10444,14 +10506,7 @@ impl Whatfast {
                         )
                     },
                     |target| {
-                        let sender = if target.from_me {
-                            i18n::t("You").to_string()
-                        } else if !target.sender_name.trim().is_empty() {
-                            target.sender_name.trim().to_string()
-                        } else {
-                            i18n::t("Unknown contact").to_string()
-                        };
-                        (sender, message_preview(target))
+                        (self.quoted_author_name(target), message_preview(target))
                     },
                 );
                 bubble.child(
